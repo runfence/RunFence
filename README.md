@@ -112,6 +112,8 @@ or AppContainer on any path. Unlike Windows Explorer, it supports configuring
 ACLs using AppContainer SIDs. All rules are tracked: when an account or
 container is deleted, its ACL entries are cleaned up automatically.
 
+![Access control configuration for an application](docs/acl.png)
+
 ### Encrypted Credential Vault
 Account passwords stored locally using DPAPI + AES-256-GCM with Argon2id key
 derivation, protected by a PIN and the admin account (DPAPI is account-bound — the
@@ -183,6 +185,8 @@ Account restrictions configurable per account:
 - **Background Autorun** — when disabled, blocks the account from running background
   processes via Task Scheduler and services
 
+![Creating account](docs/account.png)
+
 **SID migration** — when an account is deleted and recreated (Windows assigns a new SID),
 scan filesystem ACLs and config data to remap all references from the old SID to the new
 one, keeping your isolation setup intact.
@@ -210,9 +214,6 @@ what should only appear in specific contexts.
 ### Auto-Lock & Idle Timeout
 The management GUI auto-locks when minimized or after idle timeout, keeping your
 credential vault protected when you step away.
-
-![Access control configuration for an application](docs/acl.png)
-![Creating account](docs/account.png)
 
 ---
 
