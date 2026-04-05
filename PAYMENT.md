@@ -2,35 +2,60 @@
 
 **[Documentation / README](https://github.com/runfence/RunFence#readme)**
 
+## Why Paid?
+
+RunFence is a complex security product. Building it involves deep research into Windows internals, careful threat modeling, and a level of attention to correctness that isn't optional when the whole point is isolation and access control. Every feature goes through multiple rounds of design, implementation, testing, and revision. Edge cases get tracked down. Regressions get caught and fixed. Low-quality code gets rewritten, not shipped.
+
+AI tools are part of the workflow, but they lower the bar for the first draft, not the final one. Code that compiles and runs is not the same as code that is correct, maintainable, and secure — and closing that gap takes real work. Initial implementations get reviewed, pulled apart, and rewritten until the quality is actually there. On top of that, someone has to know what to build, decide how it should work, verify that it actually works, and maintain it over time. That work is ongoing and it adds up.
+
+A paid license is how that work stays sustainable.
+
+If RunFence has become essential to your workflow, purchasing a license is the best way to support its ongoing development and help ensure it continues to improve.
+
 ## Pricing
 
-### Individual Licenses (commercial use included)
+### Individual Licenses
 
 | Tier | Price | Validity |
 |------|-------|----------|
 | Quarterly | $49 | 3 months from purchase date |
 | Annual | $99 | 1 year from purchase date |
 | Lifetime | $249 | Perpetual for current major version |
+| Contributor | Free | Variable (based on contribution scope) |
+
+**Why no monthly tier?** Payments are processed manually, so we currently don't have an automatic subscription system. If you need shorter-term licensing, the Quarterly tier ($49/3 months) offers the most flexibility.
 
 All licenses are machine-bound (identified by your **Machine Code**, shown in the app).
-Re-activation on the same machine after a reinstall is supported — you will not lose your
-license if you reinstall Windows or RunFence. Minor and patch updates are free;
-major version upgrades require a new key.
+The Machine Code is tied to your hardware, not a specific Windows installation.
 
-### Organization Licenses
+**Reinstalls & Dual Boot:** Your license survives Windows reinstalls on the same machine — you will not lose it if you reinstall Windows or RunFence. Dual-boot setups on the same hardware share the same Machine Code, so a single license covers all Windows installations on that machine.
 
-Organizations and businesses require a custom quote.
+Minor and patch updates are free; major version upgrades require a new key.
 
-To request a quote, email **runfencedev@gmail.com** with:
-- Organization name
-- Number of users
-- Any special requirements
+### Open Source Contributors
 
-You will receive a price quote and payment instructions by return email. Once payment is confirmed, your license key will be issued.
+We offer free licenses to contributors based on the scope of their work:
+
+| Tier | Free License | Example Scope |
+|------|---|---|
+| Contributor | 3 months | Noticeable PRs (≈1 day equivalent work) |
+| Major Contributor | 1 year | Significant contributions (≈5+ days equivalent work) |
+| Core Contributor | Lifetime | Substantial effort (≈2 weeks+ equivalent work) |
+
+All contributor licenses are machine-bound (identified by your **Machine Code**).
+
+**How it works:**
+- Work scope is judged by PR content at the author's discretion
+- You can split work across multiple PRs — total contribution will be evaluated
+- After a free license expires, you can earn renewal by submitting another recent PR
+- Lifetime contributors never need renewal
+- Contribute more to earn more keys (one key per machine)
+
+To claim your license, include your **Machine Code** and email in the PR description or a comment. Once merged and evaluated, you will receive your license key by email.
 
 ### Supporters
 
-Voluntary donations of $250 or more are welcome. Donors of $1,000 or more are added to
+Voluntary donations are welcome. Donors of $500 or more are added to
 the public donors list unless they prefer to remain anonymous.
 
 ---
@@ -131,4 +156,4 @@ build, which is illegal. Do not trust this binary.
 
 ## License Terms
 
-RunFence is source-available under the [Elastic License 2.0](LICENSE.md). Evaluation mode is available for non-commercial use with restrictions. A paid license is required for commercial use.
+RunFence is source-available under the [Elastic License 2.0](LICENSE.md). Evaluation mode is available for free use with limitations.

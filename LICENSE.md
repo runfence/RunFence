@@ -1,4 +1,4 @@
-# Elastic License 2.0 + Additional limitations
+# RunFence Source Available License
 
 **Licensor:** Vladyslav (https://github.com/runfence)
 
@@ -56,7 +56,3 @@ The **licensor** is the entity offering these terms, and the **software** is the
 
 **trademark** means trademarks, service marks, and similar rights.
 
-## Additional limitations
-
-* You may not use the software for commercial purposes without a valid license key issued by Licensor
-* You may not get access to the restricted functionality in the software without a valid license key issued by Licensor

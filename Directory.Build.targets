@@ -1,0 +1,86 @@
+<Project>
+
+    <!--
+      Authenticode signing for non-Debug builds.
+      Requires codesign.pfx in the sibling RunFence.Private directory.
+      If the PFX is absent the build proceeds unsigned (e.g. CI, contributor machines).
+  
+      Overridable via MSBuild property or environment variable:
+        SignToolPath          – full path to signtool.exe (override via SIGNTOOL_PATH env var)
+        SigningCertPassword   – PFX password (override via RUNASMGR_SIGN_PASSWORD env var)
+        SigningTimestampUrl   – RFC 3161 timestamp server; set to empty to skip timestamping
+    -->
+
+    <PropertyGroup>
+        <_SigningPfxPath>$(MSBuildThisFileDirectory)..\RunFence.Private\codesign.pfx</_SigningPfxPath>
+
+        <SigningCertPassword Condition="'$(SigningCertPassword)' == ''">$(RUNASMGR_SIGN_PASSWORD)</SigningCertPassword>
+        <SigningTimestampUrl Condition="'$(SigningTimestampUrl)' == ''">http://timestamp.digicert.com</SigningTimestampUrl>
+
+        <!-- signtool.exe resolution: explicit property → SIGNTOOL_PATH env → Windows SDK bin → NuGet package (see ItemGroup below) -->
+        <SignToolPath Condition="'$(SignToolPath)' == '' And '$(SIGNTOOL_PATH)' != ''">$(SIGNTOOL_PATH)</SignToolPath>
+        <SignToolPath Condition="'$(SignToolPath)' == '' And '$(WindowsSdkVerBinPath)' != '' And Exists('$(WindowsSdkVerBinPath)x64\signtool.exe')">$(WindowsSdkVerBinPath)x64\signtool.exe</SignToolPath>
+
+        <!-- Sign all managed outputs (WinExe, Exe, Library) in non-Debug, non-test builds when PFX is present -->
+        <_SigningEnabled Condition="'$(_SigningEnabled)' == ''
+                                And Exists('$(_SigningPfxPath)')
+                                And '$(Configuration)' != 'Debug'
+                                And '$(IsTestProject)' != 'true'
+                                And ('$(OutputType)' == 'WinExe' Or '$(OutputType)' == 'Exe' Or '$(OutputType)' == 'Library')">true
+        </_SigningEnabled>
+        <_SigningEnabled Condition="'$(_SigningEnabled)' == ''">false</_SigningEnabled>
+    </PropertyGroup>
+
+    <!--
+      NuGet fallback: provides signtool.exe when the Windows SDK is not installed.
+      ExcludeAssets="all" means zero build impact — only $(PkgMicrosoft_Windows_SDK_BuildTools) is set.
+    -->
+    <ItemGroup Condition="'$(ManagePackageVersionsCentrally)' == 'true'">
+        <PackageReference Include="Microsoft.Windows.SDK.BuildTools"
+                          VersionOverride="10.0.26100.1742"
+                          ExcludeAssets="all"
+                          GeneratePathProperty="true"/>
+    </ItemGroup>
+    <ItemGroup Condition="'$(ManagePackageVersionsCentrally)' != 'true'">
+        <PackageReference Include="Microsoft.Windows.SDK.BuildTools"
+                          Version="10.0.26100.1742"
+                          ExcludeAssets="all"
+                          GeneratePathProperty="true"/>
+    </ItemGroup>
+
+    <Target Name="_ResolveSignTool" BeforeTargets="SignOutput"
+            Condition="'$(_SigningEnabled)' == 'true' And '$(SignToolPath)' == ''">
+        <ItemGroup>
+            <_SignToolCandidates Include="$(PkgMicrosoft_Windows_SDK_BuildTools)\bin\*\x64\signtool.exe"
+                                 Condition="'$(PkgMicrosoft_Windows_SDK_BuildTools)' != ''"/>
+        </ItemGroup>
+        <PropertyGroup Condition="'@(_SignToolCandidates)' != ''">
+            <SignToolPath>@(_SignToolCandidates)</SignToolPath>
+        </PropertyGroup>
+        <Error Condition="'$(SignToolPath)' == ''"
+               Text="signtool.exe not found. Set SIGNTOOL_PATH or install Windows SDK Signing Tools."/>
+    </Target>
+
+    <Target Name="SignOutput" AfterTargets="Build" Condition="'$(_SigningEnabled)' == 'true'">
+        <PropertyGroup>
+            <_SignPasswordArg Condition="'$(SigningCertPassword)' != ''">/p "$(SigningCertPassword)"</_SignPasswordArg>
+            <_TimestampArg Condition="'$(SigningTimestampUrl)' != ''">/td SHA256 /tr $(SigningTimestampUrl)</_TimestampArg>
+        </PropertyGroup>
+
+        <!--
+          Sign both the managed assembly (.dll) and the apphost launcher (.exe) when both exist.
+          For Library projects only the .dll is signed; apphost does not apply.
+        -->
+        <ItemGroup>
+            <_SignOutputs Include="$(TargetPath)" Condition="Exists('$(TargetPath)')"/>
+            <_SignOutputs Include="$(TargetDir)$(AssemblyName).exe"
+                          Condition="('$(OutputType)' == 'WinExe' Or '$(OutputType)' == 'Exe')
+                               And '$(TargetPath)' != '$(TargetDir)$(AssemblyName).exe'
+                               And Exists('$(TargetDir)$(AssemblyName).exe')"/>
+        </ItemGroup>
+
+        <Message Text="Signing @(_SignOutputs -> '%(Filename)%(Extension)', ', ')..." Importance="high"/>
+        <Exec Command="&quot;$(SignToolPath)&quot; sign /fd SHA256 $(_TimestampArg) /f &quot;$(_SigningPfxPath)&quot; $(_SignPasswordArg) @(_SignOutputs -> '&quot;%(FullPath)&quot;', ' ')"/>
+    </Target>
+
+</Project>
