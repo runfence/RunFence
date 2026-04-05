@@ -133,12 +133,23 @@ switching sessions: a folder browser based on the Windows file open dialog (full
 navigation, otherwise inaccessible) and a terminal — both running under the specified
 account.
 
+### Default Browser & File/URL Associations
+Set any RunFence-managed app as the default handler for links and file types. When you click
+a URL, open a document, or follow a `mailto:` link, Windows routes it directly to the
+configured app running under its isolated account — with no extra steps.
+
+- Assign any file extension or URL scheme to any app: PDFs to your sandboxed PDF reader, links
+  to your isolated browser, email links to your isolated mail client
+- Manage all assignments from a single **Associations** window; reassign any type at any time
+- "Set as Default Browser" shortcut registers all browser associations in one click
+- RunFence appears as a single **"RunFence"** entry in Windows Settings > Default Apps
+
 ### Cross-User Drag and Drop
 A lightweight bridge process enables dragging files between windows running under
 different accounts — something Windows doesn't support natively. For example, drag a
 file from your main desktop into a browser running isolated under a dedicated account.
 
-Press the copy hotkey (Ctrl+Alt+C by default) to open a drop target window, drag your 
+Press the copy hotkey (Ctrl+Alt+C by default) to open a drop target window, drag your
 files or folders onto it, then press the paste hotkey (Ctrl+Alt+V) on the target window
  under the other account.
 
@@ -146,11 +157,18 @@ files or folders onto it, then press the paste hotkey (Ctrl+Alt+V) on the target
 Create a disposable Windows account for a one-time run. RunFence automatically
 removes the account and cleans up its profile after 24 hours.
 
+### Desktop Settings Transfer
+Export desktop and Explorer settings from one Windows account and import them into
+another — mouse speed and button layout, keyboard repeat rate and delay, desktop
+background and color theme, Explorer view and folder settings, and other per-user
+preferences. Useful when setting up a new isolated account so it feels like your main
+desktop from day one.
+
 ### Account Management
 Create and delete Windows accounts directly from the GUI, rotate passwords with one
-click, migrate desktop and Explorer settings between accounts, and clean up orphaned
-profiles left behind by deleted accounts. One-click shortcuts to install Windows Terminal
-and Claude Code into a specified account.
+click, transfer desktop settings between accounts, and clean up orphaned profiles left
+behind by deleted accounts. One-click shortcuts to install Windows Terminal and Claude
+Code into a specified account.
 
 Account restrictions configurable per account:
 - **Logon** — when disabled, hides the account from the Windows login screen and blocks
@@ -208,9 +226,11 @@ credential vault protected when you step away.
 
 ## Evaluation Mode
 
-**Free for non-commercial use, no time limit.**
+**Free, no time limit.**
 
-Evaluation mode includes periodic nag reminders. Purchasing a license unlocks:
+Evaluation mode includes periodic nag reminders. If you find RunFence valuable, consider purchasing a license to support continued development — your contribution directly funds improvements and new features.
+
+Purchasing a license unlocks:
 
 - **Unlimited app entries** *(evaluation: up to 3)*
 - **Unlimited stored credentials** *(evaluation: up to 3)*
@@ -218,7 +238,7 @@ Evaluation mode includes periodic nag reminders. Purchasing a license unlocks:
 - **Account hiding** *(evaluation: up to 1 hidden account)*
 - **Auto-lock & idle timeout**
 - **Unlimited Internet whitelist entries** *(evaluation: up to 1)*
-- **Commercial use**
+- **Handler associations** *(evaluation: browser only — http, https, .htm, .html)*
 
 You can create as many accounts as you like — the limit applies only to hiding them from
 the Windows login screen.
@@ -227,7 +247,7 @@ the Windows login screen.
 
 ## Pricing
 
-Free non-commercial evaluation license is available without time limit.
+Free evaluation license is available without time limit.
 
 Paid licenses are **per machine** — each installation requires its own key, tied to the machine it was activated on.
 
@@ -242,12 +262,11 @@ See [PAYMENT.md](PAYMENT.md) for pricing tiers, supporter donations, and payment
 No. RunFence is **source-available**, not open source in the OSI sense. The source is published for transparency, auditing, and contributions — not to grant the unrestricted freedoms.
 
 **What you can legally do:**
-- Use it free of charge for **personal, non-commercial purposes** — no time limit, evaluation feature limits apply
+- Use it free of charge — no time limit, evaluation feature limits apply
 - Build it from source and audit it to verify the binary matches what is published
 - Fork it to modify and contribute — pull requests welcome; contributions require signing a CLA
 
 **What is not permitted:**
-- **Commercial use without a paid license.** Using RunFence at work or for commercial purposes requires a license.
 - **Cracking or bypassing the license key.** Patching the binary or modifying the source to remove or bypass evaluation limits is prohibited.
 - **Selling your own licenses.** Replacing the public key to issue your own license keys is explicitly prohibited. You cannot fork this and monetize it yourself.
 - **Stripping attribution.** Removing copyright notices or the license is not allowed.
@@ -343,7 +362,7 @@ Your stored account passwords are NOT portable (even for a different account on 
 ## Requirements & Installation
 
 - Windows 10 or later (x64)
-- .NET 8 Desktop Runtime
+- .NET 10 Desktop Runtime
 - Administrator privileges (the management GUI runs elevated)
 
 **[⬇ Download the latest release from GitHub Releases](https://github.com/runfence/RunFence/releases)**
@@ -368,7 +387,7 @@ dotnet build RunFence.sln -v quiet
 dotnet test src\RunFence.Tests\RunFence.Tests.csproj --no-build
 ```
 
-Requires: .NET 8 SDK, Windows.
+Requires: .NET 10 SDK, Windows.
 
 ---
 
@@ -382,6 +401,8 @@ See [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
 ```
 dotnet tool install --global wix
 wix extension add --global WixToolset.UI.wixext/6.0.0
+wix extension add --global WixToolset.BootstrapperApplications.wixext/6.0.0
+wix extension add --global WixToolset.Netfx.wixext/6.0.0
 ```
 
 ---

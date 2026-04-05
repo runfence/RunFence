@@ -1,0 +1,27 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+
+## IDE
+.vs/
+*.swp
+*~
+*.tmp.*
+*.orig
+*.rej
+
+## OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Installer build artifacts
+installer/publish/
+installer/Output/
+installer/ProductComponents.wxs
+installer/License.rtf
+installer/dotnet-runtime-10-win-x64.url
+installer/dotnet-runtime-10-win-x64.exe

@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>WinExe</OutputType>
+        <TargetFramework>net10.0-windows</TargetFramework>
+        <UseWindowsForms>true</UseWindowsForms>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <ApplicationIcon>app.ico</ApplicationIcon>
+        <Authors>Vladyslav (RunFence)</Authors>
+        <Company>Vladyslav (RunFence)</Company>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+        <ApplicationManifest>app.debug.manifest</ApplicationManifest>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)' != 'Debug'">
+        <ApplicationManifest>app.manifest</ApplicationManifest>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <InternalsVisibleTo Include="RunFence.Tests"/>
+        <InternalsVisibleTo Include="DynamicProxyGenAssembly2"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\RunFence.Core\RunFence.Core.csproj"/>
+        <ProjectReference Include="..\RunFence.FolderBrowser\RunFence.FolderBrowser.csproj"/>
+        <ProjectReference Include="..\RunFence.Launcher\RunFence.Launcher.csproj"/>
+        <ProjectReference Include="..\RunFence.DragBridge\RunFence.DragBridge.csproj"/>
+        <ProjectReference Include="..\RunFence.PinHelper\RunFence.PinHelper.csproj"/>
+        <ProjectReference Include="..\preftrans\preftrans.csproj"/>
+        <ProjectReference Include="..\RunFence.SecurityScanner\RunFence.SecurityScanner.csproj"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Content Include="RunFence-autostart.cmd">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+        <Content Include="unlock.cmd">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+        <Content Include="unregister-folder-handler.cmd">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+        <EmbeddedResource Include="Account\install-claude-code.ps1"/>
+        <EmbeddedResource Include="app.ico"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Autofac"/>
+        <ProjectReference Include="..\..\lib\Autofac.Extras.Ordering\src\Autofac.Extras.Ordering\Autofac.Extras.Ordering.csproj"/>
+        <PackageReference Include="BouncyCastle.Cryptography"/>
+        <PackageReference Include="System.Management"/>
+        <PackageReference Include="System.DirectoryServices.AccountManagement"/>
+    </ItemGroup>
+
+</Project>

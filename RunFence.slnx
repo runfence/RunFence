@@ -1,0 +1,14 @@
+<Solution>
+  <Project Path="src\RunFence.Core\RunFence.Core.csproj" />
+  <Project Path="src\RunFence\RunFence.csproj" />
+  <Project Path="src\RunFence.Launcher\RunFence.Launcher.csproj" />
+  <Project Path="src\RunFence.Tests\RunFence.Tests.csproj" />
+  <Project Path="src\preftrans\preftrans.csproj" />
+  <Project Path="src\RunFence.FolderBrowser\RunFence.FolderBrowser.csproj" />
+  <Project Path="src\RunFence.SecurityScanner\RunFence.SecurityScanner.csproj" />
+  <Project Path="src\RunFence.DragBridge\RunFence.DragBridge.csproj" />
+  <Project Path="src\RunFence.PinHelper\RunFence.PinHelper.csproj" />
+  <Folder Name="/lib/">
+    <Project Path="lib\Autofac.Extras.Ordering\src\Autofac.Extras.Ordering\Autofac.Extras.Ordering.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,3 @@
+[submodule "lib/Autofac.Extras.Ordering"]
+	path = lib/Autofac.Extras.Ordering
+	url = https://github.com/runfence/Autofac.Extras.Ordering.git
