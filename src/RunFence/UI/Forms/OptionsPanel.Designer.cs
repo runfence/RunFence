@@ -153,6 +153,7 @@ partial class OptionsPanel
         _changePinBtn.TextImageRelation = TextImageRelation.ImageBeforeText;
         _changePinBtn.TextAlign = ContentAlignment.MiddleLeft;
         _changePinBtn.ImageAlign = ContentAlignment.MiddleLeft;
+        _changePinBtn.Padding = new Padding(6, 0, 0, 0);
         _changePinBtn.Click += OnChangePinClick;
         _pinGroup.Controls.Add(_changePinBtn);
 
@@ -163,6 +164,7 @@ partial class OptionsPanel
         _securityCheckBtn.TextImageRelation = TextImageRelation.ImageBeforeText;
         _securityCheckBtn.TextAlign = ContentAlignment.MiddleLeft;
         _securityCheckBtn.ImageAlign = ContentAlignment.MiddleLeft;
+        _securityCheckBtn.Padding = new Padding(6, 0, 0, 0);
         _securityCheckBtn.Click += OnSecurityCheckClick;
         _pinGroup.Controls.Add(_securityCheckBtn);
 
@@ -173,6 +175,7 @@ partial class OptionsPanel
         _cleanupBtn.TextImageRelation = TextImageRelation.ImageBeforeText;
         _cleanupBtn.TextAlign = ContentAlignment.MiddleLeft;
         _cleanupBtn.ImageAlign = ContentAlignment.MiddleLeft;
+        _cleanupBtn.Padding = new Padding(6, 0, 0, 0);
         _cleanupBtn.Click += OnCleanupClick;
         _pinGroup.Controls.Add(_cleanupBtn);
 
