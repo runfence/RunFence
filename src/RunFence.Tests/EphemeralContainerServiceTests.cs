@@ -1,8 +1,8 @@
 using Moq;
+using RunFence.Account;
 using RunFence.Account.Lifecycle;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
 using RunFence.Persistence;
 using Xunit;
 
@@ -10,11 +10,18 @@ namespace RunFence.Tests;
 
 public class EphemeralContainerServiceTests : IDisposable
 {
-    private readonly Mock<IAppContainerService> _containerService = new();
     private readonly Mock<IContainerDeletionService> _containerDeletion = new();
     private readonly Mock<IDatabaseService> _databaseService = new();
     private readonly Mock<ILoggingService> _log = new();
+    private readonly Mock<IProcessListService> _processListService = new();
     private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
+
+    public EphemeralContainerServiceTests()
+    {
+        _processListService
+            .Setup(p => p.GetSidsWithProcesses(It.IsAny<IEnumerable<string>>()))
+            .Returns(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+    }
 
     public void Dispose() => _pinKey.Dispose();
 
@@ -28,19 +35,24 @@ public class EphemeralContainerServiceTests : IDisposable
     private EphemeralContainerService CreateStartedService(AppDatabase database,
         IContainerDeletionService? containerDeletion = null)
     {
-        containerDeletion ??= _containerDeletion.Object;
-        // Set up mock to return true (success) by default
-        _containerDeletion.Setup(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()))
-            .Returns((AppContainerEntry entry, string? _) =>
-            {
-                database.AppContainers.Remove(entry);
-                database.Apps.RemoveAll(a => a.AppContainerName == entry.Name);
-                return true;
-            });
+        if (containerDeletion == null)
+        {
+            // Set up default mock to return true (success) and remove the container
+            _containerDeletion.Setup(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()))
+                .Returns((AppContainerEntry entry, string? _) =>
+                {
+                    database.AppContainers.Remove(entry);
+                    database.Apps.RemoveAll(a => a.AppContainerName == entry.Name);
+                    return true;
+                });
+            containerDeletion = _containerDeletion.Object;
+        }
+
         var service = new EphemeralContainerService(
-            _containerService.Object, containerDeletion,
+            containerDeletion,
             _databaseService.Object, _log.Object,
-            new LambdaSessionProvider(() => CreateSession(database)), new InlineUiThreadInvoker(a => a()));
+            new LambdaSessionProvider(() => CreateSession(database)), new InlineUiThreadInvoker(a => a()),
+            _processListService.Object);
         service.Start();
         return service;
     }
@@ -150,9 +162,9 @@ public class EphemeralContainerServiceTests : IDisposable
         {
             Name = "ram_expired",
             IsEphemeral = true,
-            DeleteAfterUtc = DateTime.UtcNow.AddHours(-1)
+            DeleteAfterUtc = DateTime.UtcNow.AddHours(-1),
+            Sid = containerSid
         });
-        _containerService.Setup(s => s.GetSid("ram_expired")).Returns(containerSid);
 
         using var service = CreateStartedService(database);
         service.ProcessExpiredContainers();
@@ -183,7 +195,7 @@ public class EphemeralContainerServiceTests : IDisposable
             });
 
         var changed = EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerService.Object, _containerDeletion.Object, _log.Object);
+            database, _containerDeletion.Object, _log.Object, _processListService.Object);
 
         Assert.True(changed);
         Assert.Empty(database.AppContainers);
@@ -210,7 +222,7 @@ public class EphemeralContainerServiceTests : IDisposable
             });
 
         var changed = EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerService.Object, _containerDeletion.Object, _log.Object);
+            database, _containerDeletion.Object, _log.Object, _processListService.Object);
 
         Assert.True(changed);
         Assert.Empty(database.AppContainers);
@@ -223,7 +235,7 @@ public class EphemeralContainerServiceTests : IDisposable
         var database = new AppDatabase();
 
         var changed = EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerService.Object, _containerDeletion.Object, _log.Object);
+            database, _containerDeletion.Object, _log.Object, _processListService.Object);
 
         Assert.False(changed);
     }
@@ -240,7 +252,7 @@ public class EphemeralContainerServiceTests : IDisposable
         });
 
         var changed = EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerService.Object, _containerDeletion.Object, _log.Object);
+            database, _containerDeletion.Object, _log.Object, _processListService.Object);
 
         Assert.False(changed);
         Assert.Single(database.AppContainers);
@@ -253,6 +265,35 @@ public class EphemeralContainerServiceTests : IDisposable
     {
         var database = new AppDatabase();
         database.AppContainers.Add(new AppContainerEntry { Name = "ram_orphan", IsEphemeral = true });
+
+        using var service = CreateStartedService(database);
+        var eventFired = false;
+        service.ContainersChanged += () => eventFired = true;
+
+        service.ProcessExpiredContainers();
+
+        Assert.True(eventFired);
+    }
+
+    [Fact]
+    public void ProcessExpiredContainers_WhenTtlExtended_FiresContainersChanged()
+    {
+        // A running-process postpone updates DeleteAfterUtc (TTL extension) and must fire ContainersChanged
+        // so the UI reflects the updated expiry time.
+        var containerSid = "S-1-15-2-8888";
+        var database = new AppDatabase();
+        var entry = new AppContainerEntry
+        {
+            Name = "ram_busy",
+            IsEphemeral = true,
+            DeleteAfterUtc = DateTime.UtcNow.AddHours(-1),
+            Sid = containerSid
+        };
+        database.AppContainers.Add(entry);
+
+        _processListService
+            .Setup(p => p.GetSidsWithProcesses(It.IsAny<IEnumerable<string>>()))
+            .Returns(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { containerSid });
 
         using var service = CreateStartedService(database);
         var eventFired = false;
@@ -294,10 +335,66 @@ public class EphemeralContainerServiceTests : IDisposable
             .Returns(false);
 
         var changed = EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerService.Object, _containerDeletion.Object, _log.Object);
+            database, _containerDeletion.Object, _log.Object, _processListService.Object);
 
         // Deletion failed → entry preserved, changed=false
         Assert.False(changed);
         Assert.Single(database.AppContainers);
+    }
+
+    [Fact]
+    public void ProcessExpiredAtStartup_RunningProcesses_PostponesDeleteAndExtendsTtl()
+    {
+        var containerSid = "S-1-15-2-9999";
+        var database = new AppDatabase();
+        var entry = new AppContainerEntry
+        {
+            Name = "ram_busy",
+            IsEphemeral = true,
+            DeleteAfterUtc = DateTime.UtcNow.AddHours(-1),
+            Sid = containerSid
+        };
+        database.AppContainers.Add(entry);
+
+        _processListService
+            .Setup(p => p.GetSidsWithProcesses(It.IsAny<IEnumerable<string>>()))
+            .Returns(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { containerSid });
+
+        var changed = EphemeralContainerService.ProcessExpiredAtStartup(
+            database, _containerDeletion.Object, _log.Object, _processListService.Object);
+
+        // Entry preserved — postponed with extended TTL, changed=true (TTL was updated)
+        Assert.True(changed);
+        Assert.Single(database.AppContainers);
+        Assert.True(entry.DeleteAfterUtc > DateTime.UtcNow);
+        _containerDeletion.Verify(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()), Times.Never);
+    }
+
+    [Fact]
+    public void ProcessExpiredContainers_RunningProcesses_PostponesDeleteAndExtendsTtl()
+    {
+        var containerSid = "S-1-15-2-9999";
+        var database = new AppDatabase();
+        var entry = new AppContainerEntry
+        {
+            Name = "ram_busy",
+            IsEphemeral = true,
+            DeleteAfterUtc = DateTime.UtcNow.AddHours(-1),
+            Sid = containerSid
+        };
+        database.AppContainers.Add(entry);
+
+        _processListService
+            .Setup(p => p.GetSidsWithProcesses(It.IsAny<IEnumerable<string>>()))
+            .Returns(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { containerSid });
+
+        using var service = CreateStartedService(database);
+        service.ProcessExpiredContainers();
+
+        // Entry preserved — postponed with extended TTL
+        Assert.Single(database.AppContainers);
+        Assert.True(entry.DeleteAfterUtc > DateTime.UtcNow);
+        _containerDeletion.Verify(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()), Times.Never);
+        _databaseService.Verify(s => s.SaveConfig(database, It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Once);
     }
 }

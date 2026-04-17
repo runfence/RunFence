@@ -57,4 +57,29 @@ public class GrantedPathEntry
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SavedRightsState? SavedRights { get; set; }
+
+    /// <summary>
+    /// When set, this interactive-user grant was created by <c>ContainerInteractiveUserSync</c>
+    /// to mirror a container grant. Only entries with a matching <c>OwnerContainerSid</c>
+    /// (or null for legacy entries) are revoked when the container's grant is removed.
+    /// This prevents <c>ContainerInteractiveUserSync</c> from revoking user-added IU grants
+    /// that happen to overlap with a container's path.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OwnerContainerSid { get; set; }
+
+    /// <summary>
+    /// Returns a deep copy of this entry. <see cref="AllAppliedPaths"/> is list-cloned;
+    /// all other fields are value types, immutable strings, or an immutable record (<see cref="SavedRights"/>).
+    /// Use this when capturing a snapshot of a live DB entry for background-thread operations.
+    /// </summary>
+    public GrantedPathEntry Clone() => new()
+    {
+        Path = Path,
+        IsDeny = IsDeny,
+        SavedRights = SavedRights,
+        IsTraverseOnly = IsTraverseOnly,
+        AllAppliedPaths = AllAppliedPaths?.ToList(),
+        OwnerContainerSid = OwnerContainerSid
+    };
 }

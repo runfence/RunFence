@@ -1,5 +1,4 @@
-using System.Security.AccessControl;
-using RunFence.Acl.Permissions;
+using RunFence.Acl;
 using RunFence.Acl.QuickAccess;
 using RunFence.Core.Models;
 
@@ -10,19 +9,16 @@ namespace RunFence.Wizard;
 /// Grants file system rights on a set of paths for an account SID and records
 /// the chosen <see cref="SavedRightsState"/> on the resulting grant entry.
 /// </summary>
-public class WizardFolderGrantHelper(IPermissionGrantService permissionGrantService, IQuickAccessPinService quickAccessPinService)
+public class WizardFolderGrantHelper(IPathGrantService pathGrantService, IQuickAccessPinService quickAccessPinService)
 {
     /// <summary>
-    /// Grants <paramref name="rights"/> on each path in <paramref name="paths"/> for
-    /// <paramref name="sid"/>, updates the matching <see cref="GrantedPathEntry.SavedRights"/>,
-    /// and reports progress/errors via <paramref name="progress"/>.
+    /// Grants <paramref name="savedRights"/> on each path in <paramref name="paths"/> for
+    /// <paramref name="sid"/> and reports progress/errors via <paramref name="progress"/>.
     /// </summary>
     public async Task GrantFolderAccessAsync(
         IEnumerable<string> paths,
         string sid,
-        FileSystemRights rights,
         SavedRightsState savedRights,
-        SessionContext session,
         IWizardProgressReporter progress)
     {
         var pinPaths = new List<string>();
@@ -33,16 +29,11 @@ public class WizardFolderGrantHelper(IPermissionGrantService permissionGrantServ
             try
             {
                 progress.ReportStatus($"Granting access to {Path.GetFileName(path)}...");
-                await Task.Run(() => permissionGrantService.EnsureAccess(path, sid, rights));
+                var result = await Task.Run(() => pathGrantService.EnsureAccess(sid, path, savedRights));
 
-                var account = session.Database.GetOrCreateAccount(sid);
-                var normalized = Path.GetFullPath(path);
-                var grantEntry = account.Grants.LastOrDefault(g =>
-                    string.Equals(g.Path, normalized, StringComparison.OrdinalIgnoreCase)
-                    && g is { IsDeny: false, IsTraverseOnly: false });
-                if (grantEntry != null)
+                if (result.GrantAdded)
                 {
-                    grantEntry.SavedRights = savedRights;
+                    var normalized = Path.GetFullPath(path);
                     if (Directory.Exists(normalized))
                         pinPaths.Add(normalized);
                 }

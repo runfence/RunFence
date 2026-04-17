@@ -17,11 +17,12 @@ public class SecurityModule : Module
             .As<IWindowsHelloService>()
             .SingleInstance();
 
-        builder.RegisterType<SecureDesktopHelper>()
-            .As<ISecureDesktopRunner>()
+        builder.RegisterType<AutoLockTimerService>()
+            .As<IAutoLockTimerService>()
             .SingleInstance();
 
         builder.RegisterType<LockManager>()
+            .As<ILockManager>()
             .AsSelf()
             .SingleInstance();
 
@@ -37,6 +38,10 @@ public class SecurityModule : Module
             .SingleInstance();
 
         builder.RegisterType<PinChangeOrchestrator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<FindingLocationHelper>()
             .AsSelf()
             .SingleInstance();
 

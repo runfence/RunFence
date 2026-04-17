@@ -7,31 +7,28 @@ namespace RunFence.UI.Forms;
 
 public class DataPanel : UserControl
 {
+    private readonly IModalCoordinator _modalCoordinator = null!;
+
+    /// <summary>
+    /// DI constructor. Pass <see cref="IModalCoordinator"/> for runtime use.
+    /// </summary>
+    protected DataPanel(IModalCoordinator modalCoordinator)
+    {
+        _modalCoordinator = modalCoordinator;
+    }
+
+    /// <summary>
+    /// Parameterless constructor for the WinForms Designer. Not used at runtime.
+    /// </summary>
+    protected DataPanel()
+    {
+    }
+
     protected SessionContext Session { get; private set; } = null!;
 
     protected AppDatabase Database => Session.Database;
     protected CredentialStore CredentialStore => Session.CredentialStore;
     protected ProtectedBuffer PinDerivedKey => Session.PinDerivedKey;
-
-    // --- Modal tracking (thread-safe counter) ---
-    // Panels increment when opening a modal dialog, decrement on close.
-    // MainForm.IsModalOpen reads this to block availability checks and IPC config commands.
-    // Static accessor delegates to the IModalTracker singleton set during startup.
-    private static IModalTracker _modalTracker = new ModalTracker();
-    private static readonly ISecureDesktopRunner _secureDesktopRunner = new SecureDesktopHelper();
-
-    /// <summary>
-    /// Sets the modal tracker singleton. Called once during DI startup so all panels share one tracker.
-    /// </summary>
-    public static void SetModalTracker(IModalTracker tracker) => _modalTracker = tracker;
-
-    /// <summary>
-    /// Signal that a modal dialog is about to open. Must be paired with EndModal() in a finally block.
-    /// </summary>
-    public static void BeginModal() => _modalTracker.BeginModal();
-
-    /// <summary>Signal that a modal dialog was closed.</summary>
-    public static void EndModal() => _modalTracker.EndModal();
 
     /// <summary>
     /// Shows a modal dialog and wraps it with BeginModal/EndModal tracking.
@@ -40,43 +37,9 @@ public class DataPanel : UserControl
 
     /// <summary>
     /// Shows a modal dialog with an explicit owner, wrapped with BeginModal/EndModal tracking.
-    /// For use by non-DataPanel classes that need modal tracking.
     /// </summary>
-    public static DialogResult ShowModal(Form dialog, IWin32Window? owner)
-    {
-        BeginModal();
-        try
-        {
-            return dialog.ShowDialog(owner);
-        }
-        finally
-        {
-            EndModal();
-        }
-    }
-
-    /// <summary>
-    /// Runs an action on the secure desktop with BeginModal/EndModal tracking.
-    /// Use for dialogs that accept sensitive input (passwords, credentials).
-    /// </summary>
-    public static void RunOnSecureDesktop(Action action)
-    {
-        BeginModal();
-        try
-        {
-            _secureDesktopRunner.Run(action);
-        }
-        finally
-        {
-            EndModal();
-        }
-    }
-
-    /// <summary>
-    /// Shows a modal dialog with an explicit owner, wrapped with BeginModal/EndModal tracking.
-    /// </summary>
-    protected static DialogResult ShowModalDialog(Form dialog, IWin32Window? owner)
-        => ShowModal(dialog, owner);
+    protected DialogResult ShowModalDialog(Form dialog, IWin32Window? owner)
+        => _modalCoordinator.ShowModal(dialog, owner);
 
     public void SetData(SessionContext session)
     {

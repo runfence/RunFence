@@ -1,20 +1,20 @@
 using System.ComponentModel;
+using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch;
 using RunFence.UI;
 using RunFence.UI.Forms;
 using RunFence.Wizard.UI;
 
 namespace RunFence.Account.UI.Forms;
 
+/// <remarks>Deps above threshold: Extraction impossible: all 18 deps are already-extracted independent feature handlers (grid edit, context menu, process display, etc.) with no shared mutable state. Extracting a "handler coordinator" would just move the same wiring to another class with the same 18 deps. Reviewed 2026-04-09.</remarks>
 public partial class AccountsPanel : DataPanel,
     IAccountsPanelContext,
     IGridSortState, IAccountGridCallbacks
 {
-    private readonly IAccountCredentialManager _credentialManager;
-    private readonly ILoggingService _log;
+    private readonly SessionPersistenceHelper _persistenceHelper;
     private readonly OperationGuard _operationGuard;
     private bool _staleDone;
     private Form? _parentForm;
@@ -23,7 +23,6 @@ public partial class AccountsPanel : DataPanel,
     private readonly AccountBulkScanHandler? _bulkScanHandler;
 
     // High-level extracted services
-    private readonly AccountsPanelLaunchService _launchService;
     private readonly AccountsPanelTimerCoordinator _timerCoordinator;
     private readonly AccountSidMigrationLauncher _migrationLauncher;
     private readonly AccountProcessDisplayManager _processDisplayManager;
@@ -34,6 +33,7 @@ public partial class AccountsPanel : DataPanel,
     private readonly AccountContextMenuOrchestrator _contextMenuOrchestrator;
     private readonly AccountsPanelCredentialHandler _credentialHandler;
     private readonly AccountCreationOrchestrator _creationHandler;
+    private readonly AccountDeletionOrchestrator _deletionOrchestrator;
     private readonly AccountPanelActions _panelActions;
     private readonly AccountImportUIHandler _importUIHandler;
     private readonly AccountGridEditHandler _gridEditHandler;
@@ -56,6 +56,7 @@ public partial class AccountsPanel : DataPanel,
     Control IAccountsPanelContext.OwnerControl => this;
     OperationGuard IAccountsPanelContext.OperationGuard => _operationGuard;
     bool IAccountsPanelContext.IsRefreshing => IsRefreshing;
+    bool IAccountsPanelContext.RenameInProgress { set => RenameInProgress = value; }
     DialogResult IAccountsPanelContext.ShowModal(Form dialog) => ShowModalDialog(dialog);
     void IAccountsPanelContext.SaveAndRefresh(Guid? selectCredentialId, int fallbackIndex) => SaveAndRefresh(selectCredentialId, fallbackIndex);
     void IAccountsPanelContext.UpdateStatus(string text) => _statusLabel.Text = text;
@@ -80,16 +81,16 @@ public partial class AccountsPanel : DataPanel,
     void IAccountGridCallbacks.ClearStatus() => _statusLabel.Text = "";
 
     public AccountsPanel(
-        IAccountCredentialManager credentialManager,
-        ILoggingService log,
+        IModalCoordinator modalCoordinator,
+        SessionPersistenceHelper persistenceHelper,
         AccountContainerOrchestrator containerHandler,
         AccountsPanelRefreshOrchestrator refreshOrchestrator,
         AccountContextMenuOrchestrator contextMenuOrchestrator,
         AccountsPanelCredentialHandler credentialHandler,
         AccountCreationOrchestrator creationHandler,
+        AccountDeletionOrchestrator deletionOrchestrator,
         AccountPanelActions panelActions,
         OperationGuard operationGuard,
-        AccountsPanelLaunchService launchService,
         AccountsPanelTimerCoordinator timerCoordinator,
         AccountSidMigrationLauncher migrationLauncher,
         AccountsPanelGridInteraction gridInteraction,
@@ -99,17 +100,17 @@ public partial class AccountsPanel : DataPanel,
         AccountGridTypeAheadHandler typeAheadHandler,
         AccountBulkScanHandler? bulkScanHandler = null,
         WizardLauncher? wizardButtonHandler = null)
+        : base(modalCoordinator)
     {
-        _credentialManager = credentialManager;
-        _log = log;
+        _persistenceHelper = persistenceHelper;
         _containerHandler = containerHandler;
         _refreshOrchestrator = refreshOrchestrator;
         _contextMenuOrchestrator = contextMenuOrchestrator;
         _credentialHandler = credentialHandler;
         _creationHandler = creationHandler;
+        _deletionOrchestrator = deletionOrchestrator;
         _panelActions = panelActions;
         _operationGuard = operationGuard;
-        _launchService = launchService;
         _timerCoordinator = timerCoordinator;
         _migrationLauncher = migrationLauncher;
         _gridInteraction = gridInteraction;
@@ -149,13 +150,13 @@ public partial class AccountsPanel : DataPanel,
         _scanAclsButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F50D", Color.FromArgb(0x22, 0x88, 0x44), 42);
         _scanAclsButton.Visible = _bulkScanHandler != null;
         _firewallButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F310", Color.FromArgb(0x22, 0x66, 0xCC), 42);
-        _firewallButton.ToolTipText = "Internet Whitelist";
+        _firewallButton.ToolTipText = "Internet Allowlist";
         _firewallButton.Visible = _contextMenuOrchestrator.IsFirewallAvailable;
         _wizardButton.Image = UiIconFactory.CreateToolbarIcon("\u2728", Color.FromArgb(0x33, 0x66, 0x99), 42);
         _wizardButton.Visible = wizardButtonHandler != null;
         if (wizardButtonHandler != null)
         {
-            _wizardButton.Click += (_, _) => wizardButtonHandler.OpenWizard(this);
+            _wizardButton.Click += async (_, _) => await wizardButtonHandler.OpenWizardAsync(this);
             wizardButtonHandler.WizardCompleted += () => DataChanged?.Invoke();
         }
 
@@ -169,6 +170,7 @@ public partial class AccountsPanel : DataPanel,
         _refreshOrchestrator.Initialize(_grid, this, this, _processDisplayManager);
         _contextMenuOrchestrator.Initialize(_grid, _contextMenu, this, _hdrCreateContainer, _processDisplayManager);
         _credentialHandler.Initialize(this, this);
+        _creationHandler.Initialize(this);
         _panelActions.Initialize(_grid, this);
         _importUIHandler.Initialize(_grid, _importButton);
         _gridEditHandler.Initialize(_grid, this);
@@ -182,35 +184,24 @@ public partial class AccountsPanel : DataPanel,
             DataChanged?.Invoke();
             RefreshGrid();
         };
-        _contextMenuOrchestrator.InstallRequested += package =>
-        {
-            if (GetSelectedAccountRow() is { } ar)
-            {
-                if (package == KnownPackages.WindowsTerminal && !_launchService.IsPackageInstalled(KnownPackages.Winget, ar.Sid))
-                    _launchService.InstallPackages([KnownPackages.Winget, package], ar);
-                else
-                    _launchService.InstallPackage(package, ar);
-            }
-        };
-        _contextMenuOrchestrator.OpenFolderBrowserRequested += OnOpenFolderBrowserClick;
-        _contextMenuOrchestrator.OpenCmdRequested += OnOpenCmdClick;
-        _contextMenuOrchestrator.EnvironmentVariablesRequested += OnEnvironmentVariablesClick;
-
+        _openCmdButton.Click += (_, _) => _contextMenuOrchestrator.OpenCmd();
+        _openFolderBrowserButton.Click += (_, _) => _contextMenuOrchestrator.OpenFolderBrowser();
         _aclManagerButton.Click += (_, _) => _contextMenuOrchestrator.OpenAclManager();
         _firewallButton.Click += (_, _) => _contextMenuOrchestrator.OpenFirewallAllowlist();
 
         // Wire credential handler events
         _credentialHandler.CreateUserDialogRequested += (username, password) => OpenCreateUserDialog(username, password);
-        _credentialHandler.DeleteUserRequested += (accountRow, selectedIndex) => _creationHandler.DeleteUser(accountRow, selectedIndex);
-        _credentialHandler.InstallPackagesRequested += (packages, ar) => _launchService.InstallPackages(packages, ar);
+        _credentialHandler.DeleteUserRequested += (accountRow, selectedIndex) => _deletionOrchestrator.DeleteUser(accountRow, selectedIndex);
         _credentialHandler.SaveAndRefreshRequested += (credId, fallbackIndex) => SaveAndRefresh(credId, fallbackIndex);
 
         // Wire creation handler events
-        _creationHandler.InstallPackagesRequested += (packages, cred, pwd) => _launchService.InstallPackages(packages, cred, pwd);
         _creationHandler.SaveAndRefreshRequested += (credId, fallbackIndex) => SaveAndRefresh(credId, fallbackIndex);
-        _creationHandler.StatusUpdateRequested += text => _statusLabel.Text = text;
-        _creationHandler.OperationStarted += () => _operationGuard.Begin(this);
-        _creationHandler.OperationEnded += () => _operationGuard.End(this);
+
+        // Wire deletion handler events
+        _deletionOrchestrator.SaveAndRefreshRequested += (credId, fallbackIndex) => SaveAndRefresh(credId, fallbackIndex);
+        _deletionOrchestrator.StatusUpdateRequested += text => _statusLabel.Text = text;
+        _deletionOrchestrator.OperationStarted += () => _operationGuard.Begin(this);
+        _deletionOrchestrator.OperationEnded += () => _operationGuard.End(this);
 
         // Wire context menu items click handlers for Edit/Password operations
         var items = _contextMenuOrchestrator.Items;
@@ -231,9 +222,10 @@ public partial class AccountsPanel : DataPanel,
                 _credentialHandler.RemoveCredential(ar, GetSelectedRowIndex());
         };
         items.DeleteUser.Click += OnDeleteUserClick;
-        items.PinFolderBrowserToTray.Click += OnPinFolderBrowserToTrayClick;
-        items.PinDiscoveryToTray.Click += OnPinDiscoveryToTrayClick;
-        items.PinTerminalToTray.Click += OnPinTerminalToTrayClick;
+        items.PinFolderBrowserToTray.Click += (_, _) => _contextMenuOrchestrator.ToggleFolderBrowserTray();
+        items.PinDiscoveryToTray.Click += (_, _) => _contextMenuOrchestrator.ToggleDiscoveryTray();
+        items.PinTerminalToTray.Click += (_, _) => _contextMenuOrchestrator.ToggleTerminalTray();
+        items.ManageAssociations.Click += (_, _) => _contextMenuOrchestrator.ToggleManageAssociations();
         items.CopySid.Click += (_, _) =>
         {
             var sid = GetSelectedSid();
@@ -250,15 +242,15 @@ public partial class AccountsPanel : DataPanel,
             if (GetSelectedAccountRow() is { } ar)
                 _panelActions.OpenProfileFolder(ar.Sid);
         };
-        items.CopyPassword.Click += (_, _) =>
+        items.CopyPassword.Click += async (_, _) =>
         {
             if (GetSelectedAccountRow() is { } ar)
-                _credentialHandler.CopyPassword(ar);
+                await _credentialHandler.CopyPasswordAsync(ar);
         };
-        items.TypePassword.Click += (_, _) =>
+        items.TypePassword.Click += async (_, _) =>
         {
             if (GetSelectedAccountRow() is { } ar)
-                _credentialHandler.TypePassword(ar);
+                await _credentialHandler.TypePasswordAsync(ar);
         };
         items.RotatePassword.Click += (_, _) =>
         {
@@ -296,13 +288,11 @@ public partial class AccountsPanel : DataPanel,
     // Forwarding handlers for Designer-wired events and internal call sites
     private void OnCreateContainerClick(object? sender, EventArgs e)
     {
-        var session = Session;
-        _containerHandler.CreateContainer(session.Database, session.CredentialStore, session.PinDerivedKey,
-            FindForm(), () =>
-            {
-                DataChanged?.Invoke();
-                RefreshGrid();
-            });
+        _containerHandler.CreateContainer(FindForm(), () =>
+        {
+            DataChanged?.Invoke();
+            RefreshGrid();
+        });
     }
 
     private void OnAclManagerClick(object? sender, EventArgs e)
@@ -460,7 +450,7 @@ public partial class AccountsPanel : DataPanel,
             (containerRow != null && !string.IsNullOrEmpty(containerRow.ContainerSid));
         _firewallButton.Enabled = hasAccountRow && !isUnavailable && !string.IsNullOrEmpty(accountRow?.Sid);
 
-        var useWindowsTerminal = accountRow != null && _launchService.IsWindowsTerminal(accountRow.Sid);
+        var useWindowsTerminal = accountRow != null && _contextMenuOrchestrator.IsWindowsTerminal(accountRow.Sid);
         _openCmdButton.ToolTipText = useWindowsTerminal
             ? "Open Terminal (hold Shift to launch with full privileges)"
             : "Open CMD (hold Shift to launch with full privileges)";
@@ -495,12 +485,14 @@ public partial class AccountsPanel : DataPanel,
 
     private void HandleContainerInternetToggle(DataGridViewRow row, ContainerRow containerRow)
     {
+        if (_operationGuard.IsInProgress)
+            return;
+
         _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
         var cell = (DataGridViewCheckBoxCell)row.Cells["colAllowInternet"];
         var enable = cell.Value is true or CheckState and CheckState.Checked;
 
-        var session = Session;
-        _containerHandler.ToggleContainerInternet(containerRow, enable, session.Database, session.CredentialStore, session.PinDerivedKey,
+        _containerHandler.ToggleContainerInternet(containerRow, enable,
             () =>
             {
                 DataChanged?.Invoke();
@@ -642,11 +634,11 @@ public partial class AccountsPanel : DataPanel,
 
     // --- User and credential operations ---
 
-    private void OnCreateUserClick(object? sender, EventArgs e)
-        => _creationHandler.OpenCreateUserDialog();
+    private async void OnCreateUserClick(object? sender, EventArgs e)
+        => await _creationHandler.OpenCreateUserDialog();
 
-    private void OpenCreateUserDialog(string? prefillUsername = null, string? prefillPassword = null)
-        => _creationHandler.OpenCreateUserDialog(prefillUsername, prefillPassword);
+    private async void OpenCreateUserDialog(string? prefillUsername = null, string? prefillPassword = null)
+        => await _creationHandler.OpenCreateUserDialog(prefillUsername, prefillPassword);
 
     private void OnAddClick(object? sender, EventArgs e)
         => _credentialHandler.AddCredential(GetSelectedAccountRow());
@@ -660,100 +652,13 @@ public partial class AccountsPanel : DataPanel,
         if (accountRow.IsUnavailable)
             return;
         var selectedIndex = _grid.SelectedRows[0].Index;
-        _creationHandler.DeleteUser(accountRow, selectedIndex);
-    }
-
-    // --- Launch operations ---
-
-    private void OnOpenCmdClick(object? sender, EventArgs e)
-    {
-        if (_grid.SelectedRows.Count == 0)
-            return;
-        if (_grid.SelectedRows[0].Tag is ContainerRow containerRow)
-        {
-            var session = Session;
-            _containerHandler.LaunchCmd(containerRow, session.Database, session.CredentialStore, session.PinDerivedKey);
-            return;
-        }
-
-        if (_grid.SelectedRows[0].Tag is not AccountRow accountRow)
-            return;
-        var flags = (ModifierKeys & Keys.Shift) != 0
-            ? default
-            : LaunchFlags.FromAccountDefaults(Database, accountRow.Sid);
-        _launchService.OpenCmd(accountRow, flags);
-    }
-
-    private void OnEnvironmentVariablesClick(object? sender, EventArgs e)
-    {
-        if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not AccountRow accountRow)
-            return;
-        var flags = (ModifierKeys & Keys.Shift) != 0
-            ? default
-            : LaunchFlags.FromAccountDefaults(Database, accountRow.Sid);
-        _launchService.OpenEnvironmentVariables(accountRow, flags);
-    }
-
-    private void OnOpenFolderBrowserClick(object? sender, EventArgs e)
-    {
-        if (_grid.SelectedRows.Count == 0)
-            return;
-        if (_grid.SelectedRows[0].Tag is ContainerRow containerRow)
-        {
-            var session = Session;
-            _containerHandler.LaunchFolderBrowser(containerRow, session.Database.Settings, session.Database, session.CredentialStore, session.PinDerivedKey);
-            return;
-        }
-
-        if (_grid.SelectedRows[0].Tag is not AccountRow accountRow)
-            return;
-        var flags = (ModifierKeys & Keys.Shift) != 0
-            ? default
-            : LaunchFlags.FromAccountDefaults(Database, accountRow.Sid);
-        _launchService.OpenFolderBrowser(accountRow, flags, FindForm());
-    }
-
-    private void OnPinFolderBrowserToTrayClick(object? sender, EventArgs e)
-    {
-        if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not AccountRow accountRow)
-            return;
-        if (string.IsNullOrEmpty(accountRow.Sid))
-            return;
-        _launchService.ToggleFolderBrowserTray(accountRow, () => DataChanged?.Invoke());
-    }
-
-    private void OnPinDiscoveryToTrayClick(object? sender, EventArgs e)
-    {
-        if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not AccountRow accountRow)
-            return;
-        if (string.IsNullOrEmpty(accountRow.Sid))
-            return;
-        _launchService.ToggleDiscoveryTray(accountRow, () => DataChanged?.Invoke());
-    }
-
-    private void OnPinTerminalToTrayClick(object? sender, EventArgs e)
-    {
-        if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not AccountRow accountRow)
-            return;
-        if (string.IsNullOrEmpty(accountRow.Sid))
-            return;
-        _launchService.ToggleTerminalTray(accountRow, () => DataChanged?.Invoke());
+        _deletionOrchestrator.DeleteUser(accountRow, selectedIndex);
     }
 
     // --- Account operations ---
 
     private void OnOpenAccountsClick(object? sender, EventArgs e)
-    {
-        try
-        {
-            _panelActions.OpenUserAccountsDialog();
-        }
-        catch (Exception ex)
-        {
-            _log.Error("Failed to open User Accounts dialog", ex);
-            MessageBox.Show($"Failed to open dialog: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
+        => _panelActions.OpenUserAccountsDialog();
 
     private void OnCopyRandomPasswordClick(object? sender, EventArgs e)
         => _panelActions.CopyRandomPassword();
@@ -773,7 +678,7 @@ public partial class AccountsPanel : DataPanel,
 
     private void SaveAndRefresh(Guid? selectCredId = null, int fallbackIndex = -1)
     {
-        _credentialManager.SaveCredentialStoreAndConfig(CredentialStore, Database, PinDerivedKey);
+        _persistenceHelper.SaveCredentialStoreAndConfig(CredentialStore, Database, PinDerivedKey);
         RefreshGrid(afterPopulate: () =>
         {
             if (selectCredId != null)
@@ -787,7 +692,7 @@ public partial class AccountsPanel : DataPanel,
     private void SaveLastPrefsPath(string path)
     {
         Database.LastPrefsFilePath = path;
-        _credentialManager.SaveConfig(Database, PinDerivedKey, CredentialStore.ArgonSalt);
+        _persistenceHelper.SaveConfig(Database, PinDerivedKey, CredentialStore.ArgonSalt);
     }
 
     private void SetControlsEnabled(bool enabled)
@@ -814,7 +719,7 @@ public partial class AccountsPanel : DataPanel,
     // --- Grid selection helpers ---
 
     private AccountRow? GetSelectedAccountRow()
-        => _grid.SelectedRows.Count > 0 ? _grid.SelectedRows[0].Tag as AccountRow : null;
+        => AccountGridHelper.GetSelectedAccountRow(_grid);
 
     private string? GetSelectedSid()
     {

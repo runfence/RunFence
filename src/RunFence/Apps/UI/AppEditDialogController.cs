@@ -29,9 +29,9 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
     /// <summary>
     /// Populates non-combo dialog controls from an existing app entry.
     /// ACL section, env vars, and IPC callers are populated here.
-    /// Account/config combo selection is NOT done here — the caller must set
-    /// LaunchAsLowIl/SplitToken checkboxes before selecting the account combo
-    /// (the switch handler captures prior checkbox state on container selection).
+    /// Account/config combo selection is NOT done here — the caller must apply
+    /// PrivilegeLevel to the combobox before selecting the account combo
+    /// (the switch handler captures prior privilege level on container selection).
     /// </summary>
     public PopulateFromExistingResult PopulateNonComboState(
         AppEntry app,
@@ -53,24 +53,13 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
         }
 
         return new PopulateFromExistingResult(OverrideIpcCallers: overrideIpcCallers,
-            LaunchAsLowIlCheckState: app.LaunchAsLowIntegrity switch
-            {
-                true => CheckState.Checked,
-                false => CheckState.Unchecked,
-                null => CheckState.Indeterminate
-            },
-            SplitTokenCheckState: app.RunAsSplitToken switch
-            {
-                true => CheckState.Checked,
-                false => CheckState.Unchecked,
-                null => CheckState.Indeterminate
-            });
+            SelectedPrivilegeLevel: app.PrivilegeLevel);
     }
 
     /// <summary>
     /// Selects the account combo item matching the app entry.
-    /// Must be called AFTER LaunchAsLowIl/SplitToken checkboxes are set
-    /// (the switch handler captures their prior state on container selection).
+    /// Must be called AFTER PrivilegeLevel combobox is set
+    /// (the switch handler captures the prior mode on container selection).
     /// </summary>
     public void SelectAccountComboForExisting(
         AppEntry app,
@@ -183,27 +172,12 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
         var accountSid = selectedContainer != null ? "" : selectedAccount!.Sid;
         var appContainerName = selectedContainer?.Container.Name;
 
-        // For container apps, preserve the original LaunchAsLowIntegrity value (forced-true in UI
-        // is cosmetic only; the actual setting is irrelevant for containers but should be preserved
-        // in case the user later switches back to a user account in a future edit).
-        bool? launchAsLowIl = selectedContainer != null
-            ? _switchHandler.PriorLaunchAsLowIl
-            : state.LaunchAsLowIlCheckState switch
-            {
-                CheckState.Checked => true,
-                CheckState.Unchecked => false,
-                _ => null
-            };
-
-        // Split token is not applicable for container apps
-        bool? runAsSplitToken = selectedContainer != null
-            ? null
-            : state.SplitTokenCheckState switch
-            {
-                CheckState.Checked => true,
-                CheckState.Unchecked => false,
-                _ => null
-            };
+        // For container apps, preserve the original PrivilegeLevel value saved before container
+        // selection forced it; actual setting is irrelevant for containers but preserved in case
+        // the user later switches back to a user account in a future edit.
+        PrivilegeLevel? privilegeLevel = selectedContainer != null
+            ? _switchHandler.PriorPrivilegeLevel
+            : state.SelectedPrivilegeLevel;
 
         var argsTemplate = state.ArgumentsTemplateText;
         return entryBuilder.Build(new AppEntryBuildOptions(
@@ -226,15 +200,14 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
             ExistingId: existing?.Id,
             LastKnownExeTimestamp: existing?.LastKnownExeTimestamp,
             PreGeneratedId: preGeneratedId,
-            LaunchAsLowIntegrity: launchAsLowIl,
+            PrivilegeLevel: privilegeLevel,
             AppContainerName: appContainerName,
-            RunAsSplitToken: runAsSplitToken,
             EnvironmentVariables: envVarsSection.GetItems(),
-            ArgumentsTemplate: string.IsNullOrEmpty(argsTemplate) ? null : argsTemplate));
+            ArgumentsTemplate: string.IsNullOrEmpty(argsTemplate) ? null : argsTemplate,
+            ExistingApps: existingApps));
     }
 }
 
 public record PopulateFromExistingResult(
     bool OverrideIpcCallers,
-    CheckState LaunchAsLowIlCheckState,
-    CheckState SplitTokenCheckState);
+    PrivilegeLevel? SelectedPrivilegeLevel);

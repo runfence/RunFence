@@ -1,4 +1,5 @@
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 
 namespace RunFence.SecurityScanner;
@@ -19,9 +20,23 @@ public class TaskSchedulerDataAccess
                     return;
 
                 dynamic scheduler = Activator.CreateInstance(schedulerType)!;
-                scheduler.Connect();
-
-                CollectTaskFolderData(scheduler.GetFolder("\\"), tasks);
+                try
+                {
+                    scheduler.Connect();
+                    dynamic rootFolder = scheduler.GetFolder("\\");
+                    try
+                    {
+                        CollectTaskFolderData(rootFolder, tasks);
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(rootFolder);
+                    }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(scheduler);
+                }
             }
             catch (Exception ex)
             {
@@ -29,9 +44,11 @@ public class TaskSchedulerDataAccess
             }
         });
         thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
         thread.Start();
         if (!thread.Join(30_000))
         {
+            thread.Interrupt();
             Console.Error.WriteLine("Task Scheduler enumeration timed out");
             return [];
         }
@@ -121,6 +138,10 @@ public class TaskSchedulerDataAccess
                 {
                     /* skip individual task */
                 }
+                finally
+                {
+                    Marshal.ReleaseComObject(task);
+                }
             }
 
             foreach (dynamic subFolder in folder.GetFolders(0))
@@ -132,6 +153,10 @@ public class TaskSchedulerDataAccess
                 catch
                 {
                     /* skip inaccessible subfolder */
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(subFolder);
                 }
             }
         }
@@ -153,8 +178,22 @@ public class TaskSchedulerDataAccess
                 if (shellType == null)
                     return;
                 dynamic shell = Activator.CreateInstance(shellType)!;
-                dynamic shortcut = shell.CreateShortcut(lnkPath);
-                result = shortcut.TargetPath as string;
+                try
+                {
+                    dynamic shortcut = shell.CreateShortcut(lnkPath);
+                    try
+                    {
+                        result = shortcut.TargetPath as string;
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(shortcut);
+                    }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(shell);
+                }
             }
             catch (Exception ex)
             {
@@ -162,9 +201,13 @@ public class TaskSchedulerDataAccess
             }
         });
         thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
         thread.Start();
         if (!thread.Join(10_000))
+        {
+            thread.Interrupt();
             return null;
+        }
         if (error != null)
             ExceptionDispatchInfo.Capture(error).Throw();
         return result;

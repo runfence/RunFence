@@ -4,24 +4,15 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Apps;
 
-public class ContextMenuService : IContextMenuService
+public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvider) : IContextMenuService
 {
-    private readonly ILoggingService _log;
-    private readonly IAppIconProvider _iconProvider;
-
-    public ContextMenuService(ILoggingService log, IAppIconProvider iconProvider)
-    {
-        _log = log;
-        _iconProvider = iconProvider;
-    }
-
     public void Register()
     {
-        _log.Info("ContextMenuService: registering context menu.");
+        log.Info("ContextMenuService: registering context menu.");
         var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
-            _log.Warn($"Launcher not found at {launcherPath}, skipping context menu registration");
+            log.Warn($"Launcher not found at {launcherPath}, skipping context menu registration");
             return;
         }
 
@@ -40,16 +31,16 @@ public class ContextMenuService : IContextMenuService
             }
             catch (Exception ex)
             {
-                _log.Warn($"Failed to register context menu for '{registryPath}': {ex.Message}");
+                log.Warn($"Failed to register context menu for '{registryPath}': {ex.Message}");
             }
         }
 
-        _log.Info("Context menu registered");
+        log.Info("Context menu registered");
     }
 
     public void Unregister()
     {
-        _log.Info("ContextMenuService: unregistering context menu.");
+        log.Info("ContextMenuService: unregistering context menu.");
         foreach (var registryPath in Constants.ContextMenuRegistryPaths)
         {
             try
@@ -58,7 +49,7 @@ public class ContextMenuService : IContextMenuService
             }
             catch (Exception ex)
             {
-                _log.Warn($"Failed to remove context menu registry key '{registryPath}': {ex.Message}");
+                log.Warn($"Failed to remove context menu registry key '{registryPath}': {ex.Message}");
             }
         }
 
@@ -70,10 +61,10 @@ public class ContextMenuService : IContextMenuService
         }
         catch (Exception ex)
         {
-            _log.Warn($"Failed to delete exported icon: {ex.Message}");
+            log.Warn($"Failed to delete exported icon: {ex.Message}");
         }
 
-        _log.Info("Context menu unregistered");
+        log.Info("Context menu unregistered");
     }
 
     private void ExportIcon()
@@ -85,13 +76,13 @@ public class ContextMenuService : IContextMenuService
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
 
-            var icon = _iconProvider.GetAppIcon();
+            var icon = iconProvider.GetAppIcon();
             using var fs = new FileStream(iconPath, FileMode.Create, FileAccess.Write);
             icon.Save(fs);
         }
         catch (Exception ex)
         {
-            _log.Warn($"Failed to export icon: {ex.Message}");
+            log.Warn($"Failed to export icon: {ex.Message}");
         }
     }
 }

@@ -2,6 +2,8 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.DragBridge;
 using RunFence.Infrastructure;
+using InfraWindowNative = RunFence.Infrastructure.WindowNative;
+using RunFence.Launch;
 using RunFence.Licensing;
 using RunFence.Licensing.UI.Forms;
 using RunFence.Persistence.UI;
@@ -15,6 +17,12 @@ namespace RunFence.UI;
 /// discovery scheduling. Extracted from <see cref="RunFence.UI.Forms.MainForm"/> to reduce its
 /// dependency count. Communicates with the form via <see cref="IMainFormVisibility"/>.
 /// </summary>
+/// <remarks>
+/// Dependency count (11): at threshold but no actionable split exists. Each dep covers a
+/// distinct concern: lock manager, tray launch, notify icon, tray icon manager, idle monitor,
+/// discovery refresh, session, config orchestrator, license, launch facade, hotkey service —
+/// all interacting with the tray lifecycle. Reviewed 2026-04-16.
+/// </remarks>
 public class MainFormTrayHandler(
     LockManager lockManager,
     TrayLaunchHandler trayLaunchHandler,
@@ -25,6 +33,7 @@ public class MainFormTrayHandler(
     SessionContext session,
     ConfigManagementOrchestrator configManagementOrchestrator,
     ILicenseService licenseService,
+    ILaunchFacade launchFacade,
     IGlobalHotkeyService hotkeyService)
     : IDisposable
 {
@@ -34,12 +43,7 @@ public class MainFormTrayHandler(
 
     private IMainFormVisibility _form = null!;
     private bool _startupComplete;
-
-    /// <summary>
-    /// Raised when the PIN was reset via LockManager. MainForm subscribes to call SetData and
-    /// forward the event to callers that need to re-encrypt with the new key.
-    /// </summary>
-    public event Action<ProtectedBuffer, ProtectedBuffer>? PinResetCompleted;
+    private bool _disposed;
 
     /// <summary>
     /// Raised when the license status changes and the options panel should be refreshed.
@@ -59,13 +63,16 @@ public class MainFormTrayHandler(
 
         trayIconManager.Initialize((ITrayOwner)form);
         trayIconManager.AppLaunchRequested += trayLaunchHandler.LaunchApp;
-        trayIconManager.FolderBrowserLaunchRequested += trayLaunchHandler.LaunchFolderBrowser;
-        trayIconManager.TerminalLaunchRequested += trayLaunchHandler.LaunchTerminal;
-        trayIconManager.DiscoveredAppLaunchRequested += trayLaunchHandler.LaunchDiscoveredApp;
+        trayIconManager.FolderBrowserLaunchRequested += (sid, shift) =>
+            trayLaunchHandler.LaunchFolderBrowser(new AccountLaunchIdentity(sid)
+                { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null });
+        trayIconManager.TerminalLaunchRequested += (sid, shift) =>
+            trayLaunchHandler.LaunchTerminal(new AccountLaunchIdentity(sid)
+                { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null });
+        trayIconManager.DiscoveredAppLaunchRequested += (exe, sid) =>
+            trayLaunchHandler.LaunchDiscoveredApp(exe, new AccountLaunchIdentity(sid));
         trayIconManager.UpdateDatabase(session.CredentialStore);
         discoveryRefreshManager.SetHost(trayIconManager, formAsControl);
-
-        LockManager.PinResetCompleted += (old, next) => PinResetCompleted?.Invoke(old, next);
 
         idleMonitor.IdleTimeoutReached += () =>
         {
@@ -84,14 +91,7 @@ public class MainFormTrayHandler(
 
     public void HandleFormClosing()
     {
-        licenseService.LicenseStatusChanged -= OnLicenseStatusChanged;
-        hotkeyService.HotkeyPressed -= OnAltEscapeHotkey;
-        hotkeyService.Unregister(AltEscapeHotkeyId);
-        trayIconManager.Dispose();
-        notifyIcon.Visible = false;
-        notifyIcon.Dispose();
-        discoveryRefreshManager.Dispose();
-        LockManager.Dispose();
+        Dispose();
     }
 
     public void SetStartupComplete() => _startupComplete = true;
@@ -143,12 +143,12 @@ public class MainFormTrayHandler(
         ForceForeground();
     }
 
-    public void TryShowWindow()
+    public async Task TryShowWindowAsync()
     {
         if (!_startupComplete)
             return;
         var wasLocked = LockManager.IsLocked;
-        LockManager.TryShowWindow();
+        await LockManager.TryShowWindowAsync();
         if (wasLocked && !LockManager.IsLocked)
             configManagementOrchestrator.ScheduleAvailabilityCheck();
         if (!LockManager.IsLocked)
@@ -162,7 +162,7 @@ public class MainFormTrayHandler(
     {
         if (!licenseService.ShouldShowNag(DateTime.Now))
             return;
-        using var dlg = new EvaluationNagDialog(licenseService);
+        using var dlg = new EvaluationNagDialog(licenseService, launchFacade);
         dlg.ShowDialog((Control)_form);
         if (licenseService.IsLicensed)
             UpdateTitleAndTooltip();
@@ -205,7 +205,7 @@ public class MainFormTrayHandler(
     {
         if (id != AltEscapeHotkeyId)
             return;
-        if (NativeInterop.GetForegroundWindow() != _form.Handle)
+        if (InfraWindowNative.GetForegroundWindow() != _form.Handle)
             return;
         // Defer to avoid modifying the hotkey list during the LL hook's foreach iteration.
         _form.BeginInvokeOnUiThread(HideToTray);
@@ -231,7 +231,16 @@ public class MainFormTrayHandler(
 
     public void Dispose()
     {
-        // Disposal is done in HandleFormClosing which is called explicitly from MainForm.OnFormClosing.
+        if (_disposed)
+            return;
+        _disposed = true;
+        licenseService.LicenseStatusChanged -= OnLicenseStatusChanged;
+        hotkeyService.HotkeyPressed -= OnAltEscapeHotkey;
+        hotkeyService.Unregister(AltEscapeHotkeyId);
+        trayIconManager.Dispose();
+        notifyIcon.Visible = false;
+        notifyIcon.Dispose();
+        discoveryRefreshManager.Dispose();
     }
 
     private void ForceForeground()

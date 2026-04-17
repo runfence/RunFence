@@ -1,5 +1,6 @@
 using Moq;
 using RunFence.Acl;
+using RunFence.Account;
 using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
@@ -23,9 +24,10 @@ public class RunAsAppEntryManagerTests : IDisposable
     private readonly Mock<IAppConfigService> _appConfigService = new();
     private readonly Mock<IAclService> _aclService = new();
     private readonly Mock<IShortcutService> _shortcutService = new();
+    private readonly Mock<IBesideTargetShortcutService> _besideTargetShortcutService = new();
+    private readonly Mock<IShortcutDiscoveryService> _shortcutDiscovery = new();
     private readonly Mock<IIconService> _iconService = new();
     private readonly Mock<ILicenseService> _licenseService = new();
-    private readonly Mock<IRunAsLaunchErrorHandler> _launchErrorHandler = new();
     private readonly AppDatabase _database = new();
     private readonly CredentialStore _credentialStore = new();
     private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
@@ -34,6 +36,7 @@ public class RunAsAppEntryManagerTests : IDisposable
     {
         _appState.Setup(c => c.Database).Returns(_database);
         _licenseService.Setup(l => l.CanAddApp(It.IsAny<int>())).Returns(true);
+        _shortcutDiscovery.Setup(d => d.CreateTraversalCache()).Returns(() => new ShortcutTraversalCache([]));
     }
 
     public void Dispose() => _pinKey.Dispose();
@@ -45,10 +48,25 @@ public class RunAsAppEntryManagerTests : IDisposable
         PinDerivedKey = _pinKey
     };
 
-    private readonly Mock<ISidResolver> _sidResolver = new();
+    private readonly Mock<ISidNameCacheService> _sidNameCache = new();
 
     private AppEntryEnforcementHelper CreateEnforcementHelper()
-        => new(_aclService.Object, _shortcutService.Object, _iconService.Object, _sidResolver.Object, new Mock<IInteractiveUserDesktopProvider>().Object);
+        => new(_aclService.Object, _shortcutService.Object, _besideTargetShortcutService.Object,
+            _iconService.Object, _sidNameCache.Object,
+            new Mock<IInteractiveUserDesktopProvider>().Object, new Mock<ILoggingService>().Object);
+
+    private RunAsAppShortcutCreator CreateShortcutCreator()
+    {
+        var session = CreateSession();
+        var sessionProvider = new LambdaSessionProvider(() => session);
+        return new RunAsAppShortcutCreator(
+            _iconService.Object,
+            _sidNameCache.Object,
+            _shortcutService.Object,
+            _besideTargetShortcutService.Object,
+            sessionProvider,
+            _log.Object);
+    }
 
     private RunAsAppEntryManager CreateManager()
         => new(
@@ -59,12 +77,10 @@ public class RunAsAppEntryManagerTests : IDisposable
             CreateSession(),
             _appConfigService.Object,
             _aclService.Object,
-            _shortcutService.Object,
-            _iconService.Object,
             CreateEnforcementHelper(),
-            _sidResolver.Object,
+            _shortcutDiscovery.Object,
             _licenseService.Object,
-            _launchErrorHandler.Object);
+            CreateShortcutCreator());
 
     // ── PersistNewAppEntry — success path ─────────────────────────────────
 
@@ -319,5 +335,74 @@ public class RunAsAppEntryManagerTests : IDisposable
         // Assert
         _aclService.Verify(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
         _aclService.Verify(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
+    }
+
+    // ── PersistNewAppEntry — ManageShortcuts ──────────────────────────────
+
+    [Fact]
+    public void PersistNewAppEntry_ManageShortcuts_SuccessPath_DoesNotCallRemoveBesideTarget()
+    {
+        // On the success path, RemoveBesideTargetShortcut must NOT be called —
+        // that method is only for rollback. The creation path calls CreateBesideTargetShortcut
+        // which is gated on File.Exists(launcherPath) and is not exercised in unit tests.
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
+        _credentialStore.Credentials.Add(new CredentialEntry { Sid = UserSid });
+        _sidNameCache.Setup(c => c.GetDisplayName(UserSid)).Returns("TestUser");
+        var manager = CreateManager();
+
+        // Act
+        var result = manager.PersistNewAppEntry(app, configPath: null);
+
+        // Assert
+        Assert.True(result);
+        _besideTargetShortcutService.Verify(s => s.RemoveBesideTargetShortcut(app), Times.Never);
+    }
+
+    [Fact]
+    public void PersistNewAppEntry_ManageShortcuts_SaveConfigFails_RevokesShortcut()
+    {
+        // Arrange: save fails after ManageShortcuts path; rollback must call RemoveBesideTargetShortcut
+        _appConfigService
+            .Setup(s => s.SaveConfigForApp(It.IsAny<string>(), It.IsAny<AppDatabase>(),
+                It.IsAny<byte[]>(), It.IsAny<byte[]>()))
+            .Throws(new IOException("Disk full"));
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
+        var manager = CreateManager();
+
+        // Act
+        var result = manager.PersistNewAppEntry(app, configPath: null);
+
+        // Assert: failure + shortcut cleanup attempted during rollback
+        Assert.False(result);
+        _besideTargetShortcutService.Verify(s => s.RemoveBesideTargetShortcut(app), Times.Once);
+    }
+
+    // ── TEST-10: RevertShortcuts + RemoveBesideTargetShortcut ordering ────
+
+    [Fact]
+    public void RevertAppChanges_ManageShortcuts_CallsRevertShortcutsAndRemoveBesideTarget()
+    {
+        // Verifies the CLAUDE.md invariant: RevertShortcuts and RemoveBesideTargetShortcut
+        // must be called (via EnforcementHelper.RevertChanges) before any deletion from the DB.
+        // In RevertAppChanges the app is still in the database during the revert call.
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
+        _database.Apps.Add(app);
+
+        var callOrder = new List<string>();
+        _shortcutService.Setup(s => s.RevertShortcuts(app, It.IsAny<ShortcutTraversalCache>()))
+            .Callback(() => callOrder.Add("RevertShortcuts"));
+        _besideTargetShortcutService.Setup(s => s.RemoveBesideTargetShortcut(app))
+            .Callback(() => callOrder.Add("RemoveBesideTargetShortcut"));
+
+        var manager = CreateManager();
+
+        // Act
+        manager.RevertAppChanges(app);
+
+        // Assert: both shortcut operations called, RevertShortcuts before RemoveBesideTargetShortcut
+        Assert.Contains("RevertShortcuts", callOrder);
+        Assert.Contains("RemoveBesideTargetShortcut", callOrder);
+        Assert.True(callOrder.IndexOf("RevertShortcuts") < callOrder.IndexOf("RemoveBesideTargetShortcut"),
+            "RevertShortcuts must be called before RemoveBesideTargetShortcut");
     }
 }

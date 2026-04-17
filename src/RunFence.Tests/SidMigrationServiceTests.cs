@@ -13,6 +13,7 @@ public class SidMigrationServiceTests
 {
     private readonly SidMigrationService _service;
     private readonly Mock<ISidNameCacheService> _sidNameCache;
+    private readonly Mock<ISidAclScanService> _aclScan;
     private AppDatabase _testDatabase = new();
 
     private const string OldSid1 = "S-1-5-21-9999999999-9999999999-9999999999-1001";
@@ -22,9 +23,8 @@ public class SidMigrationServiceTests
 
     public SidMigrationServiceTests()
     {
-        var log = new Mock<ILoggingService>();
         var sidResolver = new Mock<ISidResolver>();
-        var aclScan = new SidAclScanService(log.Object, sidResolver.Object, new FileSystemAclTraverser(log.Object));
+        _aclScan = new Mock<ISidAclScanService>();
         _sidNameCache = new Mock<ISidNameCacheService>();
         var sidCleanupHelper = new Mock<ISidCleanupHelper>();
         var dbProvider = new LambdaDatabaseProvider(() => _testDatabase);
@@ -32,7 +32,7 @@ public class SidMigrationServiceTests
         sidCleanupHelper
             .Setup(h => h.CleanupSidFromAppData(It.IsAny<string>(), It.IsAny<bool>()))
             .Returns((string sid, bool removeApps) => realCleanupHelper.CleanupSidFromAppData(sid, removeApps));
-        _service = new SidMigrationService(sidResolver.Object, sidCleanupHelper.Object, aclScan, _sidNameCache.Object, dbProvider);
+        _service = new SidMigrationService(sidResolver.Object, sidCleanupHelper.Object, _aclScan.Object, _sidNameCache.Object, dbProvider);
     }
 
     // --- BuildMappings tests ---
@@ -206,6 +206,47 @@ public class SidMigrationServiceTests
     }
 
     [Fact]
+    public void MigrateAppData_AllowedAclEntries_DeduplicatesAndMergesFlags()
+    {
+        // Two AllowAclEntries with different old SIDs both map to the same new SID.
+        // The resulting merged entry must OR the boolean flags from both originals.
+        var database = new AppDatabase
+        {
+            Apps =
+            [
+                new()
+                {
+                    Id = "a1",
+                    AccountSid = "other-sid",
+                    AclMode = AclMode.Allow,
+                    AllowedAclEntries =
+                    [
+                        new AllowAclEntry { Sid = OldSid1, AllowExecute = true, AllowWrite = false },
+                        new AllowAclEntry { Sid = OldSid2, AllowExecute = false, AllowWrite = true }
+                    ]
+                }
+            ]
+        };
+
+        _testDatabase = database;
+
+        var mappings = new List<SidMigrationMapping>
+        {
+            new(OldSid1, NewSid1, "User1"),
+            new(OldSid2, NewSid1, "User2") // both map to same new SID
+        };
+
+        _service.MigrateAppData(mappings, new CredentialStore());
+
+        // After deduplication: single entry with NewSid1 and OR-merged flags
+        var entries = database.Apps[0].AllowedAclEntries!;
+        Assert.Single(entries);
+        Assert.Equal(NewSid1, entries[0].Sid);
+        Assert.True(entries[0].AllowExecute, "AllowExecute must be ORed from both entries");
+        Assert.True(entries[0].AllowWrite, "AllowWrite must be ORed from both entries");
+    }
+
+    [Fact]
     public void MigrateAppData_AllowedIpcCallers_PerApp_SidReplacement()
     {
         var database = new AppDatabase
@@ -233,11 +274,14 @@ public class SidMigrationServiceTests
     [Fact]
     public async Task DiscoverOrphanedSidsAsync_CancelledToken_ThrowsOperationCanceledException()
     {
-        // A pre-cancelled token causes Task.Run to cancel before the traversal lambda executes,
-        // verifying that the CancellationToken is correctly propagated to the background task.
-        // Using an empty root list avoids any filesystem dependency — the token check runs first.
+        // Verify that SidMigrationService correctly propagates cancellation from ISidAclScanService.
         var ct = new CancellationToken(true);
         var progress = new Progress<(long, long)>();
+
+        _aclScan
+            .Setup(s => s.DiscoverOrphanedSidsAsync(It.IsAny<IReadOnlyList<string>>(), It.IsAny<IProgress<(long, long)>>(), It.IsAny<CancellationToken>()))
+            .Returns((IReadOnlyList<string> _, IProgress<(long, long)> _, CancellationToken token) =>
+                Task.FromCanceled<List<OrphanedSid>>(token));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             _service.DiscoverOrphanedSidsAsync(
@@ -412,9 +456,11 @@ public class SidMigrationServiceTests
     }
 
     [Fact]
-    public void MigrateAppData_DuplicateCredentialSid_SkipsExisting()
+    public void MigrateAppData_DuplicateCredentialSid_RemovesOrphanedOldSidCredential()
     {
-        // If a credential with the target SID already exists, the migration should skip it
+        // If a credential with the target SID already exists, the old-SID credential is an orphan
+        // (its account has been re-created with a new SID) and must be removed from the store so
+        // it does not appear as an unresolvable SID in the RunAs dialog.
         var credentialStore = new CredentialStore
         {
             Credentials =
@@ -429,13 +475,11 @@ public class SidMigrationServiceTests
 
         _testDatabase = database;
 
-
         var counts = _service.MigrateAppData(mappings, credentialStore);
 
-        Assert.Equal(0, counts.Credentials); // Skipped due to duplicate
-        Assert.Equal(2, credentialStore.Credentials.Count);
-        Assert.Equal(OldSid1, credentialStore.Credentials[0].Sid); // Unchanged
-        Assert.Equal(NewSid1, credentialStore.Credentials[1].Sid); // Unchanged
+        Assert.Equal(0, counts.Credentials); // Skipped (not migrated — orphan removed instead)
+        Assert.Single(credentialStore.Credentials); // Old-SID orphan was removed
+        Assert.Equal(NewSid1, credentialStore.Credentials[0].Sid); // Only the new-SID credential remains
     }
 
     [Fact]
@@ -695,14 +739,17 @@ public class SidMigrationServiceTests
         Assert.True(database.GetAccount(OldSid1)?.DeleteAfterUtc.HasValue);
     }
 
-    // --- SplitTokenOptOutSids migration/deletion ---
+    // --- PrivilegeLevel migration/deletion ---
 
-    [Fact]
-    public void MigrateAppData_UpdatesSplitTokenOptOutSids()
+    [Theory]
+    [InlineData(PrivilegeLevel.Basic)]
+    [InlineData(PrivilegeLevel.HighestAllowed)]
+    [InlineData(PrivilegeLevel.LowIntegrity)]
+    public void MigrateAppData_UpdatesPrivilegeLevel(PrivilegeLevel privilegeLevel)
     {
         var database = new AppDatabase();
-        database.GetOrCreateAccount(OldSid1).SplitTokenOptOut = true;
-        database.GetOrCreateAccount(OldSid2).SplitTokenOptOut = true;
+        database.GetOrCreateAccount(OldSid1).PrivilegeLevel = privilegeLevel;
+        database.GetOrCreateAccount(OldSid2).PrivilegeLevel = privilegeLevel;
 
         var mappings = new List<SidMigrationMapping>
         {
@@ -710,21 +757,20 @@ public class SidMigrationServiceTests
         };
 
         _testDatabase = database;
-
-
         _service.MigrateAppData(mappings, new CredentialStore());
 
-        Assert.True(database.GetAccount(NewSid1)?.SplitTokenOptOut);
+        Assert.Equal(privilegeLevel, database.GetAccount(NewSid1)?.PrivilegeLevel);
         Assert.Null(database.GetAccount(OldSid1)); // renamed
-        Assert.True(database.GetAccount(OldSid2)?.SplitTokenOptOut); // OldSid2 unchanged
+        Assert.Equal(privilegeLevel, database.GetAccount(OldSid2)?.PrivilegeLevel); // OldSid2 unchanged
     }
 
     [Fact]
-    public void MigrateAppData_SplitTokenOptOutSids_DeduplicatesWhenTwoMapToSame()
+    public void MigrateAppData_PrivilegeLevel_DeduplicatesTakesHigherValue()
     {
+        // When two SIDs map to the same new SID, the higher PrivilegeLevel wins.
         var database = new AppDatabase();
-        database.GetOrCreateAccount(OldSid1).SplitTokenOptOut = true;
-        database.GetOrCreateAccount(OldSid2).SplitTokenOptOut = true;
+        database.GetOrCreateAccount(OldSid1).PrivilegeLevel = PrivilegeLevel.Basic;
+        database.GetOrCreateAccount(OldSid2).PrivilegeLevel = PrivilegeLevel.LowIntegrity;
 
         var mappings = new List<SidMigrationMapping>
         {
@@ -733,93 +779,26 @@ public class SidMigrationServiceTests
         };
 
         _testDatabase = database;
-
-
         _service.MigrateAppData(mappings, new CredentialStore());
 
-        Assert.True(database.GetAccount(NewSid1)?.SplitTokenOptOut);
+        Assert.Equal(PrivilegeLevel.LowIntegrity, database.GetAccount(NewSid1)?.PrivilegeLevel);
         Assert.Equal(1, database.Accounts.Count(a =>
             string.Equals(a.Sid, NewSid1, StringComparison.OrdinalIgnoreCase)));
     }
 
     [Fact]
-    public void DeleteSidsFromAppData_CleansSplitTokenOptOutSids()
+    public void DeleteSidsFromAppData_CleansPrivilegeLevel()
     {
         var database = new AppDatabase();
-        database.GetOrCreateAccount(OldSid1).SplitTokenOptOut = true;
-        database.GetOrCreateAccount(OldSid2).SplitTokenOptOut = true;
+        database.GetOrCreateAccount(OldSid1).PrivilegeLevel = PrivilegeLevel.LowIntegrity;
+        database.GetOrCreateAccount(OldSid2).PrivilegeLevel = PrivilegeLevel.LowIntegrity;
         var store = new CredentialStore();
 
         _testDatabase = database;
-
-
         _service.DeleteSidsFromAppData(new List<string> { OldSid1 }, store);
 
         Assert.Null(database.GetAccount(OldSid1));
-        Assert.True(database.GetAccount(OldSid2)?.SplitTokenOptOut);
-    }
-
-    // --- LowIntegrityDefaultSids migration/deletion ---
-
-    [Fact]
-    public void MigrateAppData_UpdatesLowIntegrityDefaultSids()
-    {
-        var database = new AppDatabase();
-        database.GetOrCreateAccount(OldSid1).LowIntegrityDefault = true;
-        database.GetOrCreateAccount(OldSid2).LowIntegrityDefault = true;
-
-        var mappings = new List<SidMigrationMapping>
-        {
-            new(OldSid1, NewSid1, "User1")
-        };
-
-        _testDatabase = database;
-
-
-        _service.MigrateAppData(mappings, new CredentialStore());
-
-        Assert.True(database.GetAccount(NewSid1)?.LowIntegrityDefault);
-        Assert.Null(database.GetAccount(OldSid1));
-        Assert.True(database.GetAccount(OldSid2)?.LowIntegrityDefault);
-    }
-
-    [Fact]
-    public void MigrateAppData_LowIntegrityDefaultSids_DeduplicatesWhenTwoMapToSame()
-    {
-        var database = new AppDatabase();
-        database.GetOrCreateAccount(OldSid1).LowIntegrityDefault = true;
-        database.GetOrCreateAccount(OldSid2).LowIntegrityDefault = true;
-
-        var mappings = new List<SidMigrationMapping>
-        {
-            new(OldSid1, NewSid1, "User1"),
-            new(OldSid2, NewSid1, "User2")
-        };
-
-        _testDatabase = database;
-
-
-        _service.MigrateAppData(mappings, new CredentialStore());
-
-        Assert.True(database.GetAccount(NewSid1)?.LowIntegrityDefault);
-        Assert.Equal(1, database.Accounts.Count(a =>
-            string.Equals(a.Sid, NewSid1, StringComparison.OrdinalIgnoreCase)));
-    }
-
-    [Fact]
-    public void DeleteSidsFromAppData_CleansLowIntegrityDefaultSids()
-    {
-        var database = new AppDatabase();
-        database.GetOrCreateAccount(OldSid1).LowIntegrityDefault = true;
-        database.GetOrCreateAccount(OldSid2).LowIntegrityDefault = true;
-
-        _testDatabase = database;
-
-
-        _service.DeleteSidsFromAppData(new List<string> { OldSid1 }, new CredentialStore());
-
-        Assert.Null(database.GetAccount(OldSid1));
-        Assert.True(database.GetAccount(OldSid2)?.LowIntegrityDefault);
+        Assert.Equal(PrivilegeLevel.LowIntegrity, database.GetAccount(OldSid2)?.PrivilegeLevel);
     }
 
     // --- AccountGrants migration ---
@@ -944,6 +923,132 @@ public class SidMigrationServiceTests
         Assert.Null(database.GetAccount(OldSid1));
         Assert.NotNull(database.GetAccount(OldSid2));
         Assert.False(database.GetAccount(OldSid2)!.Firewall.IsDefault);
+    }
+
+    // --- AccountGroupSnapshots migration ---
+
+    [Fact]
+    public void MigrateAppData_MigratesAccountGroupSnapshotKeys()
+    {
+        // AccountGroupSnapshots maps SID → list of group SIDs. Migration renames the key.
+        var database = new AppDatabase
+        {
+            AccountGroupSnapshots = new(StringComparer.OrdinalIgnoreCase)
+            {
+                [OldSid1] = ["S-1-5-32-544", "S-1-5-32-545"],
+                [OldSid2] = ["S-1-5-32-545"] // unmapped — stays
+            }
+        };
+
+        var mappings = new List<SidMigrationMapping> { new(OldSid1, NewSid1, "TestUser") };
+        _testDatabase = database;
+
+        _service.MigrateAppData(mappings, new CredentialStore());
+
+        // Old key removed, new key present with same group SIDs
+        Assert.False(database.AccountGroupSnapshots!.ContainsKey(OldSid1));
+        Assert.True(database.AccountGroupSnapshots.ContainsKey(NewSid1));
+        Assert.Contains("S-1-5-32-544", database.AccountGroupSnapshots[NewSid1]);
+        // Unmapped SID unchanged
+        Assert.True(database.AccountGroupSnapshots.ContainsKey(OldSid2));
+    }
+
+    [Fact]
+    public void MigrateAppData_AccountGroupSnapshots_MergesWhenNewSidAlreadyExists()
+    {
+        // When both old and new SIDs have snapshots, groups are merged without duplicates.
+        var database = new AppDatabase
+        {
+            AccountGroupSnapshots = new(StringComparer.OrdinalIgnoreCase)
+            {
+                [OldSid1] = ["S-1-5-32-544", "S-1-5-32-546"],
+                [NewSid1] = ["S-1-5-32-544", "S-1-5-32-547"] // overlap on S-1-5-32-544
+            }
+        };
+
+        var mappings = new List<SidMigrationMapping> { new(OldSid1, NewSid1, "TestUser") };
+        _testDatabase = database;
+
+        _service.MigrateAppData(mappings, new CredentialStore());
+
+        Assert.False(database.AccountGroupSnapshots.ContainsKey(OldSid1));
+        var merged = database.AccountGroupSnapshots[NewSid1];
+        Assert.Contains("S-1-5-32-544", merged);
+        Assert.Contains("S-1-5-32-546", merged);
+        Assert.Contains("S-1-5-32-547", merged);
+        Assert.Equal(3, merged.Distinct(StringComparer.OrdinalIgnoreCase).Count()); // no duplicates
+    }
+
+    // --- BuildMappings: InteractiveUser exclusion ---
+
+    [Fact]
+    public void BuildMappings_InteractiveUserCredential_Excluded()
+    {
+        // A CredentialEntry whose SID matches the current interactive user SID must be skipped.
+        // IsInteractiveUser uses SidResolutionHelper.GetInteractiveUserSid() — if null (no explorer),
+        // this credential is treated as a regular account and may be included instead.
+        // The test only verifies exclusion when the interactive SID is resolvable.
+        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
+        if (interactiveSid == null)
+            return; // no active desktop session — test is not applicable
+
+        var creds = new List<CredentialEntry>
+        {
+            new() { Sid = interactiveSid }
+        };
+        var sidNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [interactiveSid] = "InteractiveUser"
+        };
+        var localAccounts = new List<LocalUserAccount> { new("InteractiveUser", NewSid1) };
+
+        var result = _service.BuildMappings(creds, localAccounts, sidNames);
+
+        // Interactive user credential is excluded from migration
+        Assert.Empty(result);
+    }
+
+    // --- BuildMappings: empty SID skip ---
+
+    [Fact]
+    public void BuildMappings_EmptySidCredential_Skipped()
+    {
+        // CredentialEntry with empty Sid must be skipped to avoid invalid SID lookups.
+        var creds = new List<CredentialEntry>
+        {
+            new() { Sid = string.Empty }
+        };
+        var sidNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var localAccounts = new List<LocalUserAccount> { new("SomeUser", NewSid1) };
+
+        var result = _service.BuildMappings(creds, localAccounts, sidNames);
+
+        Assert.Empty(result);
+    }
+
+    // --- BuildMappings: machine prefix stripping ---
+
+    [Fact]
+    public void BuildMappings_MachinePrefixInSidName_StrippedForLocalAccountMatch()
+    {
+        // SidNames entry uses "MACHINE\username" format — the prefix must be stripped before
+        // matching against local account names.
+        var creds = new List<CredentialEntry>
+        {
+            new() { Sid = OldSid1 }
+        };
+        var sidNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [OldSid1] = @"DESKTOP-XYZ\alice" // machine-prefixed name
+        };
+        var localAccounts = new List<LocalUserAccount> { new("alice", NewSid1) };
+
+        var result = _service.BuildMappings(creds, localAccounts, sidNames);
+
+        // "alice" extracted after stripping "DESKTOP-XYZ\" and matched to local account
+        Assert.Single(result);
+        Assert.Equal(OldSid1, result[0].OldSid);
+        Assert.Equal(NewSid1, result[0].NewSid);
     }
 }
 

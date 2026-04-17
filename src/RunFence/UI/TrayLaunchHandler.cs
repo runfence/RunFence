@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using RunFence.Account;
+using RunFence.Account.UI;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -11,14 +13,39 @@ namespace RunFence.UI;
 /// Extracted from MainForm to keep launch logic separate from form lifecycle management.
 /// </summary>
 public class TrayLaunchHandler(
-    IAppLaunchOrchestrator launchOrchestrator,
+    IAppEntryLauncher entryLauncher,
+    ILaunchFacade facade,
+    ToolLauncher launchService,
+    ISidNameCacheService sidNameCache,
     ILoggingService log)
 {
     public void LaunchApp(AppEntry app)
+        => RunWithLaunchErrorHandling(
+            () => entryLauncher.Launch(app, null,
+                permissionPrompt: AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache)),
+            $"tray app {app.Name}");
+
+    public void LaunchFolderBrowser(LaunchIdentity identity)
+        => RunWithLaunchErrorHandling(
+            () => launchService.OpenFolderBrowser(identity,
+                AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache)),
+            "folder browser");
+
+    public void LaunchTerminal(LaunchIdentity identity)
+        => RunWithLaunchErrorHandling(
+            () => launchService.OpenCmd(identity),
+            "terminal");
+
+    public void LaunchDiscoveredApp(string exePath, LaunchIdentity identity)
+        => RunWithLaunchErrorHandling(
+            () => facade.LaunchFile(new ProcessLaunchTarget(exePath), identity),
+            "discovered app");
+
+    private void RunWithLaunchErrorHandling(Action launchAction, string context)
     {
         try
         {
-            launchOrchestrator.Launch(app, null);
+            launchAction();
         }
         catch (CredentialNotFoundException ex)
         {
@@ -33,66 +60,13 @@ public class TrayLaunchHandler(
             MessageBox.Show("Stored credentials are incorrect. Please update the password in RunFence.",
                 "Launch Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+        catch (OperationCanceledException)
+        {
+        }
         catch (Exception ex)
         {
-            log.Error($"Failed to launch tray app {app.Name}", ex);
+            log.Error($"Failed to launch {context}", ex);
             MessageBox.Show($"Failed to launch: {ex.Message}", "Error",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    public void LaunchFolderBrowser(string accountSid, bool shiftHeld)
-    {
-        try
-        {
-            launchOrchestrator.LaunchFolderBrowserFromTray(accountSid,
-                msg => AclPermissionDialogHelper.ShowPermissionDialog(null, "Missing permissions", msg),
-                useSplitToken: shiftHeld ? false : null,
-                useLowIntegrity: shiftHeld ? false : null);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            log.Error("Failed to launch tray folder browser", ex);
-            MessageBox.Show($"Failed to open folder browser: {ex.Message}", "Error",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    public void LaunchTerminal(string accountSid, bool shiftHeld)
-    {
-        try
-        {
-            launchOrchestrator.LaunchTerminalFromTray(accountSid,
-                useSplitToken: shiftHeld ? false : null,
-                useLowIntegrity: shiftHeld ? false : null);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            log.Error("Failed to launch tray terminal", ex);
-            MessageBox.Show($"Failed to open terminal: {ex.Message}", "Error",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    public void LaunchDiscoveredApp(string exePath, string accountSid)
-    {
-        try
-        {
-            launchOrchestrator.LaunchDiscoveredApp(exePath, accountSid);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            log.Error("Failed to launch discovered app", ex);
-            MessageBox.Show($"Failed to launch app: {ex.Message}", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }

@@ -48,7 +48,14 @@ public class InteractiveLogonHelper(ILsaRightsHelper lsaRights, ILoggingService 
             finally
             {
                 if (!alreadyHeld)
-                    lsaRights.RemoveAccountRights(sidBytes, [LsaRightsHelper.SeInteractiveLogonRight]);
+                    try
+                    {
+                        lsaRights.RemoveAccountRights(sidBytes, [LsaRightsHelper.SeInteractiveLogonRight]);
+                    }
+                    catch (Exception revokeEx)
+                    {
+                        log.Error("Failed to revoke SeInteractiveLogonRight after launch retry", revokeEx);
+                    }
             }
         }
     }

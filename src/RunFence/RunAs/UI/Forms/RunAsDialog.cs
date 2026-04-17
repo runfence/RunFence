@@ -32,8 +32,7 @@ public partial class RunAsDialog : Form
     public bool CreateNewContainerRequested => _dialogState.CreateNewContainerRequested;
     private AncestorPermissionResult? PermissionGrant => _dialogState.PermissionGrant;
     private bool CreateAppEntryOnly { get; set; }
-    private bool LaunchAsLowIntegrity { get; set; }
-    private bool LaunchAsSplitToken { get; set; }
+    private PrivilegeLevel SelectedPrivilegeLevel { get; set; }
     private bool UpdateOriginalShortcut { get; set; }
     private bool RevertShortcutRequested { get; set; }
     private AppEntry? EditExistingApp { get; set; }
@@ -45,33 +44,32 @@ public partial class RunAsDialog : Form
     private string? _lastUsedContainerName;
     private string? _currentUserSid;
     private IReadOnlyDictionary<string, string>? _sidNames;
-    private IReadOnlyList<string>? _splitTokenOptOutSids;
-    private IReadOnlyList<string>? _lowIntegrityDefaultSids;
+    private IReadOnlyDictionary<string, PrivilegeLevel>? _accountPrivilegeLevels;
     private readonly ISidResolver _sidResolver;
-    private readonly ToolTip _deElevateTip = new();
     private readonly IWindowsAccountService _windowsAccountService;
-    private readonly ILocalGroupMembershipService _groupMembership;
     private readonly RunAsCredentialListPopulator _populator;
     private readonly RunAsCredentialListRenderer _renderer;
     private readonly IAclPermissionService _aclPermission;
+    private readonly ToolTip _toolTip = new();
 
     public RunAsDialog(
         ISidResolver sidResolver,
         IAclPermissionService aclPermission,
         RunAsCredentialListPopulator populator,
         RunAsCredentialListRenderer renderer,
-        IWindowsAccountService windowsAccountService,
-        ILocalGroupMembershipService groupMembership)
+        IWindowsAccountService windowsAccountService)
     {
         _sidResolver = sidResolver;
         _aclPermission = aclPermission;
         _populator = populator;
         _renderer = renderer;
         _windowsAccountService = windowsAccountService;
-        _groupMembership = groupMembership;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
+        _toolTip.SetToolTip(_privilegeLevelComboBox, LaunchUiConstants.PrivilegeLevelTooltip);
     }
+
+    private static readonly PrivilegeLevel[] PrivilegeLevelMapping = [PrivilegeLevel.HighestAllowed, PrivilegeLevel.Basic, PrivilegeLevel.LowIntegrity];
 
     /// <summary>
     /// Initializes per-use dialog data. Must be called before <see cref="Form.ShowDialog()"/>.
@@ -88,8 +86,7 @@ public partial class RunAsDialog : Form
         _sidNames = options.SidNames;
         _shortcutContext = options.ShortcutContext;
         _appContainers = options.AppContainers;
-        _splitTokenOptOutSids = options.SplitTokenOptOutSids;
-        _lowIntegrityDefaultSids = options.LowIntegrityDefaultSids;
+        _accountPrivilegeLevels = options.AccountPrivilegeLevels;
         _dialogState = new RunAsDialogState(_filePath, options.SidsNeedingPermission, _aclPermission);
 
         _populator.Initialize(
@@ -98,7 +95,6 @@ public partial class RunAsDialog : Form
         _renderer.Attach(_credentialListBox);
 
         ConfigureLayout();
-        _deElevateTip.SetToolTip(_splitTokenCheckBox, LaunchFlags.DeElevateTooltip);
         Shown += (_, _) => Activate();
     }
 
@@ -110,8 +106,7 @@ public partial class RunAsDialog : Form
         SelectedContainer,
         PermissionGrant,
         CreateAppEntryOnly,
-        LaunchAsLowIntegrity,
-        LaunchAsSplitToken,
+        SelectedPrivilegeLevel,
         UpdateOriginalShortcut,
         RevertShortcutRequested,
         EditExistingApp,
@@ -171,11 +166,9 @@ public partial class RunAsDialog : Form
             y += 25;
         }
 
-        _lowIlCheckBox.Location = new Point(15, y);
-        y += 35;
-
-        _splitTokenCheckBox.Location = new Point(15, y);
-        y += 35;
+        _privilegeLevelLabel.Location = new Point(15, y + 5);
+        _privilegeLevelComboBox.Location = new Point(265, y);
+        y += 37;
 
         if (_shortcutContext is { IsAlreadyManaged: true, ManagedApp: not null })
         {
@@ -202,20 +195,12 @@ public partial class RunAsDialog : Form
             _credentialListBox.SelectedIndex = initialSelection;
     }
 
-    private int FindItemIndex(Func<object, bool> predicate)
-    {
-        for (int i = 0; i < _credentialListBox.Items.Count; i++)
-            if (predicate(_credentialListBox.Items[i]))
-                return i;
-        return -1;
-    }
-
     private int FindManagedAppSelection()
     {
         var preferSid = _shortcutContext!.ManagedApp?.AccountSid;
         if (preferSid != null)
         {
-            var idx = FindItemIndex(item => item is CredentialDisplayItem di &&
+            var idx = _populator.FindItemIndex(item => item is CredentialDisplayItem di &&
                                             string.Equals(di.Credential.Sid, preferSid, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
                 return idx;
@@ -224,7 +209,7 @@ public partial class RunAsDialog : Form
         var containerName = _shortcutContext.ManagedApp?.AppContainerName;
         if (containerName != null)
         {
-            var idx = FindItemIndex(item => item is AppContainerDisplayItem acdi &&
+            var idx = _populator.FindItemIndex(item => item is AppContainerDisplayItem acdi &&
                                             string.Equals(acdi.Container.Name, containerName, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
                 return idx;
@@ -239,7 +224,7 @@ public partial class RunAsDialog : Form
         if (_lastUsedAccountSid != null &&
             !string.Equals(_lastUsedAccountSid, _currentUserSid, StringComparison.OrdinalIgnoreCase))
         {
-            var idx = FindItemIndex(item => item is CredentialDisplayItem di &&
+            var idx = _populator.FindItemIndex(item => item is CredentialDisplayItem di &&
                                             string.Equals(di.Credential.Sid, _lastUsedAccountSid, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
                 return idx;
@@ -248,14 +233,14 @@ public partial class RunAsDialog : Form
         // Try last used container
         if (_lastUsedContainerName != null)
         {
-            var idx = FindItemIndex(item => item is AppContainerDisplayItem acdi &&
+            var idx = _populator.FindItemIndex(item => item is AppContainerDisplayItem acdi &&
                                             string.Equals(acdi.Container.Name, _lastUsedContainerName, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
                 return idx;
         }
 
         // Fall back to first non-current-user selectable item
-        var fallback = FindItemIndex(item =>
+        var fallback = _populator.FindItemIndex(item =>
             item is AppContainerDisplayItem ||
             (item is CredentialDisplayItem di2 &&
              !string.Equals(di2.Credential.Sid, _currentUserSid, StringComparison.OrdinalIgnoreCase)));
@@ -310,19 +295,13 @@ public partial class RunAsDialog : Form
         {
             case CreateAccountItem:
                 _currentExistingApp = null;
-                _lowIlCheckBox.Enabled = true;
-                _lowIlCheckBox.Checked = false;
-                _splitTokenCheckBox.Enabled = false;
-                _splitTokenCheckBox.Checked = true;
+                SetPrivilegeLevel(PrivilegeLevel.Basic, enabled: true);
                 UpdateLaunchButtonState();
                 _addAppButton.Text = "Add app entry\u2026";
                 return;
             case CreateContainerItem:
                 _currentExistingApp = null;
-                _lowIlCheckBox.Enabled = false;
-                _lowIlCheckBox.Checked = true; // containers are always Low IL
-                _splitTokenCheckBox.Enabled = false;
-                _splitTokenCheckBox.Checked = false;
+                SetPrivilegeLevel(PrivilegeLevel.LowIntegrity, enabled: false);
                 _addAppButton.Enabled = false;
                 UpdateLaunchButtonState();
                 return;
@@ -334,18 +313,13 @@ public partial class RunAsDialog : Form
                     string.Equals(a.ExePath, _filePath, StringComparison.OrdinalIgnoreCase));
 
                 _currentExistingApp = existingApp;
-                _lowIlCheckBox.Checked = true;
-                _lowIlCheckBox.Enabled = false; // containers are always Low IL
-                _splitTokenCheckBox.Enabled = false;
-                _splitTokenCheckBox.Checked = false;
+                SetPrivilegeLevel(PrivilegeLevel.LowIntegrity, enabled: false);
                 _addAppButton.Text = existingApp != null ? "Edit app entry\u2026" : "Add app entry\u2026";
                 UpdateLaunchButtonState();
                 return;
             }
             case CredentialDisplayItem item:
             {
-                var isAdmin = GroupFilterHelper.IsAdminAccount(item.Credential.Sid, _groupMembership);
-
                 var existingApp = _existingApps.FirstOrDefault(a =>
                     string.Equals(a.AccountSid, item.Credential.Sid, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(a.ExePath, _filePath, StringComparison.OrdinalIgnoreCase));
@@ -353,32 +327,24 @@ public partial class RunAsDialog : Form
                 if (existingApp != null)
                 {
                     _currentExistingApp = existingApp;
-                    _lowIlCheckBox.Checked = existingApp.LaunchAsLowIntegrity
-                                             ?? _lowIntegrityDefaultSids?.Contains(item.Credential.Sid, StringComparer.OrdinalIgnoreCase) == true;
-                    _lowIlCheckBox.Enabled = false;
-                    _splitTokenCheckBox.Enabled = false;
-                    _splitTokenCheckBox.Checked = isAdmin && (existingApp.RunAsSplitToken
-                                                              ?? (_splitTokenOptOutSids == null ||
-                                                                  !_splitTokenOptOutSids.Contains(item.Credential.Sid, StringComparer.OrdinalIgnoreCase)));
+                    var resolvedMode = existingApp.PrivilegeLevel
+                        ?? _accountPrivilegeLevels?.GetValueOrDefault(item.Credential.Sid, PrivilegeLevel.Basic)
+                        ?? PrivilegeLevel.Basic;
+                    SetPrivilegeLevel(resolvedMode, enabled: false);
                 }
                 else
                 {
                     _currentExistingApp = null;
-                    _lowIlCheckBox.Enabled = true;
-                    _lowIlCheckBox.Checked = _lowIntegrityDefaultSids?.Contains(item.Credential.Sid, StringComparer.OrdinalIgnoreCase) == true;
-                    _splitTokenCheckBox.Enabled = isAdmin;
-                    _splitTokenCheckBox.Checked = _splitTokenOptOutSids == null ||
-                                                  !_splitTokenOptOutSids.Contains(item.Credential.Sid, StringComparer.OrdinalIgnoreCase);
+                    var accountMode = _accountPrivilegeLevels?.GetValueOrDefault(item.Credential.Sid, PrivilegeLevel.Basic)
+                        ?? PrivilegeLevel.Basic;
+                    SetPrivilegeLevel(accountMode, enabled: true);
                 }
 
                 break;
             }
             default:
                 _currentExistingApp = null;
-                _lowIlCheckBox.Enabled = false;
-                _lowIlCheckBox.Checked = false;
-                _splitTokenCheckBox.Enabled = false;
-                _splitTokenCheckBox.Checked = _credentialListBox.SelectedItem is CreateAccountItem;
+                SetPrivilegeLevel(PrivilegeLevel.Basic, enabled: false);
                 break;
         }
 
@@ -389,8 +355,11 @@ public partial class RunAsDialog : Form
     private void UpdateLaunchButtonState()
     {
         var hasCredential = _credentialListBox.SelectedItem is CredentialDisplayItem or CreateAccountItem or AppContainerDisplayItem or CreateContainerItem;
-        _launchButton.Enabled = hasCredential &&
-                                !(_updateShortcutCheckBox.Visible && _updateShortcutCheckBox.Checked && _currentExistingApp == null);
+        var shortcutBlocked = _updateShortcutCheckBox.Visible && _updateShortcutCheckBox.Checked && _currentExistingApp == null;
+        _launchButton.Enabled = hasCredential && !shortcutBlocked;
+        _toolTip.SetToolTip(_launchButton, shortcutBlocked
+            ? "Uncheck 'Update this shortcut' or add app entry first"
+            : null);
     }
 
     private bool CaptureSelectionState()
@@ -399,19 +368,24 @@ public partial class RunAsDialog : Form
             _credentialListBox.SelectedItem,
             this,
             _currentExistingApp,
-            _lowIlCheckBox.Checked,
-            _splitTokenCheckBox.Checked,
+            GetCurrentPrivilegeLevel(),
             _updateShortcutCheckBox?.Checked ?? false,
-            out var launchAsLowIntegrity,
-            out var launchAsSplitToken,
+            out var privilegeLevel,
             out var updateOriginalShortcut,
             out var existingAppForLaunch);
 
-        LaunchAsLowIntegrity = launchAsLowIntegrity;
-        LaunchAsSplitToken = launchAsSplitToken;
+        SelectedPrivilegeLevel = privilegeLevel;
         UpdateOriginalShortcut = updateOriginalShortcut;
         ExistingAppForLaunch = existingAppForLaunch;
         return ok;
+    }
+
+    private PrivilegeLevel GetCurrentPrivilegeLevel() => PrivilegeLevelMapping[_privilegeLevelComboBox.SelectedIndex];
+
+    private void SetPrivilegeLevel(PrivilegeLevel mode, bool enabled)
+    {
+        _privilegeLevelComboBox.SelectedIndex = Array.IndexOf(PrivilegeLevelMapping, mode);
+        _privilegeLevelComboBox.Enabled = enabled;
     }
 
     private void OnLaunchClick(object? sender, EventArgs e)

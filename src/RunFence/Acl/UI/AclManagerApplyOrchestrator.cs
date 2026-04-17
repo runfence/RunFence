@@ -1,5 +1,4 @@
 using RunFence.Acl.QuickAccess;
-using RunFence.Acl.Traverse;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -10,65 +9,42 @@ namespace RunFence.Acl.UI;
 
 /// <summary>
 /// Orchestrates the Apply button logic for <see cref="AclManagerDialog"/>:
-/// Phase 1 (NTFS removes) → Phase 2 (DB commit) → Phase 3 (NTFS adds/modifications).
-/// When the SID is an AppContainer, all grant changes are also mirrored to the
-/// interactive desktop user (who must independently pass the dual access check).
+/// Phase 1 (removes) → Phase 2 (adds/modifications) → Phase 3 (post-processing).
+/// All ACL and DB work is delegated to <see cref="IPathGrantService"/>, which handles
+/// NTFS ACE operations, DB writes, and container interactive-user sync atomically per call.
 /// Tracks in-progress state to block closing while work is running.
 /// </summary>
-public class AclManagerApplyOrchestrator
+public class AclManagerApplyOrchestrator(
+    ILoggingService log,
+    IPathGrantService pathGrantService,
+    IGrantConfigTracker grantConfigTracker,
+    IDatabaseProvider databaseProvider,
+    ISessionSaver sessionSaver,
+    IQuickAccessPinService quickAccessPinService)
 {
-    private readonly ILoggingService _log;
-    private readonly AclManagerNtfsApplier _ntfsApplier;
-    private readonly AclManagerDbCommitter _dbCommitter;
-    private readonly AclManagerInteractiveUserSync _interactiveUserSync;
-    private readonly IDatabaseProvider _databaseProvider;
-    private readonly ISessionSaver _sessionSaver;
-    private readonly IQuickAccessPinService _quickAccessPinService;
     private AclManagerPendingChanges _pending = null!;
     private string _sid = null!;
     private bool _isContainer;
     private IWin32Window _owner = null!;
-    private string? _interactiveUserSid;
 
     public bool IsApplyInProgress { get; private set; }
-
-    public AclManagerApplyOrchestrator(
-        ILoggingService log,
-        AclManagerNtfsApplier ntfsApplier,
-        AclManagerDbCommitter dbCommitter,
-        AclManagerInteractiveUserSync interactiveUserSync,
-        IDatabaseProvider databaseProvider,
-        ISessionSaver sessionSaver,
-        IQuickAccessPinService quickAccessPinService)
-    {
-        _log = log;
-        _ntfsApplier = ntfsApplier;
-        _dbCommitter = dbCommitter;
-        _interactiveUserSync = interactiveUserSync;
-        _databaseProvider = databaseProvider;
-        _sessionSaver = sessionSaver;
-        _quickAccessPinService = quickAccessPinService;
-    }
 
     public void Initialize(
         AclManagerPendingChanges pending,
         string sid,
         bool isContainer,
-        IWin32Window owner,
-        string? interactiveUserSid = null)
+        IWin32Window owner)
     {
         _pending = pending;
         _sid = sid;
         _isContainer = isContainer;
         _owner = owner;
-        _interactiveUserSid = interactiveUserSid;
-        if (interactiveUserSid != null)
-            _interactiveUserSync.Initialize(interactiveUserSid);
     }
 
     /// <summary>
     /// Executes the full Apply pipeline. Called on the UI thread; NTFS operations run on a
-    /// background thread via Task.Run. The Apply button and progress bar are managed here.
+    /// background thread via Task.Run (one call per operation to keep UI responsive).
+    /// The Apply button and progress bar are managed here.
     /// </summary>
     public async Task ApplyAsync(
         ToolStripProgressBar progressBar,
@@ -107,91 +83,142 @@ public class AclManagerApplyOrchestrator
         progressBar.Visible = true;
 
         var errors = new List<(string Path, string Error)>();
-        var traverseAddedForModifications = new List<GrantedPathEntry>();
-
         int current = 0;
 
         try
         {
-            // --- Phase 1: NTFS removes (background) ---
-            var removeResult = await _ntfsApplier.RemoveEntriesAsync(
-                pendingRemoves, pendingTraverseRemoves, errors, _owner, progressBar, current, total);
-            current = removeResult.CurrentProgress;
+            // --- Phase 1: Removes (before adds to avoid NTFS conflicts) ---
 
-            // --- Phase 2: DB commit (UI thread) ---
-            _dbCommitter.CommitToDatabase(
-                _sid, removeResult,
-                pendingAdds, pendingTraverseAdds,
-                pendingUntrackGrants, pendingUntrackTraverse,
-                pendingConfigMoves, pendingTraverseConfigMoves,
-                errors);
+            // NTFS removes run on background thread per call (OS-heavy).
+            current = await RunPhaseAsync(pendingRemoves,
+                e => pathGrantService.RemoveGrant(_sid, e.Path, e.IsDeny, updateFileSystem: true),
+                "revert grant ACE for", errors, progressBar, current, total, background: true);
 
-            current += pendingUntrackGrants.Count + pendingUntrackTraverse.Count;
-            AclManagerNtfsApplier.ReportProgress(_owner, progressBar, current, total);
+            current = await RunPhaseAsync(pendingTraverseRemoves,
+                e => pathGrantService.RemoveTraverse(_sid, e.Path, updateFileSystem: true),
+                "revert traverse ACE for", errors, progressBar, current, total, background: true);
 
-            // --- Phase 3: NTFS adds/modifications (background) ---
-            var applyResult = await _ntfsApplier.ApplyEntriesAsync(
-                pendingAdds, pendingTraverseAdds, pendingModifications, pendingTraverseFixes,
-                _sid, _isContainer, errors, _owner, progressBar, current, total);
+            // Untracks are DB-only (no OS call) — run on UI thread directly.
+            current = await RunPhaseAsync(pendingUntrackGrants,
+                e => pathGrantService.RemoveGrant(_sid, e.Path, e.IsDeny, updateFileSystem: false),
+                "untrack grant for", errors, progressBar, current, total, background: false);
 
-            // Set AllAppliedPaths on newly-added traverse entries (pendingTraverseAdds) now that we're
-            // back on the UI thread. The entries are already committed to DB in Phase 2 (same object
-            // references), so mutating AllAppliedPaths here is sufficient — no separate TrackPath needed.
-            foreach (var (entry, visitedPaths) in applyResult.TraverseAddVisitedPaths)
+            current = await RunPhaseAsync(pendingUntrackTraverse,
+                e => pathGrantService.RemoveTraverse(_sid, e.Path, updateFileSystem: false),
+                "untrack traverse for", errors, progressBar, current, total, background: false);
+
+            // --- Phase 2: Adds and modifications ---
+
+            current = await RunPhaseAsync(pendingAdds,
+                e => { var ownerSid = ResolveOwnerSid(e); pathGrantService.AddGrant(_sid, e.Path, e.IsDeny, e.SavedRights, ownerSid); },
+                "apply grant ACE for", errors, progressBar, current, total, background: true);
+
+            current = await RunPhaseAsync(pendingTraverseAdds,
+                e => pathGrantService.AddTraverse(_sid, e.Path),
+                "apply traverse ACE for", errors, progressBar, current, total, background: true);
+
+            foreach (var mod in pendingModifications)
             {
-                if (visitedPaths.Count > 0)
-                    entry.AllAppliedPaths = visitedPaths;
-            }
-
-            // Track traverse entries produced during Phase 3 modification processing into DB now that
-            // we're back on the UI thread. Uses TraversePathsHelper.TrackPath for deduplication.
-            if (applyResult.TraverseNtfsAppliedForModifications.Count > 0)
-            {
-                var traversePaths = TraversePathsHelper.GetOrCreateTraversePaths(_databaseProvider.GetDatabase(), _sid);
-                foreach (var (entry, visitedPaths) in applyResult.TraverseNtfsAppliedForModifications)
-                {
-                    if (TraversePathsHelper.TrackPath(traversePaths, entry.Path, visitedPaths))
-                        traverseAddedForModifications.Add(entry);
-                }
-            }
-
-            // Persist AllAppliedPaths written by FixTraverseEntryNow, newly-added traverse entries'
-            // path tracking, and any new traverse entries added from modification processing.
-            if (pendingTraverseFixes.Count > 0 || applyResult.TraverseAddVisitedPaths.Count > 0 || traverseAddedForModifications.Count > 0)
-            {
+                var entry = mod.Entry;
                 try
                 {
-                    _sessionSaver.SaveConfig();
+                    // ownerSid is derived from the new (target) rights state.
+                    var newRights = mod.NewRights ?? entry.SavedRights;
+                    var ownerSid = ResolveOwnerSid(mod.NewIsDeny, newRights);
+                    if (mod.WasIsDeny != mod.NewIsDeny)
+                    {
+                        // Mode switch (Allow↔Deny): RemoveGrant must see the entry in DB under its original
+                        // IsDeny and original SavedRights (both remain unmodified until after the remove).
+                        // SavedRights and IsDeny are applied only after RemoveGrant so the DB remove
+                        // (FindGrantEntryInDb) and IU-revert logic operate on the correct pre-switch state.
+                        await Task.Run(() =>
+                        {
+                            pathGrantService.RemoveGrant(_sid, entry.Path, mod.WasIsDeny, updateFileSystem: true);
+                            if (mod.NewRights != null)
+                                entry.SavedRights = mod.NewRights;
+                            pathGrantService.AddGrant(_sid, entry.Path, mod.NewIsDeny, entry.SavedRights, ownerSid);
+                        });
+                        entry.IsDeny = mod.NewIsDeny;
+                    }
+                    else
+                    {
+                        // Rights-only change (or double-switch back to original mode): update in place.
+                        entry.IsDeny = mod.NewIsDeny;
+                        if (mod.NewRights != null)
+                            entry.SavedRights = mod.NewRights;
+                        await Task.Run(() => pathGrantService.UpdateGrant(_sid, entry.Path, mod.NewIsDeny, entry.SavedRights!, ownerSid));
+                    }
+
+                    // Reset ownership when: (a) allow grant had Own=true, now Own!=true; (b) deny grant with Own=true
+                    var shouldResetOwner = !_isContainer && (
+                        (!entry.IsDeny && mod.WasOwn && entry.SavedRights?.Own != true) ||
+                        (entry.IsDeny && entry.SavedRights?.Own == true));
+                    if (shouldResetOwner)
+                        await Task.Run(() => pathGrantService.ResetOwner(entry.Path, recursive: false));
                 }
                 catch (Exception ex)
                 {
-                    _log.Error("Failed to persist traverse fix paths", ex);
-                    errors.Add(("(database)", ex.Message));
+                    log.Error($"Failed to apply modification for '{entry.Path}'", ex);
+                    errors.Add((entry.Path, ex.Message));
+                }
+
+                ReportProgress(_owner, progressBar, ++current, total);
+            }
+
+            current = await RunPhaseAsync(pendingTraverseFixes,
+                e => pathGrantService.FixTraverse(_sid, e.Path),
+                "re-apply traverse ACE for", errors, progressBar, current, total, background: true);
+
+            // --- Phase 3: Post-processing (UI thread) ---
+
+            // Config moves via IGrantConfigTracker.
+            var db = databaseProvider.GetDatabase();
+            var dbEntries = db.GetAccount(_sid)?.Grants;
+
+            if (dbEntries != null)
+            {
+                foreach (var kvp in pendingConfigMoves)
+                {
+                    var (path, isDeny) = kvp.Key;
+                    var entry = dbEntries.FirstOrDefault(e =>
+                        string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase) &&
+                        e.IsDeny == isDeny && !e.IsTraverseOnly);
+                    if (entry != null)
+                        grantConfigTracker.AssignGrant(_sid, entry, kvp.Value);
+                }
+
+                foreach (var kvp in pendingTraverseConfigMoves)
+                {
+                    var entry = dbEntries.FirstOrDefault(e =>
+                        e.IsTraverseOnly &&
+                        string.Equals(e.Path, kvp.Key, StringComparison.OrdinalIgnoreCase));
+                    if (entry != null)
+                        grantConfigTracker.AssignGrant(_sid, entry, kvp.Value);
                 }
             }
 
-            // Sync all grant/traverse changes to the interactive desktop user when managing a container.
-            if (_interactiveUserSid != null)
-                await _interactiveUserSync.SyncAsync(
-                    pendingAdds, pendingRemoves, pendingModifications,
-                    [..pendingTraverseAdds, ..traverseAddedForModifications],
-                    pendingTraverseRemoves, pendingTraverseFixes,
-                    pendingUntrackGrants, pendingUntrackTraverse,
-                    removeResult.SuccessfulRemoves, removeResult.SuccessfulTraverseRemoves, errors);
-
-            // Pin newly added Allow grants for directories
+            // Quick Access pin/unpin.
             var toPin = pendingAdds
                 .Where(e => !e.IsDeny && !e.IsTraverseOnly)
                 .Select(e => e.Path).ToList();
             if (toPin.Count > 0)
-                _quickAccessPinService.PinFolders(_sid, toPin);
+                quickAccessPinService.PinFolders(_sid, toPin);
 
-            // Unpin removed Allow grants
             var toUnpin = pendingRemoves
                 .Where(e => !e.IsDeny && !e.IsTraverseOnly)
                 .Select(e => e.Path).ToList();
             if (toUnpin.Count > 0)
-                _quickAccessPinService.UnpinFolders(_sid, toUnpin);
+                quickAccessPinService.UnpinFolders(_sid, toUnpin);
+
+            try
+            {
+                sessionSaver.SaveConfig();
+            }
+            catch (Exception ex)
+            {
+                log.Error("Failed to persist applied changes", ex);
+                errors.Add(("(database)", ex.Message));
+            }
         }
         finally
         {
@@ -209,6 +236,67 @@ public class AclManagerApplyOrchestrator
             var msg = string.Join("\n", errors.Select(e => $"  {e.Path}: {e.Error}"));
             MessageBox.Show($"The following operations failed (changes were partially applied):\n\n{msg}",
                 "Apply Errors", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    /// <summary>
+    /// Runs an operation for each entry, catching and recording errors, and reporting progress.
+    /// When <paramref name="background"/> is true, each operation runs on a background thread via
+    /// <c>Task.Run</c> (for OS-heavy NTFS calls); otherwise it runs synchronously on the UI thread.
+    /// Returns the updated progress counter.
+    /// </summary>
+    private async Task<int> RunPhaseAsync(
+        IEnumerable<GrantedPathEntry> items,
+        Action<GrantedPathEntry> operation,
+        string errorContext,
+        List<(string Path, string Error)> errors,
+        ToolStripProgressBar progressBar,
+        int current, int total,
+        bool background)
+    {
+        foreach (var entry in items)
+        {
+            try
+            {
+                if (background)
+                    await Task.Run(() => operation(entry));
+                else
+                    operation(entry);
+            }
+            catch (Exception ex)
+            {
+                log.Error($"Failed to {errorContext} '{entry.Path}'", ex);
+                errors.Add((entry.Path, ex.Message));
+            }
+            ReportProgress(_owner, progressBar, ++current, total);
+        }
+        return current;
+    }
+
+    /// <summary>
+    /// Returns the SID to assign as owner when applying an allow grant, or null if ownership
+    /// should not be changed. Ownership is only changed for non-container allow grants where
+    /// <see cref="SavedRightsState.Own"/> is set.
+    /// </summary>
+    private string? ResolveOwnerSid(GrantedPathEntry entry)
+        => ResolveOwnerSid(entry.IsDeny, entry.SavedRights);
+
+    private string? ResolveOwnerSid(bool isDeny, SavedRightsState? savedRights)
+    {
+        if (isDeny || _isContainer)
+            return null;
+        return savedRights?.Own == true ? _sid : null;
+    }
+
+    private static void ReportProgress(IWin32Window owner, ToolStripProgressBar bar, int c, int t)
+    {
+        if (owner is Control { IsDisposed: false } ctrl)
+        {
+            try
+            {
+                ctrl.BeginInvoke(() => { bar.Value = Math.Min(c, t); });
+            }
+            catch (ObjectDisposedException) { }
         }
     }
 }

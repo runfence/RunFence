@@ -9,19 +9,11 @@ namespace RunFence.Acl.UI;
 /// Manages automatic traverse-entry creation and removal in response to allow-grant
 /// add/remove/mode-switch operations in the ACL Manager.
 /// </summary>
-public class TraverseAutoManager
+public class TraverseAutoManager(IAclPermissionService aclPermission, IDatabaseProvider databaseProvider)
 {
-    private readonly IAclPermissionService _aclPermission;
-    private readonly IDatabaseProvider _databaseProvider;
     private AclManagerPendingChanges _pending = null!;
     private string _sid = null!;
     private IReadOnlyList<string> _groupSids = null!;
-
-    public TraverseAutoManager(IAclPermissionService aclPermission, IDatabaseProvider databaseProvider)
-    {
-        _aclPermission = aclPermission;
-        _databaseProvider = databaseProvider;
-    }
 
     public void Initialize(AclManagerPendingChanges pending, string sid, IReadOnlyList<string> groupSids)
     {
@@ -61,7 +53,7 @@ public class TraverseAutoManager
 
 
         // Skip auto-add when the SID already has effective traverse rights on this path.
-        if (TraverseRightsHelper.HasEffectiveTraverse(traversePath, _sid, _groupSids, _aclPermission))
+        if (TraverseRightsHelper.HasEffectiveTraverse(traversePath, _sid, _groupSids, aclPermission))
             return;
 
         _pending.PendingTraverseAdds[traversePath] = new GrantedPathEntry
@@ -87,7 +79,7 @@ public class TraverseAutoManager
             }
             else if (HasExistingTraverseEntry(traversePath))
             {
-                var traverseEntry = _databaseProvider.GetDatabase().GetAccount(_sid)?.Grants
+                var traverseEntry = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants
                     .FirstOrDefault(e => e.IsTraverseOnly &&
                                          string.Equals(e.Path, traversePath, StringComparison.OrdinalIgnoreCase));
                 if (traverseEntry != null)
@@ -101,21 +93,21 @@ public class TraverseAutoManager
 
     private bool HasExistingTraverseEntry(string path)
     {
-        return _databaseProvider.GetDatabase().GetAccount(_sid)?.Grants
+        return databaseProvider.GetDatabase().GetAccount(_sid)?.Grants
             .Any(e => e.IsTraverseOnly && string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase)) == true;
     }
 
     /// <summary>
-    /// Returns true if any allow grant (in DB or PendingAdds, excluding PendingRemoves)
-    /// depends on <paramref name="path"/> as its traverse path.
+    /// Returns true if any allow grant (in DB or PendingAdds, excluding PendingRemoves and entries
+    /// pending a mode switch to Deny) depends on <paramref name="path"/> as its traverse path.
     /// A grant depends on a traverse path when <see cref="GetTraversePath"/> of the grant
     /// equals <paramref name="path"/> (i.e., the grant is a folder grant at that path, or
     /// a file grant whose parent directory equals that path).
     /// </summary>
     private bool OtherAllowGrantsDependOnPath(string path)
     {
-        // DB allow grants excluding pending removes.
-        var dbEntries = _databaseProvider.GetDatabase().GetAccount(_sid)?.Grants;
+        // DB allow grants excluding pending removes and entries pending switch to Deny.
+        var dbEntries = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants;
         if (dbEntries != null)
         {
             foreach (var e in dbEntries)
@@ -123,6 +115,9 @@ public class TraverseAutoManager
                 if (e.IsDeny || e.IsTraverseOnly)
                     continue;
                 if (_pending.IsPendingRemove(e.Path, e.IsDeny))
+                    continue;
+                // An entry pending a mode switch to Deny no longer depends on an allow traverse path.
+                if (_pending.PendingModifications.TryGetValue((e.Path, e.IsDeny), out var mod) && mod.NewIsDeny)
                     continue;
                 var effectivePath = GetTraversePath(e.Path);
                 if (string.Equals(effectivePath, path, StringComparison.OrdinalIgnoreCase))

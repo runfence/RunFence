@@ -2,7 +2,7 @@ using System.Runtime.InteropServices;
 
 namespace RunFence.Infrastructure;
 
-internal static class GroupMembershipNative
+public static class GroupMembershipNative
 {
     public const int LgIncludeIndirect = 1;
 
@@ -41,6 +41,24 @@ internal static class GroupMembershipNative
     [DllImport("Netapi32.dll", CharSet = CharSet.Unicode)]
     public static extern int NetLocalGroupSetInfo(string? servername, string groupname,
         int level, IntPtr buf, out int parm_err);
+
+    public const int UF_ACCOUNTDISABLE = 0x0002;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct USER_INFO_1
+    {
+        [MarshalAs(UnmanagedType.LPWStr)] public string usri1_name;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? usri1_password;
+        public int usri1_password_age;
+        public int usri1_priv;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? usri1_home_dir;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? usri1_comment;
+        public int usri1_flags;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? usri1_script_path;
+    }
+
+    [DllImport("Netapi32.dll", CharSet = CharSet.Unicode)]
+    public static extern int NetUserGetInfo(string? serverName, string userName, int level, out IntPtr bufPtr);
 
     [DllImport("Netapi32.dll")]
     public static extern int NetApiBufferFree(IntPtr buffer);

@@ -76,7 +76,7 @@ public class MachineLevelServiceScanner(IScannerDataAccess dataAccess, AclCheckH
             return;
         ctx.AutorunLocationPaths.Add(publicStartup);
 
-        perUserScanner.ScanStartupFolder(publicStartup, ctx.AdminSids, null, ctx.Findings, ctx.Seen, ctx.InsecureContainers, ctx.Autorun);
+        perUserScanner.ScanStartupFolder(ctx, publicStartup, ctx.AdminSids, null);
     }
 
     public void ScanSharedWrapperScripts(ScanContext ctx)

@@ -15,10 +15,10 @@ public class OptionsAutoFeatureHandler(IAutoStartService autoStartService, ILice
     /// Updates <see cref="AppSettings.AutoStartOnLogin"/> on success.
     /// Throws if the underlying auto-start service fails.
     /// </summary>
-    public void SetAutoStart(bool enabled, AppSettings settings)
+    public async Task SetAutoStart(bool enabled, AppSettings settings)
     {
         if (enabled)
-            autoStartService.EnableAutoStart();
+            await autoStartService.EnableAutoStart();
         else
             autoStartService.DisableAutoStart();
 

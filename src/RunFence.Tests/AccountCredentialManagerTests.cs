@@ -15,9 +15,11 @@ public class AccountCredentialManagerTests : IDisposable
     private const string FakeSid2 = "S-1-5-21-9999999999-9999999999-9999999999-9002";
 
     private readonly AccountCredentialManager _manager;
+    private readonly SessionPersistenceHelper _persistenceHelper;
     private readonly Mock<ILoggingService> _log;
     private readonly Mock<ISidNameCacheService> _sidNameCache;
-    private readonly TempDirectory _tempDir;
+    private readonly Mock<ICredentialRepository> _credentialRepository;
+    private readonly Mock<IConfigRepository> _configRepository;
     private readonly ProtectedBuffer _pinKey;
     private readonly byte[] _argonSalt;
 
@@ -25,9 +27,8 @@ public class AccountCredentialManagerTests : IDisposable
     {
         _log = new Mock<ILoggingService>();
         _sidNameCache = new Mock<ISidNameCacheService>();
-        _tempDir = new TempDirectory("RunFence_CredMgrTest");
-        var db = new DatabaseService(_log.Object, allowPlaintextConfig: true,
-            configDir: _tempDir.Path, localDataDir: _tempDir.Path);
+        _credentialRepository = new Mock<ICredentialRepository>();
+        _configRepository = new Mock<IConfigRepository>();
         var pinKeyBytes = new byte[32];
         new Random(42).NextBytes(pinKeyBytes);
         _argonSalt = new byte[32];
@@ -35,13 +36,16 @@ public class AccountCredentialManagerTests : IDisposable
         _pinKey = new ProtectedBuffer(pinKeyBytes, protect: false);
 
         var encryptionService = new CredentialEncryptionService();
-        _manager = new AccountCredentialManager(encryptionService, db, db, _log.Object, _sidNameCache.Object);
+        var sidResolver = new Mock<ISidResolver>();
+        var credentialDecryption = new CredentialDecryptionService(encryptionService, sidResolver.Object);
+        _manager = new AccountCredentialManager(encryptionService, credentialDecryption);
+        _persistenceHelper = new SessionPersistenceHelper(
+            _credentialRepository.Object, _configRepository.Object, _sidNameCache.Object, _log.Object);
     }
 
     public void Dispose()
     {
         _pinKey.Dispose();
-        _tempDir.Dispose();
     }
 
     [Fact]
@@ -63,11 +67,34 @@ public class AccountCredentialManagerTests : IDisposable
         };
 
         // Act
-        var changed = _manager.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
+        var changed = _persistenceHelper.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
 
         // Assert — stale name update delegated to cache service with full resolved name
         Assert.True(changed);
         _sidNameCache.Verify(c => c.UpdateName(FakeSid, "DOMAIN\\alice"), Times.Once);
+        // R2_TL1: SaveConfig must be called when ApplyStaleNameUpdates returns true
+        _configRepository.Verify(r => r.SaveConfig(database, It.IsAny<byte[]>(), _argonSalt), Times.Once);
+    }
+
+    [Fact]
+    public void ApplyStaleNameUpdates_SidAbsentFromSidNamesButResolverReturnsName_UpdatesCacheAndSaves()
+    {
+        // Arrange — R2_TL2: SID not in SidNames, resolver returns non-null name
+        var database = new AppDatabase();
+        // FakeSid2 intentionally absent from SidNames
+
+        var resolutions = new Dictionary<string, string?>
+        {
+            [FakeSid2] = "DOMAIN\\bob"
+        };
+
+        // Act
+        var changed = _persistenceHelper.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
+
+        // Assert — absent SID treated as stale (existing == null != "DOMAIN\\bob"), so it is updated
+        Assert.True(changed);
+        _sidNameCache.Verify(c => c.UpdateName(FakeSid2, "DOMAIN\\bob"), Times.Once);
+        _configRepository.Verify(r => r.SaveConfig(database, It.IsAny<byte[]>(), _argonSalt), Times.Once);
     }
 
     [Fact]
@@ -88,7 +115,7 @@ public class AccountCredentialManagerTests : IDisposable
         };
 
         // Act
-        var changed = _manager.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
+        var changed = _persistenceHelper.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
 
         // Assert — no change
         Assert.False(changed);
@@ -284,10 +311,50 @@ public class AccountCredentialManagerTests : IDisposable
         };
 
         // Act
-        var changed = _manager.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
+        var changed = _persistenceHelper.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
 
         // Assert — nothing changed
         Assert.False(changed);
         Assert.Equal("alice", database.SidNames[FakeSid]);
     }
+
+    // --- UpdateCredentialPassword ---
+
+    [Fact]
+    public void UpdateCredentialPassword_ReplacesEncryptedPassword()
+    {
+        // Arrange
+        var originalPassword = new byte[] { 0x11, 0x22, 0x33 };
+        var credEntry = new CredentialEntry { Sid = FakeSid, EncryptedPassword = originalPassword };
+
+        using var newPassword = new SecureString();
+        foreach (var c in "newpassword")
+            newPassword.AppendChar(c);
+
+        // Act
+        _manager.UpdateCredentialPassword(credEntry, newPassword, _pinKey);
+
+        // Assert — encrypted bytes are updated and differ from the original
+        Assert.NotEqual(originalPassword, credEntry.EncryptedPassword);
+        Assert.NotEmpty(credEntry.EncryptedPassword);
+    }
+
+    [Fact]
+    public void UpdateCredentialPassword_EmptyPassword_ProducesNonEmptyEncryptedBytes()
+    {
+        // Arrange — even an empty password produces a non-empty ciphertext (AEAD tag + nonce)
+        var credEntry = new CredentialEntry { Sid = FakeSid, EncryptedPassword = [] };
+        using var emptyPassword = new SecureString();
+
+        // Act
+        _manager.UpdateCredentialPassword(credEntry, emptyPassword, _pinKey);
+
+        // Assert
+        Assert.NotEmpty(credEntry.EncryptedPassword);
+    }
+
+    // Note: the InteractiveUser credential path (TryDecryptCredential returning InteractiveUser
+    // with null credEntry) cannot be tested under the non-admin test runner because resolving
+    // the interactive user SID requires an active desktop session (explorer.exe running as
+    // a different account). This path is covered by manual/integration testing only.
 }

@@ -4,7 +4,13 @@ using RunFence.Core;
 
 namespace RunFence.Account.OrphanedProfiles;
 
-public class OrphanedProfileService : IOrphanedProfileService
+public class OrphanedProfileService(
+    ILoggingService log,
+    NTTranslateApi ntTranslate,
+    IGroupPolicyScriptHelper gpHelper,
+    string? usersDir = null,
+    string? systemDir = null)
+    : IOrphanedProfileService
 {
     // Exclude well-known non-profile directories that have no registry entry
     private static readonly HashSet<string> ExcludedNames = new(StringComparer.OrdinalIgnoreCase)
@@ -16,23 +22,9 @@ public class OrphanedProfileService : IOrphanedProfileService
         "DefaultAppPool"
     };
 
-    private readonly ILoggingService _log;
-    private readonly NTTranslateApi _ntTranslate;
-    private readonly string _usersDir;
-    private readonly string? _systemDir;
-    private readonly GroupPolicyScriptHelper _gpHelper;
-
-    public OrphanedProfileService(ILoggingService log, NTTranslateApi ntTranslate, GroupPolicyScriptHelper gpHelper,
-        string? usersDir = null, string? systemDir = null)
-    {
-        _log = log;
-        _ntTranslate = ntTranslate;
-        _gpHelper = gpHelper;
-        _systemDir = systemDir;
-        _usersDir = Path.TrimEndingDirectorySeparator(
-            Path.GetFullPath(
-                usersDir ?? (Environment.GetEnvironmentVariable("SystemDrive") ?? "C:") + @"\Users"));
-    }
+    private readonly string _usersDir = Path.TrimEndingDirectorySeparator(
+        Path.GetFullPath(
+            usersDir ?? (Environment.GetEnvironmentVariable("SystemDrive") ?? "C:") + @"\Users"));
 
     public List<OrphanedProfile> GetOrphanedProfiles()
     {
@@ -93,7 +85,7 @@ public class OrphanedProfileService : IOrphanedProfileService
 
                 DeleteSafe(renamedPath);
                 deleted.Add(profile.ProfilePath);
-                _log.Info($"Deleted orphaned profile: {profile.ProfilePath}");
+                log.Info($"Deleted orphaned profile: {profile.ProfilePath}");
 
                 if (profile.Sid != null)
                 {
@@ -111,14 +103,14 @@ public class OrphanedProfileService : IOrphanedProfileService
                     }
                     catch (Exception undoEx)
                     {
-                        _log.Warn($"Failed to restore '{renamedPath}' to '{profile.ProfilePath}' after partial deletion. " +
+                        log.Warn($"Failed to restore '{renamedPath}' to '{profile.ProfilePath}' after partial deletion. " +
                                   $"The profile directory may be in an inconsistent state. " +
                                   $"Rename-back error: {undoEx.Message}. Original deletion error: {ex.Message}");
                     }
                 }
 
                 failed.Add((profile.ProfilePath, ex.Message));
-                _log.Warn($"Failed to delete orphaned profile '{profile.ProfilePath}': {ex.Message}");
+                log.Warn($"Failed to delete orphaned profile '{profile.ProfilePath}': {ex.Message}");
             }
         }
 
@@ -163,7 +155,7 @@ public class OrphanedProfileService : IOrphanedProfileService
         }
         catch (Exception ex)
         {
-            _log.Warn($"Failed to read profile list from registry: {ex.Message}");
+            log.Warn($"Failed to read profile list from registry: {ex.Message}");
         }
 
         return entries;
@@ -173,7 +165,7 @@ public class OrphanedProfileService : IOrphanedProfileService
     {
         try
         {
-            _ntTranslate.TranslateName(sidString);
+            ntTranslate.TranslateName(sidString);
             return true;
         }
         catch (IdentityNotMappedException)
@@ -182,7 +174,7 @@ public class OrphanedProfileService : IOrphanedProfileService
         }
         catch (Exception ex)
         {
-            _log.Warn($"Cannot verify account existence for SID '{sidString}': {ex.Message}");
+            log.Warn($"Cannot verify account existence for SID '{sidString}': {ex.Message}");
             return true; // safe default — don't flag as orphaned when we can't verify
         }
     }
@@ -238,7 +230,7 @@ public class OrphanedProfileService : IOrphanedProfileService
         }
         catch (Exception ex)
         {
-            _log.Warn($"Failed to remove registry key for SID '{sid}': {ex.Message}");
+            log.Warn($"Failed to remove registry key for SID '{sid}': {ex.Message}");
         }
     }
 
@@ -246,26 +238,26 @@ public class OrphanedProfileService : IOrphanedProfileService
     {
         try
         {
-            _gpHelper.SetLoginBlocked(sid, false);
+            gpHelper.SetLoginBlocked(sid, false);
         }
         catch (Exception ex)
         {
-            _log.Warn($"Failed to remove logon script entry for SID '{sid}': {ex.Message}");
+            log.Warn($"Failed to remove logon script entry for SID '{sid}': {ex.Message}");
         }
 
         try
         {
-            var sysDir = _systemDir ?? Environment.GetFolderPath(Environment.SpecialFolder.System);
+            var sysDir = systemDir ?? Environment.GetFolderPath(Environment.SpecialFolder.System);
             var gpUserSidDir = Path.Combine(sysDir, "GroupPolicyUsers", sid);
             if (Directory.Exists(gpUserSidDir))
             {
                 Directory.Delete(gpUserSidDir, recursive: true);
-                _log.Info($"Deleted GroupPolicyUsers directory for SID '{sid}'");
+                log.Info($"Deleted GroupPolicyUsers directory for SID '{sid}'");
             }
         }
         catch (Exception ex)
         {
-            _log.Warn($"Failed to delete GroupPolicyUsers directory for SID '{sid}': {ex.Message}");
+            log.Warn($"Failed to delete GroupPolicyUsers directory for SID '{sid}': {ex.Message}");
         }
     }
 

@@ -76,7 +76,7 @@ public class DragBridgeCopyFlowTests
         => DragBridgeCopyFlow.BuildArgs(pipeName, cursorPos, restoreHwnd);
 
     [Fact]
-    public void BuildArgs_ReturnsPipeNameAndCursorPosition()
+    public void BuildArgs_ContainsRequiredFlagsAndPid()
     {
         var result = InvokeBuildArgs("TestPipe-abc123", new Point(123, 456));
 
@@ -100,11 +100,14 @@ public class DragBridgeCopyFlowTests
         Assert.Equal("12345", result[idx + 1]);
     }
 
-    [Fact]
-    public void BuildArgs_PipeNameAndCoordinatesAreInCorrectPositions()
+    [Theory]
+    [InlineData("RunFence-DragBridge-unique", 10, 20, "10", "20")]
+    [InlineData("pipe1", 0, 0, "0", "0")]
+    [InlineData("pipe2", -5, -10, "-5", "-10")]
+    public void BuildArgs_PipeNameAndCoordinatesFormattedCorrectly(
+        string pipeName, int x, int y, string expectedX, string expectedY)
     {
-        var pipeName = "RunFence-DragBridge-unique";
-        var result = InvokeBuildArgs(pipeName, new Point(10, 20));
+        var result = InvokeBuildArgs(pipeName, new Point(x, y));
 
         var pipeIdx = result.IndexOf("--pipe");
         var xIdx = result.IndexOf("--x");
@@ -115,29 +118,17 @@ public class DragBridgeCopyFlowTests
         Assert.True(yIdx >= 0, "--y flag must be present");
 
         Assert.Equal(pipeName, result[pipeIdx + 1]);
-        Assert.Equal("10", result[xIdx + 1]);
-        Assert.Equal("20", result[yIdx + 1]);
+        Assert.Equal(expectedX, result[xIdx + 1]);
+        Assert.Equal(expectedY, result[yIdx + 1]);
     }
 
     [Fact]
-    public void BuildArgs_ZeroCoordinates_FormatsCorrectly()
+    public void BuildArgs_DataLength_MatchesExpectedStructure()
     {
-        var result = InvokeBuildArgs("pipe1", new Point(0, 0));
+        // BuildArgs always produces exactly 10 elements:
+        // --pipe <name> --x <x> --y <y> --runfence-pid <pid> --restore-hwnd <hwnd>
+        var result = InvokeBuildArgs("some-pipe", new Point(1, 2), restoreHwnd: 3);
 
-        var xIdx = result.IndexOf("--x");
-        var yIdx = result.IndexOf("--y");
-        Assert.Equal("0", result[xIdx + 1]);
-        Assert.Equal("0", result[yIdx + 1]);
-    }
-
-    [Fact]
-    public void BuildArgs_NegativeCoordinates_FormatsCorrectly()
-    {
-        var result = InvokeBuildArgs("pipe2", new Point(-5, -10));
-
-        var xIdx = result.IndexOf("--x");
-        var yIdx = result.IndexOf("--y");
-        Assert.Equal("-5", result[xIdx + 1]);
-        Assert.Equal("-10", result[yIdx + 1]);
+        Assert.Equal(10, result.Count);
     }
 }

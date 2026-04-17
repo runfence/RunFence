@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Win32;
@@ -12,7 +11,7 @@ namespace RunFence.Launch.Container;
 /// Handles environment variable overriding, VirtualStore access, and shell folder redirects
 /// for AppContainer process launches. All methods are best-effort and log warnings on failure.
 /// </summary>
-public class AppContainerEnvironmentSetup(ILoggingService log) : IAppContainerEnvironmentSetup
+public class AppContainerEnvironmentSetup(ILoggingService log, IShortcutComHelper shortcutHelper, IAppContainerSidProvider sidProvider) : IAppContainerEnvironmentSetup
 {
     public IntPtr OverrideProfileEnvironment(IntPtr originalEnv, string profileName)
     {
@@ -47,26 +46,11 @@ public class AppContainerEnvironmentSetup(ILoggingService log) : IAppContainerEn
     /// Grants the AppContainer SID Modify rights on the user's VirtualStore directory.
     /// Enables UAC kernel-level write virtualization (Program Files → VirtualStore redirect).
     /// </summary>
-    public void TryGrantVirtualStoreAccess(IntPtr pContainerSid, string localAppData)
+    public void TryGrantVirtualStoreAccess(string containerSid, string localAppData)
     {
         try
         {
-            if (!AppContainerNative.ConvertSidToStringSid(pContainerSid, out var pStrSid))
-                return;
-            string? sidStr;
-            try
-            {
-                sidStr = Marshal.PtrToStringUni(pStrSid);
-            }
-            finally
-            {
-                NativeMethods.LocalFree(pStrSid);
-            }
-
-            if (sidStr == null)
-                return;
-
-            var containerIdentity = new SecurityIdentifier(sidStr);
+            var containerIdentity = new SecurityIdentifier(containerSid);
             var vStorePath = Path.Combine(localAppData, "VirtualStore");
             Directory.CreateDirectory(vStorePath);
 
@@ -153,7 +137,7 @@ public class AppContainerEnvironmentSetup(ILoggingService log) : IAppContainerEn
                 AppContainerPaths.GetContainerDataPath(containerName),
                 $"{dirName} - VirtualStore.lnk");
 
-            ShortcutComHelper.WithShortcut(shortcutPath, lnk =>
+            shortcutHelper.WithShortcut(shortcutPath, lnk =>
             {
                 lnk.TargetPath = virtualStorePath;
                 lnk.Description = $"VirtualStore folder for {dirName} (UAC write virtualization)";
@@ -175,32 +159,7 @@ public class AppContainerEnvironmentSetup(ILoggingService log) : IAppContainerEn
     {
         try
         {
-            var hr = AppContainerNative.DeriveAppContainerSidFromAppContainerName(containerName, out var pSid);
-            if (hr != 0 || pSid == IntPtr.Zero)
-                return;
-
-            string? sidStr;
-            try
-            {
-                if (!AppContainerNative.ConvertSidToStringSid(pSid, out var pStrSid))
-                    return;
-                try
-                {
-                    sidStr = Marshal.PtrToStringUni(pStrSid);
-                }
-                finally
-                {
-                    NativeMethods.LocalFree(pStrSid);
-                }
-            }
-            finally
-            {
-                NativeMethods.LocalFree(pSid);
-            }
-
-            if (sidStr == null)
-                return;
-
+            var sidStr = sidProvider.GetSidString(containerName);
             var dataPath = AppContainerPaths.GetContainerDataPath(containerName);
 
             var keyPath = $@"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{sidStr}\User Shell Folders";

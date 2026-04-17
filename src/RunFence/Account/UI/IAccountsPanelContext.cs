@@ -14,6 +14,7 @@ public interface IAccountsPanelContext
     Control OwnerControl { get; }
     OperationGuard OperationGuard { get; }
     bool IsRefreshing { get; }
+    bool RenameInProgress { set; }
     DialogResult ShowModal(Form dialog);
     void SaveAndRefresh(Guid? selectCredentialId = null, int fallbackIndex = -1);
     void UpdateStatus(string text);

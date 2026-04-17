@@ -1,4 +1,5 @@
 using RunFence.Acl;
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -26,37 +27,18 @@ public interface IApplicationsPanelContext
 /// Handles add, edit, and remove operations for app entries in the ApplicationsPanel,
 /// including dialog orchestration, enforcement (ACL/shortcuts), and save/refresh.
 /// </summary>
-public class ApplicationsCrudOrchestrator
+public class ApplicationsCrudOrchestrator(
+    Func<AppEditDialog> dialogFactory,
+    IAclService aclService,
+    IIconService iconService,
+    IAppConfigService appConfigService,
+    AppEntryEnforcementHelper enforcementHelper,
+    IShortcutDiscoveryService shortcutDiscovery,
+    AppEntryPermissionPrompter permissionPrompter,
+    ILoggingService log,
+    ILicenseService licenseService)
 {
-    private readonly Func<AppEditDialog> _dialogFactory;
-    private readonly IAclService _aclService;
-    private readonly IIconService _iconService;
-    private readonly IAppConfigService _appConfigService;
-    private readonly AppEntryEnforcementHelper _enforcementHelper;
-    private readonly AppEntryPermissionPrompter _permissionPrompter;
-    private readonly ILoggingService _log;
-    private readonly ILicenseService _licenseService;
     private IApplicationsPanelContext _context = null!;
-
-    public ApplicationsCrudOrchestrator(
-        Func<AppEditDialog> dialogFactory,
-        IAclService aclService,
-        IIconService iconService,
-        IAppConfigService appConfigService,
-        AppEntryEnforcementHelper enforcementHelper,
-        AppEntryPermissionPrompter permissionPrompter,
-        ILoggingService log,
-        ILicenseService licenseService)
-    {
-        _dialogFactory = dialogFactory;
-        _aclService = aclService;
-        _iconService = iconService;
-        _appConfigService = appConfigService;
-        _enforcementHelper = enforcementHelper;
-        _permissionPrompter = permissionPrompter;
-        _log = log;
-        _licenseService = licenseService;
-    }
 
     public void Initialize(IApplicationsPanelContext context)
     {
@@ -77,13 +59,13 @@ public class ApplicationsCrudOrchestrator
         {
             initialConfigPath = grid.SelectedRows[0].Tag switch
             {
-                AppEntry selectedApp => _appConfigService.GetConfigPath(selectedApp.Id),
+                AppEntry selectedApp => appConfigService.GetConfigPath(selectedApp.Id),
                 ApplicationsPanel.ConfigGroupHeaderTag header => header.ConfigPath,
                 _ => initialConfigPath
             };
         }
 
-        var dlg = _dialogFactory();
+        var dlg = dialogFactory();
         dlg.Initialize(
             null,
             _context.CredentialStore.Credentials,
@@ -97,20 +79,21 @@ public class ApplicationsCrudOrchestrator
         {
             dlg.ApplyRequested += () =>
             {
-                if (!_licenseService.CanAddApp(_context.Database.Apps.Count))
+                if (!licenseService.CanAddApp(_context.Database.Apps.Count))
                 {
-                    MessageBox.Show(_licenseService.GetRestrictionMessage(EvaluationFeature.Apps, _context.Database.Apps.Count),
+                    MessageBox.Show(licenseService.GetRestrictionMessage(EvaluationFeature.Apps, _context.Database.Apps.Count),
                         "License Limit", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
-                _appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
+                appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
                 try
                 {
                     _context.Database.Apps.Add(dlg.Result);
-                    ApplyChanges(dlg.Result);
+                    var shortcutCache = CreateShortcutCacheIfNeeded(dlg.Result);
+                    ApplyChanges(dlg.Result, shortcutCache);
                     _context.SaveAndRefresh(dlg.Result.Id, targetedSave: true);
-                    if (_permissionPrompter.PromptAndGrant(dlg, dlg.Result))
+                    if (permissionPrompter.PromptAndGrant(dlg, dlg.Result))
                         _context.SaveAndRefresh(dlg.Result.Id);
                     if (dlg.LaunchNow)
                         _context.LaunchApp(dlg.Result, null);
@@ -120,7 +103,7 @@ public class ApplicationsCrudOrchestrator
                 catch
                 {
                     _context.Database.Apps.Remove(dlg.Result);
-                    _appConfigService.RemoveApp(dlg.Result.Id);
+                    appConfigService.RemoveApp(dlg.Result.Id);
                     throw;
                 }
             };
@@ -149,9 +132,9 @@ public class ApplicationsCrudOrchestrator
 
     private void OpenEditDialog(AppEntry app, int selectedIndex, AppEditDialogOptions? options = null)
     {
-        var originalConfigPath = _appConfigService.GetConfigPath(app.Id);
+        var originalConfigPath = appConfigService.GetConfigPath(app.Id);
 
-        var dlg = _dialogFactory();
+        var dlg = dialogFactory();
         dlg.Initialize(
             app,
             _context.CredentialStore.Credentials,
@@ -167,31 +150,32 @@ public class ApplicationsCrudOrchestrator
                 var index = _context.Database.Apps.FindIndex(a => a.Id == app.Id);
                 if (index >= 0)
                 {
-                    RevertChanges(app);
+                    var shortcutCache = CreateShortcutCacheIfNeeded(app, dlg.Result);
+                    RevertChanges(app, shortcutCache);
                     _context.Database.Apps[index] = dlg.Result;
-                    _appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
+                    appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
                     try
                     {
-                        ApplyChanges(dlg.Result);
+                        ApplyChanges(dlg.Result, shortcutCache);
                         _context.SaveAndRefresh(dlg.Result.Id);
                     }
                     catch
                     {
                         _context.Database.Apps[index] = app;
-                        _appConfigService.AssignApp(app.Id, originalConfigPath);
+                        appConfigService.AssignApp(app.Id, originalConfigPath);
                         try
                         {
-                            ApplyChanges(app);
+                            ApplyChanges(app, shortcutCache);
                         }
                         catch (Exception restoreEx)
                         {
-                            _log.Error($"Failed to restore ACL after edit failure for {app.Name}", restoreEx);
+                            log.Error($"Failed to restore ACL after edit failure for {app.Name}", restoreEx);
                         }
 
                         throw;
                     }
 
-                    if (_permissionPrompter.PromptAndGrant(dlg, dlg.Result))
+                    if (permissionPrompter.PromptAndGrant(dlg, dlg.Result))
                         _context.SaveAndRefresh(dlg.Result.Id);
                 }
 
@@ -203,10 +187,11 @@ public class ApplicationsCrudOrchestrator
 
             dlg.RemoveRequested += () =>
             {
-                RevertChanges(app);
+                var shortcutCache = CreateShortcutCacheIfNeeded(app);
+                RevertChanges(app, shortcutCache);
                 _context.Database.Apps.Remove(app);
-                _appConfigService.RemoveApp(app.Id);
-                _iconService.DeleteIcon(app.Id);
+                appConfigService.RemoveApp(app.Id);
+                iconService.DeleteIcon(app.Id);
                 _context.SaveAndRefresh(fallbackIndex: selectedIndex);
                 dlg.DialogResult = DialogResult.OK;
                 dlg.Close();
@@ -230,42 +215,48 @@ public class ApplicationsCrudOrchestrator
 
         if (MessageBox.Show(removeMessage, "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
         {
-            RevertChanges(app);
+            var shortcutCache = CreateShortcutCacheIfNeeded(app);
+            RevertChanges(app, shortcutCache);
             _context.Database.Apps.Remove(app);
-            _appConfigService.RemoveApp(app.Id);
-            _iconService.DeleteIcon(app.Id);
+            appConfigService.RemoveApp(app.Id);
+            iconService.DeleteIcon(app.Id);
             _context.SaveAndRefresh(fallbackIndex: selectedIndex);
         }
     }
 
-    private void ApplyChanges(AppEntry app)
+    private void ApplyChanges(AppEntry app, ShortcutTraversalCache shortcutCache)
     {
         try
         {
-            _enforcementHelper.ApplyChanges(app, _context.Database.Apps, _context.Database.SidNames);
-            _aclService.RecomputeAllAncestorAcls(_context.Database.Apps);
+            enforcementHelper.ApplyChanges(app, _context.Database.Apps, shortcutCache);
+            aclService.RecomputeAllAncestorAcls(_context.Database.Apps);
         }
         catch (Exception ex)
         {
-            _log.Error($"Failed to apply changes for {app.Name}", ex);
+            log.Error($"Failed to apply changes for {app.Name}", ex);
             MessageBox.Show($"Failed to apply ACL/shortcut changes for {app.Name}:\n{ex.Message}",
                 "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 
-    private void RevertChanges(AppEntry app)
+    private void RevertChanges(AppEntry app, ShortcutTraversalCache shortcutCache)
     {
         try
         {
-            _enforcementHelper.RevertChanges(app, _context.Database.Apps);
+            enforcementHelper.RevertChanges(app, _context.Database.Apps, shortcutCache);
             var appsAfterRevert = _context.Database.Apps.Where(a => a.Id != app.Id).ToList();
-            _aclService.RecomputeAllAncestorAcls(appsAfterRevert);
+            aclService.RecomputeAllAncestorAcls(appsAfterRevert);
         }
         catch (Exception ex)
         {
-            _log.Error($"Failed to revert changes for {app.Name}", ex);
+            log.Error($"Failed to revert changes for {app.Name}", ex);
             MessageBox.Show($"Failed to revert ACL/shortcut changes for {app.Name}:\n{ex.Message}",
                 "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
+
+    private ShortcutTraversalCache CreateShortcutCacheIfNeeded(params AppEntry[] apps)
+        => apps.Any(a => a.ManageShortcuts)
+            ? shortcutDiscovery.CreateTraversalCache()
+            : new ShortcutTraversalCache([]);
 }

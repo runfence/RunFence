@@ -1,6 +1,7 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Moq;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
 using RunFence.Core;
@@ -33,28 +34,46 @@ public class GrantReconciliationServiceTests
                 It.IsAny<FileSystemSecurity>(), It.IsAny<string>(),
                 It.IsAny<IReadOnlyList<string>>(), It.IsAny<FileSystemRights>()))
             .Returns(true);
+
+        _service = BuildService(new AppDatabase());
     }
 
     private GrantReconciliationService BuildService(AppDatabase db) =>
         new(_aclPermission.Object, new Mock<ILocalGroupMembershipService>().Object, _log.Object, _sessionSaver.Object,
-            new LambdaDatabaseProvider(() => db));
+            new LambdaDatabaseProvider(() => db),
+            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object),
+            new Mock<IInteractiveUserResolver>().Object);
 
     // _service uses an empty database; suitable for tests that don't depend on database state.
-    private GrantReconciliationService _service => BuildService(new AppDatabase());
+    // Stored as a readonly field so the same instance is reused throughout a single test.
+    private readonly GrantReconciliationService _service;
+
+    /// <summary>
+    /// Creates an <see cref="AppDatabase"/> with <paramref name="sid"/> in <c>SidNames</c> and
+    /// <c>Accounts</c>, and optionally a pre-populated <c>AccountGroupSnapshots</c> entry.
+    /// </summary>
+    private static AppDatabase MakeDbWithSnapshot(
+        string sid,
+        string displayName,
+        List<string>? snapshotGroups = null)
+    {
+        var db = new AppDatabase();
+        db.SidNames[sid] = displayName;
+        db.GetOrCreateAccount(sid);
+        if (snapshotGroups != null)
+        {
+            db.AccountGroupSnapshots ??= new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            db.AccountGroupSnapshots[sid] = snapshotGroups;
+        }
+        return db;
+    }
 
     // --- DetectGroupChanges tests ---
 
     [Fact]
     public async Task DetectGroupChanges_FirstSeenSid_PopulatesSnapshotWithoutReportingChange()
     {
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice");
         var service = BuildService(db);
 
         var changed = await service.DetectGroupChanges();
@@ -67,18 +86,7 @@ public class GrantReconciliationServiceTests
     [Fact]
     public async Task DetectGroupChanges_SameGroups_ReturnsEmpty()
     {
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            },
-            AccountGroupSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = [..DefaultGroups]
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice", [..DefaultGroups]);
         var service = BuildService(db);
 
         var changed = await service.DetectGroupChanges();
@@ -92,18 +100,7 @@ public class GrantReconciliationServiceTests
         // Simulate user being added to BUILTIN\Users — groups now differ from snapshot
         _aclPermission.Setup(s => s.ResolveAccountGroupSids(UserSid)).Returns(GroupsWithUsers);
 
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            },
-            AccountGroupSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = [..DefaultGroups]
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice", [..DefaultGroups]);
         var service = BuildService(db);
 
         var changed = await service.DetectGroupChanges();
@@ -119,18 +116,7 @@ public class GrantReconciliationServiceTests
         // Snapshot has 3 groups but current only has 2 (removed from BUILTIN\Users)
         _aclPermission.Setup(s => s.ResolveAccountGroupSids(UserSid)).Returns(DefaultGroups);
 
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            },
-            AccountGroupSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = [..GroupsWithUsers]
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice", [..GroupsWithUsers]);
         var service = BuildService(db);
 
         var changed = await service.DetectGroupChanges();
@@ -148,18 +134,7 @@ public class GrantReconciliationServiceTests
         _aclPermission.Setup(s => s.ResolveAccountGroupSids(UserSid))
             .Returns(["S-1-5-11", "S-1-1-0"]); // reversed order
 
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            },
-            AccountGroupSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = [..DefaultGroups] // ["S-1-1-0", "S-1-5-11"]
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice", [..DefaultGroups]); // ["S-1-1-0", "S-1-5-11"]
         var service = BuildService(db);
 
         var changed = await service.DetectGroupChanges();
@@ -205,18 +180,7 @@ public class GrantReconciliationServiceTests
         _aclPermission.Setup(s => s.ResolveAccountGroupSids(UserSid))
             .Throws(new InvalidOperationException("test error"));
 
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            },
-            AccountGroupSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = [..DefaultGroups]
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice", [..DefaultGroups]);
         var service = BuildService(db);
 
         // Should not throw; SID simply skipped
@@ -396,18 +360,7 @@ public class GrantReconciliationServiceTests
     [Fact]
     public async Task ReconcileIfGroupsChanged_NoChanges_ReturnsFalse()
     {
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            },
-            AccountGroupSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = [..DefaultGroups]
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice", [..DefaultGroups]);
         var service = BuildService(db);
 
         var result = await service.ReconcileIfGroupsChanged();
@@ -419,14 +372,7 @@ public class GrantReconciliationServiceTests
     public async Task ReconcileIfGroupsChanged_FirstRun_ReturnsFalseButPopulatesSnapshot()
     {
         // First run: snapshot is null/missing → populate without reconciling (no change to report)
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice");
         var service = BuildService(db);
 
         var result = await service.ReconcileIfGroupsChanged();
@@ -442,18 +388,7 @@ public class GrantReconciliationServiceTests
         // to ReconcileChangedSids. Verified via ApplyReconciliationResult updating the snapshot.
         _aclPermission.Setup(s => s.ResolveAccountGroupSids(UserSid)).Returns(GroupsWithUsers);
 
-        var db = new AppDatabase
-        {
-            SidNames =
-            {
-                [UserSid] = "MACHINE\\alice"
-            },
-            AccountGroupSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = [..DefaultGroups]
-            }
-        };
-        db.GetOrCreateAccount(UserSid);
+        var db = MakeDbWithSnapshot(UserSid, "MACHINE\\alice", [..DefaultGroups]);
         var service = BuildService(db);
 
         var changed = await service.ReconcileIfGroupsChanged();
@@ -463,25 +398,34 @@ public class GrantReconciliationServiceTests
         Assert.Equal(GroupsWithUsers, db.AccountGroupSnapshots![UserSid]);
     }
 
-    // --- ReconcileLogonScript / filesystem reconciliation path tests ---
+    // --- Logon script / filesystem reconciliation path tests ---
 
     [Fact]
-    public void ReconcileLogonScript_ScriptFileMissing_EarlyReturn_NoEntries()
+    public void ReconcileChangedSids_ScriptFileMissing_EarlyReturn_NoEntries()
     {
-        // ReconcileLogonScript checks both File.Exists(scriptFile) and Directory.Exists(scriptsDir).
-        // Using a fake SID guarantees the per-SID script file ("{sid}_block_login.cmd") does not
-        // exist in the scripts directory, so the method returns immediately without any side effects.
-        var newTraverseEntries = new Dictionary<string, List<(string, List<string>)>>(StringComparer.OrdinalIgnoreCase);
-        var removedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var granter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object);
-        var identity = new SecurityIdentifier(UserSid);
+        // ReconcileChangedSids → ReconcileTraverseForSid → ReconcileLogonScript checks both
+        // File.Exists(scriptFile) and Directory.Exists(scriptsDir). Using a fake SID guarantees
+        // the per-SID script file ("{sid}_block_login.cmd") does not exist in the scripts
+        // directory, so ReconcileLogonScript returns immediately without any side effects.
+        // HasEffectiveRights is set to true so that traversal of any real directories reports
+        // traverse already covered — preventing ACE writes.
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<FileSystemRights>()))
+            .Returns(true);
+
+        var changedSids = new List<(string Sid, List<string> NewGroups)>
+        {
+            (UserSid, DefaultGroups)
+        };
+        var emptyGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
 
         // UserSid is a synthetic SID — no script file for it will exist on any real system
-        _service.ReconcileLogonScript(UserSid, identity, DefaultGroups,
-            granter, newTraverseEntries, removedPaths);
+        var result = _service.ReconcileChangedSids(changedSids, emptyGrants);
 
-        Assert.Empty(newTraverseEntries);
-        Assert.Empty(removedPaths);
+        Assert.True(result.UpdatedSnapshots.ContainsKey(UserSid));
+        Assert.Empty(result.RemovedTraversePaths);
     }
 
     [Fact]
@@ -546,5 +490,95 @@ public class GrantReconciliationServiceTests
         Assert.Empty(result.NewTraverseEntries);
         // No traverse entries in AccountGrants for this SID → nothing to remove
         Assert.Empty(result.RemovedTraversePaths);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_TraverseNowCoveredByGroup_MarkedForRemoval()
+    {
+        // Arrange: Use the actual DragBridge temp root — the only reconcile location that requires
+        // no prerequisite file. The entry path must match the reconcile location exactly so that
+        // CheckRedundantTraverse finds and flags the entry.
+        // HasEffectiveRights returns true → groups alone cover the path → marked for removal.
+        var dragBridgeTempRoot = Path.Combine(Constants.ProgramDataDir, Constants.DragBridgeTempDir);
+
+        if (!Directory.Exists(dragBridgeTempRoot))
+            throw Xunit.Sdk.SkipException.ForSkip($"DragBridge temp root '{dragBridgeTempRoot}' does not exist — RunFence not installed.");
+
+        try { new DirectoryInfo(dragBridgeTempRoot).GetAccessControl(); }
+        catch { throw Xunit.Sdk.SkipException.ForSkip($"Cannot read ACL of '{dragBridgeTempRoot}' — insufficient permissions in test environment."); }
+
+        var accountGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase)
+        {
+            [UserSid] =
+            [
+                new GrantedPathEntry
+                {
+                    Path = dragBridgeTempRoot,
+                    IsTraverseOnly = true,
+                    AllAppliedPaths = [dragBridgeTempRoot]
+                }
+            ]
+        };
+
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<FileSystemRights>()))
+            .Returns(true);
+
+        var changedSids = new List<(string Sid, List<string> NewGroups)>
+        {
+            (UserSid, GroupsWithUsers)
+        };
+
+        // Act
+        var result = _service.ReconcileChangedSids(changedSids, accountGrants);
+
+        // Assert: the traverse entry is marked for removal because groups now cover it
+        Assert.True(result.RemovedTraversePaths.ContainsKey(UserSid));
+        Assert.Contains(Path.GetFullPath(dragBridgeTempRoot), result.RemovedTraversePaths[UserSid],
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_TraverseNowNeededAfterGroupRemoval_PopulatesNewTraverseEntries()
+    {
+        // Arrange: HasEffectiveRights returns false — groups no longer cover traverse, so a new
+        // direct ACE must be written. Setting the interactive user to UserSid causes
+        // ReconcileAppDirectory to run against AppContext.BaseDirectory, which is guaranteed to
+        // exist in any test run. ITraverseAcl is mocked (AddAllowAce is a no-op), so no real
+        // NTFS writes occur.
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<FileSystemRights>()))
+            .Returns(false);
+
+        var changedSids = new List<(string Sid, List<string> NewGroups)>
+        {
+            (UserSid, DefaultGroups)
+        };
+        var emptyGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
+
+        var iuResolver = new Mock<IInteractiveUserResolver>();
+        iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns(UserSid);
+        var db = new AppDatabase();
+        var service = new GrantReconciliationService(
+            _aclPermission.Object,
+            new Mock<ILocalGroupMembershipService>().Object,
+            _log.Object,
+            _sessionSaver.Object,
+            new LambdaDatabaseProvider(() => db),
+            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object),
+            iuResolver.Object);
+
+        // Act
+        var result = service.ReconcileChangedSids(changedSids, emptyGrants);
+
+        // Assert: NewTraverseEntries is populated because HasEffectiveRights=false and the app
+        // directory (AppContext.BaseDirectory) exists, causing AncestorTraverseGranter to add ACEs.
+        Assert.True(result.UpdatedSnapshots.ContainsKey(UserSid));
+        Assert.True(result.NewTraverseEntries.ContainsKey(UserSid),
+            "NewTraverseEntries should be populated when HasEffectiveRights=false and app directory exists");
     }
 }

@@ -1,12 +1,18 @@
 namespace RunFence.Acl.UI;
 
+public interface IReparsePointPromptHelper
+{
+    bool IsReparsePoint(string path);
+    IReadOnlyList<string> ResolveForAdd(string path, IWin32Window owner);
+}
+
 /// <summary>
 /// Detects NTFS reparse points (junctions, symbolic links) and prompts the user for
 /// how to resolve the path when adding entries to ACL Manager.
 /// </summary>
-public static class ReparsePointPromptHelper
+public class ReparsePointPromptHelper : IReparsePointPromptHelper
 {
-    public static bool IsReparsePoint(string path)
+    public bool IsReparsePoint(string path)
     {
         try
         {
@@ -27,7 +33,7 @@ public static class ReparsePointPromptHelper
     ///   <item>User cancels, or target cannot be resolved → <c>[]</c> (nothing added).</item>
     /// </list>
     /// </summary>
-    public static IReadOnlyList<string> ResolveForAdd(string path, IWin32Window owner)
+    public IReadOnlyList<string> ResolveForAdd(string path, IWin32Window owner)
     {
         if (!IsReparsePoint(path))
             return [path];
@@ -64,7 +70,7 @@ public static class ReparsePointPromptHelper
         return [target];
     }
 
-    private static string? TryResolveTarget(string path)
+    private string? TryResolveTarget(string path)
     {
         try
         {

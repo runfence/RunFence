@@ -31,4 +31,12 @@ public interface IAppInitializationHelper
     /// desktop user SID (explorer.exe owner), used on first run and reset flows.
     /// </summary>
     void PopulateDefaultIpcCallers(AppDatabase database);
+
+    /// <summary>
+    /// Initializes a freshly created <see cref="AppDatabase"/> for first-run and reset flows:
+    /// populates default IPC callers then ensures the interactive user SID name is recorded.
+    /// Combines <see cref="PopulateDefaultIpcCallers"/> and <see cref="EnsureInteractiveUserSidName"/>
+    /// in the correct sequence so callers cannot accidentally omit the second step.
+    /// </summary>
+    void InitializeNewDatabase(AppDatabase database);
 }

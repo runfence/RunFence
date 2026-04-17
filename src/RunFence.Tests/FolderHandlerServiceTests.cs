@@ -1,8 +1,10 @@
 using System.Security.Principal;
 using Microsoft.Win32;
 using Moq;
-using RunFence.Acl.Permissions;
+using RunFence.Acl;
 using RunFence.Core;
+using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Launch;
 using Xunit;
 
@@ -11,7 +13,7 @@ namespace RunFence.Tests;
 /// <summary>
 /// Tests for FolderHandlerService.
 /// Uses a temp registry key under HKCU as the HKU root, and the current user's SID as the account SID.
-/// An injected isAdminAccount delegate controls admin-check behaviour without needing a real admin account.
+/// A mocked ILocalGroupMembershipService controls admin-check behaviour without needing a real admin account.
 /// A temp launcher stub is injected for full isolation.
 /// </summary>
 public class FolderHandlerServiceTests : IDisposable
@@ -22,7 +24,8 @@ public class FolderHandlerServiceTests : IDisposable
     private readonly string _tempDir;
     private readonly string _launcherPath;
     private readonly Mock<ILoggingService> _log;
-    private readonly Mock<IPermissionGrantService> _permissionGrant;
+    private readonly Mock<IPathGrantService> _pathGrant;
+    private readonly Mock<ILocalGroupMembershipService> _localGroupMembership;
 
     public FolderHandlerServiceTests()
     {
@@ -34,7 +37,9 @@ public class FolderHandlerServiceTests : IDisposable
         _launcherPath = Path.Combine(_tempDir, Constants.LauncherExeName);
         File.WriteAllBytes(_launcherPath, []);
         _log = new Mock<ILoggingService>();
-        _permissionGrant = new Mock<IPermissionGrantService>();
+        _pathGrant = new Mock<IPathGrantService>();
+        _localGroupMembership = new Mock<ILocalGroupMembershipService>();
+        _localGroupMembership.Setup(s => s.GetGroupsForUser(It.IsAny<string>())).Returns(new List<LocalUserAccount>());
     }
 
     public void Dispose()
@@ -46,9 +51,15 @@ public class FolderHandlerServiceTests : IDisposable
     }
 
     private FolderHandlerService CreateService(bool isAdmin = false, string? shellServerPath = null)
-        => new(_log.Object, _permissionGrant.Object,
+    {
+        _localGroupMembership.Setup(s => s.GetGroupsForUser(It.IsAny<string>()))
+            .Returns(isAdmin
+                ? new List<LocalUserAccount> { new("Administrators", "S-1-5-32-544") }
+                : new List<LocalUserAccount>());
+        return new(_log.Object, _pathGrant.Object, _localGroupMembership.Object,
             hkuOverride: _hkuRoot, launcherPathOverride: _launcherPath,
-            isAdminAccount: _ => isAdmin, shellServerPathOverride: shellServerPath);
+            shellServerPathOverride: shellServerPath);
+    }
 
     private string CommandKeyPath(string classType) =>
         $@"{_testSid}\Software\Classes\{classType}\shell\open\command";
@@ -122,8 +133,8 @@ public class FolderHandlerServiceTests : IDisposable
     {
         // Arrange — launcher path does not exist
         var missingLauncher = Path.Combine(_tempDir, "nonexistent_" + Guid.NewGuid().ToString("N") + ".exe");
-        var service = new FolderHandlerService(_log.Object, _permissionGrant.Object,
-            hkuOverride: _hkuRoot, launcherPathOverride: missingLauncher, isAdminAccount: _ => false);
+        var service = new FolderHandlerService(_log.Object, _pathGrant.Object, _localGroupMembership.Object,
+            hkuOverride: _hkuRoot, launcherPathOverride: missingLauncher);
 
         // Act
         service.Register(_testSid);
@@ -204,26 +215,19 @@ public class FolderHandlerServiceTests : IDisposable
     }
 
     [Fact]
-    public void UnregisterAll_UnregistersAllRegisteredSids()
+    public void UnregisterAll_UnregistersOnlySidsTrackedByThisInstance()
     {
-        // Arrange — register two different SIDs using separate override SIDs
+        // Arrange — register two different SIDs via the service API on two separate instances
+        // that share the same HKU root. Each instance tracks only its own registrations.
         var sid2 = "S-1-5-21-99999-99999-99999-1001"; // fake SID for second account
         var service = CreateService();
         service.Register(_testSid);
 
-        // Manually register the second SID by writing the registry key directly so the service tracks it
-        var commandValue = $"\"{_launcherPath}\" --open-folder \"%V\"";
-        using (var key = _hkuRoot.CreateSubKey($@"{sid2}\Software\Classes\Directory\shell\open\command"))
-            key.SetValue(null, commandValue);
-        using (var key = _hkuRoot.CreateSubKey($@"{sid2}\Software\Classes\Folder\shell\open\command"))
-            key.SetValue(null, commandValue);
-
-        // Register via a second service instance that shares the same HKU root
-        var service2 = new FolderHandlerService(_log.Object, _permissionGrant.Object,
-            hkuOverride: _hkuRoot, launcherPathOverride: _launcherPath, isAdminAccount: _ => false);
+        var service2 = new FolderHandlerService(_log.Object, _pathGrant.Object, _localGroupMembership.Object,
+            hkuOverride: _hkuRoot, launcherPathOverride: _launcherPath);
         service2.Register(sid2);
 
-        // Act
+        // Act — each instance unregisters only what it registered
         service.UnregisterAll();
         service2.UnregisterAll();
 

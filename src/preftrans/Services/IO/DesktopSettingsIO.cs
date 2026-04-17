@@ -1,15 +1,16 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class DesktopSettingsIO
+public class DesktopSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static DesktopSettings Read()
+    public DesktopSettings Read()
     {
         var desktop = new DesktopSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegDesktop);
             if (key == null)
@@ -35,13 +36,13 @@ public static class DesktopSettingsIO
             desktop.HungAppTimeout = key.GetValue("HungAppTimeout") as string;
             desktop.LowLevelHooksTimeout = key.GetValue("LowLevelHooksTimeout") as string;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegDesktop);
             if (key?.GetValue("CaretWidth") is int v)
                 desktop.CaretWidth = v;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegWallpapers);
             if (key?.GetValue("BackgroundType") is int v)
@@ -50,10 +51,10 @@ public static class DesktopSettingsIO
         return desktop;
     }
 
-    public static void Write(DesktopSettings desktop)
+    public void Write(DesktopSettings desktop)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (desktop.WallpaperStyle != null)
             {
@@ -73,7 +74,7 @@ public static class DesktopSettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (desktop.WallpaperPath == null)
                 return;
@@ -89,7 +90,7 @@ public static class DesktopSettingsIO
                 NativeMethods.SystemParametersInfo(Constants.SPI_SETDESKWALLPAPER, 0, desktop.WallpaperPath, Constants.SPIF_UPDATEANDNOTIFY);
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (desktop.CursorBlinkRate != null)
             {
@@ -98,7 +99,7 @@ public static class DesktopSettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (desktop.CaretWidth.HasValue)
             {
@@ -107,7 +108,7 @@ public static class DesktopSettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (desktop.BackgroundType.HasValue)
             {
@@ -116,7 +117,7 @@ public static class DesktopSettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegDesktop);
             if (desktop.WaitToKillAppTimeout != null)
@@ -144,6 +145,10 @@ public static class DesktopSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Desktop = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Desktop != null) Write(s.Desktop); }
 }

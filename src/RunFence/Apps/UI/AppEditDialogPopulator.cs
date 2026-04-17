@@ -4,7 +4,6 @@ using RunFence.Account.UI.AppContainer;
 using RunFence.Apps.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
 using RunFence.Persistence;
 using RunFence.UI;
 
@@ -14,22 +13,11 @@ namespace RunFence.Apps.UI;
 /// Handles combo box population and item search for <see cref="AppEditDialog"/>.
 /// Consolidates repeated combo-search patterns into a single generic helper.
 /// </summary>
-public class AppEditDialogPopulator
+public class AppEditDialogPopulator(
+    IAppConfigService appConfigService,
+    ISidResolver sidResolver,
+    CredentialFilterHelper credentialFilterHelper)
 {
-    private readonly IAppConfigService _appConfigService;
-    private readonly ISidResolver _sidResolver;
-    private readonly IAppContainerService _appContainerService;
-
-    public AppEditDialogPopulator(
-        IAppConfigService appConfigService,
-        ISidResolver sidResolver,
-        IAppContainerService appContainerService)
-    {
-        _appConfigService = appConfigService;
-        _sidResolver = sidResolver;
-        _appContainerService = appContainerService;
-    }
-
     /// <summary>
     /// Populates the account combo box with credentials (filtered to resolvable accounts)
     /// and AppContainer items separated by a visual divider.
@@ -45,10 +33,10 @@ public class AppEditDialogPopulator
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase)
                             ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var representedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var cred in CredentialFilterHelper.FilterResolvableCredentials(credentials, sidNames, _sidResolver, existing))
+        foreach (var cred in credentialFilterHelper.FilterResolvableCredentials(credentials, sidNames, existing))
         {
             var isEphemeral = !string.IsNullOrEmpty(cred.Sid) && ephemeralSids.Contains(cred.Sid);
-            combo.Items.Add(new CredentialDisplayItem(cred, _sidResolver, sidNames, isEphemeral: isEphemeral));
+            combo.Items.Add(new CredentialDisplayItem(cred, sidResolver, sidNames, isEphemeral: isEphemeral));
             if (!string.IsNullOrEmpty(cred.Sid))
                 representedSids.Add(cred.Sid);
         }
@@ -58,7 +46,7 @@ public class AppEditDialogPopulator
         if (interactiveSid != null && !representedSids.Contains(interactiveSid))
         {
             var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = interactiveSid };
-            combo.Items.Add(new CredentialDisplayItem(transient, _sidResolver, sidNames,
+            combo.Items.Add(new CredentialDisplayItem(transient, sidResolver, sidNames,
                 isEphemeral: ephemeralSids.Contains(interactiveSid)));
         }
 
@@ -66,19 +54,7 @@ public class AppEditDialogPopulator
         {
             combo.Items.Add(new ContainerSeparatorItem());
             foreach (var container in database.AppContainers.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
-            {
-                string containerSid;
-                try
-                {
-                    containerSid = _appContainerService.GetSid(container.Name);
-                }
-                catch
-                {
-                    containerSid = "";
-                }
-
-                combo.Items.Add(new AppContainerDisplayItem(container, containerSid));
-            }
+                combo.Items.Add(new AppContainerDisplayItem(container, container.Sid));
         }
     }
 
@@ -88,7 +64,7 @@ public class AppEditDialogPopulator
     public void PopulateConfigCombo(ComboBox combo)
     {
         combo.Items.Add(new ConfigComboItem(null));
-        foreach (var path in _appConfigService.GetLoadedConfigPaths())
+        foreach (var path in appConfigService.GetLoadedConfigPaths())
             combo.Items.Add(new ConfigComboItem(path));
         combo.SelectedIndex = 0;
     }

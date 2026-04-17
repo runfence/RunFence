@@ -9,7 +9,14 @@ public class LambdaUiThreadInvoker(
     Action<Action>? beginInvoke = null,
     Action<Action>? runOnUiThread = null) : IUiThreadInvoker
 {
-    public void Invoke(Action action) => invoke(action);
+    public T Invoke<T>(Func<T> func)
+    {
+        T result = default!;
+        invoke(() => result = func());
+        return result;
+    }
+
+    // void Invoke(Action) — uses default interface impl (forwards to Invoke<T> via VoidStruct)
     public void BeginInvoke(Action action) => (beginInvoke ?? invoke)(action);
     public void RunOnUiThread(Action action) => (runOnUiThread ?? invoke)(action);
 }

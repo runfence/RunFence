@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Moq;
+using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Persistence;
@@ -129,12 +130,15 @@ public class AppContainerSerializationTests
         // must skip these entries.
         var mockDb = new Mock<IDatabaseService>();
         var grantTracker = new Mock<IGrantConfigTracker>().Object;
+        var handlerMappings = new Mock<IHandlerMappingService>().Object;
         var appConfigService = new AppConfigService(
             new Mock<ILoggingService>().Object,
             new AppConfigIndex(grantTracker),
             grantTracker,
-            new Mock<IHandlerMappingService>().Object,
-            mockDb.Object);
+            handlerMappings,
+            mockDb.Object,
+            new AppConfigSaveHelper(grantTracker, handlerMappings, mockDb.Object),
+            new AppEntryIdGenerator());
         var database = new AppDatabase();
         var containerApp = new AppEntry
         {
@@ -193,25 +197,25 @@ public class AppContainerSerializationTests
     }
 
     [Fact]
-    public void AppEntry_NullLaunchAsLowIntegrity_OmittedFromJson()
+    public void AppEntry_NullPrivilegeLevel_OmittedFromJson()
     {
         var entry = new AppEntry { Name = "Test", ExePath = @"C:\test.exe" };
-        // LaunchAsLowIntegrity = null (default)
+        // PrivilegeLevel = null (default)
 
         var json = JsonSerializer.Serialize(entry, Options);
 
-        Assert.DoesNotContain("launchAsLowIntegrity", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("privilegeLevel", json, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void AppEntry_MissingLaunchAsLowIntegrity_DeserializesAsNull()
+    public void AppEntry_MissingPrivilegeLevel_DeserializesAsNull()
     {
         var json = """{"id":"t0001","name":"Test","exePath":"C:\\test.exe"}""";
 
         var result = JsonSerializer.Deserialize<AppEntry>(json, Options);
 
         Assert.NotNull(result);
-        Assert.Null(result.LaunchAsLowIntegrity);
+        Assert.Null(result.PrivilegeLevel);
     }
 
     [Fact]

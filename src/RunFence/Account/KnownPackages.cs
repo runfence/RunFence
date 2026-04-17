@@ -25,7 +25,8 @@ public static class KnownPackages
     private static string ReadEmbeddedScript(string filename)
     {
         var resourceName = $"RunFence.Account.{filename}";
-        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName)!;
+        using var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded resource '{resourceName}' not found");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
     }

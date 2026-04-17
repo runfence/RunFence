@@ -1,9 +1,10 @@
+using System.Security.AccessControl;
 using RunFence.Core.Models;
 
 namespace RunFence.Acl.UI;
 
 /// <summary>
-/// Compares actual NTFS rights (from ReadRights) against saved rights on a <see cref="GrantedPathEntry"/>.
+/// Compares actual NTFS rights (from ReadGrantState) against saved rights on a <see cref="GrantedPathEntry"/>.
 /// Used to detect drift (yellow row indicator) in the ACL Manager.
 /// </summary>
 public class SavedRightsComparer
@@ -19,8 +20,13 @@ public class SavedRightsComparer
     /// Returns true if they match (no drift).
     /// Returns false if <see cref="GrantedPathEntry.SavedRights"/> is null (not yet populated — triggers auto-populate).
     /// Also returns false if the ACE count for the entry's mode is 0 (no ACE) or &gt; 1 (duplicates).
+    /// <para>
+    /// <paramref name="isFolder"/> is accepted for API consistency with <see cref="FromNtfsState"/>
+    /// but does not affect comparison logic — <see cref="GrantRightsState"/> already exposes
+    /// per-right booleans independent of path type.
+    /// </para>
     /// </summary>
-    public bool MatchesSavedRights(GrantedPathEntry entry, GrantRightsState state, bool isContainer)
+    public bool MatchesSavedRights(GrantedPathEntry entry, GrantRightsState state, bool isContainer, bool isFolder = true)
     {
         if (entry.SavedRights == null)
             return false;
@@ -38,17 +44,17 @@ public class SavedRightsComparer
                 return false;
 
             // Allow mode: compare Execute, Write, Special. Read is always-on (no AllowRead in GrantRightsState).
-            if (saved.Execute != (state.AllowExecute == CheckState.Checked))
+            if (saved.Execute != (state.AllowExecute == RightCheckState.Checked))
                 return false;
-            if (saved.Write != (state.AllowWrite == CheckState.Checked))
+            if (saved.Write != (state.AllowWrite == RightCheckState.Checked))
                 return false;
-            if (saved.Special != (state.AllowSpecial == CheckState.Checked))
+            if (saved.Special != (state.AllowSpecial == RightCheckState.Checked))
                 return false;
 
             // Own comparison (skip for containers)
             if (!isContainer)
             {
-                bool actualOwner = state.IsAccountOwner == CheckState.Checked;
+                bool actualOwner = state.IsAccountOwner == RightCheckState.Checked;
                 if (saved.Own != actualOwner)
                     return false;
             }
@@ -64,9 +70,9 @@ public class SavedRightsComparer
                 return false;
 
             // Deny mode: compare Execute and Read only (Write+Special are always-on, skip)
-            if (saved.Execute != (state.DenyExecute == CheckState.Checked))
+            if (saved.Execute != (state.DenyExecute == RightCheckState.Checked))
                 return false;
-            if (saved.Read != (state.DenyRead == CheckState.Checked))
+            if (saved.Read != (state.DenyRead == RightCheckState.Checked))
                 return false;
 
             // Own comparison (skip for containers)
@@ -75,7 +81,7 @@ public class SavedRightsComparer
             // Deny+checked but owner is someone else (admin or third party) → NOT a mismatch
             if (!isContainer && saved.Own)
             {
-                if (state.IsAccountOwner == CheckState.Checked)
+                if (state.IsAccountOwner == RightCheckState.Checked)
                     return false;
             }
         }
@@ -86,6 +92,7 @@ public class SavedRightsComparer
     /// <summary>
     /// Auto-populates <see cref="GrantedPathEntry.SavedRights"/> from the current NTFS state
     /// for entries where <see cref="GrantedPathEntry.SavedRights"/> is null.
+    /// Uses <see cref="GrantRightsMapper.FromNtfsRights"/> for accurate path-type-aware mapping.
     /// </summary>
     /// <param name="entries">All grant entries to consider.</param>
     /// <param name="readRights">Delegate that returns current NTFS state, or null if the path does not exist.</param>
@@ -107,36 +114,49 @@ public class SavedRightsComparer
             if (state == null)
                 continue;
 
-            entry.SavedRights = BuildSavedRights(entry, state, isContainer);
+            bool isFolder = Directory.Exists(entry.Path);
+            entry.SavedRights = FromNtfsState(state, entry.IsDeny, isContainer, isFolder);
             populated.Add(entry);
         }
 
         return populated;
     }
 
-    private static SavedRightsState BuildSavedRights(GrantedPathEntry entry, GrantRightsState state, bool isContainer)
-        => FromNtfsState(state, entry.IsDeny, isContainer);
-
     /// <summary>
     /// Builds a <see cref="SavedRightsState"/> from the current NTFS state for the given mode.
+    /// Uses <see cref="GrantRightsMapper.FromNtfsRights"/> for accurate path-type-aware mapping.
+    /// <paramref name="isFolder"/> controls which Write/Special masks are applied.
+    /// For non-existent paths where isFolder cannot be determined, default to true (folder assumption).
     /// </summary>
-    public static SavedRightsState FromNtfsState(GrantRightsState state, bool isDeny, bool isContainer)
+    public static SavedRightsState FromNtfsState(GrantRightsState state, bool isDeny, bool isContainer, bool isFolder = true)
     {
-        if (!isDeny)
-        {
-            return new SavedRightsState(
-                Execute: state.AllowExecute == CheckState.Checked,
-                Write: state.AllowWrite == CheckState.Checked,
-                Read: true, // always on in allow mode
-                Special: state.AllowSpecial == CheckState.Checked,
-                Own: !isContainer && state.IsAccountOwner == CheckState.Checked);
-        }
+        var allowRights = BuildAllowRights(state, isFolder);
+        var denyRights = BuildDenyRights(state, isFolder);
+        var ownerState = isContainer ? RightCheckState.Unchecked : state.IsAccountOwner;
+        bool adminOwner = !isContainer && state.IsAdminOwner;
+        return GrantRightsMapper.FromNtfsRights(allowRights, denyRights, isDeny, isFolder, ownerState, adminOwner);
+    }
 
-        return new SavedRightsState(
-            Execute: state.DenyExecute == CheckState.Checked,
-            Write: true, // always on in deny mode
-            Read: state.DenyRead == CheckState.Checked,
-            Special: true, // always on in deny mode
-            Own: !isContainer && state.IsAdminOwner);
+    private static FileSystemRights BuildAllowRights(GrantRightsState state, bool isFolder)
+    {
+        var result = GrantRightsMapper.ReadMask;
+        if (state.AllowExecute == RightCheckState.Checked)
+            result |= GrantRightsMapper.ExecuteMask;
+        if (state.AllowWrite == RightCheckState.Checked)
+            result |= isFolder ? GrantRightsMapper.WriteFolderMask : GrantRightsMapper.WriteFileMask;
+        if (state.AllowSpecial == RightCheckState.Checked)
+            result |= isFolder ? GrantRightsMapper.SpecialFolderMask : GrantRightsMapper.SpecialFileMask;
+        return result;
+    }
+
+    private static FileSystemRights BuildDenyRights(GrantRightsState state, bool isFolder)
+    {
+        var result = (isFolder ? GrantRightsMapper.WriteFolderMask : GrantRightsMapper.WriteFileMask) |
+                     (isFolder ? GrantRightsMapper.SpecialFolderMask : GrantRightsMapper.SpecialFileMask);
+        if (state.DenyRead == RightCheckState.Checked)
+            result |= GrantRightsMapper.ReadMask;
+        if (state.DenyExecute == RightCheckState.Checked)
+            result |= GrantRightsMapper.ExecuteMask;
+        return result;
     }
 }

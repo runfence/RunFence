@@ -9,8 +9,7 @@ namespace RunFence.Tests;
 
 public class LicenseServiceTests : IDisposable
 {
-    private static readonly ECDsa TestKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-    private static readonly byte[] TestPublicKeyBytes = TestKey.ExportSubjectPublicKeyInfo();
+    private static readonly byte[] TestPublicKeyBytes = LicenseTestKey.PublicKeyBytes;
 
     private readonly string _licenseFilePath = Path.Combine(Path.GetTempPath(), $"license_test_{Guid.NewGuid():N}.dat");
     private readonly string _registryKeyPath = $@"Software\RunFenceTests\{Guid.NewGuid():N}";
@@ -42,7 +41,10 @@ public class LicenseServiceTests : IDisposable
     }
 
     private string BuildValidKey(string name = "Test User", uint expiryDays = 0)
-        => TestKeyBuilder.BuildKey(TestKey, TestMachineHash, expiryDays: expiryDays, licenseeName: name);
+    {
+        using var key = LicenseTestKey.CreateSigningKey();
+        return TestKeyBuilder.BuildKey(key, TestMachineHash, expiryDays: expiryDays, licenseeName: name);
+    }
 
     [Fact]
     public void ActivateLicense_ValidKey_ReturnsSuccess_AndStoresInFile()

@@ -6,6 +6,13 @@ namespace RunFence.Core;
 /// Manages interactive user SID state and current user SID caching.
 /// Stateless name resolution utilities have been moved to <see cref="SidNameResolver"/>.
 /// </summary>
+/// <remarks>
+/// <c>_interactiveUserSid</c> and <c>_interactiveUserIsSameAsCurrent</c> are each individually
+/// volatile, but there is no multi-field atomicity guarantee: a reader may observe the new SID
+/// with the old <c>_interactiveUserIsSameAsCurrent</c> flag (or vice versa) during the brief
+/// window of <see cref="InitializeInteractiveUserSid"/>. This is intentional; a brief
+/// inconsistency during a fast user switch is acceptable — the next read will be consistent.
+/// </remarks>
 public static class SidResolutionHelper
 {
     private static readonly string CurrentUserSid = WindowsIdentity.GetCurrent().User!.Value;

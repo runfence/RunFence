@@ -16,4 +16,12 @@ public interface IAccountLoginRestrictionService
     /// When false, sets <c>EnumerateAdministrators=0</c> in the CredUI policy key to suppress enumeration.
     /// </summary>
     void SetUacAdminEnumeration(bool enumerate);
+
+    /// <summary>
+    /// Reads the current <c>EnumerateAdministrators</c> registry value.
+    /// Returns the current DWORD value, or <c>-1</c> if the key/value is absent (Windows default = enumerate).
+    /// The sentinel <c>-1</c> is recognized by <see cref="AccountLifecycleManager"/> as
+    /// "restore by deleting the value" rather than writing a DWORD back.
+    /// </summary>
+    int GetCurrentUacAdminEnumeration();
 }

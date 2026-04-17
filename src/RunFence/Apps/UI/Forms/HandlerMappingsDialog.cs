@@ -1,44 +1,65 @@
-﻿using System.ComponentModel;
+using RunFence.Apps;
+using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
 using RunFence.UI;
 
 namespace RunFence.Apps.UI.Forms;
 
 /// <summary>
-/// Dedicated window showing all handler associations (extension/protocol → app name).
+/// Dedicated window showing all handler associations (extension/protocol → app or direct handler).
 /// Accessible from the ApplicationsPanel toolbar.
 /// </summary>
 public partial class HandlerMappingsDialog : Form
 {
-    private readonly IHandlerMappingService _handlerMappingService;
-    private readonly IAppHandlerRegistrationService _handlerRegistrationService;
+    private readonly HandlerMappingsController _controller;
     private readonly ILoggingService _log;
-    private readonly Func<AppDatabase> _getDatabase;
-    private readonly Action _saveDatabase;
-    private bool _hasChanges;
+    private readonly ShellHelper _shellHelper;
+    private readonly Func<HandlerMappingAddDialog> _createAddDialog;
+    private readonly Func<HandlerMappingEditDirectDialog> _createEditDirectDialog;
+    private readonly Func<HandlerMappingEditAppDialog> _createEditAppDialog;
+    private Func<AppDatabase> _getDatabase = null!;
+    private Action _saveDatabase = null!;
     private int _ctxRowIndex = -1;
     private readonly GridSortHelper _sortHelper = new();
 
-    private static readonly string[] CommonOptions =
-        ["Browser (http, https, .htm, .html)", .. AppHandlerRegistrationService.CommonAssociationSuggestions];
-
     public HandlerMappingsDialog(
-        IHandlerMappingService handlerMappingService,
-        IAppHandlerRegistrationService handlerRegistrationService,
+        HandlerMappingsController controller,
         ILoggingService log,
-        Func<AppDatabase> getDatabase,
-        Action saveDatabase)
+        ShellHelper shellHelper,
+        Func<HandlerMappingAddDialog> createAddDialog,
+        Func<HandlerMappingEditDirectDialog> createEditDirectDialog,
+        Func<HandlerMappingEditAppDialog> createEditAppDialog)
     {
-        _handlerMappingService = handlerMappingService;
-        _handlerRegistrationService = handlerRegistrationService;
+        _controller = controller;
         _log = log;
-        _getDatabase = getDatabase;
-        _saveDatabase = saveDatabase;
+        _shellHelper = shellHelper;
+        _createAddDialog = createAddDialog;
+        _createEditDirectDialog = createEditDirectDialog;
+        _createEditAppDialog = createEditAppDialog;
 
         InitializeComponent();
+
+        // Rename Application → Handler without touching Designer.cs
+        _colAppName.HeaderText = "Handler";
+        _editButton.ToolTipText = "Edit selected association";
+        _ctxEdit.Text = "Edit...";
+
+        // Add Import button after a separator
+        var sep = new ToolStripSeparator();
+        var importButton = new ToolStripButton
+        {
+            DisplayStyle = ToolStripItemDisplayStyle.Image,
+            ToolTipText = "Import associations from interactive user..."
+        };
+        importButton.Image = UiIconFactory.CreateToolbarIcon("\u2B07", Color.FromArgb(0x22, 0x6B, 0xBB));
+        importButton.Click += OnImportClick;
+        var insertIndex = _toolbar.Items.IndexOf(_removeButton) + 1;
+        _toolbar.Items.Insert(insertIndex, sep);
+        _toolbar.Items.Insert(insertIndex + 1, importButton);
+
+        UpdateWarningLabelHeight();
 
         _addButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22));
         _editButton.Image = UiIconFactory.CreateToolbarIcon("\u270E", Color.FromArgb(0x33, 0x66, 0x99));
@@ -48,24 +69,28 @@ public partial class HandlerMappingsDialog : Form
 
         Icon = AppIcons.GetAppIcon();
         _sortHelper.EnableThreeStateSorting(_grid, RefreshGrid);
+    }
 
+    /// <summary>
+    /// Initializes per-use dialog data. Must be called before <see cref="Form.ShowDialog()"/>.
+    /// </summary>
+    public void Initialize(Func<AppDatabase> getDatabase, Action saveDatabase, string interactiveUsername)
+    {
+        _getDatabase = getDatabase;
+        _saveDatabase = saveDatabase;
+        _openDefaultAppsButton.Text = "Open Default Apps for " + interactiveUsername;
+        _controller.Initialize(getDatabase);
         RefreshGrid();
     }
 
     private void RefreshGrid()
     {
         _grid.Rows.Clear();
-        var db = _getDatabase();
-        var effective = _handlerMappingService.GetEffectiveHandlerMappings(db);
-
-        foreach (var kvp in effective.OrderBy(k => k.Key))
+        foreach (var row in _controller.GetGridRows())
         {
-            var app = db.Apps.FirstOrDefault(a => a.Id == kvp.Value);
-            var appName = app?.Name ?? $"(unknown: {kvp.Value})";
-            var rowIndex = _grid.Rows.Add(kvp.Key, appName);
-            _grid.Rows[rowIndex].Tag = kvp;
+            var rowIndex = _grid.Rows.Add(row.Key, row.HandlerDisplay, row.AccountDisplay, row.ArgsTemplate);
+            _grid.Rows[rowIndex].Tag = row.Tag;
         }
-
         UpdateButtonState();
     }
 
@@ -103,7 +128,18 @@ public partial class HandlerMappingsDialog : Form
             OnRemoveClick(sender, e);
     }
 
-    private void OnContextMenuOpening(object? sender, CancelEventArgs e)
+    private void OnGridCellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0)
+            return;
+        var tag = _grid.Rows[e.RowIndex].Tag;
+        if (tag is DirectHandlerRowTag)
+            OnEditDirectHandlerClick(sender, e);
+        else
+            OnChangeAppClick(sender, e);
+    }
+
+    private void OnContextMenuOpening(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         _ctxAdd.Visible = _ctxRowIndex < 0;
         _ctxEdit.Visible = _ctxRowIndex >= 0;
@@ -112,85 +148,34 @@ public partial class HandlerMappingsDialog : Form
 
     private void OnAddClick(object? sender, EventArgs e)
     {
-        using var dlg = new Form();
-        dlg.Text = "Add Handler Association";
-        dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
-        dlg.MaximizeBox = false;
-        dlg.MinimizeBox = false;
-        dlg.StartPosition = FormStartPosition.CenterParent;
-        dlg.ClientSize = new Size(350, 140);
-
-        var keyLabel = new Label { Text = "Extension or Protocol:", Location = new Point(15, 12), AutoSize = true };
-        var keyCombo = new ComboBox
-        {
-            Location = new Point(15, 32),
-            Size = new Size(320, 23),
-            DropDownStyle = ComboBoxStyle.DropDown
-        };
-        keyCombo.Items.AddRange(CommonOptions.Cast<object>().ToArray());
-
-        var appLabel = new Label { Text = "Application:", Location = new Point(15, 62), AutoSize = true };
         var db = _getDatabase();
-        var appCombo = new ComboBox
-        {
-            Location = new Point(15, 82),
-            Size = new Size(320, 23),
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
-        foreach (var app in db.Apps.Where(a => a is { IsFolder: false, IsUrlScheme: false }).OrderBy(a => a.Name))
-            appCombo.Items.Add(new AppComboItem(app));
-        if (appCombo.Items.Count > 0)
-            appCombo.SelectedIndex = 0;
-
-        var okButton = new Button
-        {
-            Text = "OK", DialogResult = DialogResult.OK,
-            Location = new Point(180, 115), Size = new Size(75, 28), FlatStyle = FlatStyle.System
-        };
-        var cancelButton = new Button
-        {
-            Text = "Cancel", DialogResult = DialogResult.Cancel,
-            Location = new Point(260, 115), Size = new Size(75, 28), FlatStyle = FlatStyle.System
-        };
-
-        dlg.AcceptButton = okButton;
-        dlg.CancelButton = cancelButton;
-        dlg.Controls.AddRange(keyLabel, keyCombo, appLabel, appCombo, okButton, cancelButton);
-
+        using var dlg = _createAddDialog();
+        dlg.Initialize(db.Apps);
         if (dlg.ShowDialog(this) != DialogResult.OK)
             return;
-        if (appCombo.SelectedItem is not AppComboItem selectedApp)
-            return;
 
-        var rawKey = keyCombo.Text.Trim().ToLowerInvariant();
-        if (string.IsNullOrEmpty(rawKey))
-            return;
-
-        // Expand "Browser (...)" convenience option
-        string[] keys;
-        if (string.Equals(rawKey, CommonOptions[0], StringComparison.OrdinalIgnoreCase))
-            keys = ["http", "https", ".htm", ".html"];
-        else
-            keys = [rawKey];
-
-        foreach (var key in keys)
+        if (dlg.IsDirectMode)
         {
-            if (!AppHandlerRegistrationService.IsValidKey(key))
-            {
-                MessageBox.Show($"Invalid key '{key}'. Use a file extension (.pdf) or protocol (http).",
-                    "Invalid", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                continue;
-            }
-
-            // Auto-enable AllowPassingArguments on the target app
-            if (!selectedApp.App.AllowPassingArguments)
-                selectedApp.App.AllowPassingArguments = true;
-
-            _handlerMappingService.SetHandlerMapping(key, selectedApp.App.Id, db);
+            var validKeys = ValidateKeys(dlg.ResolvedKeys);
+            if (validKeys.Count == 0)
+                return;
+            _controller.AddDirectHandler(validKeys, dlg.DirectHandlerValue ?? string.Empty);
+        }
+        else
+        {
+            if (dlg.SelectedAppId == null)
+                return;
+            var app = db.Apps.FirstOrDefault(a =>
+                string.Equals(a.Id, dlg.SelectedAppId, StringComparison.OrdinalIgnoreCase));
+            if (app == null)
+                return;
+            var validKeys = ValidateKeys(dlg.ResolvedKeys);
+            if (validKeys.Count == 0)
+                return;
+            _controller.AddAppMapping(validKeys, app, dlg.ArgumentsTemplate);
         }
 
-        _hasChanges = true;
-        SyncAndRefresh();
+        RefreshGrid();
     }
 
     private void OnChangeAppClick(object? sender, EventArgs e)
@@ -198,69 +183,55 @@ public partial class HandlerMappingsDialog : Form
         if (_grid.SelectedRows.Count == 0)
             return;
         var row = _grid.SelectedRows[0];
-        if (row.Tag is not KeyValuePair<string, string> kvp)
+        if (row.Tag is DirectHandlerRowTag)
+        {
+            OnEditDirectHandlerClick(sender, e);
+            return;
+        }
+        if (row.Tag is not AppMappingRowTag appTag)
             return;
 
-        using var dlg = new Form();
-        dlg.Text = $"Change Application — {kvp.Key}";
-        dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
-        dlg.MaximizeBox = false;
-        dlg.MinimizeBox = false;
-        dlg.StartPosition = FormStartPosition.CenterParent;
-        dlg.ClientSize = new Size(350, 100);
-
-        var label = new Label { Text = $"Application for \"{kvp.Key}\":", Location = new Point(15, 12), AutoSize = true };
+        var currentTemplateInRow = row.Cells[3].Value?.ToString();
         var db = _getDatabase();
-        var appCombo = new ComboBox
-        {
-            Location = new Point(15, 32),
-            Size = new Size(320, 23),
-            DropDownStyle = ComboBoxStyle.DropDownList
-        };
-        foreach (var app in db.Apps.Where(a => a is { IsFolder: false, IsUrlScheme: false }).OrderBy(a => a.Name))
-            appCombo.Items.Add(new AppComboItem(app));
+        var currentApp = db.Apps.FirstOrDefault(a => string.Equals(a.Id, appTag.AppId, StringComparison.OrdinalIgnoreCase));
 
-        // Pre-select the current app
-        for (int i = 0; i < appCombo.Items.Count; i++)
-        {
-            if (appCombo.Items[i] is AppComboItem item &&
-                string.Equals(item.App.Id, kvp.Value, StringComparison.OrdinalIgnoreCase))
-            {
-                appCombo.SelectedIndex = i;
-                break;
-            }
-        }
-
-        if (appCombo is { SelectedIndex: < 0, Items.Count: > 0 })
-            appCombo.SelectedIndex = 0;
-
-        var okButton = new Button
-        {
-            Text = "OK", DialogResult = DialogResult.OK,
-            Location = new Point(175, 62), Size = new Size(75, 28), FlatStyle = FlatStyle.System
-        };
-        var cancelButton = new Button
-        {
-            Text = "Cancel", DialogResult = DialogResult.Cancel,
-            Location = new Point(260, 62), Size = new Size(75, 28), FlatStyle = FlatStyle.System
-        };
-
-        dlg.AcceptButton = okButton;
-        dlg.CancelButton = cancelButton;
-        dlg.Controls.AddRange(label, appCombo, okButton, cancelButton);
-
+        using var dlg = _createEditAppDialog();
+        dlg.Initialize(appTag.Key, db.Apps, currentApp, currentTemplateInRow);
         if (dlg.ShowDialog(this) != DialogResult.OK)
             return;
-        if (appCombo.SelectedItem is not AppComboItem selected)
-            return;
-        if (string.Equals(selected.App.Id, kvp.Value, StringComparison.OrdinalIgnoreCase))
+        if (dlg.SelectedApp is not AppEntry selected)
             return;
 
-        _handlerMappingService.SetHandlerMapping(kvp.Key, selected.App.Id, db);
-        if (!selected.App.AllowPassingArguments)
-            selected.App.AllowPassingArguments = true;
-        _hasChanges = true;
-        SyncAndRefresh();
+        if (_controller.ChangeAppMapping(appTag.Key, appTag.AppId, selected, dlg.NewTemplate, currentTemplateInRow))
+            RefreshGrid();
+    }
+
+    private void OnEditDirectHandlerClick(object? sender, EventArgs e)
+    {
+        if (_grid.SelectedRows.Count == 0)
+            return;
+        var row = _grid.SelectedRows[0];
+        if (row.Tag is not DirectHandlerRowTag tag)
+            return;
+
+        var currentEntryNullable = _controller.GetDirectHandlerEntry(tag.Key);
+        if (currentEntryNullable == null)
+            return;
+
+        var currentEntry = currentEntryNullable.Value;
+        var currentValue = currentEntry.ClassName ?? currentEntry.Command ?? string.Empty;
+
+        using var dlg = _createEditDirectDialog();
+        dlg.Initialize(tag.Key, currentValue);
+        if (dlg.ShowDialog(this) != DialogResult.OK)
+            return;
+
+        var newValue = dlg.NewValue;
+        if (newValue == null)
+            return;
+
+        _controller.EditDirectHandler(tag.Key, currentEntry, newValue);
+        RefreshGrid();
     }
 
     private void OnRemoveClick(object? sender, EventArgs e)
@@ -268,20 +239,52 @@ public partial class HandlerMappingsDialog : Form
         if (_grid.SelectedRows.Count == 0)
             return;
         var row = _grid.SelectedRows[0];
-        if (row.Tag is not KeyValuePair<string, string> kvp)
+        if (row.Tag is DirectHandlerRowTag directTag)
+        {
+            _controller.RemoveDirectHandler(directTag);
+            RefreshGrid();
+        }
+        else if (row.Tag is AppMappingRowTag appTag)
+        {
+            _controller.RemoveMapping(appTag);
+            RefreshGrid();
+        }
+    }
+
+    private void OnImportClick(object? sender, EventArgs e)
+    {
+        var entries = _controller.GetInteractiveUserAssociations();
+        if (entries.Count == 0)
+        {
+            MessageBox.Show(
+                "No user-specific associations found in the interactive user's registry.",
+                "Import Associations", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var existingKeys = _controller.GetExistingKeys();
+        using var importDlg = new ImportAssociationsDialog();
+        importDlg.Initialize(entries, existingKeys);
+
+        if (importDlg.ShowDialog(this) != DialogResult.OK)
             return;
 
-        var db = _getDatabase();
-        _handlerMappingService.RemoveHandlerMapping(kvp.Key, db);
-        _hasChanges = true;
-        SyncAndRefresh();
+        var selected = importDlg.SelectedEntries
+            .Where(entry => AppHandlerRegistrationService.IsValidKey(entry.Key))
+            .ToList();
+
+        if (selected.Count == 0)
+            return;
+
+        _controller.ApplyImportedAssociations(selected);
+        RefreshGrid();
     }
 
     private void OnOpenDefaultAppsClick(object? sender, EventArgs e)
     {
         try
         {
-            ShellHelper.OpenDefaultAppsSettings();
+            _shellHelper.OpenDefaultAppsSettings();
         }
         catch (Exception ex)
         {
@@ -289,12 +292,27 @@ public partial class HandlerMappingsDialog : Form
         }
     }
 
+    private void OnDialogSizeChanged(object? sender, EventArgs e) => UpdateWarningLabelHeight();
+
+    private void UpdateWarningLabelHeight()
+    {
+        var textWidth = _warningLabel.Width - _warningLabel.Padding.Horizontal;
+        if (textWidth <= 0) return;
+        var textSize = TextRenderer.MeasureText(_warningLabel.Text, _warningLabel.Font,
+            new Size(textWidth, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl);
+        _warningLabel.Height = textSize.Height + _warningLabel.Padding.Vertical;
+    }
+
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (_hasChanges)
+        if (_controller.HasChanges)
         {
+            // Apply pending AllowPassingArguments changes to live objects before saving
+            _controller.ApplyPendingAllowPassingArgs(_getDatabase());
             _saveDatabase();
-            if (MessageBox.Show(
+            if (_controller.HasNewCapability() &&
+                MessageBox.Show(
                     "Handler registrations have changed. Would you like to open Windows Default Apps settings?",
                     "Handler Associations", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
             {
@@ -303,17 +321,27 @@ public partial class HandlerMappingsDialog : Form
         }
     }
 
-    private void SyncAndRefresh()
+    private void OnReapplyClick(object? sender, EventArgs e)
     {
-        var db = _getDatabase();
-        var effective = _handlerMappingService.GetEffectiveHandlerMappings(db);
-        _handlerRegistrationService.Sync(effective, db.Apps);
+        _controller.Sync();
         RefreshGrid();
     }
 
-    private class AppComboItem(AppEntry app)
+    /// <summary>
+    /// Validates keys against <see cref="AppHandlerRegistrationService.IsValidKey"/>.
+    /// Shows a warning for each invalid key and returns only the valid subset.
+    /// </summary>
+    private List<string> ValidateKeys(IReadOnlyList<string> keys)
     {
-        public AppEntry App { get; } = app;
-        public override string ToString() => App.Name;
+        var valid = new List<string>(keys.Count);
+        foreach (var key in keys)
+        {
+            if (AppHandlerRegistrationService.IsValidKey(key))
+                valid.Add(key);
+            else
+                MessageBox.Show($"Invalid key '{key}'. Use a file extension (.pdf) or protocol (http).",
+                    "Invalid", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        return valid;
     }
 }

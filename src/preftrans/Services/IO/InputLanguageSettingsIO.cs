@@ -1,15 +1,16 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class InputLanguageSettingsIO
+public class InputLanguageSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static InputLanguageSettings Read()
+    public InputLanguageSettings Read()
     {
         var inputLang = new InputLanguageSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegKeyboardLayout + @"\Preload");
             if (key != null)
@@ -22,7 +23,7 @@ public static class InputLanguageSettingsIO
                 }
             }
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegKeyboardLayout + @"\Substitutes");
             if (key != null)
@@ -35,7 +36,7 @@ public static class InputLanguageSettingsIO
                 }
             }
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegKeyboardLayout + @"\Toggle");
             if (key != null)
@@ -48,10 +49,10 @@ public static class InputLanguageSettingsIO
         return inputLang;
     }
 
-    public static void Write(InputLanguageSettings inputLang)
+    public void Write(InputLanguageSettings inputLang)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (inputLang.Preload != null)
             {
@@ -60,7 +61,7 @@ public static class InputLanguageSettingsIO
                 // (e.g. previously configured input languages) do not persist alongside the
                 // restored set, which could cause duplicate or conflicting language entries.
                 foreach (var name in key.GetValueNames())
-                    SafeExecutor.Try(() => key.DeleteValue(name, throwOnMissingValue: false), "writing");
+                    safe.Try(() => key.DeleteValue(name, throwOnMissingValue: false), "writing");
                 foreach (var (name, val) in inputLang.Preload)
                 {
                     key.SetValue(name, val, RegistryValueKind.String);
@@ -68,14 +69,14 @@ public static class InputLanguageSettingsIO
                 }
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (inputLang.Substitutes != null)
             {
                 using var key = Registry.CurrentUser.CreateSubKey(Constants.RegKeyboardLayout + @"\Substitutes");
                 // Delete all existing values first — same reason as Preload.
                 foreach (var name in key.GetValueNames())
-                    SafeExecutor.Try(() => key.DeleteValue(name, throwOnMissingValue: false), "writing");
+                    safe.Try(() => key.DeleteValue(name, throwOnMissingValue: false), "writing");
                 foreach (var (name, val) in inputLang.Substitutes)
                 {
                     key.SetValue(name, val, RegistryValueKind.String);
@@ -83,7 +84,7 @@ public static class InputLanguageSettingsIO
                 }
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (inputLang.SwitchHotkey != null || inputLang.LanguageHotkey != null || inputLang.LayoutHotkey != null)
             {
@@ -98,6 +99,10 @@ public static class InputLanguageSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.InputLanguage = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.InputLanguage != null) Write(s.InputLanguage); }
 }

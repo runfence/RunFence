@@ -5,14 +5,11 @@ using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.QuickAccess;
 using RunFence.Acl.UI;
-using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
-using RunFence.Launch.Container;
-using RunFence.Licensing;
 using RunFence.Persistence;
 using RunFence.RunAs;
 using RunFence.RunAs.UI;
@@ -35,30 +32,25 @@ public class RunAsResultProcessorTests : IDisposable
     private const string FilePath = @"C:\Apps\test.exe";
 
     private readonly Mock<IAppStateProvider> _appState = new();
-    private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
-    private readonly Mock<IDataChangeNotifier> _dataChangeNotifier = new();
     private readonly Mock<ILoggingService> _log = new();
-    private readonly Mock<IAppConfigService> _appConfigService = new();
     private readonly Mock<IDatabaseService> _databaseService = new();
-    private readonly Mock<IAclService> _aclService = new();
     private readonly Mock<IShortcutService> _shortcutService = new();
     private readonly Mock<IIconService> _iconService = new();
-    private readonly Mock<IAppLaunchOrchestrator> _launchOrchestrator = new();
-    private readonly Mock<IPermissionGrantService> _permissionGrantService = new();
-    private readonly Mock<IProcessLaunchService> _processLaunchService = new();
-    private readonly Mock<IAppContainerService> _appContainerService = new();
+    private readonly Mock<IAppEntryLauncher> _launchOrchestrator = new();
+    private readonly Mock<IPathGrantService> _pathGrantService = new();
+
     private readonly Mock<ICredentialEncryptionService> _encryptionService = new();
     private readonly Mock<ISidResolver> _sidResolver = new();
-    private readonly Mock<IFolderHandlerService> _folderHandlerService = new();
-    private readonly Mock<IProfileRepairHelper> _profileRepairHelper = new();
     private readonly Mock<IRunAsLaunchErrorHandler> _launchErrorHandler = new();
+    private readonly Mock<ILaunchFacade> _directLauncherFacade = new();
     private readonly AppDatabase _database = new();
     private readonly CredentialStore _credentialStore = new();
     private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
-    private readonly FakeRunAsAppEditDialogHandler _fakeDialogHandler = new();
+    private readonly FakeRunAsAppEditDialogHandler _fakeDialogHandler;
 
     public RunAsResultProcessorTests()
     {
+        _fakeDialogHandler = new FakeRunAsAppEditDialogHandler(_pinKey);
         _appState.Setup(c => c.Database).Returns(_database);
         _launchErrorHandler
             .Setup(h => h.RunWithErrorHandling(It.IsAny<Action>(), It.IsAny<string>()))
@@ -68,7 +60,6 @@ public class RunAsResultProcessorTests : IDisposable
     public void Dispose()
     {
         _pinKey.Dispose();
-        _fakeDialogHandler.Dispose();
     }
 
     private SessionContext CreateSession() => new()
@@ -78,24 +69,18 @@ public class RunAsResultProcessorTests : IDisposable
         PinDerivedKey = _pinKey
     };
 
-    private readonly Mock<ILicenseService> _licenseService = new();
-
-    private RunAsAppEntryManager CreateAppEntryManager()
-        => new(
-            _appState.Object,
-            _uiThreadInvoker.Object,
-            _dataChangeNotifier.Object,
-            _log.Object,
-            CreateSession(),
-            _appConfigService.Object,
-            _aclService.Object,
-            _shortcutService.Object,
+    private RunAsAppShortcutCreator CreateShortcutCreator()
+    {
+        var session = CreateSession();
+        var sessionProvider = new LambdaSessionProvider(() => session);
+        return new RunAsAppShortcutCreator(
             _iconService.Object,
-            new AppEntryEnforcementHelper(_aclService.Object, _shortcutService.Object, _iconService.Object, _sidResolver.Object,
-                new Mock<IInteractiveUserDesktopProvider>().Object),
-            _sidResolver.Object,
-            _licenseService.Object,
-            _launchErrorHandler.Object);
+            new Mock<ISidNameCacheService>().Object,
+            _shortcutService.Object,
+            new Mock<IBesideTargetShortcutService>().Object,
+            sessionProvider,
+            _log.Object);
+    }
 
     private RunAsCredentialPersister CreateCredentialPersister()
         => new(
@@ -112,33 +97,51 @@ public class RunAsResultProcessorTests : IDisposable
     }
 
     private RunAsDirectLauncher CreateDirectLauncher()
-        => new(_appState.Object, _launchOrchestrator.Object, _processLaunchService.Object, _sidResolver.Object, _folderHandlerService.Object,
-            _profileRepairHelper.Object, _launchErrorHandler.Object);
+    {
+        var sidNameCache = new Mock<ISidNameCacheService>();
+        sidNameCache.Setup(s => s.GetDisplayName(It.IsAny<string>())).Returns((string sid) => sid);
+        return new(_appState.Object, _directLauncherFacade.Object, sidNameCache.Object,
+            _sidResolver.Object, _launchErrorHandler.Object);
+    }
+
+    private RunAsPermissionApplier CreatePermissionApplier()
+        => new(
+            _pathGrantService.Object,
+            _databaseService.Object,
+            CreateSession(),
+            _appState.Object,
+            _log.Object,
+            new Mock<IQuickAccessPinService>().Object);
+
+    private RunAsLaunchDispatcher CreateLaunchDispatcher(RunAsDirectLauncher directLauncher)
+    {
+        var sidNameCache = new Mock<ISidNameCacheService>();
+        sidNameCache.Setup(s => s.GetDisplayName(It.IsAny<string>())).Returns((string sid) => sid);
+        return new RunAsLaunchDispatcher(
+            _fakeDialogHandler,
+            _launchOrchestrator.Object,
+            directLauncher,
+            sidNameCache.Object,
+            _appState.Object,
+            _launchErrorHandler.Object,
+            CreateShortcutCreator());
+    }
 
     private RunAsResultProcessor CreateProcessor()
     {
         // We use a real RunAsCredentialPersister backed by the mock IDatabaseService.
         // All test cases use CreateAppEntryOnly=false so _fakeDialogHandler methods are never called.
-        var appEntryManager = CreateAppEntryManager();
         var persister = CreateCredentialPersister();
         var dosProtection = CreateDosProtection();
         var directLauncher = CreateDirectLauncher();
 
         return new RunAsResultProcessor(
-            appEntryManager,
-            _fakeDialogHandler,
-            directLauncher,
-            _launchOrchestrator.Object,
-            _permissionGrantService.Object,
+            CreatePermissionApplier(),
+            CreateLaunchDispatcher(directLauncher),
             persister,
             dosProtection,
-            _databaseService.Object,
             _shortcutService.Object,
-            CreateSession(),
-            _appState.Object,
-            _log.Object,
-            _appContainerService.Object,
-            new Mock<IQuickAccessPinService>().Object);
+            _log.Object);
     }
 
     private static RunAsDialogResult MakeCredentialResult(
@@ -150,8 +153,7 @@ public class RunAsResultProcessorTests : IDisposable
             SelectedContainer: null,
             PermissionGrant: permissionGrant,
             CreateAppEntryOnly: false,
-            LaunchAsLowIntegrity: false,
-            LaunchAsSplitToken: false,
+            PrivilegeLevel: PrivilegeLevel.Basic,
             UpdateOriginalShortcut: false,
             RevertShortcutRequested: false,
             EditExistingApp: null,
@@ -161,17 +163,7 @@ public class RunAsResultProcessorTests : IDisposable
         AppContainerEntry container,
         AppEntry? existingApp = null,
         AncestorPermissionResult? permissionGrant = null)
-        => new(
-            Credential: null,
-            SelectedContainer: container,
-            PermissionGrant: permissionGrant,
-            CreateAppEntryOnly: false,
-            LaunchAsLowIntegrity: false,
-            LaunchAsSplitToken: false,
-            UpdateOriginalShortcut: false,
-            RevertShortcutRequested: false,
-            EditExistingApp: null,
-            ExistingAppForLaunch: existingApp);
+        => RunAsTestHelpers.MakeContainerResult(container, existingApp, permissionGrant: permissionGrant);
 
     // ── ProcessCredentialResult — permission grant → save → launch ──────
 
@@ -187,9 +179,9 @@ public class RunAsResultProcessorTests : IDisposable
 
         processor.ProcessCredentialResult(result, FilePath, null, null, false, null);
 
-        _permissionGrantService.Verify(
+        _pathGrantService.Verify(
             p => p.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>()),
+                It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()),
             Times.Never);
         _databaseService.Verify(d => d.SaveConfig(It.IsAny<AppDatabase>(),
             It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
@@ -200,17 +192,17 @@ public class RunAsResultProcessorTests : IDisposable
     {
         var credential = new CredentialEntry { Sid = UserSid };
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
-        _permissionGrantService
-            .Setup(p => p.EnsureAccess(@"C:\Data", UserSid, FileSystemRights.ReadAndExecute, null))
-            .Returns(new EnsureAccessResult(GrantAdded: true, DatabaseModified: true));
+        _pathGrantService
+            .Setup(p => p.EnsureAccess(UserSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
 
         using var result = MakeCredentialResult(credential, permissionGrant: permissionGrant);
         var processor = CreateProcessor();
 
         processor.ProcessCredentialResult(result, FilePath, null, null, false, null);
 
-        _permissionGrantService.Verify(
-            p => p.EnsureAccess(@"C:\Data", UserSid, FileSystemRights.ReadAndExecute, null),
+        _pathGrantService.Verify(
+            p => p.EnsureAccess(UserSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false),
             Times.Once);
         // SaveConfig may be called multiple times (permission grant save + last-used account save)
         _databaseService.Verify(
@@ -226,10 +218,10 @@ public class RunAsResultProcessorTests : IDisposable
         _database.Settings.LastUsedRunAsAccountSid = UserSid;
         var credential = new CredentialEntry { Sid = UserSid };
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
-        _permissionGrantService
+        _pathGrantService
             .Setup(p => p.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>()))
-            .Returns(new EnsureAccessResult());
+                It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
+            .Returns(new GrantOperationResult());
 
         using var result = MakeCredentialResult(credential, permissionGrant: permissionGrant);
         var processor = CreateProcessor();
@@ -252,7 +244,7 @@ public class RunAsResultProcessorTests : IDisposable
 
         processor.ProcessCredentialResult(result, FilePath, "--arg", null, false, null);
 
-        _launchOrchestrator.Verify(o => o.Launch(existingApp, "--arg", null), Times.Once);
+        _launchOrchestrator.Verify(o => o.Launch(existingApp, "--arg", null, It.IsAny<Func<string, string, bool>?>()), Times.Once);
     }
 
     [Fact]
@@ -264,10 +256,8 @@ public class RunAsResultProcessorTests : IDisposable
 
         processor.ProcessCredentialResult(result, FilePath, null, null, false, null);
 
-        // Direct launcher calls launchOrchestrator.Launch internally via a temp app
-        _launchOrchestrator.Verify(o => o.Launch(
-            It.Is<AppEntry>(a => a.ExePath == FilePath && a.AccountSid == UserSid),
-            null, null), Times.Once);
+        _directLauncherFacade.Verify(f => f.LaunchFile(It.Is<ProcessLaunchTarget>(t => t.ExePath == FilePath && t.Arguments == null),
+            It.Is<AccountLaunchIdentity>(a => a.Sid == UserSid), It.IsAny<Func<string, string, bool>?>()), Times.Once);
     }
 
     // ── ProcessContainerResult — basic flow ─────────────────────────────
@@ -275,20 +265,19 @@ public class RunAsResultProcessorTests : IDisposable
     [Fact]
     public void ProcessContainerResult_WithPermissionGrantAndContainer_GrantsAccess()
     {
-        var container = new AppContainerEntry { Name = ContainerName };
+        var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
-        _appContainerService.Setup(s => s.GetSid(ContainerName)).Returns(ContainerSid);
-        _permissionGrantService
-            .Setup(p => p.EnsureAccess(@"C:\Data", ContainerSid, FileSystemRights.ReadAndExecute, null))
-            .Returns(new EnsureAccessResult(GrantAdded: true, DatabaseModified: true));
+        _pathGrantService
+            .Setup(p => p.EnsureAccess(ContainerSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
 
         using var result = MakeContainerResult(container, permissionGrant: permissionGrant);
         var processor = CreateProcessor();
 
         processor.ProcessContainerResult(result, FilePath, null, null, false, null);
 
-        _permissionGrantService.Verify(
-            p => p.EnsureAccess(@"C:\Data", ContainerSid, FileSystemRights.ReadAndExecute, null),
+        _pathGrantService.Verify(
+            p => p.EnsureAccess(ContainerSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false),
             Times.Once);
         // SaveConfig must be called at least once for the permission grant save
         _databaseService.Verify(d => d.SaveConfig(_database,
@@ -298,7 +287,7 @@ public class RunAsResultProcessorTests : IDisposable
     [Fact]
     public void ProcessContainerResult_ExistingApp_LaunchesViaOrchestrator()
     {
-        var container = new AppContainerEntry { Name = ContainerName };
+        var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
         var existingApp = new AppEntry
         {
             Id = "app01", Name = "MyApp",
@@ -310,7 +299,7 @@ public class RunAsResultProcessorTests : IDisposable
 
         processor.ProcessContainerResult(result, FilePath, null, null, false, null);
 
-        _launchOrchestrator.Verify(o => o.Launch(existingApp, null, null), Times.Once);
+        _launchOrchestrator.Verify(o => o.Launch(existingApp, null, null, It.IsAny<Func<string, string, bool>?>()), Times.Once);
     }
 
     // ── ProcessShortcutRevert ───────────────────────────────────────────
@@ -341,45 +330,4 @@ public class RunAsResultProcessorTests : IDisposable
         Assert.Throws<IOException>(() => processor.ProcessShortcutRevert(lnkPath, app));
     }
 
-    // ── Stub for RunAsAppEditDialogHandler ───────────────────────────────
-
-    /// <summary>
-    /// Minimal stub that satisfies the processor constructor without any WinForms dependencies.
-    /// None of the tested code paths call into this handler; its methods are never invoked.
-    /// </summary>
-    private sealed class FakeRunAsAppEditDialogHandler : RunAsAppEditDialogHandler, IDisposable
-    {
-        private readonly ProtectedBuffer _pinKey;
-
-        public FakeRunAsAppEditDialogHandler() : this(new ProtectedBuffer(new byte[32], protect: false))
-        {
-        }
-
-        private FakeRunAsAppEditDialogHandler(ProtectedBuffer pinKey) : base(
-            new Mock<IAppStateProvider>().Object,
-            new Mock<IDataChangeNotifier>().Object,
-            new Mock<IAppLaunchOrchestrator>().Object,
-            new Mock<ILoggingService>().Object,
-            new SessionContext
-            {
-                Database = new AppDatabase(),
-                CredentialStore = new CredentialStore(),
-                PinDerivedKey = pinKey
-            },
-            new Mock<IAppConfigService>().Object,
-            null!, // Func<AppEditDialog> factory — not called in tested paths
-            new AppEntryPermissionPrompter(
-                new Mock<IAppContainerService>().Object,
-                new Mock<ILoggingService>().Object,
-                new Mock<IAclPermissionService>().Object,
-                new Mock<IPermissionGrantService>().Object,
-                new LambdaDatabaseProvider(() => new AppDatabase()),
-                new Mock<IQuickAccessPinService>().Object),
-            null!) // RunAsAppEntryManager — not called in tested paths
-        {
-            _pinKey = pinKey;
-        }
-
-        public void Dispose() => _pinKey.Dispose();
-    }
 }

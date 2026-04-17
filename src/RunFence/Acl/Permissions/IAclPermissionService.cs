@@ -1,31 +1,13 @@
 using System.Security.AccessControl;
-using RunFence.Core;
 
 namespace RunFence.Acl.Permissions;
 
 /// <summary>
-/// Injectable service for ACL permission checks and write operations: granting rights,
-/// restricting access, ensuring access with user confirmation, and querying effective permissions.
+/// Injectable service for ACL permission checks and write operations: restricting access
+/// and querying effective permissions.
 /// </summary>
 public interface IAclPermissionService
 {
-    /// <summary>
-    /// Grants <paramref name="rights"/> (default: ReadAndExecute with full inheritance
-    /// on directories) to <paramref name="accountSid"/> on <paramref name="path"/>.
-    /// </summary>
-    void GrantRights(string path, string accountSid,
-        FileSystemRights rights = FileSystemRights.ReadAndExecute);
-
-    /// <summary>
-    /// Checks and, if needed, grants <paramref name="rights"/> to <paramref name="accountSid"/>
-    /// on the exact <paramref name="path"/> (caller resolves the directory if needed).
-    /// <paramref name="confirm"/> returns true to proceed, false to skip; cancel throws
-    /// <see cref="OperationCanceledException"/> from inside the callback. Null = silent grant.
-    /// Returns true if an ACE was actually added, false otherwise (already sufficient / declined / error).
-    /// </summary>
-    bool EnsureRights(string path, string accountSid, FileSystemRights rights,
-        ILoggingService logger, Func<string, bool>? confirm = null);
-
     /// <summary>
     /// Disables inheritance on a file and restricts access to SYSTEM (FullControl) and
     /// Administrators (FullControl) only. All other ACEs are removed.
@@ -48,9 +30,11 @@ public interface IAclPermissionService
     /// <summary>
     /// Returns true if <paramref name="accountSid"/> does not have
     /// <paramref name="requiredRights"/> on <paramref name="filePath"/>.
+    /// When <paramref name="unelevated"/> is true, the Administrators group is excluded from the
+    /// effective-rights check: an unelevated token cannot use Admins group for allow ACEs.
     /// </summary>
     bool NeedsPermissionGrant(string filePath, string accountSid,
-        FileSystemRights requiredRights = FileSystemRights.ReadAndExecute);
+        FileSystemRights requiredRights = FileSystemRights.ReadAndExecute, bool unelevated = false);
 
     /// <summary>
     /// Returns true if <paramref name="accountSid"/> needs ReadAndExecute on the directory

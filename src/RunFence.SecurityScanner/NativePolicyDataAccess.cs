@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using Microsoft.Win32;
 
 namespace RunFence.SecurityScanner;
@@ -6,8 +7,12 @@ namespace RunFence.SecurityScanner;
 /// <summary>
 /// Implements policy and service-state queries that require P/Invoke:
 /// account lockout policy (NetAPI/SAM), Windows Firewall service state (SCM),
-/// and drive root enumeration (QueryDosDevice for SUBST detection).
+/// drive root enumeration (QueryDosDevice for SUBST detection),
+/// and local group membership resolution (LsaLookupSids/NetLocalGroupGetMembers).
 /// Extracted from <see cref="DefaultScannerDataAccess"/> to isolate P/Invoke declarations.
+///
+/// Note: The native P/Invoke declarations and their direct wrapper methods (SAM, SCM, LSA,
+/// NetLocalGroup, Drive APIs) are tightly coupled native interop — not business logic to extract.
 /// </summary>
 public class NativePolicyDataAccess
 {
@@ -230,6 +235,217 @@ public class NativePolicyDataAccess
         {
             return null;
         }
+    }
+
+    [DllImport("advapi32.dll")]
+    private static extern int LsaOpenPolicy(
+        nint systemName,
+        ref OBJECT_ATTRIBUTES objectAttributes,
+        uint desiredAccess,
+        out nint policyHandle);
+
+    [DllImport("advapi32.dll")]
+    private static extern int LsaLookupSids(
+        nint policyHandle,
+        int count,
+        nint[] sids,
+        out nint referencedDomains,
+        out nint names);
+
+    [DllImport("advapi32.dll")]
+    private static extern int LsaFreeMemory(nint buffer);
+
+    [DllImport("advapi32.dll")]
+    private static extern int LsaClose(nint objectHandle);
+
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern int NetLocalGroupGetMembers(
+        string? servername,
+        string localGroupName,
+        int level,
+        out nint bufptr,
+        int prefmaxlen,
+        out int entriesread,
+        out int totalentries,
+        ref nint resumehandle);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_UNICODE_STRING
+    {
+        public ushort Length;
+        public ushort MaximumLength;
+        public nint Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_TRANSLATED_NAME
+    {
+        public int Use;
+        public LSA_UNICODE_STRING Name;
+        public int DomainIndex;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LOCALGROUP_MEMBERS_INFO_0
+    {
+        public nint lgrmi0_sid;
+    }
+
+    private const uint POLICY_LOOKUP_NAMES = 0x00000800;
+    private const int STATUS_SUCCESS = 0;
+    private const int STATUS_SOME_NOT_MAPPED = 0x00000107;
+    private const int SID_TYPE_ALIAS = 4; // SidTypeAlias: local SAM group
+
+    private string? _localDomainSid;
+
+    /// <summary>
+    /// Returns the local machine's domain SID prefix (e.g. "S-1-5-21-X-Y-Z"), used to
+    /// distinguish local SIDs from domain SIDs without a network roundtrip.
+    /// </summary>
+    public string? GetLocalDomainSid()
+    {
+        if (_localDomainSid != null)
+            return _localDomainSid;
+
+        if (NetUserModalsGet(null, 2, out var ptr) != 0)
+            return null;
+
+        try
+        {
+            var info = Marshal.PtrToStructure<USER_MODALS_INFO_2>(ptr);
+            if (info.usrmod2_domain_id == nint.Zero)
+                return null;
+            _localDomainSid = new SecurityIdentifier(info.usrmod2_domain_id).Value;
+            return _localDomainSid;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            NetApiBufferFree(ptr);
+        }
+    }
+
+    /// <summary>
+    /// Resolves all provided SID strings in a single <c>LsaLookupSids</c> call and returns
+    /// those that are local SAM groups (SidTypeAlias), mapping SID string → group name.
+    /// SIDs that are users, well-known groups, or cannot be resolved are omitted.
+    /// </summary>
+    public Dictionary<string, string> ResolveLocalGroupNames(IReadOnlyList<string> sidStrings)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (sidStrings.Count == 0)
+            return result;
+
+        var validEntries = new List<(int OriginalIndex, byte[] Binary)>(sidStrings.Count);
+        for (int i = 0; i < sidStrings.Count; i++)
+        {
+            try
+            {
+                var si = new SecurityIdentifier(sidStrings[i]);
+                var bin = new byte[si.BinaryLength];
+                si.GetBinaryForm(bin, 0);
+                validEntries.Add((i, bin));
+            }
+            catch { /* invalid SID string — skip */ }
+        }
+
+        if (validEntries.Count == 0)
+            return result;
+
+        var handles = new GCHandle[validEntries.Count];
+        var sidPtrs = new nint[validEntries.Count];
+        try
+        {
+            for (int i = 0; i < validEntries.Count; i++)
+            {
+                handles[i] = GCHandle.Alloc(validEntries[i].Binary, GCHandleType.Pinned);
+                sidPtrs[i] = handles[i].AddrOfPinnedObject();
+            }
+
+            var objAttrs = new OBJECT_ATTRIBUTES { Length = Marshal.SizeOf<OBJECT_ATTRIBUTES>() };
+            if (LsaOpenPolicy(nint.Zero, ref objAttrs, POLICY_LOOKUP_NAMES, out nint policy) != STATUS_SUCCESS)
+                return result;
+
+            try
+            {
+                int status = LsaLookupSids(policy, validEntries.Count, sidPtrs,
+                    out nint domains, out nint names);
+                if (status == STATUS_SUCCESS || status == STATUS_SOME_NOT_MAPPED)
+                {
+                    try
+                    {
+                        int stride = Marshal.SizeOf<LSA_TRANSLATED_NAME>();
+                        for (int i = 0; i < validEntries.Count; i++)
+                        {
+                            var entry = Marshal.PtrToStructure<LSA_TRANSLATED_NAME>(names + i * stride);
+                            if (entry.Use == SID_TYPE_ALIAS
+                                && entry.Name.Length > 0
+                                && entry.Name.Buffer != nint.Zero)
+                            {
+                                var name = Marshal.PtrToStringUni(entry.Name.Buffer,
+                                    entry.Name.Length / 2);
+                                if (!string.IsNullOrEmpty(name))
+                                    result[sidStrings[validEntries[i].OriginalIndex]] = name;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        LsaFreeMemory(domains);
+                        LsaFreeMemory(names);
+                    }
+                }
+            }
+            finally
+            {
+                LsaClose(policy);
+            }
+        }
+        catch { /* return partially-filled result */ }
+        finally
+        {
+            foreach (var h in handles)
+                if (h.IsAllocated) h.Free();
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Enumerates direct member SIDs of a local SAM group by name via <c>NetLocalGroupGetMembers</c>.
+    /// Returns null if the group cannot be enumerated.
+    /// </summary>
+    public HashSet<string>? GetLocalGroupMemberSids(string groupName)
+    {
+        nint resumeHandle = nint.Zero;
+        int status = NetLocalGroupGetMembers(null, groupName, 0, out nint buf, -1,
+            out int entriesRead, out _, ref resumeHandle);
+        if (status != 0)
+            return null;
+
+        var members = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            int stride = Marshal.SizeOf<LOCALGROUP_MEMBERS_INFO_0>();
+            for (int i = 0; i < entriesRead; i++)
+            {
+                var info = Marshal.PtrToStructure<LOCALGROUP_MEMBERS_INFO_0>(buf + i * stride);
+                if (info.lgrmi0_sid != nint.Zero)
+                {
+                    try { members.Add(new SecurityIdentifier(info.lgrmi0_sid).Value); }
+                    catch { }
+                }
+            }
+        }
+        finally
+        {
+            NetApiBufferFree(buf);
+        }
+
+        return members;
     }
 
     public IEnumerable<string> GetDriveRoots()

@@ -1,15 +1,16 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class ThemeSettingsIO
+public class ThemeSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static ThemeSettings Read()
+    public ThemeSettings Read()
     {
         var theme = new ThemeSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegThemesPersonalize);
             if (key == null)
@@ -19,7 +20,7 @@ public static class ThemeSettingsIO
             theme.EnableTransparency = key.GetValue("EnableTransparency") as int?;
             theme.ColorPrevalence = key.GetValue("ColorPrevalence") as int?;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegDWM);
             var val = key?.GetValue("AccentColor");
@@ -29,10 +30,10 @@ public static class ThemeSettingsIO
         return theme;
     }
 
-    public static void Write(ThemeSettings theme)
+    public void Write(ThemeSettings theme)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegThemesPersonalize);
 
@@ -50,7 +51,7 @@ public static class ThemeSettingsIO
             Set("EnableTransparency", theme.EnableTransparency);
             Set("ColorPrevalence", theme.ColorPrevalence);
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (theme.AccentColor.HasValue)
             {
@@ -60,6 +61,10 @@ public static class ThemeSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Theme = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Theme != null) Write(s.Theme); }
 }

@@ -4,7 +4,7 @@ using RunFence.Startup;
 
 namespace RunFence.Persistence;
 
-public class AutoStartService(ILoggingService log, ISidResolver sidResolver) : IAutoStartService
+public class AutoStartService(ILoggingService log, ISidResolver sidResolver, IShortcutComHelper shortcutHelper) : IAutoStartService
 {
     private const string ShortcutName = "RunFence.lnk";
 
@@ -15,10 +15,14 @@ public class AutoStartService(ILoggingService log, ISidResolver sidResolver) : I
     public bool IsAutoStartEnabled()
     {
         var paths = GetAllShortcutPaths();
-        return paths.Any(IsValidAutoStartShortcut);
+        var checkTask = Task.Run(() => paths.Any(IsValidAutoStartShortcut));
+        if (checkTask.Wait(TimeSpan.FromSeconds(5)))
+            return checkTask.Result;
+        log.Warn("IsAutoStartEnabled timed out (5s) — COM may be hung; returning false");
+        return false;
     }
 
-    public void EnableAutoStart()
+    public async Task EnableAutoStart()
     {
         var exePath = Path.Combine(AppContext.BaseDirectory, "RunFence.exe");
         var cmdPath = GetCmdPath();
@@ -28,7 +32,7 @@ public class AutoStartService(ILoggingService log, ISidResolver sidResolver) : I
             throw new FileNotFoundException(
                 $"The auto-start wrapper script was not found. Expected: {cmdPath}", cmdPath);
 
-        ShortcutComHelper.WithShortcut(shortcutPath, sc =>
+        var createTask = Task.Run(() => shortcutHelper.WithShortcut(shortcutPath, sc =>
         {
             sc.TargetPath = cmdPath;
             sc.Arguments = "";
@@ -37,8 +41,14 @@ public class AutoStartService(ILoggingService log, ISidResolver sidResolver) : I
             sc.WindowStyle = 7; // SW_SHOWMINNOACTIVE — minimize the cmd window
             sc.IconLocation = $"{exePath},0";
             sc.Save();
-        });
+        }));
+        if (await Task.WhenAny(createTask, Task.Delay(TimeSpan.FromSeconds(5))) != createTask)
+        {
+            log.Warn("Auto-start shortcut creation timed out (5s) — COM may be hung");
+            return;
+        }
 
+        await createTask; // rethrow any exception from the COM call
         log.Info($"Auto-start shortcut created: {shortcutPath}");
     }
 
@@ -54,13 +64,13 @@ public class AutoStartService(ILoggingService log, ISidResolver sidResolver) : I
         }
     }
 
-    private static bool IsValidAutoStartShortcut(string shortcutPath)
+    private bool IsValidAutoStartShortcut(string shortcutPath)
     {
         if (!File.Exists(shortcutPath))
             return false;
         try
         {
-            var target = ShortcutComHelper.WithShortcut(shortcutPath, sc => (string?)sc.TargetPath);
+            var target = shortcutHelper.WithShortcut(shortcutPath, sc => (string?)sc.TargetPath);
             var expectedExe = Path.Combine(AppContext.BaseDirectory, "RunFence.exe");
             // Also accept old shortcuts targeting the exe directly (backward compatibility)
             return string.Equals(target, GetCmdPath(), StringComparison.OrdinalIgnoreCase)

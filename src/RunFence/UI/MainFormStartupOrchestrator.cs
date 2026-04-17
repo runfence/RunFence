@@ -1,8 +1,6 @@
-using RunFence.Acl.Traverse;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch.Container;
 using RunFence.Persistence.UI;
 using RunFence.Startup;
 using RunFence.Startup.UI;
@@ -19,11 +17,12 @@ namespace RunFence.UI;
 public class MainFormStartupOrchestrator(
     IStartupSecurityService startupSecurityService,
     ILoggingService log,
-    ConfigManagementOrchestrator configHandler,
+    ConfigSaveOrchestrator configSaver,
     IStartupEnforcementService enforcementService,
-    IAppContainerService appContainerService,
     ApplicationState applicationState,
-    SessionContext session)
+    SessionContext session,
+    EnforcementResultApplier enforcementResultApplier,
+    FindingLocationHelper findingLocationHelper)
 {
     public async Task RunStartupChecksAsync(
         MainForm owner,
@@ -61,7 +60,7 @@ public class MainFormStartupOrchestrator(
                 foreach (var f in findings)
                     log.Warn($"Startup security: [{f.Category}] {f.TargetDescription} — {f.VulnerablePrincipal}: {f.AccessDescription}");
 
-                using var dlg = new StartupSecurityDialog(findings);
+                using var dlg = new StartupSecurityDialog(findings, findingLocationHelper);
                 dlg.ShowDialog(owner);
             }
 
@@ -96,7 +95,7 @@ public class MainFormStartupOrchestrator(
             }
 
             if (settingsChanged)
-                configHandler.SaveSecurityFindingsHash();
+                configSaver.SaveSecurityFindingsHash();
 
             log.Info($"MainFormStartupOrchestrator: startup security checks complete ({findings.Count} finding(s)).");
         }
@@ -120,7 +119,10 @@ public class MainFormStartupOrchestrator(
         {
             showNagIfNeeded();
             if (!owner.IsDisposed)
-                NativeInterop.ForceToForeground(owner);
+            {
+                WindowForegroundHelper.ForceToForeground(owner.Handle);
+                owner.BringToFront();
+            }
         }
     }
 
@@ -139,27 +141,10 @@ public class MainFormStartupOrchestrator(
 
             if (!owner.IsDisposed)
             {
-                foreach (var (appId, timestamp) in result.TimestampUpdates)
-                {
-                    var app = database.Apps.FirstOrDefault(a => a.Id == appId);
-                    if (app != null)
-                        app.LastKnownExeTimestamp = timestamp;
-                }
+                var (timestampsChanged, traverseRetracked) = enforcementResultApplier.ApplyToDatabase(result, database);
 
-                // Re-track traverse grants on the live database. NTFS ACLs were applied by Enforce() on
-                // the snapshot; we write DB entries directly because EnsureTraverseAccess would skip
-                // tracking when ACEs already exist (anyAceAdded = false). AppliedPaths from
-                // Enforce() are passed so AllAppliedPaths is set correctly for precise future reverts.
-                bool traverseRetracked = false;
-                foreach (var (container, traverseDir, appliedPaths) in result.TraverseGrants)
-                {
-                    var containerSid = appContainerService.GetSid(container.Name);
-                    var traversePaths = TraversePathsHelper.GetOrCreateTraversePaths(database, containerSid);
-                    traverseRetracked |= TraversePathsHelper.TrackPath(traversePaths, traverseDir, appliedPaths);
-                }
-
-                if (result.TimestampUpdates.Count > 0 || traverseRetracked)
-                    configHandler.SaveConfigAfterEnforcement(database);
+                if (timestampsChanged || traverseRetracked)
+                    configSaver.SaveConfigAfterEnforcement(database);
             }
 
             if (!owner.IsDisposed)

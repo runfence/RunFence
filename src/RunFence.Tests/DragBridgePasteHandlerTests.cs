@@ -1,6 +1,7 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Moq;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.DragBridge;
@@ -20,7 +21,7 @@ public class DragBridgePasteHandlerTests : IDisposable
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
-    private readonly Mock<IPermissionGrantService> _permissionGrantService = new();
+    private readonly Mock<IPathGrantService> _pathGrantService = new();
     private readonly SidDisplayNameResolver _displayNameResolver = new(new Mock<ISidResolver>().Object);
 
     private readonly List<string> _tempFiles = new();
@@ -50,7 +51,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         _log.Object,
         _uiThreadInvoker.Object,
         _aclPermission.Object,
-        _permissionGrantService.Object,
+        _pathGrantService.Object,
         _displayNameResolver);
 
     private string CreateTempFile()
@@ -131,9 +132,9 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _permissionGrantService.Setup(g => g.EnsureAccess(file, TargetSid.Value,
-                It.IsAny<FileSystemRights>(), null))
-            .Returns(new EnsureAccessResult(GrantAdded: true, DatabaseModified: true));
+        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file,
+                FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
         var handler = CreateHandler();
 
         // Act
@@ -143,8 +144,8 @@ public class DragBridgePasteHandlerTests : IDisposable
         Assert.NotNull(result);
         Assert.Contains(file, result);
         Assert.Contains(file, granted);
-        _permissionGrantService.Verify(g => g.EnsureAccess(file, TargetSid.Value,
-            It.IsAny<FileSystemRights>(), null), Times.Once);
+        _pathGrantService.Verify(g => g.EnsureAccess(TargetSid.Value, file,
+            FileSystemRights.Read | FileSystemRights.Synchronize, null, false), Times.Once);
     }
 
     [Fact]
@@ -179,35 +180,91 @@ public class DragBridgePasteHandlerTests : IDisposable
     }
 
     [Fact]
-    public async Task ResolveFileAccess_Inaccessible_CopyToTempWholeFolder_CopiesParentDirs()
+    public async Task ResolveFileAccess_Inaccessible_GrantFolderAccess_GrantsParentDirAndReturnsOriginalPaths()
     {
-        // Arrange: a file inside a dir; dir is inaccessible
+        // Arrange: a file inside a dir; user chooses GrantFolderAccess
         var dir = CreateTempDir();
         var file = Path.Combine(dir, "test.txt");
         File.WriteAllText(file, "data");
         _tempFiles.Add(file);
-
-        var tempFolder = CreateTempDir();
-        var tempDir = Path.Combine(tempFolder, Path.GetFileName(dir));
 
         _aclPermission.Setup(a => a.NeedsPermissionGrant(file, SourceSid, FileSystemRights.Read))
             .Returns(false);
         _aclPermission.Setup(a => a.NeedsPermissionGrant(file, TargetSid.Value, FileSystemRights.Read))
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
-            .Returns(DragBridgeAccessAction.CopyToTempWholeFolder);
-        _tempManager.Setup(t => t.CreateTempFolder(TargetSid.Value, null)).Returns(tempFolder);
-        _tempManager.Setup(t => t.CopyFilesToTemp(tempFolder, It.Is<IReadOnlyList<string>>(l => l.Contains(dir))))
-            .Returns([tempDir]);
+            .Returns(DragBridgeAccessAction.GrantFolderAccess);
+        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, dir,
+                FileSystemRights.ReadAndExecute, null, false))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
         var handler = CreateHandler();
 
         // Act
-        var (result, _, _) = await handler.ResolveFileAccessAsync(TargetSid, [file], SourceSid, null, CancellationToken.None);
+        var (result, _, granted) = await handler.ResolveFileAccessAsync(TargetSid, [file], SourceSid, null, CancellationToken.None);
 
-        // Assert: CopyFilesToTemp called with the parent directory
+        // Assert: EnsureAccess called on parent dir; original path returned (no temp copy)
         Assert.NotNull(result);
-        _tempManager.Verify(t => t.CopyFilesToTemp(tempFolder,
-            It.Is<IReadOnlyList<string>>(l => l.Contains(dir))), Times.Once);
+        Assert.Contains(file, result);
+        Assert.Contains(dir, granted);
+        _pathGrantService.Verify(g => g.EnsureAccess(TargetSid.Value, dir,
+            FileSystemRights.ReadAndExecute, null, false), Times.Once);
+        _tempManager.Verify(t => t.CreateTempFolder(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ResolveFileAccess_Inaccessible_GrantFolderAccess_DirectoryPath_GrantsDirectoryItself()
+    {
+        // Arrange: an inaccessible directory itself (not a file inside it)
+        var dir = CreateTempDir();
+
+        _aclPermission.Setup(a => a.NeedsPermissionGrant(dir, SourceSid, FileSystemRights.Read))
+            .Returns(false);
+        _aclPermission.Setup(a => a.NeedsPermissionGrant(dir, TargetSid.Value, FileSystemRights.Read))
+            .Returns(true);
+        _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
+            .Returns(DragBridgeAccessAction.GrantFolderAccess);
+        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, dir,
+                FileSystemRights.ReadAndExecute, null, false))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
+        var handler = CreateHandler();
+
+        // Act
+        var (result, _, granted) = await handler.ResolveFileAccessAsync(TargetSid, [dir], SourceSid, null, CancellationToken.None);
+
+        // Assert: EnsureAccess called on the directory itself
+        Assert.NotNull(result);
+        Assert.Contains(dir, result);
+        Assert.Contains(dir, granted);
+        _pathGrantService.Verify(g => g.EnsureAccess(TargetSid.Value, dir,
+            FileSystemRights.ReadAndExecute, null, false), Times.Once);
+    }
+
+    [Fact]
+    public async Task ResolveFileAccess_GrantFolderAccessNotRemembered_SecondCallPromptsAgain()
+    {
+        // Arrange: GrantFolderAccess is NOT remembered — second call prompts again
+        var dir = CreateTempDir();
+        var file = Path.Combine(dir, "test.txt");
+        File.WriteAllText(file, "data");
+        _tempFiles.Add(file);
+
+        _aclPermission.Setup(a => a.NeedsPermissionGrant(file, SourceSid, FileSystemRights.Read))
+            .Returns(false);
+        _aclPermission.Setup(a => a.NeedsPermissionGrant(file, TargetSid.Value, FileSystemRights.Read))
+            .Returns(true);
+        _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
+            .Returns(DragBridgeAccessAction.GrantFolderAccess);
+        _pathGrantService.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
+                FileSystemRights.ReadAndExecute, null, false))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
+        var handler = CreateHandler();
+
+        // Act
+        await handler.ResolveFileAccessAsync(TargetSid, [file], SourceSid, null, CancellationToken.None);
+        await handler.ResolveFileAccessAsync(TargetSid, [file], SourceSid, null, CancellationToken.None);
+
+        // Assert: prompt called twice (GrantFolderAccess not remembered)
+        _accessPrompt.Verify(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()), Times.Exactly(2));
     }
 
     [Fact]
@@ -269,9 +326,9 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _permissionGrantService.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<FileSystemRights>(), null))
-            .Returns(new EnsureAccessResult(GrantAdded: true, DatabaseModified: true));
+        _pathGrantService.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
+                FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
         var handler = CreateHandler();
 
         // Act
@@ -297,11 +354,11 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _permissionGrantService.Setup(g => g.EnsureAccess(file1, TargetSid.Value,
-                It.IsAny<FileSystemRights>(), null))
-            .Returns(new EnsureAccessResult(GrantAdded: true, DatabaseModified: true));
-        _permissionGrantService.Setup(g => g.EnsureAccess(file2, TargetSid.Value,
-                It.IsAny<FileSystemRights>(), null))
+        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
+                FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
+        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
+                FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Throws(new UnauthorizedAccessException("denied"));
         var handler = CreateHandler();
 
@@ -313,6 +370,69 @@ public class DragBridgePasteHandlerTests : IDisposable
         Assert.Contains(file1, granted);
         Assert.DoesNotContain(file2, granted);
         _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Once);
+    }
+
+    // ── NeedsAccessResolution ─────────────────────────────────────────────
+
+    [Fact]
+    public void NeedsAccessResolution_AllAccessible_ReturnsFalse()
+    {
+        var file = CreateTempFile();
+        _aclPermission.Setup(a => a.NeedsPermissionGrant(file, TargetSid.Value, FileSystemRights.Read))
+            .Returns(false);
+        var handler = CreateHandler();
+
+        Assert.False(handler.NeedsAccessResolution(TargetSid, [file]));
+    }
+
+    [Fact]
+    public void NeedsAccessResolution_FileNotExist_ReturnsTrue()
+    {
+        var handler = CreateHandler();
+
+        Assert.True(handler.NeedsAccessResolution(TargetSid, [@"C:\nonexistent\file.txt"]));
+    }
+
+    [Fact]
+    public void NeedsAccessResolution_SomeInaccessible_ReturnsTrue()
+    {
+        var file = CreateTempFile();
+        _aclPermission.Setup(a => a.NeedsPermissionGrant(file, TargetSid.Value, FileSystemRights.Read))
+            .Returns(true);
+        var handler = CreateHandler();
+
+        Assert.True(handler.NeedsAccessResolution(TargetSid, [file]));
+    }
+
+    [Fact]
+    public async Task ResolveFileAccess_PreCancelledToken_ReturnsNullNoGrantsApplied()
+    {
+        // Arrange: file exists and target needs access — but token is pre-cancelled.
+        // When the token is cancelled the prompt ask-result is discarded and null is returned,
+        // ensuring no grant operations were attempted.
+        var file = CreateTempFile();
+        _aclPermission.Setup(a => a.NeedsPermissionGrant(file, SourceSid, FileSystemRights.Read))
+            .Returns(false);
+        _aclPermission.Setup(a => a.NeedsPermissionGrant(file, TargetSid.Value, FileSystemRights.Read))
+            .Returns(true);
+        _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
+            .Returns((DragBridgeAccessAction?)null); // prompt returns cancel when called
+        var handler = CreateHandler();
+
+        var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        // Act
+        var (result, _, granted) = await handler.ResolveFileAccessAsync(
+            TargetSid, [file], SourceSid, null, cts.Token);
+
+        // Assert: null result returned (cancelled prompt) and no grants applied
+        Assert.Null(result);
+        Assert.Empty(granted);
+        _pathGrantService.Verify(g => g.EnsureAccess(
+            It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()),
+            Times.Never);
     }
 
     [Fact]

@@ -194,7 +194,7 @@ partial class ApplicationsPanel
         _ctxOpenDir.Text = "Open Directory";
         _ctxOpenDir.Click += OnOpenDirClick;
 
-        _ctxSetDefaultBrowser.Text = "Set as Default Browser";
+        _ctxSetDefaultBrowser.Text = "Default Browser";
         _ctxSetDefaultBrowser.Click += OnSetDefaultBrowserClick;
 
         // _contextMenu

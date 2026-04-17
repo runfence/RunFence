@@ -68,19 +68,29 @@ public class AccountProcessTimerManager(ILoggingService log) : IDisposable
         _wasMinimized = isMinimized;
 
         if (justRestored && _isVisibleAndParentVisible() && !_isSortActive())
-        {
-            OnProcessCheckTimerTick(null, EventArgs.Empty);
-            OnProcessRefreshTimerTick(null, EventArgs.Empty);
-        }
+            TriggerImmediateRefresh();
     }
 
     /// <summary>
     /// Triggers immediate process check and refresh. Used by RefreshOnActivation and TriggerProcessRefresh.
+    /// Stops both timers before invoking handlers to prevent overlapping ticks, then restarts both in
+    /// finally. The refresh timer handler also self-restarts in its own finally after async work completes,
+    /// which harmlessly resets the countdown interval.
     /// </summary>
     public void TriggerImmediateRefresh()
     {
-        OnProcessCheckTimerTick(null, EventArgs.Empty);
-        OnProcessRefreshTimerTick(null, EventArgs.Empty);
+        _processCheckTimer?.Stop();
+        _processRefreshTimer?.Stop();
+        try
+        {
+            OnProcessCheckTimerTick(null, EventArgs.Empty);
+            OnProcessRefreshTimerTick(null, EventArgs.Empty);
+        }
+        finally
+        {
+            _processCheckTimer?.Start();
+            _processRefreshTimer?.Start();
+        }
     }
 
     /// <summary>

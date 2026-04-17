@@ -4,7 +4,6 @@ using RunFence.Account.UI.AppContainer;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch.Container;
 using RunFence.RunAs.UI.Forms;
 using RunFence.UI;
 
@@ -15,9 +14,8 @@ namespace RunFence.RunAs.UI;
 /// </summary>
 public class RunAsCredentialListPopulator(
     ISidResolver sidResolver,
-    IWindowsAccountService windowsAccountService,
     ILocalUserProvider localUserProvider,
-    IAppContainerService appContainerService)
+    CredentialFilterHelper credentialFilterHelper)
 {
     private ListBox _listBox = null!;
     private List<CredentialEntry> _credentials = null!;
@@ -56,16 +54,17 @@ public class RunAsCredentialListPopulator(
 
         var representedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var cred in CredentialFilterHelper.FilterResolvableCredentials(_credentials, _sidNames, sidResolver))
+        foreach (var cred in credentialFilterHelper.FilterResolvableCredentials(_credentials, _sidNames))
         {
             _listBox.Items.Add(new CredentialDisplayItem(cred, sidResolver, _sidNames));
             if (!string.IsNullOrEmpty(cred.Sid))
                 representedSids.Add(cred.Sid);
         }
 
+        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
+
         if (_showAllAccountsCheckBox.Checked)
         {
-            var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
             try
             {
                 var localUsers = localUserProvider.GetLocalUserAccounts();
@@ -76,8 +75,6 @@ public class RunAsCredentialListPopulator(
                     if (string.Equals(user.Sid, _currentUserSid, StringComparison.OrdinalIgnoreCase))
                         continue;
                     if (interactiveSid != null && string.Equals(user.Sid, interactiveSid, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (windowsAccountService.IsAccountDisabled(user.Username))
                         continue;
 
                     var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = user.Sid };
@@ -91,10 +88,9 @@ public class RunAsCredentialListPopulator(
             }
         }
 
-        var interactiveSidFull = SidResolutionHelper.GetInteractiveUserSid();
-        if (interactiveSidFull != null && !representedSids.Contains(interactiveSidFull))
+        if (interactiveSid != null && !representedSids.Contains(interactiveSid))
         {
-            var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = interactiveSidFull };
+            var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = interactiveSid };
             _listBox.Items.Add(new CredentialDisplayItem(transient, sidResolver, _sidNames));
         }
 
@@ -104,19 +100,7 @@ public class RunAsCredentialListPopulator(
         if (_appContainers != null)
         {
             foreach (var container in _appContainers.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
-            {
-                string containerSid;
-                try
-                {
-                    containerSid = appContainerService.GetSid(container.Name);
-                }
-                catch
-                {
-                    containerSid = "";
-                }
-
-                _listBox.Items.Add(new AppContainerDisplayItem(container, containerSid));
-            }
+                _listBox.Items.Add(new AppContainerDisplayItem(container, container.Sid));
         }
 
         _listBox.Items.Add(new CreateContainerItem());
@@ -152,7 +136,7 @@ public class RunAsCredentialListPopulator(
         }
     }
 
-    private int FindItemIndex(Func<object, bool> predicate)
+    public int FindItemIndex(Func<object, bool> predicate)
     {
         for (int i = 0; i < _listBox.Items.Count; i++)
             if (predicate(_listBox.Items[i]))

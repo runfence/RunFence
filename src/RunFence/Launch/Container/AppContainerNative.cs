@@ -3,16 +3,10 @@ using System.Runtime.InteropServices;
 namespace RunFence.Launch.Container;
 
 /// <summary>
-/// Shared P/Invoke declarations used by both AppContainerService and AppContainerLauncher.
+/// Shared P/Invoke declarations used by AppContainerService, AppContainerProcessLauncher, and AppContainerSidProvider.
 /// </summary>
 public static class AppContainerNative
 {
-    [DllImport("advapi32.dll", SetLastError = true)]
-    public static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    public static extern bool RevertToSelf();
-
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool ConvertSidToStringSid(IntPtr pSid, out IntPtr pStringSid);
 

@@ -1,6 +1,6 @@
-using System.DirectoryServices.AccountManagement;
+using System.Security.AccessControl;
 using Microsoft.Win32;
-using RunFence.Acl.Permissions;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Infrastructure;
 
@@ -8,15 +8,14 @@ namespace RunFence.Launch;
 
 public class FolderHandlerService(
     ILoggingService log,
-    IPermissionGrantService permissionGrantService,
+    IPathGrantService pathGrantService,
+    ILocalGroupMembershipService localGroupMembership,
     RegistryKey? hkuOverride = null,
     string? launcherPathOverride = null,
-    Func<string, bool>? isAdminAccount = null,
     string? shellServerPathOverride = null)
     : IFolderHandlerService
 {
     private readonly RegistryKey _hku = hkuOverride ?? Registry.Users;
-    private readonly Func<string, bool> _isAdminAccount = isAdminAccount ?? DefaultIsAdminAccount;
 
     private readonly HashSet<string> _registeredSids =
         new(StringComparer.OrdinalIgnoreCase);
@@ -39,7 +38,8 @@ public class FolderHandlerService(
             return;
         }
 
-        if (_isAdminAccount(accountSid))
+        if (localGroupMembership.GetGroupsForUser(accountSid)
+                .Any(g => string.Equals(g.Sid, "S-1-5-32-544", StringComparison.OrdinalIgnoreCase)))
         {
             log.Info($"FolderHandlerService: skipping registration for admin account {accountSid}");
             return;
@@ -74,13 +74,15 @@ public class FolderHandlerService(
             SetFolderCommandValue(accountSid, commandValue);
 
             // Ensure the RunAs account can execute the launcher.
-            permissionGrantService.EnsureExeDirectoryAccess(launcherPath, accountSid);
+            var launcherDir = Path.GetDirectoryName(launcherPath);
+            if (!string.IsNullOrEmpty(launcherDir))
+                pathGrantService.EnsureAccess(accountSid, launcherDir, FileSystemRights.ReadAndExecute, confirm: null);
 
             // Schedule cleanup via RunOnce so if the account ever logs in interactively,
             // it removes the handler from its own HKCU on first logon.
             SetRunOnce(accountSid, launcherPath);
 
-            NativeMethods.SHChangeNotify(NativeMethods.SHCNE_ASSOCCHANGED, NativeMethods.SHCNF_IDLIST,
+            ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST,
                 IntPtr.Zero, IntPtr.Zero);
             _registeredSids.Add(accountSid);
             log.Info($"FolderHandlerService: registration complete for {accountSid}");
@@ -106,7 +108,7 @@ public class FolderHandlerService(
             RemoveRunOnce(accountSid);
 
             _registeredSids.Remove(accountSid);
-            NativeMethods.SHChangeNotify(NativeMethods.SHCNE_ASSOCCHANGED, NativeMethods.SHCNF_IDLIST,
+            ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST,
                 IntPtr.Zero, IntPtr.Zero);
         }
         catch (Exception ex)
@@ -158,7 +160,7 @@ public class FolderHandlerService(
         if (cleaned)
         {
             log.Info($"FolderHandlerService: removed stale registration for {sidName}");
-            NativeMethods.SHChangeNotify(NativeMethods.SHCNE_ASSOCCHANGED, NativeMethods.SHCNF_IDLIST,
+            ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST,
                 IntPtr.Zero, IntPtr.Zero);
         }
     }
@@ -279,22 +281,4 @@ public class FolderHandlerService(
         }
     }
 
-    private static bool DefaultIsAdminAccount(string accountSid)
-    {
-        try
-        {
-            using var context = new PrincipalContext(ContextType.Machine);
-            using var principal = Principal.FindByIdentity(context, IdentityType.Sid, accountSid);
-            if (principal == null)
-                return false;
-            using var adminGroup = GroupPrincipal.FindByIdentity(context, IdentityType.Sid, "S-1-5-32-544");
-            if (adminGroup == null)
-                return false;
-            return principal.IsMemberOf(adminGroup);
-        }
-        catch
-        {
-            return false;
-        }
-    }
 }

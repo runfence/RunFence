@@ -1,30 +1,31 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class AccessibilitySettingsIO
+public class AccessibilitySettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static AccessibilitySettings Read()
+    public AccessibilitySettings Read()
     {
         var accessibility = new AccessibilitySettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegAccessibility + @"\StickyKeys");
             accessibility.StickyKeysFlags = key?.GetValue("Flags") as string;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegAccessibility + @"\Keyboard Response");
             accessibility.FilterKeysFlags = key?.GetValue("Flags") as string;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegAccessibility + @"\ToggleKeys");
             accessibility.ToggleKeysFlags = key?.GetValue("Flags") as string;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegAccessibility + @"\MouseKeys");
             accessibility.MouseKeysFlags = key?.GetValue("Flags") as string;
@@ -32,10 +33,10 @@ public static class AccessibilitySettingsIO
         return accessibility;
     }
 
-    public static void Write(AccessibilitySettings accessibility)
+    public void Write(AccessibilitySettings accessibility)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (accessibility.StickyKeysFlags != null)
             {
@@ -44,7 +45,7 @@ public static class AccessibilitySettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (accessibility.FilterKeysFlags != null)
             {
@@ -53,7 +54,7 @@ public static class AccessibilitySettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (accessibility.ToggleKeysFlags != null)
             {
@@ -62,7 +63,7 @@ public static class AccessibilitySettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (accessibility.MouseKeysFlags != null)
             {
@@ -72,6 +73,10 @@ public static class AccessibilitySettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Accessibility = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Accessibility != null) Write(s.Accessibility); }
 }

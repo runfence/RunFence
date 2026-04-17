@@ -1,6 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
-using RunFence.Acl.Traverse;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 
@@ -11,7 +11,7 @@ namespace RunFence.Launch.Container;
 /// the interactive user access). Separated from AppContainerService to keep profile lifecycle
 /// logic distinct from data folder lifecycle logic.
 /// </summary>
-public class AppContainerDataFolderService(ILoggingService log, IUserTraverseService userTraverseService)
+public class AppContainerDataFolderService(ILoggingService log, IPathGrantService pathGrantService)
 {
     /// <summary>
     /// Creates the container's data folder subtree (Temp/Roaming/Local/ProgramData) if missing,
@@ -35,7 +35,7 @@ public class AppContainerDataFolderService(ILoggingService log, IUserTraverseSer
             // reach its data folder. AppContainer dual-check requires an ACE on every
             // directory in the path — SeChangeNotifyPrivilege doesn't help here.
             // Tracking in AccountGrants allows RevertTraverseAccess to clean up naturally.
-            userTraverseService.EnsureTraverseAccess(containerSid, dataRoot);
+            pathGrantService.AddTraverse(containerSid, dataRoot);
         }
         catch (Exception ex)
         {
@@ -56,7 +56,7 @@ public class AppContainerDataFolderService(ILoggingService log, IUserTraverseSer
             if (!Directory.Exists(dataPath))
                 return;
 
-            userTraverseService.EnsureTraverseAccess(containerSid, dataPath);
+            pathGrantService.AddTraverse(containerSid, dataPath);
         }
         catch (Exception ex)
         {

@@ -1,52 +1,26 @@
-using System.Diagnostics;
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Launch;
 using RunFence.Launch.Tokens;
 
 namespace RunFence.DragBridge;
 
 public class DragBridgeLauncher(
-    IAppLaunchOrchestrator launchOrchestrator,
-    ISplitTokenLauncher splitTokenLauncher,
-    ICurrentAccountLauncher currentAccountLauncher,
+    ILaunchFacade facade,
     ILoggingService log) : IDragBridgeLauncher
 {
-    public Process? LaunchDirect(string exePath, IReadOnlyList<string> args,
-        bool useSplitToken = false, bool useLowIntegrity = false)
+    public ProcessInfo? LaunchDirect(string exePath, IReadOnlyList<string> args,
+        PrivilegeLevel privilegeLevel = PrivilegeLevel.HighestAllowed)
     {
-        var psi = new ProcessStartInfo
-        {
-            FileName = exePath,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        foreach (var arg in args)
-            psi.ArgumentList.Add(arg);
-
+        var target = new ProcessLaunchTarget
+        (
+            ExePath: exePath,
+            HideWindow: true,
+            ArgumentsList: args.ToList()
+        );
         try
         {
-            if (useSplitToken)
-            {
-                var pid = splitTokenLauncher.Launch(psi, null, null, null, useLowIntegrity, LaunchTokenSource.CurrentProcess);
-                try
-                {
-                    return Process.GetProcessById(pid);
-                }
-                catch
-                {
-                    return null;
-                }
-            }
-
-            var currentPid = currentAccountLauncher.Launch(psi);
-            try
-            {
-                return Process.GetProcessById(currentPid);
-            }
-            catch
-            {
-                return null;
-            }
+            return facade.LaunchFile(target, AccountLaunchIdentity.CurrentAccountBasic with { PrivilegeLevel = privilegeLevel });
         }
         catch (Exception ex)
         {
@@ -55,28 +29,22 @@ public class DragBridgeLauncher(
         }
     }
 
-    public int LaunchManaged(string exePath, string accountSid, IReadOnlyList<string> args)
+    public ProcessInfo LaunchManaged(string exePath, string accountSid, IReadOnlyList<string> args)
     {
-        return launchOrchestrator.LaunchExeReturnPid(exePath, accountSid, args.ToList());
+        return facade.LaunchFile(new ProcessLaunchTarget(exePath, ArgumentsList: args.ToList()), new AccountLaunchIdentity(accountSid))
+               ?? throw new InvalidOperationException($"LaunchManaged returned null process for '{exePath}'");
     }
 
-    public int LaunchDeElevated(string exePath, IReadOnlyList<string> args, bool skipSplitToken = false)
+    public ProcessInfo? LaunchDeElevated(string exePath, IReadOnlyList<string> args, PrivilegeLevel? privilegeLevel = null)
     {
-        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-        if (interactiveSid == null)
-        {
-            log.Error($"DragBridgeLauncher: No interactive user found — cannot launch de-elevated '{exePath}'");
-            return 0;
-        }
         try
         {
-            return launchOrchestrator.LaunchExeReturnPid(exePath, interactiveSid, args.ToList(),
-                useSplitToken: skipSplitToken ? false : null);
+            return facade.LaunchFile(new ProcessLaunchTarget(exePath, ArgumentsList: args.ToList()), AccountLaunchIdentity.InteractiveUser with { PrivilegeLevel = privilegeLevel });
         }
         catch (Exception ex)
         {
             log.Error($"DragBridgeLauncher: de-elevated launch failed for '{exePath}'", ex);
-            return 0;
+            return null;
         }
     }
 }

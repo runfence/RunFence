@@ -22,4 +22,10 @@ public class AppContainerEntry
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? ComAccessClsids { get; set; }
+
+    /// <summary>
+    /// Cached AppContainer SID string. Populated on creation and refreshed at startup when the
+    /// interactive user changes. Empty string means not yet resolved.
+    /// </summary>
+    public string Sid { get; set; } = string.Empty;
 }

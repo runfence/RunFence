@@ -13,8 +13,7 @@ public record RunAsDialogResult(
     AppContainerEntry? SelectedContainer,
     AncestorPermissionResult? PermissionGrant,
     bool CreateAppEntryOnly,
-    bool LaunchAsLowIntegrity,
-    bool LaunchAsSplitToken,
+    PrivilegeLevel PrivilegeLevel,
     bool UpdateOriginalShortcut,
     bool RevertShortcutRequested,
     AppEntry? EditExistingApp,
@@ -23,4 +22,16 @@ public record RunAsDialogResult(
     bool RememberPassword = false) : IDisposable
 {
     public void Dispose() => AdHocPassword?.Dispose();
+
+    /// <summary>Returns an empty result representing a declined or no-op dialog outcome.</summary>
+    public static RunAsDialogResult Empty() => new(
+        Credential: null,
+        SelectedContainer: null,
+        PermissionGrant: null,
+        CreateAppEntryOnly: false,
+        PrivilegeLevel: PrivilegeLevel.Basic,
+        UpdateOriginalShortcut: false,
+        RevertShortcutRequested: false,
+        EditExistingApp: null,
+        ExistingAppForLaunch: null);
 }

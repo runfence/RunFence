@@ -12,6 +12,12 @@ namespace RunFence.Startup;
 /// Wires all inter-service event subscriptions during application startup.
 /// Extracted from AppLifecycleStarter to give each concern a clear owner.
 /// </summary>
+/// <remarks>
+/// Dependency count (11): acceptable for a single-method event-wiring class. All deps are
+/// event sources or targets used directly in wiring. No further extraction is meaningful since
+/// all subscriptions route through MainForm.BeginInvoke — splitting would produce partial
+/// dependency graphs with no clear separation of concerns. Reviewed 2026-04-16.
+/// </remarks>
 public class AppLifecycleEventWirer(
     MainForm mainForm,
     ApplicationState applicationState,

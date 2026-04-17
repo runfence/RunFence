@@ -9,6 +9,13 @@ namespace RunFence.RunAs.UI;
 /// Handles owner-draw rendering for the credential list box in <see cref="RunAsDialog"/>.
 /// Caches icons to avoid repeated GDI allocations.
 /// </summary>
+/// <remarks>
+/// The 3 static <see cref="Image"/> fields (<c>_iconKeyStored</c>, <c>_iconKeyAdHoc</c>,
+/// <c>_iconContainer</c>) live for process lifetime. This is acceptable: RunFence is a
+/// single-instance desktop app, these GDI objects are tiny (16×16 bitmaps), and the
+/// alternative (per-instance Image objects) would require IDisposable plumbing in a class
+/// whose instances are created per-dialog invocation, making cleanup complex and fragile.
+/// </remarks>
 public class RunAsCredentialListRenderer
 {
     private static Image? _iconKeyStored;

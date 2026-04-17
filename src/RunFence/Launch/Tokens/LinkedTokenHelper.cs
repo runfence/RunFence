@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using RunFence.Core;
 using RunFence.Infrastructure;
-using RunFence.Launch.Container;
 
 namespace RunFence.Launch.Tokens;
 
@@ -23,7 +22,7 @@ public static class LinkedTokenHelper
         IntPtr hLinkedToken = IntPtr.Zero;
         try
         {
-            if (!NativeMethods.OpenProcessToken(NativeMethods.GetCurrentProcess(),
+            if (!ProcessNative.OpenProcessToken(ProcessNative.GetCurrentProcess(),
                     ProcessLaunchNative.TOKEN_QUERY | ProcessLaunchNative.TOKEN_DUPLICATE |
                     ProcessLaunchNative.TOKEN_IMPERSONATE, out hCurrentToken))
             {
@@ -40,7 +39,7 @@ public static class LinkedTokenHelper
                 return;
             }
 
-            if (!AppContainerNative.ImpersonateLoggedOnUser(hLinkedToken))
+            if (!ProcessNative.ImpersonateLoggedOnUser(hLinkedToken))
             {
                 log.Warn("RunUnderLinkedToken: ImpersonateLoggedOnUser failed, running without impersonation");
                 action(hLinkedToken);
@@ -53,28 +52,28 @@ public static class LinkedTokenHelper
             }
             finally
             {
-                AppContainerNative.RevertToSelf();
+                ProcessNative.RevertToSelf();
             }
         }
         finally
         {
             if (hLinkedToken != IntPtr.Zero)
-                NativeMethods.CloseHandle(hLinkedToken);
+                ProcessNative.CloseHandle(hLinkedToken);
             if (hCurrentToken != IntPtr.Zero)
-                NativeMethods.CloseHandle(hCurrentToken);
+                ProcessNative.CloseHandle(hCurrentToken);
         }
     }
 
     public static IntPtr TryGetLinkedToken(IntPtr hToken)
     {
-        NativeMethods.GetTokenInformation(hToken, ProcessLaunchNative.TOKEN_LINKED_TOKEN, IntPtr.Zero, 0, out var size);
+        ProcessNative.GetTokenInformation(hToken, ProcessLaunchNative.TOKEN_LINKED_TOKEN, IntPtr.Zero, 0, out var size);
         if (size == 0)
             return IntPtr.Zero;
 
         var buffer = Marshal.AllocHGlobal((int)size);
         try
         {
-            if (!NativeMethods.GetTokenInformation(hToken, ProcessLaunchNative.TOKEN_LINKED_TOKEN, buffer, size, out _))
+            if (!ProcessNative.GetTokenInformation(hToken, ProcessLaunchNative.TOKEN_LINKED_TOKEN, buffer, size, out _))
                 return IntPtr.Zero;
             return Marshal.ReadIntPtr(buffer);
         }

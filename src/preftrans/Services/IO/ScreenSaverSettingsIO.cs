@@ -1,27 +1,28 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class ScreenSaverSettingsIO
+public class ScreenSaverSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static ScreenSaverSettings Read()
+    public ScreenSaverSettings Read()
     {
         var screenSaver = new ScreenSaverSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             int val = 0;
             if (NativeMethods.SystemParametersInfo(Constants.SPI_GETSCREENSAVEACTIVE, 0, ref val, 0))
                 screenSaver.Enabled = val != 0;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             int val = 0;
             if (NativeMethods.SystemParametersInfo(Constants.SPI_GETSCREENSAVETIMEOUT, 0, ref val, 0))
                 screenSaver.TimeoutSeconds = val;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegDesktop);
             screenSaver.ExecutablePath = key?.GetValue("SCRNSAVE.EXE") as string;
@@ -32,20 +33,20 @@ public static class ScreenSaverSettingsIO
         return screenSaver;
     }
 
-    public static void Write(ScreenSaverSettings screenSaver)
+    public void Write(ScreenSaverSettings screenSaver)
     {
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (screenSaver.Enabled.HasValue)
                 NativeMethods.SystemParametersInfo(Constants.SPI_SETSCREENSAVEACTIVE, screenSaver.Enabled.Value ? 1u : 0u, IntPtr.Zero, Constants.SPIF_UPDATEANDNOTIFY);
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (screenSaver.TimeoutSeconds.HasValue)
                 NativeMethods.SystemParametersInfo(Constants.SPI_SETSCREENSAVETIMEOUT, (uint)screenSaver.TimeoutSeconds.Value, IntPtr.Zero, Constants.SPIF_UPDATEANDNOTIFY);
         }, "writing");
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegDesktop);
             if (screenSaver.ExecutablePath != null)
@@ -67,6 +68,10 @@ public static class ScreenSaverSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.ScreenSaver = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.ScreenSaver != null) Write(s.ScreenSaver); }
 }

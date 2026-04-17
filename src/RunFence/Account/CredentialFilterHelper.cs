@@ -8,22 +8,25 @@ namespace RunFence.Account;
 /// exist in the SidNames map, or represent the current/interactive user account.
 /// Used by dialog combo boxes to hide stale/orphaned credentials.
 /// </summary>
-public static class CredentialFilterHelper
+public class CredentialFilterHelper(ISidResolver sidResolver)
 {
     /// <summary>
     /// Returns credentials that are resolvable: current account, interactive user,
     /// resolvable via OS lookup, present in <paramref name="sidNames"/>, or matching
     /// the <paramref name="existing"/> app's account SID (if provided).
     /// </summary>
-    public static List<CredentialEntry> FilterResolvableCredentials(
+    public List<CredentialEntry> FilterResolvableCredentials(
         IEnumerable<CredentialEntry> credentials,
         IReadOnlyDictionary<string, string>? sidNames,
-        ISidResolver sidResolver,
         AppEntry? existing = null)
     {
         return credentials.Where(cred =>
-                cred is not { IsCurrentAccount: false, IsInteractiveUser: false } || sidResolver.TryResolveName(cred.Sid) != null ||
-                (sidNames != null && sidNames.ContainsKey(cred.Sid)) || (existing != null && string.Equals(existing.AccountSid, cred.Sid, StringComparison.OrdinalIgnoreCase)))
-            .ToList();
+        {
+            bool isCurrentUser = cred.IsCurrentAccount || cred.IsInteractiveUser;
+            bool hasValidSid = sidResolver.TryResolveName(cred.Sid) != null;
+            bool isResolvable = (sidNames != null && sidNames.ContainsKey(cred.Sid)) ||
+                                (existing != null && string.Equals(existing.AccountSid, cred.Sid, StringComparison.OrdinalIgnoreCase));
+            return isCurrentUser || hasValidSid || isResolvable;
+        }).ToList();
     }
 }

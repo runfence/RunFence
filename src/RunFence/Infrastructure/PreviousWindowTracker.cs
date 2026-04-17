@@ -12,16 +12,16 @@ namespace RunFence.Infrastructure;
 public class PreviousWindowTracker : IPreviousWindowTracker, IDisposable
 {
     // ReSharper disable once PrivateFieldCanBeConvertedToLocalVariable
-    private readonly NativeInterop.WinEventDelegate _hookCallback;
+    private readonly WindowNative.WinEventDelegate _hookCallback;
     private IntPtr _hookHandle;
 
     public PreviousWindowTracker()
     {
         _hookCallback = OnWinEvent;
-        _hookHandle = NativeInterop.SetWinEventHook(
-            NativeInterop.EventSystemForeground, NativeInterop.EventSystemForeground,
+        _hookHandle = WindowNative.SetWinEventHook(
+            WindowNative.EventSystemForeground, WindowNative.EventSystemForeground,
             IntPtr.Zero, _hookCallback, 0, 0,
-            NativeInterop.WinEventOutOfContext | NativeInterop.WinEventSkipOwnProcess);
+            WindowNative.WinEventOutOfContext | WindowNative.WinEventSkipOwnProcess);
     }
 
     public IntPtr PreviousWindow { get; private set; }
@@ -41,7 +41,7 @@ public class PreviousWindowTracker : IPreviousWindowTracker, IDisposable
     private static bool IsTransientSystemWindow(IntPtr hwnd)
     {
         var cls = new StringBuilder(64);
-        NativeInterop.GetClassName(hwnd, cls, cls.Capacity);
+        WindowNative.GetClassName(hwnd, cls, cls.Capacity);
         var className = cls.ToString();
 
         switch (className)
@@ -51,7 +51,7 @@ public class PreviousWindowTracker : IPreviousWindowTracker, IDisposable
             case "XamlExplorerHostIslandWindow":
             {
                 var title = new StringBuilder(64);
-                NativeInterop.GetWindowText(hwnd, title, title.Capacity);
+                WindowNative.GetWindowText(hwnd, title, title.Capacity);
                 return title.ToString() == "Task Switching";
             }
             default:
@@ -63,7 +63,7 @@ public class PreviousWindowTracker : IPreviousWindowTracker, IDisposable
     {
         if (_hookHandle != IntPtr.Zero)
         {
-            NativeInterop.UnhookWinEvent(_hookHandle);
+            WindowNative.UnhookWinEvent(_hookHandle);
             _hookHandle = IntPtr.Zero;
         }
     }

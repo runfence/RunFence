@@ -1,7 +1,8 @@
 using RunFence.Account;
+using RunFence.Account.UI;
 using RunFence.Infrastructure;
 using RunFence.Core.Models;
-using RunFence.Firewall;
+using RunFence.Firewall.UI;
 using RunFence.Launch;
 using RunFence.Persistence;
 using RunFence.PrefTrans;
@@ -20,8 +21,8 @@ public class WizardAccountSetupHelperFactory(
     ILocalGroupMembershipService groupMembership,
     ISidNameCacheService sidNameCache,
     ISettingsTransferService settingsTransferService,
-    IFirewallService firewallService,
-    AccountLauncher accountLauncher,
+    FirewallApplyHelper firewallApplyHelper,
+    PackageInstallService packageInstallService,
     IDatabaseProvider databaseProvider)
 {
     /// <summary>
@@ -47,5 +48,5 @@ public class WizardAccountSetupHelperFactory(
 
     public WizardAccountSetupHelper Create(SessionContext session) =>
         new(credentialManager, localUserProvider, sidNameCache,
-            settingsTransferService, firewallService, accountLauncher, session);
+            settingsTransferService, firewallApplyHelper, packageInstallService, session);
 }

@@ -14,7 +14,9 @@ public class AclManagerActionOrchestrator(
     IDatabaseProvider databaseProvider,
     AclManagerGrantsHelper grantsHelper,
     AclManagerTraverseHelper traverseHelper,
-    TraverseAutoManager traverseAutoManager)
+    TraverseAutoManager traverseAutoManager,
+    IReparsePointPromptHelper reparsePointHelper,
+    ShellHelper shellHelper)
 {
     private readonly AclManagerGrantsHelper _grantsHelper = grantsHelper;
     private readonly AclManagerTraverseHelper _traverseHelper = traverseHelper;
@@ -63,8 +65,8 @@ public class AclManagerActionOrchestrator(
     /// <returns>First duplicate-path error encountered, or null if all paths added successfully.</returns>
     public string? HandleShellDropOnGrants(string[] paths, string? targetConfigPath = null)
     {
-        var regularPaths = paths.Where(p => !ReparsePointPromptHelper.IsReparsePoint(p)).ToList();
-        var reparsePaths = paths.Where(p => ReparsePointPromptHelper.IsReparsePoint(p)).ToList();
+        var regularPaths = paths.Where(p => !reparsePointHelper.IsReparsePoint(p)).ToList();
+        var reparsePaths = paths.Where(p => reparsePointHelper.IsReparsePoint(p)).ToList();
 
         string? firstError = null;
 
@@ -79,7 +81,7 @@ public class AclManagerActionOrchestrator(
         foreach (var path in reparsePaths)
         {
             // By design: reparse-point targets are always added as Allow (deny on symlink targets is unreliable)
-            var pathsToAdd = ReparsePointPromptHelper.ResolveForAdd(path, _owner);
+            var pathsToAdd = reparsePointHelper.ResolveForAdd(path, _owner);
             firstError = pathsToAdd.Aggregate(firstError, (current, p) => AddGrantPathDirect(p, isDeny: false, targetConfigPath) ?? current);
         }
 
@@ -113,120 +115,16 @@ public class AclManagerActionOrchestrator(
     {
         foreach (var path in paths)
         {
-            var pathsToAdd = ReparsePointPromptHelper.ResolveForAdd(path, _owner);
+            var pathsToAdd = reparsePointHelper.ResolveForAdd(path, _owner);
             foreach (var p in pathsToAdd)
                 _traverseHelper.AddTraversePathDirect(p);
         }
     }
 
-    public static void OpenInExplorer(string path)
+    public void OpenInExplorer(string path)
     {
         string folder = Directory.Exists(path) ? path : Path.GetDirectoryName(path) ?? path;
-        ShellHelper.OpenInExplorer(folder);
-    }
-
-    /// <summary>
-    /// Batch-registers discovered ACE paths into pending adds (deferred). No DB or NTFS writes
-    /// occur until Apply — the ACEs already exist on disk from an external source, so Apply will
-    /// re-apply them idempotently. Refreshes the grants grid once after processing all entries.
-    /// Returns the count of newly added paths.
-    /// </summary>
-    /// <param name="results">Grant paths and their allow/deny mode from the scan.</param>
-    /// <param name="discoveredRights">
-    /// Optional rights per path from the scan. When provided, <see cref="GrantedPathEntry.SavedRights"/>
-    /// is pre-populated from the discovered NTFS state instead of waiting for the auto-populate migration.
-    /// </param>
-    public int BatchAddGrantPaths(
-        IReadOnlyList<(string Path, bool IsDeny)> results,
-        IReadOnlyDictionary<string, DiscoveredGrantRights>? discoveredRights = null)
-    {
-        int added = 0;
-        foreach (var (path, isDeny) in results)
-        {
-            var normalized = Path.GetFullPath(path);
-
-            if (_pending.ExistsInDbOrPending(databaseProvider.GetDatabase(), _sid, normalized, isDeny))
-                continue;
-
-            // Cancel a pending untrack — scan found the ACE still exists.
-            if (_pending.PendingUntrackGrants.Remove((normalized, isDeny)))
-            {
-                added++;
-                continue;
-            }
-
-            var savedRights = discoveredRights != null && discoveredRights.TryGetValue(normalized, out var rights)
-                ? BuildSavedRightsFromDiscovered(rights, isDeny)
-                : SavedRightsState.DefaultForMode(isDeny);
-
-            var entry = new GrantedPathEntry
-            {
-                Path = normalized,
-                IsDeny = isDeny,
-                SavedRights = savedRights
-            };
-
-            _pending.PendingAdds[(normalized, isDeny)] = entry;
-            added++;
-        }
-
-        if (added > 0)
-            _gridRefresher.RefreshGrantsGrid();
-
-        return added;
-    }
-
-    private static SavedRightsState BuildSavedRightsFromDiscovered(DiscoveredGrantRights rights, bool isDeny)
-    {
-        if (!isDeny)
-        {
-            return SavedRightsState.DefaultForMode(false, own: rights.IsAccountOwner) with
-            {
-                Execute = rights.AllowExecute,
-                Write = rights.AllowWrite,
-                Special = rights.AllowSpecial
-            };
-        }
-
-        return SavedRightsState.DefaultForMode(true, own: rights.IsAdminOwner) with
-        {
-            Execute = rights.DenyExecute,
-            Read = rights.DenyRead
-        };
-    }
-
-    /// <summary>
-    /// Batch-registers discovered traverse paths into pending adds (deferred). No DB or NTFS writes
-    /// occur until Apply — the ACEs already exist on disk from an external source, so Apply will
-    /// re-apply them idempotently. Refreshes the traverse grid once after processing all entries.
-    /// Returns the count of newly added paths.
-    /// </summary>
-    public int BatchAddTraversePaths(IReadOnlyList<string> paths)
-    {
-        int added = 0;
-        foreach (var path in paths)
-        {
-            var normalized = Path.GetFullPath(path);
-
-            if (_pending.ExistsTraverseInDbOrPending(databaseProvider.GetDatabase(), _sid, normalized))
-                continue;
-
-            // Cancel a pending removal or untrack — scan found the ACE still exists.
-            if (_pending.PendingTraverseRemoves.Remove(normalized) ||
-                _pending.PendingUntrackTraverse.Remove(normalized))
-            {
-                added++;
-                continue;
-            }
-
-            _pending.PendingTraverseAdds[normalized] = new GrantedPathEntry { Path = normalized, IsTraverseOnly = true };
-            added++;
-        }
-
-        if (added > 0)
-            _gridRefresher.RefreshTraverseGrid();
-
-        return added;
+        shellHelper.OpenInExplorer(folder);
     }
 
     /// <summary>
@@ -237,24 +135,14 @@ public class AclManagerActionOrchestrator(
     public void UntrackGrantPath(GrantedPathEntry entry)
     {
         var key = (entry.Path, entry.IsDeny);
-
-        // Pending add — discard entirely (never written to DB/NTFS).
-        if (_pending.PendingAdds.Remove(key))
-        {
-            _pending.PendingConfigMoves.Remove(key);
-            if (!entry.IsDeny)
-            {
-                var traversePath = TraverseAutoManager.GetTraversePath(entry.Path);
-                if (traversePath != null)
-                    _traverseAutoManager.AutoRemoveTraverseIfUnneeded(traversePath);
-            }
-
+        if (CancelPendingAddOrReturn(key))
             return;
-        }
 
         _pending.PendingUntrackGrants[key] = entry;
         // Discard any pending modification or config move — untrack supersedes them.
-        _pending.PendingModifications.Remove(key);
+        // Also discard any config move re-keyed to the new mode by a prior mode switch.
+        if (_pending.PendingModifications.Remove(key, out var mod))
+            _pending.PendingConfigMoves.Remove((entry.Path, mod.NewIsDeny));
         _pending.PendingConfigMoves.Remove(key);
     }
 
@@ -287,24 +175,15 @@ public class AclManagerActionOrchestrator(
     public void RemoveGrantPathDeferred(GrantedPathEntry entry)
     {
         var key = (entry.Path, entry.IsDeny);
-        if (_pending.PendingAdds.Remove(key))
-        {
-            // Was only in pending — discard, never wrote to DB/NTFS.
-            _pending.PendingConfigMoves.Remove(key);
-            if (!entry.IsDeny)
-            {
-                var traversePath = TraverseAutoManager.GetTraversePath(entry.Path);
-                if (traversePath != null)
-                    _traverseAutoManager.AutoRemoveTraverseIfUnneeded(traversePath);
-            }
-
+        if (CancelPendingAddOrReturn(key))
             return;
-        }
 
         // Queue the existing DB entry for deferred removal.
         _pending.PendingRemoves[key] = entry;
         // Discard any pending modification or config move — removal supersedes them.
-        _pending.PendingModifications.Remove(key);
+        // Also discard any config move re-keyed to the new mode by a prior mode switch.
+        if (_pending.PendingModifications.Remove(key, out var mod))
+            _pending.PendingConfigMoves.Remove((entry.Path, mod.NewIsDeny));
         _pending.PendingConfigMoves.Remove(key);
 
         // Auto-remove traverse if no other allow grants depend on it.
@@ -317,25 +196,72 @@ public class AclManagerActionOrchestrator(
     }
 
     /// <summary>
-    /// Handles the Own checkbox change for a grant row. Updates SavedRights in memory,
-    /// marks the entry as pending modification, and refreshes the row background.
+    /// If the entry was a pending add, discards it (removes from <see cref="AclManagerPendingChanges.PendingAdds"/>
+    /// and <see cref="AclManagerPendingChanges.PendingConfigMoves"/>, auto-removes traverse when allow)
+    /// and returns true. Returns false when no pending add was found, indicating the caller should
+    /// proceed with its DB-entry path.
+    /// </summary>
+    private bool CancelPendingAddOrReturn((string Path, bool IsDeny) key)
+    {
+        if (!_pending.PendingAdds.Remove(key))
+            return false;
+
+        _pending.PendingConfigMoves.Remove(key);
+        if (!key.IsDeny)
+        {
+            var traversePath = TraverseAutoManager.GetTraversePath(key.Path);
+            if (traversePath != null)
+                _traverseAutoManager.AutoRemoveTraverseIfUnneeded(traversePath);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Handles the Own checkbox change for a grant row. Records new ownership in PendingModification
+    /// without mutating the live DB entry, marks the row as pending, and refreshes buttons.
     /// The <paramref name="updateActionButtons"/> callback is called after state changes.
     /// </summary>
     public void HandleOwnChange(DataGridViewRow row, GrantedPathEntry entry, Action updateActionButtons)
     {
-        // Ownership change is deferred: update SavedRights in memory and mark as pending.
+        // Ownership change is deferred: record in PendingModification without mutating entry.SavedRights.
         // Deny+unchecked → no dialog, no NTFS write until Apply (no-op on Apply per plan).
         // The actual NTFS ownership change happens in AclManagerApplyOrchestrator.ApplyAsync.
-        var checkState = (CheckState)(row.Cells[AclManagerGrantsHelper.ColOwner].Value ?? CheckState.Unchecked);
-        bool ownValue = checkState == CheckState.Checked;
+        var checkState = (RightCheckState)(row.Cells[AclManagerGrantsHelper.ColOwner].Value ?? RightCheckState.Unchecked);
+        bool ownValue = checkState == RightCheckState.Checked;
 
-        entry.SavedRights = entry.SavedRights != null
-            ? entry.SavedRights with { Own = ownValue }
-            : SavedRightsState.DefaultForMode(entry.IsDeny, own: ownValue);
+        // Capture original Own from the entry's NTFS-committed rights (before any pending change).
+        bool originalOwn = entry.SavedRights?.Own == true;
 
-        var key = (entry.Path, entry.IsDeny);
-        if (!_pending.PendingAdds.ContainsKey(key))
-            _pending.PendingModifications[key] = entry;
+        var dbKey = (entry.Path, entry.IsDeny);
+        var addKey = (entry.Path, _pending.GetEffectiveIsDeny(entry));
+        if (_pending.PendingAdds.ContainsKey(addKey))
+        {
+            // For pending adds the entry itself is the only record — update SavedRights directly.
+            entry.SavedRights = entry.SavedRights != null
+                ? entry.SavedRights with { Own = ownValue }
+                : SavedRightsState.DefaultForMode(entry.IsDeny, own: ownValue);
+        }
+        else
+        {
+            // DB entry: store updated rights in PendingModification without mutating entry.SavedRights.
+            // Preserve WasIsDeny from any existing modification — it reflects the true NTFS mode and must
+            // not be overwritten when only ownership (not mode) changes after a prior mode switch.
+            // Preserve WasOwn from existing mod if already tracked; otherwise use originalOwn.
+            bool wasIsDeny = _pending.PendingModifications.TryGetValue(dbKey, out var existingMod)
+                ? existingMod.WasIsDeny
+                : entry.IsDeny;
+            bool newIsDeny = existingMod?.NewIsDeny ?? entry.IsDeny;
+            bool wasOwn = existingMod?.WasOwn ?? originalOwn;
+
+            // Compute new rights by updating Own on the current effective rights.
+            var effectiveRights = _pending.GetEffectiveRights(entry) ?? SavedRightsState.DefaultForMode(entry.IsDeny);
+            var newSavedRights = effectiveRights with { Own = ownValue };
+
+            _pending.PendingModifications[dbKey] = new PendingModification(
+                entry, WasIsDeny: wasIsDeny, WasOwn: wasOwn,
+                NewIsDeny: newIsDeny, NewRights: newSavedRights);
+        }
 
         AclManagerGrantRowRenderer.SetPendingRowColor(row);
         _grantsHelper.FixableEntries.Remove(entry);
@@ -411,7 +337,10 @@ public class AclManagerActionOrchestrator(
         {
             int aceCount = isDeny ? ntfsState.DirectDenyAceCount : ntfsState.DirectAllowAceCount;
             if (aceCount > 0)
-                entry.SavedRights = SavedRightsComparer.FromNtfsState(ntfsState, isDeny, _isContainer);
+            {
+                bool isFolder = Directory.Exists(normalized);
+                entry.SavedRights = SavedRightsComparer.FromNtfsState(ntfsState, isDeny, _isContainer, isFolder);
+            }
         }
 
         _pending.PendingAdds[(normalized, isDeny)] = entry;

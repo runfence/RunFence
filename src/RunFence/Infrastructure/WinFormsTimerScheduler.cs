@@ -17,11 +17,9 @@ public class WinFormsTimerScheduler : ITimerScheduler
         return new TimerDisposable(timer);
     }
 
-    private sealed class TimerDisposable : IDisposable
+    private sealed class TimerDisposable(Timer timer) : IDisposable
     {
-        private Timer? _timer;
-
-        public TimerDisposable(Timer timer) => _timer = timer;
+        private Timer? _timer = timer;
 
         public void Dispose()
         {

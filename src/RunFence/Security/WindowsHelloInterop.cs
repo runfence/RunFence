@@ -1,72 +1,8 @@
 using System.Runtime.InteropServices;
 
-// ReSharper disable UnusedMember.Global
-
 namespace RunFence.Security;
 
-internal enum WinHelloVerificationResult
-{
-    Verified = 0,
-    DeviceNotPresent = 1,
-    NotConfiguredForUser = 2,
-    DisabledByPolicy = 3,
-    DeviceBusy = 4,
-    RetriesExhausted = 5,
-    Canceled = 6,
-}
-
-internal enum WinHelloAsyncStatus
-{
-    Started = 0,
-    Completed = 1,
-    Canceled = 2,
-    Error = 3,
-}
-
-[ComImport]
-[Guid("39E050C3-4E74-441A-8DC0-B81104DF949C")]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IUserConsentVerifierInterop
-{
-    void GetIids(out uint iidCount, out IntPtr iids);
-    void GetRuntimeClassName(out IntPtr className);
-    void GetTrustLevel(out int trustLevel);
-
-    void RequestVerificationForWindowAsync(
-        IntPtr appWindow,
-        IntPtr message,
-        ref Guid riid,
-        out IntPtr asyncOperation);
-}
-
-[ComImport]
-[Guid("00000036-0000-0000-C000-000000000046")]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IWinHelloAsyncInfo
-{
-    void GetIids(out uint iidCount, out IntPtr iids);
-    void GetRuntimeClassName(out IntPtr className);
-    void GetTrustLevel(out int trustLevel);
-
-    void get_Id(out uint id);
-    void get_Status(out WinHelloAsyncStatus status);
-    void get_ErrorCode(out int errorCode);
-    void Cancel();
-    void Close();
-}
-
-// FIXED IID: this is IAsyncOperation<UserConsentVerificationResult>
-[ComImport]
-[Guid("FD596FFD-2318-558F-9DBE-D21DF43764A5")]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IAsyncOperation_VerificationResult : IWinHelloAsyncInfo
-{
-    void put_Completed(IntPtr handler);
-    void get_Completed(out IntPtr handler);
-    void GetResults(out WinHelloVerificationResult result);
-}
-
-internal static class WindowsHelloNative
+public static class WindowsHelloInterop
 {
     private const string ClassId = "Windows.Security.Credentials.UI.UserConsentVerifier";
 
@@ -79,7 +15,8 @@ internal static class WindowsHelloNative
     [DllImport("combase.dll")]
     private static extern int RoGetActivationFactory(IntPtr activatableClassId, ref Guid iid, out IntPtr factory);
 
-    internal static async Task<WinHelloVerificationResult> RequestAsync(IntPtr hwnd, string message)
+    /// <remarks>Known limitation: polling loop used because WinRT put_Completed requires COM marshaling setup. Consider callback approach in future.</remarks>
+    public static async Task<HelloVerificationResult> RequestAsync(IntPtr hwnd, string message)
     {
         IntPtr classId = IntPtr.Zero;
         IntPtr messageHString = IntPtr.Zero;
@@ -107,24 +44,32 @@ internal static class WindowsHelloNative
             {
                 op.get_Status(out var status);
 
-                if (status == WinHelloAsyncStatus.Completed)
+                if (status == AsyncStatus.Completed)
                     break;
 
                 switch (status)
                 {
-                    case WinHelloAsyncStatus.Error:
+                    case AsyncStatus.Error:
                         op.get_ErrorCode(out var hr);
                         Marshal.ThrowExceptionForHR(hr);
                         break;
-                    case WinHelloAsyncStatus.Canceled:
-                        return WinHelloVerificationResult.Canceled;
+                    case AsyncStatus.Canceled:
+                        return HelloVerificationResult.Canceled;
                 }
 
                 await Task.Delay(50).ConfigureAwait(false);
             }
 
             op.GetResults(out var result);
-            return result;
+            return result switch
+            {
+                VerificationResult.Verified => HelloVerificationResult.Verified,
+                VerificationResult.Canceled => HelloVerificationResult.Canceled,
+                VerificationResult.DeviceNotPresent or VerificationResult.NotConfiguredForUser or
+                    VerificationResult.DisabledByPolicy or VerificationResult.DeviceBusy or
+                    VerificationResult.RetriesExhausted => HelloVerificationResult.NotAvailable,
+                _ => HelloVerificationResult.Failed
+            };
         }
         finally
         {
@@ -139,22 +84,18 @@ internal static class WindowsHelloNative
         }
     }
 
-    internal static bool IsSystemAvailable()
+    public static bool IsSystemAvailable()
     {
         IntPtr classId = IntPtr.Zero;
         IntPtr factoryPtr = IntPtr.Zero;
 
         try
         {
-            // Create HSTRING for runtime class
             if (WindowsCreateString(ClassId, ClassId.Length, out classId) < 0)
                 return false;
 
             var iid = typeof(IUserConsentVerifierInterop).GUID;
-
-            // Try to get activation factory
             var hr = RoGetActivationFactory(classId, ref iid, out factoryPtr);
-
             return hr >= 0 && factoryPtr != IntPtr.Zero;
         }
         catch
@@ -165,7 +106,6 @@ internal static class WindowsHelloNative
         {
             if (factoryPtr != IntPtr.Zero)
                 Marshal.Release(factoryPtr);
-
             if (classId != IntPtr.Zero)
                 WindowsDeleteString(classId);
         }
@@ -175,5 +115,67 @@ internal static class WindowsHelloNative
     {
         if (hr < 0)
             Marshal.ThrowExceptionForHR(hr);
+    }
+
+    private enum VerificationResult
+    {
+        Verified = 0,
+        DeviceNotPresent = 1,
+        NotConfiguredForUser = 2,
+        DisabledByPolicy = 3,
+        DeviceBusy = 4,
+        RetriesExhausted = 5,
+        Canceled = 6,
+    }
+
+    private enum AsyncStatus
+    {
+        Started = 0,
+        Completed = 1,
+        Canceled = 2,
+        Error = 3,
+    }
+
+    [ComImport]
+    [Guid("39E050C3-4E74-441A-8DC0-B81104DF949C")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IUserConsentVerifierInterop
+    {
+        void GetIids(out uint iidCount, out IntPtr iids);
+        void GetRuntimeClassName(out IntPtr className);
+        void GetTrustLevel(out int trustLevel);
+
+        void RequestVerificationForWindowAsync(
+            IntPtr appWindow,
+            IntPtr message,
+            ref Guid riid,
+            out IntPtr asyncOperation);
+    }
+
+    [ComImport]
+    [Guid("00000036-0000-0000-C000-000000000046")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IWinHelloAsyncInfo
+    {
+        void GetIids(out uint iidCount, out IntPtr iids);
+        void GetRuntimeClassName(out IntPtr className);
+        void GetTrustLevel(out int trustLevel);
+
+        void get_Id(out uint id);
+        void get_Status(out AsyncStatus status);
+        void get_ErrorCode(out int errorCode);
+        void Cancel();
+        void Close();
+    }
+
+    // FIXED IID: this is IAsyncOperation<UserConsentVerificationResult>
+    [ComImport]
+    [Guid("FD596FFD-2318-558F-9DBE-D21DF43764A5")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAsyncOperation_VerificationResult : IWinHelloAsyncInfo
+    {
+        void put_Completed(IntPtr handler);
+        void get_Completed(out IntPtr handler);
+        void GetResults(out VerificationResult result);
     }
 }

@@ -9,13 +9,14 @@ namespace RunFence.Account.UI;
 /// Manages the periodic account check timer for <see cref="Forms.AccountsPanel"/>,
 /// detecting local account SID changes and notifying subscribers via events.
 /// </summary>
-public class AccountCheckTimerService : IDisposable
+public class AccountCheckTimerService(
+    ILocalUserProvider localUserProvider,
+    ISessionProvider sessionProvider,
+    ILoggingService log,
+    ReconciliationGuard reconciliationGuard,
+    GrantReconciliationService? reconciler = null)
+    : IDisposable
 {
-    private readonly ILocalUserProvider _localUserProvider;
-    private readonly ISessionProvider _sessionProvider;
-    private readonly ILoggingService _log;
-    private readonly GrantReconciliationService? _reconciler;
-
     private Timer? _timer;
     private Dictionary<string, string>? _currentOsAccounts; // SID → username
 
@@ -24,18 +25,6 @@ public class AccountCheckTimerService : IDisposable
 
     /// <summary>Raised when the accounts grid should be refreshed.</summary>
     public event Action? RefreshNeeded;
-
-    public AccountCheckTimerService(
-        ILocalUserProvider localUserProvider,
-        ISessionProvider sessionProvider,
-        ILoggingService log,
-        GrantReconciliationService? reconciler = null)
-    {
-        _localUserProvider = localUserProvider;
-        _sessionProvider = sessionProvider;
-        _log = log;
-        _reconciler = reconciler;
-    }
 
     public void Start()
     {
@@ -64,32 +53,41 @@ public class AccountCheckTimerService : IDisposable
     {
         if (_inProcess)
             return;
+        if (reconciliationGuard.IsInProgress)
+            return;
 
         _inProcess = true;
+        // Set the guard before any await so that a concurrent manual refresh cannot start
+        // reconciliation during the DetectGroupChanges async gap on the UI thread.
+        if (reconciler != null)
+            reconciliationGuard.IsInProgress = true;
+        var reconciliationDispatched = false;
         try
         {
             // Detect group membership changes and reconcile traverse grants asynchronously.
             // Done before the SID-change check so snapshot is updated even if no SID change.
-            if (_reconciler != null)
+            if (reconciler != null)
             {
-                var changedSids = await _reconciler.DetectGroupChanges();
+                var changedSids = await reconciler.DetectGroupChanges();
                 if (changedSids.Count > 0)
                 {
                     _timer?.Stop();
-                    var db = _sessionProvider.GetSession().Database;
+                    var db = sessionProvider.GetSession().Database;
                     var grantsSnapshot = db.Accounts.ToDictionary(
                         a => a.Sid, a => a.Grants.ToList(), StringComparer.OrdinalIgnoreCase);
-                    _ = Task.Run(() => _reconciler.ReconcileChangedSids(changedSids, grantsSnapshot))
+                    reconciliationDispatched = true;
+                    _ = Task.Run(() => reconciler.ReconcileChangedSids(changedSids, grantsSnapshot))
                         .ContinueWith(task =>
                         {
+                            reconciliationGuard.IsInProgress = false;
                             if (task.IsCompletedSuccessfully)
                             {
-                                _reconciler.ApplyReconciliationResult(task.Result);
+                                reconciler.ApplyReconciliationResult(task.Result);
                                 RefreshNeeded?.Invoke();
                             }
                             else if (task.Exception != null)
                             {
-                                _log.Error("Grant reconciliation failed", task.Exception);
+                                log.Error("Grant reconciliation failed", task.Exception);
                             }
 
                             _timer?.Start();
@@ -100,8 +98,8 @@ public class AccountCheckTimerService : IDisposable
 
             try
             {
-                _localUserProvider.InvalidateCache();
-                var currentAccounts = _localUserProvider.GetLocalUserAccounts();
+                localUserProvider.InvalidateCache();
+                var currentAccounts = localUserProvider.GetLocalUserAccounts();
                 var current = currentAccounts.ToDictionary(
                     u => u.Sid, u => u.Username, StringComparer.OrdinalIgnoreCase);
 
@@ -117,7 +115,7 @@ public class AccountCheckTimerService : IDisposable
 
                     if (sidsChanged)
                     {
-                        var session = _sessionProvider.GetSession();
+                        var session = sessionProvider.GetSession();
                         var db = session.Database;
                         var credentialStore = session.CredentialStore;
 
@@ -143,18 +141,20 @@ public class AccountCheckTimerService : IDisposable
                     _currentOsAccounts = current;
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                /* best effort */
+                log.Debug($"SID change detection failed: {ex}");
             }
         }
         catch (Exception ex)
         {
-            _log.Error(ex.ToString());
+            log.Error(ex.ToString());
         }
         finally
         {
             _inProcess = false;
+            if (!reconciliationDispatched)
+                reconciliationGuard.IsInProgress = false;
         }
     }
 

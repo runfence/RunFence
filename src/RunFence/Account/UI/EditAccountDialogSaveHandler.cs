@@ -13,7 +13,8 @@ namespace RunFence.Account.UI;
 public class EditAccountDialogSaveHandler(
     IWindowsAccountService windowsAccountService,
     ILocalGroupMembershipService groupMembership,
-    IAccountRestrictionService accountRestriction,
+    IAccountLoginRestrictionService loginRestriction,
+    IAccountLsaRestrictionService lsaRestriction,
     IAccountValidationService accountValidation,
     ILicenseService licenseService)
 {
@@ -114,7 +115,7 @@ public class EditAccountDialogSaveHandler(
         {
             try
             {
-                accountRestriction.SetLocalOnlyBySid(request.Sid, localOnly: !request.NewNetworkLogin.Value);
+                lsaRestriction.SetLocalOnlyBySid(request.Sid, localOnly: !request.NewNetworkLogin.Value);
             }
             catch (Exception ex)
             {
@@ -134,7 +135,7 @@ public class EditAccountDialogSaveHandler(
             {
                 try
                 {
-                    accountRestriction.SetLoginBlockedBySid(request.Sid, effectiveName, blocked: settingBlocked);
+                    loginRestriction.SetLoginBlockedBySid(request.Sid, effectiveName, blocked: settingBlocked);
                 }
                 catch (Exception ex)
                 {
@@ -147,7 +148,7 @@ public class EditAccountDialogSaveHandler(
         {
             try
             {
-                accountRestriction.SetNoBgAutostartBySid(request.Sid, blocked: !request.NewBgAutorun.Value);
+                lsaRestriction.SetNoBgAutostartBySid(request.Sid, blocked: !request.NewBgAutorun.Value);
             }
             catch (Exception ex)
             {

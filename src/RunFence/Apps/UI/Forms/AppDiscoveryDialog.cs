@@ -40,7 +40,7 @@ public partial class AppDiscoveryDialog : Form
                 _iconCache[app.TargetPath] = icon;
             }
 
-            var idx = _grid.Rows.Add(icon!, app.Name, app.TargetPath);
+            var idx = _grid.Rows.Add(icon ?? (object)DBNull.Value, app.Name, app.TargetPath);
             _grid.Rows[idx].Tag = app;
         }
 

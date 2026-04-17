@@ -15,7 +15,7 @@ public static class AccountContextMenuBuilder
     /// </summary>
     public static AccountContextMenuItems Build(ContextMenuStrip contextMenu)
     {
-        var ctxFirewallAllowlist = new ToolStripMenuItem("Internet Whitelist");
+        var ctxFirewallAllowlist = new ToolStripMenuItem("Internet Allowlist");
         var accountItems = BuildAccountItems(contextMenu);
         var manage = BuildManageSubmenu(contextMenu, ctxFirewallAllowlist);
         var edit = BuildEditSubmenu(contextMenu, accountItems);
@@ -37,6 +37,7 @@ public static class AccountContextMenuBuilder
             PinFolderBrowserToTray = accountItems.PinFolderBrowserToTray,
             PinDiscoveryToTray = accountItems.PinDiscoveryToTray,
             PinTerminalToTray = accountItems.PinTerminalToTray,
+            ManageAssociations = accountItems.ManageAssociations,
             FirewallAllowlist = ctxFirewallAllowlist,
             CopySid = accountItems.CopySid,
             CopyProfilePath = accountItems.CopyProfilePath,
@@ -98,6 +99,7 @@ public static class AccountContextMenuBuilder
         var ctxPinFolderBrowserToTray = new ToolStripMenuItem("Pin Folder Browser to Tray");
         var ctxPinDiscoveryToTray = new ToolStripMenuItem("Pin App Discovery to Tray");
         var ctxPinTerminalToTray = new ToolStripMenuItem("Pin Terminal to Tray");
+        var ctxManageAssociations = new ToolStripMenuItem("Manage Associations");
 
         var ctxCopySid = new ToolStripMenuItem("Copy SID");
         var ctxCopyProfilePath = new ToolStripMenuItem("Copy Profile Path");
@@ -113,11 +115,12 @@ public static class AccountContextMenuBuilder
         var ctxNewApp = new ToolStripMenuItem("New App...");
 
         // Add account items to context menu (Edit submenu and Manage submenu are inserted separately)
-        contextMenu.Items.AddRange(ctxCopyPassword, ctxTypePassword, ctxSep4, ctxPinFolderBrowserToTray, ctxPinDiscoveryToTray, ctxPinTerminalToTray, ctxSep5, ctxCopySid, ctxCopyProfilePath, ctxOpenProfileFolder, ctxAppsSeparator, ctxNewApp);
+        contextMenu.Items.AddRange(ctxCopyPassword, ctxTypePassword, ctxSep4, ctxPinFolderBrowserToTray, ctxPinDiscoveryToTray, ctxPinTerminalToTray, ctxManageAssociations, ctxSep5, ctxCopySid, ctxCopyProfilePath, ctxOpenProfileFolder, ctxAppsSeparator, ctxNewApp);
 
         return new AccountItemsResult(
             ctxEditAccount, ctxEditCredential, ctxRemoveCredential, ctxDeleteUser,
             ctxPinFolderBrowserToTray, ctxPinDiscoveryToTray, ctxPinTerminalToTray,
+            ctxManageAssociations,
             ctxCopySid, ctxCopyProfilePath, ctxOpenProfileFolder,
             ctxCopyPassword, ctxTypePassword, ctxRotatePassword, ctxSetEmptyPassword,
             new ToolStripSeparator(), new ToolStripSeparator(), new ToolStripSeparator(),
@@ -258,6 +261,7 @@ public static class AccountContextMenuBuilder
         ToolStripMenuItem PinFolderBrowserToTray,
         ToolStripMenuItem PinDiscoveryToTray,
         ToolStripMenuItem PinTerminalToTray,
+        ToolStripMenuItem ManageAssociations,
         ToolStripMenuItem CopySid,
         ToolStripMenuItem CopyProfilePath,
         ToolStripMenuItem OpenProfileFolder,

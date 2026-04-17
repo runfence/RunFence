@@ -1,20 +1,10 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using RunFence.Core;
-using RunFence.Infrastructure;
 using RunFence.Core.Models;
-using RunFence.RunAs.UI.Forms;
+using RunFence.Infrastructure;
 using RunFence.UI;
 
 namespace RunFence.Acl.UI.Forms;
-
-/// <summary>Result of <see cref="AclConfigSection.BuildResult"/>.</summary>
-public record struct AclConfigResult(
-    bool RestrictAcl,
-    AclMode AclMode,
-    AclTarget AclTarget,
-    int Depth,
-    DeniedRights DeniedRights,
-    List<AllowAclEntry>? AllowedEntries);
 
 /// <summary>
 /// ACL configuration section for AppEditDialog. Manages mode radios, target radios,
@@ -23,11 +13,10 @@ public record struct AclConfigResult(
 public partial class AclConfigSection : UserControl
 {
     private readonly IAclService _aclService;
-    private readonly ILocalUserProvider _localUserProvider;
-    private readonly ILocalGroupMembershipService _groupMembership;
-    private readonly SidDisplayNameResolver _displayNameResolver;
-    private readonly ISidEntryHelper _sidEntryHelper;
+    private readonly AclAllowListGridHandler _allowListHandler;
+    private readonly AllowListEntryFactory _allowListEntryFactory;
     private readonly AclConfigValidator _validator;
+    private readonly ILoggingService _log;
 
     private readonly List<string> _folderDepthPaths = new();
     private readonly List<int> _folderDepthIndices = new();
@@ -57,17 +46,13 @@ public partial class AclConfigSection : UserControl
         }
     }
 
-    public AclConfigSection(IAclService aclService, ILocalUserProvider localUserProvider,
-        ILocalGroupMembershipService groupMembership,
-        ISidEntryHelper sidEntryHelper,
-        SidDisplayNameResolver displayNameResolver)
+    public AclConfigSection(IAclService aclService, AclAllowListGridHandler allowListHandler, AllowListEntryFactory allowListEntryFactory, AclConfigValidator validator, ILoggingService log)
     {
         _aclService = aclService;
-        _localUserProvider = localUserProvider;
-        _groupMembership = groupMembership;
-        _sidEntryHelper = sidEntryHelper;
-        _displayNameResolver = displayNameResolver;
-        _validator = new AclConfigValidator(aclService);
+        _allowListHandler = allowListHandler;
+        _allowListEntryFactory = allowListEntryFactory;
+        _validator = validator;
+        _log = log;
         InitializeComponent();
         _allowTsAddButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22));
         _allowTsRemoveButton.Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33));
@@ -95,7 +80,7 @@ public partial class AclConfigSection : UserControl
             foreach (var entry in app.AllowedAclEntries)
             {
                 var idx = _allowEntriesGrid.Rows.Add(
-                    _displayNameResolver.GetDisplayName(entry.Sid, null, _context?.SidNames),
+                    _allowListEntryFactory.GetDisplayName(entry.Sid, null, _context?.SidNames),
                     entry.AllowExecute,
                     entry.AllowWrite);
                 _allowEntriesGrid.Rows[idx].Tag = entry;
@@ -171,8 +156,9 @@ public partial class AclConfigSection : UserControl
                 folder = parent;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            _log.Debug($"UpdateFolderDepthCombo: path resolution failed for '{exePath}': {ex.Message}");
             _folderDepthComboBox.Items.Add("(invalid path)");
         }
 
@@ -380,68 +366,51 @@ public partial class AclConfigSection : UserControl
         if (string.IsNullOrEmpty(sid))
             return;
 
-        // Write access is off by default — app directories rarely need user write access
-        // and granting write poses a security risk.
-        var entry = new AllowAclEntry { Sid = sid, AllowExecute = true, AllowWrite = false };
-        var idx = _allowEntriesGrid.Rows.Add(
-            _displayNameResolver.GetDisplayName(sid, null, _context?.SidNames), true, false);
-        _allowEntriesGrid.Rows[idx].Tag = entry;
+        var isContainer = _context?.Provider.IsContainerSelected() == true;
+        var entries = _allowListEntryFactory.BuildPrePopulationEntries(sid, isContainer, _context?.SidNames);
 
-        // Container apps need both the container package SID and the interactive user SID.
-        // The container SID was added above (via GetSelectedAccountSid returning the container SID).
-        // Now add the interactive user SID so the desktop user token can also reach the exe
-        // (AppContainer dual access check: user SID must pass step 1 independently).
-        if (_context?.Provider.IsContainerSelected() == true)
+        foreach (var populated in entries)
         {
-            var interactiveSid = NativeTokenHelper.TryGetInteractiveUserSid()?.Value;
-            if (!string.IsNullOrEmpty(interactiveSid) &&
-                !string.Equals(interactiveSid, sid, StringComparison.OrdinalIgnoreCase))
-            {
-                var iEntry = new AllowAclEntry { Sid = interactiveSid, AllowExecute = true, AllowWrite = false };
-                var iIdx = _allowEntriesGrid.Rows.Add(
-                    _displayNameResolver.GetDisplayName(interactiveSid, null, _context?.SidNames), true, false);
-                _allowEntriesGrid.Rows[iIdx].Tag = iEntry;
-            }
+            var idx = _allowEntriesGrid.Rows.Add(
+                populated.DisplayName,
+                populated.Entry.AllowExecute,
+                populated.Entry.AllowWrite);
+            _allowEntriesGrid.Rows[idx].Tag = populated.Entry;
         }
     }
 
     private async void OnAllowAddClick(object? sender, EventArgs e)
     {
-        var localUsers = _localUserProvider.GetLocalUserAccounts();
+        var existingEntries = _allowEntriesGrid.Rows
+            .Cast<DataGridViewRow>()
+            .Where(r => r.Tag is AllowAclEntry)
+            .Select(r => (AllowAclEntry)r.Tag!)
+            .ToList();
 
-        var sid = _context?.Provider.GetSelectedAccountSid();
-        if (!string.IsNullOrEmpty(sid))
+        var result = await _allowListEntryFactory.PromptNewEntryAsync(
+            _context?.Provider.GetSelectedAccountSid(),
+            _context?.SidNames,
+            FindForm(),
+            existingEntries);
+
+        if (result == null)
+            return;
+
+        if (result.IsDuplicate)
         {
-            var groups = await Task.Run(() => _groupMembership.GetGroupsForUser(sid));
-            if (groups.Count > 0)
-                localUsers = groups.Concat(localUsers).ToList();
+            MessageBox.Show("This account is already in the list.",
+                "Duplicate", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
         }
 
-        using var dlg = new CallerIdentityDialog(localUsers, _sidEntryHelper);
-        if (dlg.ShowDialog() == DialogResult.OK && dlg.Result != null)
-        {
-            foreach (DataGridViewRow row in _allowEntriesGrid.Rows)
-            {
-                if (row.Tag is AllowAclEntry existing &&
-                    string.Equals(existing.Sid, dlg.Result, StringComparison.OrdinalIgnoreCase))
-                {
-                    MessageBox.Show("This account is already in the list.",
-                        "Duplicate", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-            }
+        if (result.ResolvedName != null)
+            _context?.Provider.OnSidNameLearned(result.Entry!.Sid, result.ResolvedName);
 
-            var entry = new AllowAclEntry { Sid = dlg.Result, AllowExecute = true, AllowWrite = false };
-
-            if (dlg.ResolvedName != null)
-                _context?.Provider.OnSidNameLearned(dlg.Result, dlg.ResolvedName);
-
-            var idx = _allowEntriesGrid.Rows.Add(
-                _displayNameResolver.GetDisplayName(entry.Sid, null, _context?.SidNames),
-                entry.AllowExecute,
-                entry.AllowWrite);
-            _allowEntriesGrid.Rows[idx].Tag = entry;
-        }
+        var idx = _allowEntriesGrid.Rows.Add(
+            result.DisplayName ?? result.Entry!.Sid,
+            result.Entry!.AllowExecute,
+            result.Entry.AllowWrite);
+        _allowEntriesGrid.Rows[idx].Tag = result.Entry;
     }
 
     private void OnAllowRemoveClick(object? sender, EventArgs e)
@@ -466,40 +435,31 @@ public partial class AclConfigSection : UserControl
         if (e.Button == MouseButtons.Right)
         {
             var hit = _allowEntriesGrid.HitTest(e.X, e.Y);
-            if (hit.RowIndex >= 0)
-            {
-                _allowEntriesGrid.ClearSelection();
-                _allowEntriesGrid.Rows[hit.RowIndex].Selected = true;
-            }
-            else
-            {
-                _allowEntriesGrid.ClearSelection();
-            }
+            var rowIndex = _allowListHandler.GetRightClickRowIndex(hit);
+            _allowEntriesGrid.ClearSelection();
+            if (rowIndex >= 0)
+                _allowEntriesGrid.Rows[rowIndex].Selected = true;
         }
     }
 
     private void OnAllowContextMenuOpening(object? sender, CancelEventArgs e)
     {
-        if (!_allowEntriesGrid.Enabled)
+        var hasSelection = _allowEntriesGrid.SelectedRows.Count > 0;
+        if (!_allowListHandler.BuildContextMenuState(_allowEntriesGrid.Enabled, hasSelection,
+                out bool showAdd, out bool showRemove))
         {
             e.Cancel = true;
             return;
         }
 
-        var hasSelection = _allowEntriesGrid.SelectedRows.Count > 0;
-        _allowCtxAdd.Visible = !hasSelection;
-        _allowCtxRemove.Visible = hasSelection;
+        _allowCtxAdd.Visible = showAdd;
+        _allowCtxRemove.Visible = showRemove;
     }
 
     private void OnAllowGridCellValueChanged(object? sender, DataGridViewCellEventArgs e)
     {
         if (e.RowIndex < 0)
             return;
-        var row = _allowEntriesGrid.Rows[e.RowIndex];
-        if (row.Tag is AllowAclEntry entry)
-        {
-            entry.AllowExecute = row.Cells["Execute"].Value is true;
-            entry.AllowWrite = row.Cells["Write"].Value is true;
-        }
+        _allowListHandler.ApplyCellValueToEntry(_allowEntriesGrid.Rows[e.RowIndex]);
     }
 }

@@ -35,17 +35,9 @@ public interface IAccountCredentialManager
         string accountSid, CredentialStore credStore, ProtectedBuffer pinKey,
         out SecureString? password);
 
-    void SaveCredentialStoreAndConfig(
-        CredentialStore credStore, AppDatabase database, ProtectedBuffer pinKey);
-
-    void SaveConfig(AppDatabase database, ProtectedBuffer pinKey, byte[] argonSalt);
-
     /// <summary>
-    /// Detects and applies stale name updates from pre-resolved SID→name mappings.
-    /// Updates AppDatabase.SidNames (config only — not credential store).
-    /// Returns true if any names were updated (and saved).
+    /// Checks whether valid credentials exist for the account without decrypting the password.
+    /// Use this when only the lookup status is needed.
     /// </summary>
-    bool ApplyStaleNameUpdates(
-        Dictionary<string, string?> resolutions,
-        AppDatabase database, ProtectedBuffer pinKey, byte[] argonSalt);
+    CredentialLookupStatus CheckCredential(string accountSid, CredentialStore credStore);
 }

@@ -8,15 +8,15 @@ namespace RunFence.Acl.UI;
 /// Icons are cached by (isDirectory, isReparsePoint) since all folders share one icon and
 /// all reparse-point folders share another. File icons are similarly generic.
 /// </summary>
-public static class AclPathIconProvider
+public class AclPathIconProvider : IAclPathIconProvider, IDisposable
 {
-    private static readonly Dictionary<(bool isDir, bool isReparse), Bitmap> Cache = new();
+    private readonly Dictionary<(bool isDir, bool isReparse), Bitmap> _cache = new();
 
     /// <summary>
     /// Returns a 16×16 icon for the path. Detects directory/file type and reparse-point status
     /// from the filesystem; falls back gracefully for missing paths or P/Invoke failures.
     /// </summary>
-    public static Bitmap GetIcon(string path)
+    public Bitmap GetIcon(string path)
     {
         bool isDirectory;
         bool isReparsePoint = false;
@@ -33,24 +33,31 @@ public static class AclPathIconProvider
         }
 
         var key = (isDirectory, isReparsePoint);
-        if (Cache.TryGetValue(key, out var cached))
+        if (_cache.TryGetValue(key, out var cached))
             return cached;
 
         var bmp = FetchIcon(isDirectory, isReparsePoint) ?? CreateTransparentBitmap();
-        Cache[key] = bmp;
+        _cache[key] = bmp;
         return bmp;
+    }
+
+    public void Dispose()
+    {
+        foreach (var bmp in _cache.Values)
+            bmp.Dispose();
+        _cache.Clear();
     }
 
     private static Bitmap? FetchIcon(bool isDirectory, bool isReparsePoint)
     {
-        uint flags = ShellIconHelper.SHGFI_ICON | ShellIconHelper.SHGFI_SMALLICON | ShellIconHelper.SHGFI_USEFILEATTRIBUTES;
+        uint flags = ShellNative.SHGFI_ICON | ShellNative.SHGFI_SMALLICON | ShellNative.SHGFI_USEFILEATTRIBUTES;
         if (isReparsePoint)
-            flags |= ShellIconHelper.SHGFI_LINKOVERLAY;
+            flags |= ShellNative.SHGFI_LINKOVERLAY;
 
         string fakePath = isDirectory ? "folder" : "file.txt";
-        uint attrs = isDirectory ? ShellIconHelper.FILE_ATTRIBUTE_DIRECTORY : ShellIconHelper.FILE_ATTRIBUTE_NORMAL;
+        uint attrs = isDirectory ? FileSecurityNative.FILE_ATTRIBUTE_DIRECTORY : FileSecurityNative.FILE_ATTRIBUTE_NORMAL;
 
-        var hIcon = ShellIconHelper.GetFileIconHandle(fakePath, attrs, flags);
+        var hIcon = ShellNative.GetFileIconHandle(fakePath, attrs, flags);
         if (hIcon == IntPtr.Zero)
             return null;
 
@@ -64,7 +71,7 @@ public static class AclPathIconProvider
         }
         finally
         {
-            NativeMethods.DestroyIcon(hIcon);
+            WindowNative.DestroyIcon(hIcon);
         }
     }
 

@@ -1,5 +1,8 @@
+using RunFence.Account;
 using RunFence.Account.UI;
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Launch.Container;
 using RunFence.UI;
@@ -24,29 +27,16 @@ namespace RunFence.Wizard.Templates;
 /// <see cref="FirewallOptionsStep"/> for the account path, <see cref="ContainerCapabilitiesStep"/>
 /// for the container path.
 /// </summary>
-public class UntrustedAppTemplate : IWizardTemplate
+public class UntrustedAppTemplate(
+    WizardTemplateExecutor executor,
+    WizardAccountSetupHelperFactory setupHelperFactory,
+    IAppContainerService appContainerService,
+    SessionContext session,
+    WizardLicenseChecker licenseChecker,
+    IShortcutDiscoveryService discoveryService)
+    : IWizardTemplate
 {
-    private readonly WizardTemplateExecutor _executor;
-    private readonly WizardAccountSetupHelperFactory _setupHelperFactory;
-    private readonly IAppContainerService _appContainerService;
-    private readonly SessionContext _session;
-    private readonly WizardLicenseChecker _licenseChecker;
-
     private readonly CommitData _data = new();
-
-    public UntrustedAppTemplate(
-        WizardTemplateExecutor executor,
-        WizardAccountSetupHelperFactory setupHelperFactory,
-        IAppContainerService appContainerService,
-        SessionContext session,
-        WizardLicenseChecker licenseChecker)
-    {
-        _executor = executor;
-        _setupHelperFactory = setupHelperFactory;
-        _appContainerService = appContainerService;
-        _session = session;
-        _licenseChecker = licenseChecker;
-    }
 
     public string DisplayName => "Untrusted App";
     public string Description => "Run an untrusted or risky app in a sandboxed account or AppContainer";
@@ -61,10 +51,10 @@ public class UntrustedAppTemplate : IWizardTemplate
     {
         _data.Reset();
 
-        var containerOrAccountStep = new ContainerOrAccountStep((useContainer, useLowIntegrity, isEphemeral) =>
+        var containerOrAccountStep = new ContainerOrAccountStep((useContainer, privilegeLevel, isEphemeral) =>
         {
             _data.UseContainer = useContainer;
-            _data.UseLowIntegrity = useLowIntegrity;
+            _data.PrivilegeLevel = privilegeLevel;
             _data.IsEphemeral = isEphemeral;
         });
 
@@ -82,7 +72,7 @@ public class UntrustedAppTemplate : IWizardTemplate
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
-                    }, appPathDesc)
+                    }, discoveryService, appPathDesc)
                 ]
                 :
                 [
@@ -100,7 +90,7 @@ public class UntrustedAppTemplate : IWizardTemplate
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
-                    }, appPathDesc)
+                    }, discoveryService, appPathDesc)
                 ]);
 
         // Initial step list: account mode is default (account radio is pre-checked).
@@ -121,7 +111,7 @@ public class UntrustedAppTemplate : IWizardTemplate
             {
                 _data.AppPath = path;
                 _data.AppName = name;
-            }, appPathDesc)
+            }, discoveryService, appPathDesc)
         ];
     }
 
@@ -141,7 +131,7 @@ public class UntrustedAppTemplate : IWizardTemplate
 
     private async Task ExecuteAccountAsync(IWizardProgressReporter progress)
     {
-        var defaults = _setupHelperFactory.CreateAccountDefaults();
+        var defaults = setupHelperFactory.CreateAccountDefaults();
 
         // Create account: remove from Users, optional low integrity and ephemeral, block all network
         progress.ReportStatus("Creating isolated account...");
@@ -167,8 +157,7 @@ public class UntrustedAppTemplate : IWizardTemplate
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
             IsEphemeral: _data.IsEphemeral,
-            SplitTokenOptOut: false,
-            LowIntegrityDefault: _data.UseLowIntegrity,
+            PrivilegeLevel: _data.PrivilegeLevel,
             FirewallSettings: firewallSettings.IsDefault ? null : firewallSettings,
             DesktopSettingsPath: defaults.DesktopSettingsPath,
             InstallPackages: null,
@@ -176,7 +165,7 @@ public class UntrustedAppTemplate : IWizardTemplate
 
         var appName = _data.AppName;
         var appPath = _data.AppPath;
-        var useLowIntegrity = _data.UseLowIntegrity;
+        var privilegeLevel = _data.PrivilegeLevel;
 
         var flowParams = new WizardStandardFlowParams(
             Request: request,
@@ -190,16 +179,19 @@ public class UntrustedAppTemplate : IWizardTemplate
                     restrictAcl: false,
                     aclMode: AclMode.Deny,
                     manageShortcuts: true,
-                    launchAsLowIntegrity: useLowIntegrity ? true : null)
-            ]);
+                    privilegeLevel: privilegeLevel)
+            ],
+            CreateDesktopShortcut: true);
 
-        await _executor.ExecuteAsync(flowParams, progress);
+        await executor.ExecuteAsync(flowParams, progress);
     }
 
     private async Task ExecuteContainerAsync(IWizardProgressReporter progress)
     {
         // License checks
-        if (!_licenseChecker.CheckCanCreateContainer(_session, progress))
+        if (!licenseChecker.CheckCanCreateContainer(session, progress))
+            return;
+        if (!licenseChecker.CheckCanAddApp(session, progress))
             return;
 
         // Generate a unique container name from the app name
@@ -218,7 +210,7 @@ public class UntrustedAppTemplate : IWizardTemplate
         progress.ReportStatus("Creating AppContainer profile...");
         try
         {
-            await Task.Run(() => _appContainerService.CreateProfile(containerEntry));
+            await Task.Run(() => appContainerService.CreateProfile(containerEntry));
         }
         catch (Exception ex)
         {
@@ -226,7 +218,8 @@ public class UntrustedAppTemplate : IWizardTemplate
             return;
         }
 
-        _session.Database.AppContainers.Add(containerEntry);
+        session.Database.AppContainers.Add(containerEntry);
+        try { containerEntry.Sid = appContainerService.GetSid(containerEntry.Name); } catch { }
 
         var appName = _data.AppName;
         var appPath = _data.AppPath;
@@ -245,9 +238,10 @@ public class UntrustedAppTemplate : IWizardTemplate
                     aclMode: AclMode.Deny,
                     manageShortcuts: true,
                     appContainerName: containerName)
-            ]);
+            ],
+            CreateDesktopShortcut: true);
 
-        await _executor.ExecuteAsync(flowParams, progress);
+        await executor.ExecuteAsync(flowParams, progress);
     }
 
     private static string GenerateContainerName(string appName)
@@ -266,7 +260,7 @@ public class UntrustedAppTemplate : IWizardTemplate
     private sealed class CommitData
     {
         public bool UseContainer { get; set; }
-        public bool UseLowIntegrity { get; set; }
+        public PrivilegeLevel PrivilegeLevel { get; set; }
         public bool IsEphemeral { get; set; }
         public bool AllowInternet { get; set; }
         public bool AllowLan { get; set; }
@@ -278,7 +272,7 @@ public class UntrustedAppTemplate : IWizardTemplate
         public void Reset()
         {
             UseContainer = false;
-            UseLowIntegrity = false;
+            PrivilegeLevel = PrivilegeLevel.Basic;
             IsEphemeral = false;
             AllowInternet = false;
             AllowLan = false;

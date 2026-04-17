@@ -65,6 +65,7 @@ public static class Program
 
         log = foundationContainer.Resolve<ILoggingService>();
         var databaseService = foundationContainer.Resolve<IDatabaseService>();
+        var configPaths = foundationContainer.Resolve<IConfigPaths>();
         var appInit = foundationContainer.Resolve<IAppInitializationHelper>();
         var startupUi = foundationContainer.Resolve<IStartupUI>();
         var encryptionService = foundationContainer.Resolve<ICredentialEncryptionService>();
@@ -73,36 +74,34 @@ public static class Program
         if (!new ElevationChecker(startupUi).CheckElevation())
             return;
 
-        // Enable ACL-related privileges once for the lifetime of this always-elevated admin process.
-        // Disabling them between operations would introduce a race window and is unnecessary — this
-        // process is already fully elevated, so holding SeBackup/SeRestore/SeTakeOwnership permanently
-        // carries no additional risk beyond what elevation itself grants.
-        try
+        // Enable required privileges once for the lifetime of this always-elevated admin process.
+        // Each privilege is enabled independently so that failure of one (e.g. not held by this
+        // token) does not roll back the others — matching the TokenTest's per-privilege approach.
+        // Non-default privileges are stripped from child process tokens (LaunchTokenSource.CurrentProcess)
+        // via PrivilegesToDisable in CreateProcessLauncherHelper.
+        foreach (var priv in new[]
         {
-            TokenPrivilegeHelper.EnablePrivileges([
-                TokenPrivilegeHelper.SeBackupPrivilege,
-                TokenPrivilegeHelper.SeRestorePrivilege,
-                TokenPrivilegeHelper.SeTakeOwnershipPrivilege
-            ]);
-        }
-        catch (Exception ex)
+            TokenPrivilegeHelper.SeBackupPrivilege,
+            TokenPrivilegeHelper.SeRestorePrivilege,
+            TokenPrivilegeHelper.SeTakeOwnershipPrivilege,
+            TokenPrivilegeHelper.SeImpersonatePrivilege,
+            TokenPrivilegeHelper.SeIncreaseQuotaPrivilege,
+            TokenPrivilegeHelper.SeDebugPrivilege,
+        })
         {
-            log.Warn($"Could not enable ACL privileges at startup: {ex.Message}");
+            try { TokenPrivilegeHelper.EnablePrivileges([priv]); }
+            catch (Exception ex) { log.Warn($"Could not enable {priv} at startup: {ex.Message}"); }
         }
 
         var singleInstance = new SingleInstanceService();
-        if (!new SessionAcquisitionHandler(startupUi).AcquireMutexOrTakeover(singleInstance, isBackground, log))
+        if (!new SessionAcquisitionHandler(startupUi, configPaths).AcquireMutexOrTakeover(singleInstance, isBackground, log))
             return;
 
         try
         {
-            var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
-            if (!File.Exists(launcherPath))
-                log.Warn($"Launcher not found at: {launcherPath}");
-
             log.Info($"Running as: {identity.Name}");
 
-            var credResult = new StartupCredentialLoader(startupUi, databaseService)
+            var credResult = new StartupCredentialLoader(startupUi, databaseService, configPaths)
                 .LoadAndVerifyCredentials(encryptionService, log);
             if (credResult == null)
                 return;
@@ -145,9 +144,8 @@ public static class Program
                         {
                             case ConfigIntegrityResult.FirstRun:
                                 database = new AppDatabase();
-                                appInit.PopulateDefaultIpcCallers(database);
+                                appInit.InitializeNewDatabase(database);
                                 appInit.EnsureCurrentAccountCredential(credentialStore, database);
-                                appInit.EnsureInteractiveUserSidName(database);
                                 databaseService.SaveCredentialStoreAndConfig(credentialStore, database, startupScope.Data);
                                 break;
 
@@ -164,29 +162,13 @@ public static class Program
                             case ConfigIntegrityResult.DecryptionFailed:
                             default:
                             {
-                                var startFreshButton = new TaskDialogButton("Start Fresh");
-                                var exitButton = new TaskDialogButton("Exit");
-
-                                var errorPage = new TaskDialogPage
-                                {
-                                    Caption = "Configuration Error",
-                                    Heading = "Could not decrypt configuration file.",
-                                    Text = "Your app configuration cannot be read.\n\n" +
-                                           "\"Start Fresh\" will discard it and create an empty configuration.",
-                                    Icon = TaskDialogIcon.Error,
-                                    Buttons = { startFreshButton, exitButton },
-                                    DefaultButton = exitButton
-                                };
-
-                                var dialogResult = TaskDialog.ShowDialog(errorPage);
-                                if (dialogResult == exitButton)
+                                if (!startupUi.ConfirmStartFresh())
                                     return;
 
                                 // Start Fresh: write empty config encrypted with current key
                                 database = new AppDatabase();
-                                appInit.PopulateDefaultIpcCallers(database);
+                                appInit.InitializeNewDatabase(database);
                                 appInit.EnsureCurrentAccountCredential(credentialStore, database);
-                                appInit.EnsureInteractiveUserSidName(database);
                                 databaseService.SaveCredentialStoreAndConfig(credentialStore, database, startupScope.Data);
                                 break;
                             }
@@ -226,10 +208,6 @@ public static class Program
 
                 var options = new StartupOptions(isBackground);
                 using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(foundationContainer, session, options);
-
-                // Wire modal tracker to DataPanel static accessor so all panel modal tracking
-                // uses the same IModalTracker singleton that ApplicationState reads.
-                DataPanel.SetModalTracker(sessionScope.Resolve<IModalTracker>());
 
                 // Initialize license before MainForm — its constructor reads IsLicensed
                 // for the title and About panel. Other init services run later in Start().

@@ -1,18 +1,13 @@
-using RunFence.Account;
-using RunFence.Acl.Permissions;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Launch;
-using RunFence.Security;
 
 namespace RunFence.Acl.QuickAccess;
 
 public class QuickAccessPinService(
     ISessionProvider sessionProvider,
-    ICredentialEncryptionService encryptionService,
-    ISidResolver sidResolver,
-    IProcessLaunchService processLaunchService,
-    IPermissionGrantService permissionGrantService,
+    ILaunchFacade facade,
     ILoggingService log)
     : IQuickAccessPinService
 {
@@ -28,15 +23,8 @@ public class QuickAccessPinService(
         if (filteredPaths.Count == 0)
             return;
 
-        var creds = TryGetCredentials(accountSid);
-        if (creds == null)
-            return;
-
-        permissionGrantService.EnsureExeDirectoryAccess(PinHelperExe, accountSid);
         log.Info($"Pinning {filteredPaths.Count} folder(s) for {accountSid}: {string.Join(", ", filteredPaths)}");
-
-        var credsValue = creds.Value;
-        _ = Task.Run(() => TryLaunchProcess(credsValue, filteredPaths, unpin: false, accountSid));
+        _ = Task.Run(() => TryLaunchProcess(filteredPaths, unpin: false, accountSid));
     }
 
     public void UnpinFolders(string accountSid, IReadOnlyList<string> paths)
@@ -47,15 +35,8 @@ public class QuickAccessPinService(
         if (paths.Count == 0)
             return;
 
-        var creds = TryGetCredentials(accountSid);
-        if (creds == null)
-            return;
-
-        permissionGrantService.EnsureExeDirectoryAccess(PinHelperExe, accountSid);
         log.Info($"Unpinning {paths.Count} folder(s) for {accountSid}: {string.Join(", ", paths)}");
-
-        var credsValue = creds.Value;
-        _ = Task.Run(() => TryLaunchProcess(credsValue, paths, unpin: true, accountSid));
+        _ = Task.Run(() => TryLaunchProcess(paths, unpin: true, accountSid));
     }
 
     public void PinAllGrantedFolders()
@@ -73,7 +54,7 @@ public class QuickAccessPinService(
 
     private bool IsEligible(string accountSid)
     {
-        if (accountSid.StartsWith("S-1-15-2-", StringComparison.OrdinalIgnoreCase))
+        if (AclHelper.IsContainerSid(accountSid))
             return false;
         if (string.Equals(accountSid, SidResolutionHelper.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
             return false;
@@ -82,23 +63,14 @@ public class QuickAccessPinService(
         return true;
     }
 
-    private LaunchCredentials? TryGetCredentials(string accountSid)
-    {
-        var session = sessionProvider.GetSession();
-        using var scope = session.PinDerivedKey.Unprotect();
-        var creds = CredentialHelper.DecryptAndResolve(
-            accountSid, session.CredentialStore, encryptionService, scope.Data, sidResolver, null,
-            out var status);
-        return status == CredentialLookupStatus.Success ? creds : null;
-    }
-
-    private void TryLaunchProcess(LaunchCredentials creds, IReadOnlyList<string> paths, bool unpin, string accountSid)
+    private void TryLaunchProcess(IReadOnlyList<string> paths, bool unpin, string accountSid)
     {
         try
         {
             var flag = unpin ? "--unpin-folders" : "--pin-folders";
-            var args = CommandLineHelper.JoinArgs(new[] { flag }.Concat(paths));
-            processLaunchService.LaunchExe(new ProcessLaunchTarget(PinHelperExe, Arguments: args), creds);
+            var cmdArgs = CommandLineHelper.JoinArgs(new[] { flag }.Concat(paths));
+            var target = new ProcessLaunchTarget(PinHelperExe, Arguments: cmdArgs);
+            facade.LaunchFile(target, new AccountLaunchIdentity(accountSid));
             log.Info($"PinHelper ({(unpin ? "unpin" : "pin")}) succeeded for {accountSid}");
         }
         catch (Exception ex)

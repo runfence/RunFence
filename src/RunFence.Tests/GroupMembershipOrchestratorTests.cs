@@ -121,6 +121,27 @@ public class GroupMembershipOrchestratorTests
         _prompt.Verify(p => p.ShowErrors(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()), Times.Never);
     }
 
+    [Fact]
+    public void AddMembers_NonEmptyExistingMemberSids_PropagatesExistingMembersToPickerAsSeedSet()
+    {
+        // Arrange — R2_TL9: existing member SIDs must be passed to the picker so it can
+        // exclude already-present members from the selectable candidates.
+        var existingMemberSid = "S-1-5-21-1-2-3-9001";
+        var existingMembers = new List<string> { existingMemberSid };
+        HashSet<string>? capturedSeedSet = null;
+        _memberPicker.Setup(p => p.ShowPicker(It.IsAny<string>(), It.IsAny<HashSet<string>>(), null))
+            .Callback<string, HashSet<string>, IWin32Window?>((_, seedSet, _) => capturedSeedSet = seedSet)
+            .Returns((List<LocalUserAccount>?)null);
+        var handler = CreateHandler();
+
+        // Act
+        handler.AddMembers(GroupSid, "TestGroup", existingMembers, owner: null);
+
+        // Assert: the picker received the existing member SID in its seed set
+        Assert.NotNull(capturedSeedSet);
+        Assert.Contains(existingMemberSid, capturedSeedSet!);
+    }
+
     // ── RemoveMember — confirmed/declined/error ───────────────────────────
 
     [Fact]

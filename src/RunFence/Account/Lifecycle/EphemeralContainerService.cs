@@ -1,7 +1,7 @@
+using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch.Container;
 using RunFence.Persistence;
 using RunFence.Startup;
 
@@ -12,12 +12,12 @@ namespace RunFence.Account.Lifecycle;
 /// Separate from EphemeralAccountService (different dependencies and deletion logic).
 /// </summary>
 public class EphemeralContainerService(
-    IAppContainerService appContainerService,
     IContainerDeletionService containerDeletion,
     IDatabaseService databaseService,
     ILoggingService log,
     ISessionProvider sessionProvider,
-    IUiThreadInvoker uiThreadInvoker)
+    IUiThreadInvoker uiThreadInvoker,
+    IProcessListService processListService)
     : IDisposable, IBackgroundService
 {
     private EphemeralTimerHelper? _timer;
@@ -39,14 +39,8 @@ public class EphemeralContainerService(
         bool changed = false;
 
         var (orphaned, expired) = ClassifyEntries(database.AppContainers);
-        changed |= ProcessEntries(orphaned);
-
-        foreach (var entry in expired)
-        {
-            if (!ProcessContainerCleanup(entry))
-                continue;
-            changed = true;
-        }
+        changed |= ProcessOrphanedEntries(orphaned, containerDeletion);
+        changed |= ProcessExpiredEntries(expired, containerDeletion, log, processListService);
 
         if (changed)
         {
@@ -61,27 +55,17 @@ public class EphemeralContainerService(
     /// Returns true if any changes were made.
     /// </summary>
     public static bool ProcessExpiredAtStartup(
-        AppDatabase database, IAppContainerService appContainerService,
-        IContainerDeletionService containerDeletion, ILoggingService log)
+        AppDatabase database,
+        IContainerDeletionService containerDeletion, ILoggingService log,
+        IProcessListService processListService)
     {
         bool changed = false;
         var (orphaned, expired) = ClassifyEntries(database.AppContainers);
 
         log.Info($"EphemeralContainerService: processing expired containers at startup ({orphaned.Count} orphaned, {expired.Count} expired).");
 
-        foreach (var entry in orphaned)
-        {
-            if (!RunDeletion(entry, appContainerService, containerDeletion, log))
-                continue;
-            changed = true;
-        }
-
-        foreach (var entry in expired)
-        {
-            if (!RunDeletion(entry, appContainerService, containerDeletion, log))
-                continue;
-            changed = true;
-        }
+        changed |= ProcessOrphanedEntries(orphaned, containerDeletion);
+        changed |= ProcessExpiredEntries(expired, containerDeletion, log, processListService);
 
         log.Info("EphemeralContainerService: startup container processing complete.");
         return changed;
@@ -95,19 +79,20 @@ public class EphemeralContainerService(
     public void ProcessExpiredContainersAtStartup()
     {
         var session = sessionProvider.GetSession();
-        if (ProcessExpiredAtStartup(session.Database, appContainerService, containerDeletion, log))
+        if (ProcessExpiredAtStartup(session.Database, containerDeletion, log, processListService))
         {
             using var scope = session.PinDerivedKey.Unprotect();
             databaseService.SaveConfig(session.Database, scope.Data, session.CredentialStore.ArgonSalt);
         }
     }
 
-    private bool ProcessEntries(List<AppContainerEntry> entries)
+    private static bool ProcessOrphanedEntries(List<AppContainerEntry> orphaned,
+        IContainerDeletionService containerDeletion)
     {
         bool anyRemoved = false;
-        foreach (var entry in entries)
+        foreach (var entry in orphaned)
         {
-            if (!ProcessContainerCleanup(entry))
+            if (!RunDeletion(entry, containerDeletion))
                 continue; // preserve entry — skip DB cleanup so it can be retried next time
             anyRemoved = true;
         }
@@ -115,17 +100,41 @@ public class EphemeralContainerService(
         return anyRemoved;
     }
 
-    private bool ProcessContainerCleanup(AppContainerEntry entry)
+    private static bool ProcessExpiredEntries(List<AppContainerEntry> expired,
+        IContainerDeletionService containerDeletion, ILoggingService log,
+        IProcessListService processListService)
     {
-        var containerSid = TryGetContainerSid(appContainerService, entry.Name, log);
-        return containerDeletion.DeleteContainer(entry, containerSid);
+        bool changed = false;
+
+        var expiredSids = expired
+            .Where(e => !string.IsNullOrEmpty(e.Sid))
+            .Select(e => e.Sid!)
+            .ToList();
+        var sidsWithProcesses = expiredSids.Count > 0
+            ? processListService.GetSidsWithProcesses(expiredSids)
+            : [];
+
+        foreach (var entry in expired)
+        {
+            if (!string.IsNullOrEmpty(entry.Sid) && sidsWithProcesses.Contains(entry.Sid))
+            {
+                log.Info($"Postponing ephemeral container deletion for '{entry.Name}': processes still running under SID {entry.Sid}");
+                entry.DeleteAfterUtc = DateTime.UtcNow.AddHours(24);
+                changed = true;
+                continue;
+            }
+
+            if (!RunDeletion(entry, containerDeletion))
+                continue;
+            changed = true;
+        }
+
+        return changed;
     }
 
-    private static bool RunDeletion(AppContainerEntry entry,
-        IAppContainerService appContainerService, IContainerDeletionService containerDeletion,
-        ILoggingService log)
+    private static bool RunDeletion(AppContainerEntry entry, IContainerDeletionService containerDeletion)
     {
-        var containerSid = TryGetContainerSid(appContainerService, entry.Name, log);
+        var containerSid = string.IsNullOrEmpty(entry.Sid) ? null : entry.Sid;
         return containerDeletion.DeleteContainer(entry, containerSid);
     }
 
@@ -151,19 +160,6 @@ public class EphemeralContainerService(
         }
 
         return (orphaned, expired);
-    }
-
-    private static string? TryGetContainerSid(IAppContainerService appContainerService, string containerName, ILoggingService log)
-    {
-        try
-        {
-            return appContainerService.GetSid(containerName);
-        }
-        catch (Exception ex)
-        {
-            log.Warn($"Failed to get SID for container '{containerName}': {ex.Message}");
-            return null;
-        }
     }
 
     public void Dispose()

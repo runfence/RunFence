@@ -1,10 +1,8 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.DirectoryServices.AccountManagement;
 using System.Management;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
-using Microsoft.Win32;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Launch;
@@ -14,38 +12,18 @@ namespace RunFence.Account;
 public class WindowsAccountService(
     ILoggingService log,
     IAccountValidationService accountValidation,
-    IAccountRestrictionService restrictions,
+    IAccountLoginRestrictionService restrictions,
     ISidResolver sidResolver,
-    ILocalUserProvider localUserProvider)
+    ILocalUserProvider localUserProvider,
+    IFolderHandlerService folderHandlerService)
     : IWindowsAccountService
 {
-    public void OpenUserAccountsDialog()
-    {
-        var lusrmgr = Path.Combine(Environment.SystemDirectory, "lusrmgr.msc");
-        if (File.Exists(lusrmgr))
-            Process.Start("mmc.exe", "lusrmgr.msc");
-        else
-            Process.Start("control", "userpasswords2");
-    }
-
-    // --- Account Status ---
-
-    public bool IsAccountDisabled(string username)
-    {
-        try
-        {
-            using var context = new PrincipalContext(ContextType.Machine);
-            using var user = UserPrincipal.FindByIdentity(context, IdentityType.Name, username);
-            return user is { Enabled: false };
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     // --- Delete User ---
 
+    /// <remarks>
+    /// Dual deletion intentional: UserPrincipal.Delete() sometimes leaves the profile directory.
+    /// WMI Win32_UserProfile.Delete() is the fallback to ensure complete cleanup.
+    /// </remarks>
     public void DeleteUser(string sid)
     {
         accountValidation.ValidateNotCurrentAccount(sid, "delete");
@@ -120,20 +98,7 @@ public class WindowsAccountService(
 
     // --- Profile Path ---
 
-    public string? GetProfilePath(string sid)
-    {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                $@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\{sid}");
-            return key?.GetValue("ProfileImagePath") is string raw ? Environment.ExpandEnvironmentVariables(raw) : null;
-        }
-        catch (Exception ex)
-        {
-            log.Error($"Failed to get profile path for SID {sid}", ex);
-            return null;
-        }
-    }
+    public string? GetProfilePath(string sid) => sidResolver.TryGetProfilePath(sid);
 
     // --- Rename ---
 
@@ -160,7 +125,29 @@ public class WindowsAccountService(
             if (wasHidden)
             {
                 restrictions.SetAccountHidden(newUsername, sid, true);
-                restrictions.SetAccountHidden(currentUsername, sid, false);
+                try
+                {
+                    restrictions.SetAccountHidden(currentUsername, sid, false);
+                }
+                catch (Exception ex)
+                {
+                    log.Warn($"Failed to remove old hidden registry entry for '{currentUsername}' after rename: {ex.Message}");
+                }
+            }
+
+            // If the account had a folder handler registered, unregister it now so that any
+            // stale entries referencing the old account state are removed. The handler will be
+            // re-registered by the next launch if needed.
+            if (folderHandlerService.IsRegistered(sid))
+            {
+                try
+                {
+                    folderHandlerService.Unregister(sid);
+                }
+                catch (Exception ex)
+                {
+                    log.Warn($"Failed to unregister folder handler for '{currentUsername}' ({sid}) after rename: {ex.Message}");
+                }
             }
 
             localUserProvider.InvalidateCache();
@@ -192,9 +179,9 @@ public class WindowsAccountService(
         int[] logonTypes = [Logon32LogonNetwork, Logon32LogonBatch, Logon32LogonInteractive];
         foreach (var logonType in logonTypes)
         {
-            if (NativeInterop.LogonUser(username, domainArg, password, logonType, Logon32ProviderDefault, out var token))
+            if (WindowsAccountNative.LogonUser(username, domainArg, password, logonType, Logon32ProviderDefault, out var token))
             {
-                NativeMethods.CloseHandle(token);
+                ProcessNative.CloseHandle(token);
                 return null; // Success
             }
 

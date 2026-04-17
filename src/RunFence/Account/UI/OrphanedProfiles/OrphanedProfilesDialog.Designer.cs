@@ -44,7 +44,7 @@ partial class OrphanedProfilesDialog
         _deleteButton.Size = new Size(120, 28);
         _deleteButton.FlatStyle = FlatStyle.System;
         _deleteButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
-        _deleteButton.Click += OnDeleteSelectedClick;
+        _deleteButton.Click += OnDeleteButtonClick;
 
         // _closeButton
         _closeButton.Text = "Close";

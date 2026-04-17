@@ -1,4 +1,5 @@
 using Moq;
+using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Persistence;
@@ -6,6 +7,12 @@ using Xunit;
 
 namespace RunFence.Tests;
 
+/// <summary>
+/// Integration tests for <see cref="AppConfigService"/> and related config management types.
+/// Real file I/O (temp files via <see cref="TempDirectory"/>) is intentional — the service
+/// semantics are file-path-centric (load/unload/save by path) and cannot be fully tested
+/// without exercising the actual filesystem path-tracking behavior.
+/// </summary>
 public class AppConfigServiceTests : IDisposable
 {
     private readonly AppConfigService _service;
@@ -24,9 +31,11 @@ public class AppConfigServiceTests : IDisposable
         _dbService = new Mock<IDatabaseService>();
         _tempDir = new TempDirectory("RunFence_AppConfigTest");
         _grantTracker = new GrantConfigTracker();
-        _handlerMappings = new HandlerMappingService();
         _index = new AppConfigIndex(_grantTracker);
-        _service = new AppConfigService(_log.Object, _index, _grantTracker, _handlerMappings, _dbService.Object);
+        _handlerMappings = new HandlerMappingService(_index);
+        _service = new AppConfigService(_log.Object, _index, _grantTracker, _handlerMappings, _dbService.Object,
+            new AppConfigSaveHelper(_grantTracker, _handlerMappings, _dbService.Object),
+            new AppEntryIdGenerator());
         _pinKey = new byte[32];
         new Random(42).NextBytes(_pinKey);
         _argonSalt = new byte[32];
@@ -223,7 +232,7 @@ public class AppConfigServiceTests : IDisposable
         database.GetOrCreateAccount("S-1-5-21-2").TrayFolderBrowser = true;
         database.GetOrCreateAccount("S-1-5-21-3").TrayDiscovery = true;
         database.GetOrCreateAccount("S-1-5-21-4").DeleteAfterUtc = DateTime.UtcNow.AddDays(1);
-        database.GetOrCreateAccount("S-1-5-21-7").LowIntegrityDefault = true;
+        database.GetOrCreateAccount("S-1-5-21-7").PrivilegeLevel = PrivilegeLevel.LowIntegrity;
         database.GetOrCreateAccount("S-1-5-21-9").Grants.Add(grantEntry);
 
         var filtered = _index.FilterForMainConfig(database);
@@ -240,7 +249,7 @@ public class AppConfigServiceTests : IDisposable
         Assert.True(filtered.GetAccount("S-1-5-21-2")?.TrayFolderBrowser);
         Assert.True(filtered.GetAccount("S-1-5-21-3")?.TrayDiscovery);
         Assert.True(filtered.GetAccount("S-1-5-21-4")?.DeleteAfterUtc.HasValue);
-        Assert.True(filtered.GetAccount("S-1-5-21-7")?.LowIntegrityDefault);
+        Assert.Equal(PrivilegeLevel.LowIntegrity, filtered.GetAccount("S-1-5-21-7")?.PrivilegeLevel);
         // Grant entry preserved (belongs to main config)
         Assert.Single(filtered.GetAccount("S-1-5-21-9")!.Grants);
         Assert.Equal(@"C:\foo", filtered.GetAccount("S-1-5-21-9")!.Grants[0].Path);
@@ -358,7 +367,7 @@ public class AppConfigServiceTests : IDisposable
     {
         var appId = AppEntry.GenerateId();
         var app = new AppEntry { Id = appId, Name = "App" };
-        var path = CreateConfigFileWithMappings([app], new Dictionary<string, string> { [".pdf"] = appId });
+        var path = CreateConfigFileWithMappings([app], new Dictionary<string, HandlerMappingEntry> { [".pdf"] = new HandlerMappingEntry(appId) });
         var database = new AppDatabase();
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
@@ -368,7 +377,7 @@ public class AppConfigServiceTests : IDisposable
             It.Is<AppConfig>(c =>
                 c.HandlerMappings != null &&
                 c.HandlerMappings.ContainsKey(".pdf") &&
-                c.HandlerMappings[".pdf"] == appId),
+                c.HandlerMappings[".pdf"].AppId == appId),
             Path.GetFullPath(path),
             _pinKey, _argonSalt), Times.Once);
     }
@@ -436,6 +445,97 @@ public class AppConfigServiceTests : IDisposable
 
     // --- GetLoadedConfigPaths (ordered) ---
 
+    // --- ReencryptAndSaveAll ---
+
+    [Fact]
+    public void ReencryptAndSaveAll_CallsSaveCredentialStoreAndAllConfigsWithNewKey()
+    {
+        // Arrange: load two additional configs so ReencryptAndSaveAll has something to re-encrypt
+        var mainApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "MainApp" };
+        var extraApp1 = new AppEntry { Id = AppEntry.GenerateId(), Name = "ExtraApp1" };
+        var extraApp2 = new AppEntry { Id = AppEntry.GenerateId(), Name = "ExtraApp2" };
+        var path1 = CreateConfigFile([extraApp1]);
+        var path2 = CreateConfigFile([extraApp2]);
+        var database = new AppDatabase { Apps = [mainApp] };
+        _service.LoadAdditionalConfig(path1, database, _pinKey);
+        _service.LoadAdditionalConfig(path2, database, _pinKey);
+
+        var newKey = new byte[32];
+        new Random(88).NextBytes(newKey);
+        var store = new CredentialStore
+        {
+            ArgonSalt = _argonSalt,
+            EncryptedCanary = [1, 2, 3]
+        };
+
+        List<(string, AppConfig)>? capturedConfigs = null;
+        byte[]? capturedKey = null;
+        _dbService
+            .Setup(d => d.SaveCredentialStoreAndAllConfigs(
+                It.IsAny<CredentialStore>(),
+                It.IsAny<AppDatabase>(),
+                It.IsAny<byte[]>(),
+                It.IsAny<List<(string, AppConfig)>>()))
+            .Callback<CredentialStore, AppDatabase, byte[], List<(string, AppConfig)>>(
+                (_, _, key, configs) =>
+                {
+                    capturedKey = key;
+                    capturedConfigs = configs;
+                });
+
+        // Act
+        _service.ReencryptAndSaveAll(store, database, newKey);
+
+        // Assert: called once with the new key
+        _dbService.Verify(d => d.SaveCredentialStoreAndAllConfigs(
+            store,
+            database,
+            newKey,
+            It.IsAny<List<(string, AppConfig)>>()), Times.Once);
+
+        Assert.NotNull(capturedKey);
+        Assert.Equal(newKey, capturedKey);
+
+        // Both additional configs must be included
+        Assert.NotNull(capturedConfigs);
+        Assert.Equal(2, capturedConfigs!.Count);
+        Assert.Contains(capturedConfigs, c => c.Item1 == Path.GetFullPath(path1));
+        Assert.Contains(capturedConfigs, c => c.Item1 == Path.GetFullPath(path2));
+    }
+
+    [Fact]
+    public void ReencryptAndSaveAll_NoAdditionalConfigs_CallsSaveWithEmptyList()
+    {
+        // Arrange: no additional configs loaded — only the main config is re-encrypted
+        var store = new CredentialStore
+        {
+            ArgonSalt = _argonSalt,
+            EncryptedCanary = [1, 2, 3]
+        };
+        var database = new AppDatabase();
+        var newKey = new byte[32];
+        new Random(77).NextBytes(newKey);
+
+        List<(string, AppConfig)>? capturedConfigs = null;
+        _dbService
+            .Setup(d => d.SaveCredentialStoreAndAllConfigs(
+                It.IsAny<CredentialStore>(),
+                It.IsAny<AppDatabase>(),
+                It.IsAny<byte[]>(),
+                It.IsAny<List<(string, AppConfig)>>()))
+            .Callback<CredentialStore, AppDatabase, byte[], List<(string, AppConfig)>>(
+                (_, _, _, configs) => capturedConfigs = configs);
+
+        // Act
+        _service.ReencryptAndSaveAll(store, database, newKey);
+
+        // Assert: called once; additional configs list is empty
+        _dbService.Verify(d => d.SaveCredentialStoreAndAllConfigs(
+            store, database, newKey, It.IsAny<List<(string, AppConfig)>>()), Times.Once);
+        Assert.NotNull(capturedConfigs);
+        Assert.Empty(capturedConfigs!);
+    }
+
     [Fact]
     public void GetLoadedConfigPaths_ReturnsInsertionOrder()
     {
@@ -457,7 +557,7 @@ public class AppConfigServiceTests : IDisposable
 
     // --- Handler Mapping helpers ---
 
-    private string CreateConfigFileWithMappings(List<AppEntry>? apps, Dictionary<string, string>? handlerMappings)
+    private string CreateConfigFileWithMappings(List<AppEntry>? apps, Dictionary<string, HandlerMappingEntry>? handlerMappings)
     {
         var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
         var config = new AppConfig { Apps = apps ?? [], HandlerMappings = handlerMappings };
@@ -476,17 +576,17 @@ public class AppConfigServiceTests : IDisposable
         var database = new AppDatabase
         {
             Apps = [mainApp],
-            Settings = { HandlerMappings = new Dictionary<string, string> { [".pdf"] = mainApp.Id } }
+            Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { [".pdf"] = new HandlerMappingEntry(mainApp.Id) } }
         };
         var extraPath = CreateConfigFileWithMappings([extraApp],
-            new Dictionary<string, string> { ["http"] = extraApp.Id });
+            new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(extraApp.Id) });
         _service.LoadAdditionalConfig(extraPath, database, _pinKey);
 
         var effective = _handlerMappings.GetEffectiveHandlerMappings(database);
 
         Assert.Equal(2, effective.Count);
-        Assert.Equal(mainApp.Id, effective[".pdf"]);
-        Assert.Equal(extraApp.Id, effective["http"]);
+        Assert.Equal(mainApp.Id, effective[".pdf"].AppId);
+        Assert.Equal(extraApp.Id, effective["http"].AppId);
     }
 
     [Fact]
@@ -497,17 +597,63 @@ public class AppConfigServiceTests : IDisposable
         var database = new AppDatabase
         {
             Apps = [mainApp],
-            Settings = { HandlerMappings = new Dictionary<string, string> { ["http"] = mainApp.Id } }
+            Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(mainApp.Id) } }
         };
         var extraPath = CreateConfigFileWithMappings([extraApp],
-            new Dictionary<string, string> { ["http"] = extraApp.Id });
+            new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(extraApp.Id) });
         _service.LoadAdditionalConfig(extraPath, database, _pinKey);
 
         var effective = _handlerMappings.GetEffectiveHandlerMappings(database);
 
         // Extra config wins on duplicate key
         Assert.Single(effective);
-        Assert.Equal(extraApp.Id, effective["http"]);
+        Assert.Equal(extraApp.Id, effective["http"].AppId);
+    }
+
+    // --- GetAllHandlerMappings ---
+
+    [Fact]
+    public void GetAllHandlerMappings_ReturnsBothWhenSameKeyInMultipleConfigs()
+    {
+        var mainApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "MainApp" };
+        var extraApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "ExtraApp" };
+        var database = new AppDatabase
+        {
+            Apps = [mainApp],
+            Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(mainApp.Id) } }
+        };
+        var extraPath = CreateConfigFileWithMappings([extraApp],
+            new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(extraApp.Id) });
+        _service.LoadAdditionalConfig(extraPath, database, _pinKey);
+
+        var all = _handlerMappings.GetAllHandlerMappings(database);
+
+        // Both apps appear for "http", main config first
+        Assert.Single(all);
+        Assert.Equal(2, all["http"].Count);
+        Assert.Equal(mainApp.Id, all["http"][0].AppId);
+        Assert.Equal(extraApp.Id, all["http"][1].AppId);
+    }
+
+    [Fact]
+    public void GetAllHandlerMappings_MergesDistinctKeysFromAllConfigs()
+    {
+        var mainApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "MainApp" };
+        var extraApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "ExtraApp" };
+        var database = new AppDatabase
+        {
+            Apps = [mainApp],
+            Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { [".pdf"] = new HandlerMappingEntry(mainApp.Id) } }
+        };
+        var extraPath = CreateConfigFileWithMappings([extraApp],
+            new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(extraApp.Id) });
+        _service.LoadAdditionalConfig(extraPath, database, _pinKey);
+
+        var all = _handlerMappings.GetAllHandlerMappings(database);
+
+        Assert.Equal(2, all.Count);
+        Assert.Equal(mainApp.Id, Assert.Single(all[".pdf"]).AppId);
+        Assert.Equal(extraApp.Id, Assert.Single(all["http"]).AppId);
     }
 
     // --- SetHandlerMapping ---
@@ -518,10 +664,10 @@ public class AppConfigServiceTests : IDisposable
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
         var database = new AppDatabase { Apps = [app] };
 
-        _handlerMappings.SetHandlerMapping("http", app.Id, database);
+        _handlerMappings.SetHandlerMapping("http", new HandlerMappingEntry(app.Id), database);
 
         Assert.NotNull(database.Settings.HandlerMappings);
-        Assert.Equal(app.Id, database.Settings.HandlerMappings["http"]);
+        Assert.Equal(app.Id, database.Settings.HandlerMappings["http"].AppId);
     }
 
     [Fact]
@@ -532,38 +678,39 @@ public class AppConfigServiceTests : IDisposable
         var path = CreateConfigFile([app]);
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
-        _handlerMappings.SetHandlerMapping("http", app.Id, database);
+        _handlerMappings.SetHandlerMapping("http", new HandlerMappingEntry(app.Id), database);
 
         // Not in main config
         Assert.Null(database.Settings.HandlerMappings);
         // In extra config
         var mappingsForConfig = _handlerMappings.GetHandlerMappingsForConfig(path);
         Assert.NotNull(mappingsForConfig);
-        Assert.Equal(app.Id, mappingsForConfig["http"]);
+        Assert.Equal(app.Id, mappingsForConfig["http"].AppId);
     }
 
     [Fact]
-    public void SetHandlerMapping_ReplacesExistingFromOtherConfig()
+    public void SetHandlerMapping_AddsToOwnConfig_PreservesOtherConfigMappings()
     {
         var mainApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "MainApp" };
         var extraApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "ExtraApp" };
         var database = new AppDatabase
         {
             Apps = [mainApp],
-            Settings = { HandlerMappings = new Dictionary<string, string> { ["http"] = mainApp.Id } }
+            Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(mainApp.Id) } }
         };
         var path = CreateConfigFile([extraApp]);
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
-        // Reassign "http" from main app to extra app
-        _handlerMappings.SetHandlerMapping("http", extraApp.Id, database);
+        // Add "http" for extra app (different config than main app)
+        _handlerMappings.SetHandlerMapping("http", new HandlerMappingEntry(extraApp.Id), database);
 
-        // Removed from main config
-        Assert.Null(database.Settings.HandlerMappings);
-        // Added to extra config
+        // Main config mapping preserved
+        Assert.NotNull(database.Settings.HandlerMappings);
+        Assert.Equal(mainApp.Id, database.Settings.HandlerMappings["http"].AppId);
+        // Extra config also has "http"
         var mappingsForConfig = _handlerMappings.GetHandlerMappingsForConfig(path);
         Assert.NotNull(mappingsForConfig);
-        Assert.Equal(extraApp.Id, mappingsForConfig["http"]);
+        Assert.Equal(extraApp.Id, mappingsForConfig["http"].AppId);
     }
 
     // --- RemoveHandlerMapping ---
@@ -573,16 +720,16 @@ public class AppConfigServiceTests : IDisposable
     {
         var database = new AppDatabase
         {
-            Settings = { HandlerMappings = new Dictionary<string, string> { ["http"] = "app1", [".pdf"] = "app1" } }
+            Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app1") } }
         };
 
-        _handlerMappings.RemoveHandlerMapping("http", database);
+        _handlerMappings.RemoveHandlerMapping("http", "app1", database);
 
         // "http" removed, ".pdf" still present
         Assert.NotNull(database.Settings.HandlerMappings);
         Assert.False(database.Settings.HandlerMappings.ContainsKey("http"));
         Assert.Single(database.Settings.HandlerMappings);
-        Assert.Equal("app1", database.Settings.HandlerMappings[".pdf"]);
+        Assert.Equal("app1", database.Settings.HandlerMappings[".pdf"].AppId);
     }
 
     [Fact]
@@ -590,12 +737,46 @@ public class AppConfigServiceTests : IDisposable
     {
         var database = new AppDatabase
         {
-            Settings = { HandlerMappings = new Dictionary<string, string> { ["http"] = "app1" } }
+            Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") } }
         };
 
-        _handlerMappings.RemoveHandlerMapping("http", database);
+        _handlerMappings.RemoveHandlerMapping("http", "app1", database);
 
         Assert.Null(database.Settings.HandlerMappings);
+    }
+
+    [Fact]
+    public void RemoveHandlerMapping_DoesNotRemoveWhenValueBelongsToDifferentApp_MainConfig()
+    {
+        // Main config has "http" → "app1"; calling remove for "app2" (also in main config) must not remove it
+        var database = new AppDatabase
+        {
+            Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") } }
+        };
+
+        _handlerMappings.RemoveHandlerMapping("http", "app2", database);
+
+        Assert.NotNull(database.Settings.HandlerMappings);
+        Assert.Equal("app1", database.Settings.HandlerMappings["http"].AppId);
+    }
+
+    [Fact]
+    public void RemoveHandlerMapping_DoesNotRemoveWhenValueBelongsToDifferentApp_ExtraConfig()
+    {
+        // Extra config has "http" → appA and ".pdf" → appB; removing ("http", appB) must not touch appA's mapping
+        var appA = new AppEntry { Id = AppEntry.GenerateId(), Name = "AppA" };
+        var appB = new AppEntry { Id = AppEntry.GenerateId(), Name = "AppB" };
+        var database = new AppDatabase();
+        var path = CreateConfigFileWithMappings([appA, appB],
+            new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(appA.Id), [".pdf"] = new HandlerMappingEntry(appB.Id) });
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        _handlerMappings.RemoveHandlerMapping("http", appB.Id, database);
+
+        var mappings = _handlerMappings.GetHandlerMappingsForConfig(path);
+        Assert.NotNull(mappings);
+        Assert.Equal(appA.Id, mappings["http"].AppId); // appA's mapping preserved
+        Assert.Equal(appB.Id, mappings[".pdf"].AppId);  // appB's mapping preserved
     }
 
     [Fact]
@@ -604,10 +785,10 @@ public class AppConfigServiceTests : IDisposable
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
         var database = new AppDatabase();
         var path = CreateConfigFileWithMappings([app],
-            new Dictionary<string, string> { ["http"] = app.Id });
+            new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(app.Id) });
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
-        _handlerMappings.RemoveHandlerMapping("http", database);
+        _handlerMappings.RemoveHandlerMapping("http", app.Id, database);
 
         var mappings = _handlerMappings.GetHandlerMappingsForConfig(path);
         Assert.Null(mappings); // empty after removal → null
@@ -621,12 +802,12 @@ public class AppConfigServiceTests : IDisposable
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
         var database = new AppDatabase();
         var path = CreateConfigFileWithMappings([app],
-            new Dictionary<string, string> { ["http"] = app.Id });
+            new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(app.Id) });
 
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
         var effective = _handlerMappings.GetEffectiveHandlerMappings(database);
-        Assert.Equal(app.Id, effective["http"]);
+        Assert.Equal(app.Id, effective["http"].AppId);
     }
 
     [Fact]
@@ -635,7 +816,7 @@ public class AppConfigServiceTests : IDisposable
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
         var database = new AppDatabase();
         var path = CreateConfigFileWithMappings([app],
-            new Dictionary<string, string> { ["http"] = app.Id });
+            new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(app.Id) });
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
         _service.UnloadConfig(path, database);

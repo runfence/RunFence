@@ -27,9 +27,9 @@ public class AppEntry
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? WorkingDirectory { get; set; }
 
-    /// <summary>Tri-state: true=always low integrity, false=never, null=use account default.</summary>
+    [JsonConverter(typeof(JsonStringEnumConverter))]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public bool? LaunchAsLowIntegrity { get; set; }
+    public PrivilegeLevel? PrivilegeLevel { get; set; }
 
     public string AccountSid { get; set; } = string.Empty;
     public bool RestrictAcl { get; set; } = true;
@@ -53,10 +53,6 @@ public class AppEntry
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     [JsonConverter(typeof(SidStringListConverter))]
     public List<string>? AllowedIpcCallers { get; set; }
-
-    /// <summary>Tri-state: true=always split token, false=never, null=use account default.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public bool? RunAsSplitToken { get; set; }
 
     /// <summary>
     /// When set, this app runs in the named AppContainer instead of a user account.

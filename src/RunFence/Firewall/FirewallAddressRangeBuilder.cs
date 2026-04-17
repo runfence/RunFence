@@ -11,26 +11,28 @@ namespace RunFence.Firewall;
 public class FirewallAddressRangeBuilder
 {
     // IPv4 base: everything except loopback and LAN
-    private static readonly (string Network, int Prefix)[] IPv4BaseRanges =
+    private static readonly IReadOnlyList<(string Network, int Prefix)> IPv4BaseRanges =
     [
         ("0.0.0.0", 0)
     ];
 
-    private static readonly (string Network, int Prefix)[] IPv4BaseExclusions =
+    private static readonly IReadOnlyList<(string Network, int Prefix)> IPv4BaseExclusions =
     [
         ("127.0.0.0", 8),
         ("10.0.0.0", 8),
         ("172.16.0.0", 12),
-        ("192.168.0.0", 16)
+        ("192.168.0.0", 16),
+        ("169.254.0.0", 16), // link-local (APIPA)
+        ("100.64.0.0", 10)   // CGNAT / RFC 6598 (Tailscale, WireGuard)
     ];
 
     // IPv6 base: everything except loopback and LAN
-    private static readonly (string Network, int Prefix)[] IPv6BaseRanges =
+    private static readonly IReadOnlyList<(string Network, int Prefix)> IPv6BaseRanges =
     [
         ("::", 0)
     ];
 
-    private static readonly (string Network, int Prefix)[] IPv6BaseExclusions =
+    private static readonly IReadOnlyList<(string Network, int Prefix)> IPv6BaseExclusions =
     [
         ("::1", 128),
         ("fe80::", 10),
@@ -38,14 +40,16 @@ public class FirewallAddressRangeBuilder
     ];
 
     // LAN base ranges
-    private static readonly (string Network, int Prefix)[] IPv4LanBaseRanges =
+    private static readonly IReadOnlyList<(string Network, int Prefix)> IPv4LanBaseRanges =
     [
         ("10.0.0.0", 8),
         ("172.16.0.0", 12),
-        ("192.168.0.0", 16)
+        ("192.168.0.0", 16),
+        ("169.254.0.0", 16), // link-local (APIPA)
+        ("100.64.0.0", 10)   // CGNAT / RFC 6598 (Tailscale, WireGuard)
     ];
 
-    private static readonly (string Network, int Prefix)[] IPv6LanBaseRanges =
+    private static readonly IReadOnlyList<(string Network, int Prefix)> IPv6LanBaseRanges =
     [
         ("fe80::", 10),
         ("fc00::", 7)
@@ -56,8 +60,8 @@ public class FirewallAddressRangeBuilder
     /// </summary>
     public string BuildInternetIPv4Range(IReadOnlyList<string> exclusions)
     {
-        var ranges = ApplyExclusions(IPv4BaseRanges.ToList(), IPv4BaseExclusions.Concat(
-            ParseIPv4Exclusions(exclusions)).ToList(), AddressFamily.InterNetwork);
+        var allExclusions = IPv4BaseExclusions.Concat(ParseIPv4Exclusions(exclusions)).ToList();
+        var ranges = ApplyExclusions(IPv4BaseRanges, allExclusions, AddressFamily.InterNetwork);
         return FormatRanges(ranges);
     }
 
@@ -66,13 +70,13 @@ public class FirewallAddressRangeBuilder
     /// </summary>
     public string BuildInternetIPv6Range(IReadOnlyList<string> exclusions)
     {
-        var ranges = ApplyExclusions(IPv6BaseRanges.ToList(), IPv6BaseExclusions.Concat(
-            ParseIPv6Exclusions(exclusions)).ToList(), AddressFamily.InterNetworkV6);
+        var allExclusions = IPv6BaseExclusions.Concat(ParseIPv6Exclusions(exclusions)).ToList();
+        var ranges = ApplyExclusions(IPv6BaseRanges, allExclusions, AddressFamily.InterNetworkV6);
         return FormatRanges(ranges);
     }
 
     /// <summary>Returns fixed IPv4 LAN ranges.</summary>
-    public string BuildLanIPv4Range() => "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16";
+    public string BuildLanIPv4Range() => "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10";
 
     /// <summary>Returns fixed IPv6 LAN ranges.</summary>
     public string BuildLanIPv6Range() => "fe80::/10,fc00::/7";
@@ -82,7 +86,7 @@ public class FirewallAddressRangeBuilder
     /// </summary>
     public string BuildLanIPv4Range(IReadOnlyList<string> exclusions)
     {
-        var ranges = ApplyExclusions(IPv4LanBaseRanges.ToList(),
+        var ranges = ApplyExclusions(IPv4LanBaseRanges,
             ParseIPv4Exclusions(exclusions).ToList(), AddressFamily.InterNetwork);
         return FormatRanges(ranges);
     }
@@ -92,32 +96,28 @@ public class FirewallAddressRangeBuilder
     /// </summary>
     public string BuildLanIPv6Range(IReadOnlyList<string> exclusions)
     {
-        var ranges = ApplyExclusions(IPv6LanBaseRanges.ToList(),
+        var ranges = ApplyExclusions(IPv6LanBaseRanges,
             ParseIPv6Exclusions(exclusions).ToList(), AddressFamily.InterNetworkV6);
         return FormatRanges(ranges);
     }
 
     private static IEnumerable<(string Network, int Prefix)> ParseIPv4Exclusions(IReadOnlyList<string> exclusions)
-    {
-        foreach (var exc in exclusions)
-        {
-            if (TryParseCidr(exc, out var net, out var prefix) &&
-                net.AddressFamily == AddressFamily.InterNetwork)
-                yield return (net.ToString(), prefix);
-            else if (IPAddress.TryParse(exc, out var ip) && ip.AddressFamily == AddressFamily.InterNetwork)
-                yield return (ip.ToString(), 32);
-        }
-    }
+        => ParseExclusions(exclusions, AddressFamily.InterNetwork, maxPrefix: 32);
 
     private static IEnumerable<(string Network, int Prefix)> ParseIPv6Exclusions(IReadOnlyList<string> exclusions)
+        => ParseExclusions(exclusions, AddressFamily.InterNetworkV6, maxPrefix: 128);
+
+    private static IEnumerable<(string Network, int Prefix)> ParseExclusions(
+        IReadOnlyList<string> exclusions,
+        AddressFamily family,
+        int maxPrefix)
     {
         foreach (var exc in exclusions)
         {
-            if (TryParseCidr(exc, out var net, out var prefix) &&
-                net.AddressFamily == AddressFamily.InterNetworkV6)
+            if (TryParseCidr(exc, out var net, out var prefix) && net.AddressFamily == family)
                 yield return (net.ToString(), prefix);
-            else if (IPAddress.TryParse(exc, out var ip) && ip.AddressFamily == AddressFamily.InterNetworkV6)
-                yield return (ip.ToString(), 128);
+            else if (IPAddress.TryParse(exc, out var ip) && ip.AddressFamily == family)
+                yield return (ip.ToString(), maxPrefix);
         }
     }
 
@@ -141,7 +141,7 @@ public class FirewallAddressRangeBuilder
     }
 
     private static List<(string Network, int Prefix)> ApplyExclusions(
-        List<(string Network, int Prefix)> ranges,
+        IReadOnlyList<(string Network, int Prefix)> ranges,
         IReadOnlyList<(string Network, int Prefix)> exclusions,
         AddressFamily family)
     {

@@ -10,6 +10,11 @@ public class AccountPasswordService(ILoggingService log) : IAccountPasswordServi
 {
     public void ChangeAccountPassword(string sid, SecureString oldPassword, string newPassword)
     {
+        // Asymmetry by design: the old password is received as SecureString and marshaled
+        // directly to unmanaged memory to minimize exposure in the managed heap.
+        // The new password is accepted as a plain string because RunFence isolated accounts
+        // are admin-controlled — the credential is not an end-user secret requiring the same
+        // level of in-memory protection.
         IntPtr oldPtr = IntPtr.Zero;
         try
         {

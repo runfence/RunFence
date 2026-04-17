@@ -19,11 +19,12 @@ public class AppContainerProfileSetup(ILoggingService log, IAppContainerEnvironm
     {
         try
         {
-            if (!AppContainerNative.ImpersonateLoggedOnUser(hToken))
+            if (!ProcessNative.ImpersonateLoggedOnUser(hToken))
             {
+                // Skip entirely — writing shell folder redirects under the elevated user's HKCU
+                // would target the wrong hive and corrupt the admin's registry unexpectedly.
                 log.Warn($"AppContainerLauncher: ImpersonateLoggedOnUser failed (error {Marshal.GetLastWin32Error()}), " +
-                         "creating profile under elevated user context");
-                EnsureProfileDirect(entry);
+                         "skipping profile and shell folder redirect setup to avoid writing to wrong HKCU hive");
                 return;
             }
 
@@ -35,7 +36,7 @@ public class AppContainerProfileSetup(ILoggingService log, IAppContainerEnvironm
                     IntPtr.Zero, 0, out var sid);
 
                 if (sid != IntPtr.Zero)
-                    NativeMethods.LocalFree(sid);
+                    ProcessNative.LocalFree(sid);
 
                 if (hr == ProcessLaunchNative.HrAlreadyExists)
                     log.Info($"AppContainerLauncher: Profile '{entry.Name}' already exists");
@@ -48,35 +49,12 @@ public class AppContainerProfileSetup(ILoggingService log, IAppContainerEnvironm
             }
             finally
             {
-                AppContainerNative.RevertToSelf();
+                ProcessNative.RevertToSelf();
             }
         }
         catch (Exception ex)
         {
             log.Warn($"AppContainerLauncher: EnsureProfileUnderToken failed for '{entry.Name}': {ex.Message}");
-        }
-    }
-
-    /// <summary>Fallback: create profile without impersonation (elevated user's HKCU).</summary>
-    private void EnsureProfileDirect(AppContainerEntry entry)
-    {
-        try
-        {
-            var hr = AppContainerNative.CreateAppContainerProfile(
-                entry.Name, entry.DisplayName,
-                $"RunFence AppContainer: {entry.DisplayName}",
-                IntPtr.Zero, 0, out var sid);
-            if (sid != IntPtr.Zero)
-                NativeMethods.LocalFree(sid);
-
-            if (hr != 0 && hr != ProcessLaunchNative.HrAlreadyExists)
-                log.Warn($"AppContainerLauncher: CreateAppContainerProfile returned HRESULT 0x{hr:X8} for '{entry.Name}'");
-
-            environmentSetup.WriteShellFolderRedirects(entry.Name);
-        }
-        catch (Exception ex)
-        {
-            log.Warn($"AppContainerLauncher: EnsureProfileDirect failed for '{entry.Name}': {ex.Message}");
         }
     }
 
@@ -126,7 +104,7 @@ public class AppContainerProfileSetup(ILoggingService log, IAppContainerEnvironm
         var buffer = Marshal.AllocHGlobal(sizeof(uint));
         try
         {
-            return NativeMethods.GetTokenInformation(hToken, infoClass, buffer, sizeof(uint), out _)
+            return ProcessNative.GetTokenInformation(hToken, infoClass, buffer, sizeof(uint), out _)
                 ? (uint)Marshal.ReadInt32(buffer)
                 : null;
         }

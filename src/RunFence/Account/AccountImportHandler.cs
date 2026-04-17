@@ -1,6 +1,5 @@
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch;
 using RunFence.PrefTrans;
 
 namespace RunFence.Account;
@@ -9,36 +8,22 @@ namespace RunFence.Account;
 /// Handles the desktop settings import workflow: per-account import, progress logging,
 /// and credential decryption. File selection and progress display are caller responsibilities.
 /// </summary>
-public class AccountImportHandler
+public class AccountImportHandler(
+    ISettingsTransferService settingsTransferService,
+    IAccountCredentialManager credentialManager,
+    SessionPersistenceHelper persistenceHelper,
+    ILoggingService log) : IAccountImportHandler
 {
-    private readonly ISettingsTransferService _settingsTransferService;
-    private readonly IAccountCredentialManager _credentialManager;
-    private readonly ILoggingService _log;
-    private readonly ISidResolver _sidResolver;
-
-    public AccountImportHandler(
-        ISettingsTransferService settingsTransferService,
-        IAccountCredentialManager credentialManager,
-        ILoggingService log,
-        ISidResolver sidResolver)
-    {
-        _settingsTransferService = settingsTransferService;
-        _credentialManager = credentialManager;
-        _log = log;
-        _sidResolver = sidResolver;
-    }
-
     /// <summary>
     /// Runs the import workflow for the selected accounts.
     /// </summary>
-    /// <param name="accounts">Accounts to import to. Current account and interactive user are imported without a password; other accounts require a stored password.</param>
+    /// <param name="accounts">Accounts to import to. Accounts without a stored credential entry are skipped.</param>
     /// <param name="credStore">The credential store for password decryption.</param>
     /// <param name="pinKey">The PIN-derived key.</param>
     /// <param name="selectFile">Callback that returns the selected settings file path, or null if cancelled.</param>
     /// <param name="appendLog">Callback to append a line to the progress log.</param>
     /// <param name="enableOk">Callback to enable the OK button when import is complete.</param>
     /// <param name="onStatusUpdate">Callback to update a status label during import.</param>
-    /// <param name="sidNames">SID-to-name mapping for display purposes.</param>
     /// <returns>The selected settings file path if import completed, or null if the user cancelled.</returns>
     public async Task<string?> RunImportAsync(
         List<ImportAccount> accounts,
@@ -48,7 +33,6 @@ public class AccountImportHandler
         Action<string> appendLog,
         Action enableOk,
         Action<string> onStatusUpdate,
-        IReadOnlyDictionary<string, string>? sidNames = null,
         AppDatabase? db = null)
     {
         var settingsPath = selectFile();
@@ -74,8 +58,8 @@ public class AccountImportHandler
 
                 appendLog($"Importing to {account.Username}...");
 
-                var lookupStatus = _credentialManager.DecryptCredential(
-                    account.CredEntry.Sid, credStore, pinKey, out var password);
+                var lookupStatus = credentialManager.CheckCredential(
+                    account.CredEntry.Sid, credStore);
 
                 if (lookupStatus is CredentialLookupStatus.NotFound or CredentialLookupStatus.MissingPassword)
                 {
@@ -83,20 +67,11 @@ public class AccountImportHandler
                     continue;
                 }
 
-                SettingsTransferResult result;
-                try
-                {
-                    var creds = LaunchCredentials.FromCredentialEntry(password, account.CredEntry, _sidResolver, sidNames);
-                    result = await Task.Run(() => _settingsTransferService.Import(
-                        settingsPath, creds, account.CredEntry.Sid));
-                }
-                finally
-                {
-                    password?.Dispose();
-                }
+                var result = await Task.Run(() => settingsTransferService.Import(
+                    settingsPath, account.CredEntry.Sid));
 
                 if (result.DatabaseModified && db != null)
-                    _credentialManager.SaveConfig(db, pinKey, credStore.ArgonSalt);
+                    persistenceHelper.SaveConfig(db, pinKey, credStore.ArgonSalt);
 
                 var status = result.Success ? "OK" : "FAILED";
                 appendLog($"  [{status}] {result.Message}");
@@ -111,7 +86,7 @@ public class AccountImportHandler
             appendLog("");
             appendLog($"Error: {ex.Message}");
             onStatusUpdate($"Import error: {ex.Message}");
-            _log.Error("Import UI error", ex);
+            log.Error("Import UI error", ex);
         }
         finally
         {
@@ -120,6 +95,4 @@ public class AccountImportHandler
 
         return settingsPath;
     }
-
-    public record ImportAccount(CredentialEntry CredEntry, string Username);
 }

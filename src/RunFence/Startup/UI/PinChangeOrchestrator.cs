@@ -1,10 +1,10 @@
 using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.Security;
 using RunFence.Startup.UI.Forms;
-using RunFence.UI.Forms;
 
 namespace RunFence.Startup.UI;
 
@@ -16,7 +16,7 @@ public class PinChangeOrchestrator(
     IPinService pinService,
     IAppConfigService appConfigService,
     ILoggingService log,
-    ISecureDesktopRunner secureDesktop)
+    IModalCoordinator modalCoordinator)
 {
     /// <summary>
     /// Runs the full PIN change flow. Calls <paramref name="onPinChanged"/> if the PIN was
@@ -33,35 +33,27 @@ public class PinChangeOrchestrator(
         using var pinnedKey = ExtractPinDerivedKey(session.PinDerivedKey);
         var store = session.CredentialStore;
 
-        DataPanel.BeginModal();
-        try
+        modalCoordinator.RunOnSecureDesktop(() =>
         {
-            secureDesktop.Run(() =>
+            using var dlg = new PinDialog(PinDialogMode.Set);
+            dlg.ProcessingCallback = async (newPin, _) =>
             {
-                using var dlg = new PinDialog(PinDialogMode.Set);
-                dlg.ProcessingCallback = async (newPin, _) =>
+                try
                 {
-                    try
-                    {
-                        var (resultStore, resultKey) = await Task.Run(() =>
-                            pinService.ChangePin(pinnedKey.Data, newPin, store));
-                        newStore = resultStore;
-                        newKey = resultKey;
-                        return null;
-                    }
-                    catch (Exception ex)
-                    {
-                        log.Error("PIN change failed", ex);
-                        return $"PIN change failed: {ex.Message}";
-                    }
-                };
-                dlgResult = dlg.ShowDialog();
-            });
-        }
-        finally
-        {
-            DataPanel.EndModal();
-        }
+                    var (resultStore, resultKey) = await Task.Run(() =>
+                        pinService.ChangePin(pinnedKey.Data, newPin, store));
+                    newStore = resultStore;
+                    newKey = resultKey;
+                    return null;
+                }
+                catch (Exception ex)
+                {
+                    log.Error("PIN change failed", ex);
+                    return $"PIN change failed: {ex.Message}";
+                }
+            };
+            dlgResult = dlg.ShowDialog();
+        });
 
         if (dlgResult == DialogResult.OK)
         {

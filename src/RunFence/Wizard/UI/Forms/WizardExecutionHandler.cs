@@ -24,6 +24,7 @@ public class WizardExecutionHandler
     public async Task ExecuteTemplateAsync()
     {
         _ctx.IsExecuting = true;
+        _ctx.SetTitleText(_ctx.SelectedTemplate!.DisplayName);
         _ctx.SetProgressVisible(true);
         _ctx.SetNavigationEnabled(false);
 
@@ -46,6 +47,10 @@ public class WizardExecutionHandler
         {
             await _ctx.SelectedTemplate!.ExecuteAsync(reporter);
 
+            // TemplateCompletedCount is incremented regardless of whether the template reported
+            // errors via progress.ReportError (non-throwing path). Intentional: CompletionStep
+            // shows the errors, and the user can run another template or close. Only unhandled
+            // exceptions (caught below) skip the count increment.
             _ctx.TemplateCompletedCount++;
 
             var postAction = _ctx.SelectedTemplate!.PostWizardAction;
@@ -128,7 +133,7 @@ public class WizardExecutionHandler
             ? $"\u2705 {_ctx.SelectedTemplate!.DisplayName} completed successfully."
             : $"\u26A0\uFE0F {_ctx.SelectedTemplate!.DisplayName} completed with {errors.Count} error(s).");
 
-        summaryLines.AddRange(statusMessages.Select(msg => $"  \u2022 {msg}"));
+        summaryLines.AddRange(statusMessages.Select(msg => $"\u2022 {msg}"));
 
         var summary = string.Join(Environment.NewLine, summaryLines);
 
@@ -136,7 +141,8 @@ public class WizardExecutionHandler
         _ctx.Steps.Add(completionStep);
         _ctx.ShowStep(_ctx.Steps.Count - 1);
 
-        _ctx.SetCompletionButtonsState(showNavigation: false, cancelText: "Close");
+        _ctx.SetCompletionButtonsState(showNavigation: true, cancelText: "Close");
+        _ctx.SetNextText("Done");
     }
 
     private sealed class WizardProgressReporter(

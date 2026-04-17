@@ -1,8 +1,7 @@
-using System.Security;
 using RunFence.Account.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Firewall;
+using RunFence.Firewall.UI;
 using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.PrefTrans;
@@ -15,8 +14,8 @@ namespace RunFence.Account.UI;
 /// </summary>
 public class AccountPostCreateSetupService(
     ISettingsTransferService settingsTransferService,
-    IFirewallService firewallService,
-    AccountLauncher accountLauncher,
+    FirewallApplyHelper firewallApplyHelper,
+    PackageInstallService packageInstallService,
     ISessionProvider sessionProvider,
     ILoggingService log)
 {
@@ -46,9 +45,8 @@ public class AccountPostCreateSetupService(
                         progressForm.SetStatus($"Importing desktop settings for {request.NewUsername}...");
                         try
                         {
-                            var creds = new LaunchCredentials(request.Password, ".", request.NewUsername);
                             var (error, _) = await SettingsImportHelper.ImportAsync(
-                                request.SettingsImportPath, creds, request.CreatedSid,
+                                request.SettingsImportPath, request.CreatedSid,
                                 settingsTransferService);
                             if (error != null)
                                 request.Errors.Add($"Settings import: {error}");
@@ -71,9 +69,9 @@ public class AccountPostCreateSetupService(
                             progressForm.SetStatus($"Installing packages for {request.NewUsername}...");
                             try
                             {
-                                accountLauncher.InstallPackages(request.SelectedInstallPackages, request.Password, credEntry, refreshedSession.Database.SidNames);
+                                packageInstallService.InstallPackages(request.SelectedInstallPackages, new AccountLaunchIdentity(request.CreatedSid));
                                 progressForm.SetStatus($"Waiting for install scripts to complete for {request.NewUsername}...");
-                                await accountLauncher.WaitForInstallCompletionAsync(request.CreatedSid, TimeSpan.FromMinutes(10));
+                                await packageInstallService.WaitForInstallCompletionAsync(request.CreatedSid, TimeSpan.FromMinutes(10));
                             }
                             catch (Exception ex)
                             {
@@ -89,14 +87,14 @@ public class AccountPostCreateSetupService(
                         var username = refreshedSession.Database.SidNames.GetValueOrDefault(request.CreatedSid) ?? request.NewUsername;
                         var fwSettings = refreshedSession.Database.GetAccount(request.CreatedSid)?.Firewall ?? new FirewallAccountSettings();
                         var sid = request.CreatedSid;
-                        try
-                        {
-                            await Task.Run(() => firewallService.ApplyFirewallRules(sid, username, fwSettings));
-                        }
-                        catch (Exception ex)
-                        {
-                            request.Errors.Add($"Firewall rules: {ex.Message}");
-                        }
+                        await firewallApplyHelper.ApplyWithRollbackAsync(
+                            sid: sid,
+                            username: username,
+                            previous: null,
+                            final: fwSettings,
+                            database: refreshedSession.Database,
+                            saveAction: saveAndRefresh,
+                            reportError: msg => request.Errors.Add(msg));
                     }
                 }
                 catch (Exception ex)
@@ -118,12 +116,20 @@ public class AccountPostCreateSetupService(
     }
 }
 
-public record PostCreateSetupRequest(
+public class PostCreateSetupRequest(
     string? SettingsImportPath,
     string CreatedSid,
     string NewUsername,
-    SecureString? Password,
     bool FirewallSettingsChanged,
     List<InstallablePackage> SelectedInstallPackages,
     bool AllowInternet,
-    List<string> Errors);
+    List<string> Errors)
+{
+    public string? SettingsImportPath { get; } = SettingsImportPath;
+    public string CreatedSid { get; } = CreatedSid;
+    public string NewUsername { get; } = NewUsername;
+    public bool FirewallSettingsChanged { get; } = FirewallSettingsChanged;
+    public List<InstallablePackage> SelectedInstallPackages { get; } = SelectedInstallPackages;
+    public bool AllowInternet { get; } = AllowInternet;
+    public List<string> Errors { get; } = Errors;
+}

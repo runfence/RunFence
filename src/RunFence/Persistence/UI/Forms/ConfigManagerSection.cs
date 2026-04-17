@@ -4,7 +4,6 @@ using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Licensing;
 using RunFence.UI;
 
 namespace RunFence.Persistence.UI.Forms;
@@ -13,19 +12,15 @@ namespace RunFence.Persistence.UI.Forms;
 /// Config file management section: create, load, unload, export, and import app configs.
 /// Used by OptionsPanel.
 /// </summary>
-internal partial class ConfigManagerSection : UserControl
+public partial class ConfigManagerSection : UserControl
 {
     private readonly IAppConfigService _appConfigService;
     private readonly IAppFilter _appFilter;
     private readonly ILoggingService _log;
     private readonly IAclPermissionService _aclPermission;
-    private readonly ILicenseService _licenseService;
     private readonly HandlerSyncHelper? _handlerSyncHelper;
-
-    // Data access delegates (set after construction, before use)
-    private Func<AppDatabase> _getDatabase = null!;
-    private Func<CredentialStore> _getCredentialStore = null!;
-    private Func<ProtectedBuffer> _getPinDerivedKey = null!;
+    private readonly ConfigImportHandler _importHandler;
+    private readonly ISessionProvider _sessionProvider;
 
     /// <summary>Fired when a config file should be loaded by the parent.</summary>
     public event Action<string>? ConfigLoadRequested;
@@ -36,15 +31,17 @@ internal partial class ConfigManagerSection : UserControl
     /// <summary>Fired when config data changes and the parent should refresh.</summary>
     public event Action? DataChanged;
 
-    internal ConfigManagerSection(IAppConfigService appConfigService,
+    public ConfigManagerSection(IAppConfigService appConfigService,
         IAppFilter appFilter, ILoggingService log, IAclPermissionService aclPermission,
-        ILicenseService licenseService, HandlerSyncHelper? handlerSyncHelper = null)
+        ConfigImportHandler importHandler, ISessionProvider sessionProvider,
+        HandlerSyncHelper? handlerSyncHelper = null)
     {
         _appConfigService = appConfigService;
         _appFilter = appFilter;
         _log = log;
         _aclPermission = aclPermission;
-        _licenseService = licenseService;
+        _importHandler = importHandler;
+        _sessionProvider = sessionProvider;
         _handlerSyncHelper = handlerSyncHelper;
         InitializeComponent();
         _configNewButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4C4", Color.FromArgb(0x22, 0x8B, 0x22));
@@ -54,15 +51,9 @@ internal partial class ConfigManagerSection : UserControl
         _configImportButton.Image = UiIconFactory.CreateToolbarIcon("\u21A9", Color.FromArgb(0x66, 0x66, 0x99));
     }
 
-    /// <summary>
-    /// Sets data access callbacks. Must be called before any interaction.
-    /// </summary>
-    public void SetDataContext(Func<AppDatabase> getDb, Func<CredentialStore> getStore, Func<ProtectedBuffer> getKey)
-    {
-        _getDatabase = getDb;
-        _getCredentialStore = getStore;
-        _getPinDerivedKey = getKey;
-    }
+    private AppDatabase GetDatabase() => _sessionProvider.GetSession().Database;
+    private CredentialStore GetCredentialStore() => _sessionProvider.GetSession().CredentialStore;
+    private ProtectedBuffer GetPinDerivedKey() => _sessionProvider.GetSession().PinDerivedKey;
 
     public void RefreshConfigList()
     {
@@ -135,8 +126,8 @@ internal partial class ConfigManagerSection : UserControl
 
         try
         {
-            using (var scope = _getPinDerivedKey().Unprotect())
-                _appConfigService.CreateEmptyConfig(dlg.FileName, scope.Data, _getCredentialStore().ArgonSalt);
+            using (var scope = GetPinDerivedKey().Unprotect())
+                _appConfigService.CreateEmptyConfig(dlg.FileName, scope.Data, GetCredentialStore().ArgonSalt);
         }
         catch (Exception ex)
         {
@@ -201,7 +192,7 @@ internal partial class ConfigManagerSection : UserControl
 
         try
         {
-            var database = _getDatabase();
+            var database = GetDatabase();
             string json;
             if (item.Path == null)
             {
@@ -211,6 +202,9 @@ internal partial class ConfigManagerSection : UserControl
                     Apps = mainDb.Apps,
                     Settings = database.Settings,
                     Accounts = mainDb.Accounts,
+                    // SidNames is intentionally included: it carries account display names that are
+                    // needed to resolve SIDs on a different machine after import (e.g., when migrating
+                    // config to a new system where the original accounts do not exist).
                     SidNames = database.SidNames,
                 };
                 json = JsonSerializer.Serialize(exportDb, JsonDefaults.Options);
@@ -253,92 +247,9 @@ internal partial class ConfigManagerSection : UserControl
 
         try
         {
-            var json = File.ReadAllText(openDlg.FileName);
-            var database = _getDatabase();
-
             if (item.Path == null)
             {
-                var importedDb = JsonSerializer.Deserialize<AppDatabase>(json, JsonDefaults.Options)
-                                 ?? throw new InvalidOperationException("Failed to parse config file.");
-
-                // Imported configs are trusted — it is the user's responsibility to verify the source.
-                // AllowedIpcCallers and other security settings are replaced as-is.
-                if (!_licenseService.IsLicensed)
-                {
-                    var violations = new List<string>();
-                    var additionalAppsCount = database.Apps.Count(a => _appConfigService.GetConfigPath(a.Id) != null);
-                    var totalAfterImport = importedDb.Apps.Count + additionalAppsCount;
-                    var appsMsg = _licenseService.GetRestrictionMessage(EvaluationFeature.Apps, totalAfterImport - 1);
-                    if (appsMsg != null)
-                        violations.Add($"Apps: {appsMsg}");
-                    var totalAllowlistEntries = importedDb.Accounts?.Sum(a => a.Firewall.Allowlist.Count) ?? 0;
-                    if (totalAllowlistEntries > Constants.EvaluationMaxFirewallAllowlistEntries)
-                        violations.Add(
-                            $"Firewall whitelist: imported config has {totalAllowlistEntries} entries across all accounts (limit: {Constants.EvaluationMaxFirewallAllowlistEntries})");
-                    if (violations.Count > 0)
-                    {
-                        MessageBox.Show(
-                            "Cannot import: the imported config exceeds evaluation limits.\n\n" +
-                            string.Join("\n", violations) + "\n\nActivate a license to remove these limits.",
-                            "Evaluation Limit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
-                }
-
-                var additionalApps = database.Apps
-                    .Where(a => _appConfigService.GetConfigPath(a.Id) != null)
-                    .ToList();
-                database.Apps.Clear();
-                database.Apps.AddRange(importedDb.Apps);
-                foreach (var app in additionalApps)
-                {
-                    if (database.Apps.Any(a => a.Id == app.Id))
-                    {
-                        for (int i = 0; i < 10; i++)
-                        {
-                            var candidate = AppEntry.GenerateId();
-                            if (database.Apps.All(a => a.Id != candidate) && !additionalApps.Any(a => a != app && a.Id == candidate))
-                            {
-                                app.Id = candidate;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                database.Apps.AddRange(additionalApps);
-
-                database.Settings = importedDb.Settings ?? new AppSettings();
-
-                // Merge SidNames additively — the SidNames map is append-only and must never lose
-                // associations already known by this installation.
-                foreach (var (sid, name) in importedDb.SidNames)
-                    database.SidNames.TryAdd(sid, name);
-
-                // Replace IPC callers and firewall settings from imported config.
-                // Tray flags, split-token, low-integrity, ephemeral, and grants are per-installation
-                // state that are preserved and never overwritten by the imported config.
-                foreach (var a in database.Accounts)
-                {
-                    a.IsIpcCaller = false;
-                    a.Firewall = new FirewallAccountSettings();
-                }
-
-                foreach (var importedAccount in importedDb.Accounts ?? [])
-                {
-                    if (importedAccount is { IsIpcCaller: false, Firewall.IsDefault: true })
-                        continue;
-                    var entry = database.GetOrCreateAccount(importedAccount.Sid);
-                    entry.IsIpcCaller = importedAccount.IsIpcCaller;
-                    entry.Firewall = importedAccount.Firewall;
-                }
-
-                foreach (var a in database.Accounts.ToList())
-                    database.RemoveAccountIfEmpty(a.Sid);
-
-                using var scope = _getPinDerivedKey().Unprotect();
-                _appConfigService.ReencryptAndSaveAll(_getCredentialStore(), database, scope.Data);
-
+                _importHandler.ImportMainConfig(openDlg.FileName);
                 DataChanged?.Invoke();
                 _handlerSyncHelper?.Sync();
                 RefreshConfigList();
@@ -347,18 +258,16 @@ internal partial class ConfigManagerSection : UserControl
             }
             else
             {
-                var importedConfig = JsonSerializer.Deserialize<AppConfig>(json, JsonDefaults.Options)
-                                     ?? throw new InvalidOperationException("Failed to parse config file.");
-
                 ConfigUnloadRequested?.Invoke(item.Path);
-
-                using (var scope = _getPinDerivedKey().Unprotect())
-                    _appConfigService.SaveImportedConfig(item.Path, importedConfig.Apps, scope.Data, _getCredentialStore().ArgonSalt);
-
+                _importHandler.ImportAdditionalConfig(openDlg.FileName, item.Path);
                 ConfigLoadRequested?.Invoke(item.Path);
                 MessageBox.Show("Config imported successfully.", "Import Complete",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
+        }
+        catch (EvaluationLimitException ex)
+        {
+            MessageBox.Show(ex.Message, "Evaluation Limit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (Exception ex)
         {

@@ -7,17 +7,17 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Groups.UI.Forms;
 using RunFence.Infrastructure;
-using RunFence.Licensing;
 using RunFence.Licensing.UI.Forms;
 using RunFence.Persistence.UI;
 using RunFence.TrayIcon;
+using RunFence.UI;
 using RunFence.Wizard.UI;
 
 namespace RunFence.UI.Forms;
 
 public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisibility
 {
-    private static readonly int WmTaskbarCreated = (int)NativeMethods.RegisterWindowMessage("TaskbarCreated");
+    private static readonly int WmTaskbarCreated = (int)WindowNative.RegisterWindowMessage("TaskbarCreated");
     private readonly ApplicationsPanel _appsPanel;
     private readonly AccountsPanel _accountsPanel;
     private readonly GroupsPanel _groupsPanel;
@@ -29,6 +29,8 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
     private readonly MainFormStartupOrchestrator _startupHandler;
     private readonly MainFormTrayHandler _trayHandler;
     private readonly ApplicationState _applicationState;
+    private readonly MainFormFirstRunExporter _firstRunExporter;
+    private readonly IInteractiveUserDesktopProvider _interactiveUserDesktopProvider;
 
     private bool _suppressInitialVisibility;
     private bool _wasStartedInBackground;
@@ -46,7 +48,9 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         MainFormStartupOrchestrator startupHandler,
         MainFormTrayHandler trayHandler,
         WizardLauncher wizardLauncher,
-        ILicenseService licenseService)
+        AboutPanel aboutPanel,
+        MainFormFirstRunExporter firstRunExporter,
+        IInteractiveUserDesktopProvider interactiveUserDesktopProvider)
     {
         _session = session;
         _applicationState = applicationState;
@@ -57,8 +61,9 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _optionsPanel = optionsPanel;
         _startupHandler = startupHandler;
         _trayHandler = trayHandler;
+        _firstRunExporter = firstRunExporter;
+        _interactiveUserDesktopProvider = interactiveUserDesktopProvider;
 
-        _trayHandler.PinResetCompleted += OnPinResetCompleted;
         _trayHandler.LicenseChangedRefreshNeeded += () => _optionsPanel.SetData(_session);
 
         Load += OnFormLoad;
@@ -69,7 +74,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _appsPanel.DataChanged += HandleDataChanged;
         _appsPanel.EnforcementRequested += OnEnforcementRequested;
         _appsPanel.AccountNavigationRequested += OnNavigateToAccount;
-        _appsPanel.WizardRequested += owner => wizardLauncher.OpenWizard(owner);
+        _appsPanel.WizardRequested += async owner => await wizardLauncher.OpenWizardAsync(owner);
         _appsPanel.WizardButtonEnabled = true;
         wizardLauncher.WizardCompleted += HandleDataChanged;
         _applicationsTab.Controls.Add(_appsPanel);
@@ -95,7 +100,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _optionsPanel.ConfigUnloadRequested += path => _configHandler.UnloadApps(path);
         _optionsTab.Controls.Add(_optionsPanel);
 
-        _aboutTab.Controls.Add(new AboutPanel(licenseService));
+        _aboutTab.Controls.Add(aboutPanel);
 
         _tabControl.SelectedIndexChanged += (_, _) => ScheduleAvailabilityCheck();
 
@@ -159,7 +164,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         base.SetVisibleCore(value);
     }
 
-    public void TryShowWindow() => _trayHandler.TryShowWindow();
+    public Task TryShowWindowAsync() => _trayHandler.TryShowWindowAsync();
 
     public void ConfigureIdleMonitor() => _trayHandler.ConfigureIdleMonitor();
 
@@ -186,29 +191,18 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _trayHandler.HandleFormLoad();
     }
 
-    protected override async void OnShown(EventArgs e)
+    protected override void OnShown(EventArgs e)
     {
-        if (!_wasStartedInBackground)
-            PromptExportSettingsIfNeeded();
         base.OnShown(e);
-        NativeInterop.ForceToForeground(this);
+        WindowForegroundHelper.ForceToForeground(Handle);
+        BringToFront();
         _trayHandler.RefreshDiscovery();
-        await _startupHandler.RunStartupChecksAsync(this, _wasStartedInBackground, _trayHandler.ShowNagIfNeeded);
-    }
-
-    private void PromptExportSettingsIfNeeded()
-    {
-        if (!string.IsNullOrEmpty(_session.Database.Settings.DefaultDesktopSettingsPath) && File.Exists(_session.Database.Settings.DefaultDesktopSettingsPath))
-            return;
-        var result = MessageBox.Show(this,
-            "No desktop settings export file exists. Export your current desktop settings now?",
-            "Export Desktop Settings",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
-        if (result != DialogResult.Yes)
-            return;
-        _tabControl.SelectedTab = _optionsTab;
-        _optionsPanel.PerformExportSettings();
+        BeginInvoke(async () =>
+        {
+            if (!_wasStartedInBackground)
+                await _firstRunExporter.PromptExportSettingsIfNeededAsync(this);
+            await _startupHandler.RunStartupChecksAsync(this, _wasStartedInBackground, _trayHandler.ShowNagIfNeeded);
+        });
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -226,7 +220,16 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
     {
+        if (e.Reason is not (SessionSwitchReason.ConsoleConnect
+            or SessionSwitchReason.ConsoleDisconnect
+            or SessionSwitchReason.SessionLogon
+            or SessionSwitchReason.SessionLogoff
+            or SessionSwitchReason.RemoteConnect
+            or SessionSwitchReason.RemoteDisconnect))
+            return;
+
         SidResolutionHelper.ReinitializeInteractiveUserSid();
+        _interactiveUserDesktopProvider.InvalidateCache();
     }
 
     protected override void WndProc(ref Message m)
@@ -269,6 +272,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _appsPanel.SetData(_session);
         _accountsPanel.SetData(_session);
         _groupsPanel.SetData(_session);
+        _optionsPanel.SetData(_session);
         _trayHandler.ScheduleDiscoveryRefresh();
     }
 
@@ -307,12 +311,6 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         PinDerivedKeyReplaced?.Invoke(oldBuffer, newBuffer);
     }
 
-    private void OnPinResetCompleted(ProtectedBuffer oldBuffer, ProtectedBuffer newBuffer)
-    {
-        SetData();
-        PinDerivedKeyReplaced?.Invoke(oldBuffer, newBuffer);
-    }
-
     private void OnOptionsSettingsChanged()
     {
         _trayHandler.ConfigureIdleMonitor();
@@ -338,7 +336,20 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     private void OnCleanupRequested()
     {
-        _configHandler.CleanupAllApps(_applicationState.EnforcementGuard.IsInProgress, _accountsPanel.IsOperationInProgress);
+        var result = _configHandler.CleanupAllApps(_applicationState.EnforcementGuard.IsInProgress, _accountsPanel.IsOperationInProgress);
+        switch (result)
+        {
+            case CleanupAllAppsResult.OperationInProgress:
+                MessageBox.Show(this,
+                    "An operation is currently in progress. Please wait for it to finish before cleaning up.",
+                    "Cleanup Unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                break;
+            case CleanupAllAppsResult.ReadyToExit:
+                Application.Exit();
+                break;
+        }
     }
 
     private void OnEnforcementRequested()

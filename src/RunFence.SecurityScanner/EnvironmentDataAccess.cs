@@ -5,8 +5,20 @@ using RunFence.Core;
 
 namespace RunFence.SecurityScanner;
 
-public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<string> logError)
+/// <summary>
+/// Provides environmental context for the security scanner: user SIDs, profiles, admin members,
+/// group membership, and firewall/policy state.
+/// </summary>
+/// <remarks>
+/// Depends on concrete <see cref="NativePolicyDataAccess"/> directly — acceptable for a standalone
+/// scanner tool without DI. If testability is needed in the future, extract an interface for the
+/// 3 methods used: <c>GetLocalDomainSid</c>, <c>ResolveLocalGroupNames</c>, <c>GetLocalGroupMemberSids</c>.
+/// </remarks>
+public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<string> logError, NTTranslateApi ntTranslate) : IEnvironmentDataAccess
 {
+    // Pre-populated by GetAdminMemberSids() to avoid re-opening a PrincipalContext for the same group.
+    private readonly Dictionary<string, HashSet<string>> _directMembersCache = new(StringComparer.OrdinalIgnoreCase);
+
     public string? GetPublicStartupPath()
     {
         try
@@ -64,19 +76,25 @@ public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<s
     public HashSet<string> GetAdminMemberSids()
     {
         var sids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var directMembers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         try
         {
             using var context = new PrincipalContext(ContextType.Machine);
             using var adminGroup = GroupPrincipal.FindByIdentity(context, IdentityType.Sid, "S-1-5-32-544");
             if (adminGroup != null)
             {
-                // First pass: recursive individual users
-                foreach (var member in adminGroup.GetMembers(true))
+                // First pass: direct members — captures group SIDs like Domain Admins.
+                // Also pre-populates _directMembersCache so TryGetGroupMemberSids("S-1-5-32-544")
+                // returns from cache without opening a second PrincipalContext.
+                foreach (var member in adminGroup.GetMembers(false))
                 {
                     try
                     {
                         if (member.Sid != null)
+                        {
                             sids.Add(member.Sid.Value);
+                            directMembers.Add(member.Sid.Value);
+                        }
                     }
                     catch
                     {
@@ -88,8 +106,8 @@ public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<s
                     }
                 }
 
-                // Second pass: direct members (captures group SIDs like Domain Admins)
-                foreach (var member in adminGroup.GetMembers(false))
+                // Second pass: recursive individual users
+                foreach (var member in adminGroup.GetMembers(true))
                 {
                     try
                     {
@@ -112,6 +130,7 @@ public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<s
             logError($"Failed to enumerate admin group members: {ex.Message}");
         }
 
+        _directMembersCache["S-1-5-32-544"] = directMembers;
         // Always include the group SID itself
         sids.Add("S-1-5-32-544");
         return sids;
@@ -154,45 +173,67 @@ public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<s
 
     public HashSet<string>? TryGetGroupMemberSids(string groupSid)
     {
-        try
-        {
-            using var context = new PrincipalContext(ContextType.Machine);
-            using var group = GroupPrincipal.FindByIdentity(context, IdentityType.Sid, groupSid);
-            if (group == null)
-                return null;
+        if (_directMembersCache.TryGetValue(groupSid, out var cachedDirect))
+            return cachedDirect;
 
-            var members = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var member in group.GetMembers(false))
+        var results = BulkLookupGroupMemberSids([groupSid]);
+        return results.GetValueOrDefault(groupSid);
+    }
+
+    public Dictionary<string, HashSet<string>?> BulkLookupGroupMemberSids(IReadOnlyList<string> sids)
+    {
+        var result = new Dictionary<string, HashSet<string>?>(StringComparer.OrdinalIgnoreCase);
+        var localDomainSid = nativePolicy.GetLocalDomainSid();
+        var toResolve = new List<string>(sids.Count);
+
+        foreach (var sid in sids)
+        {
+            if (_directMembersCache.TryGetValue(sid, out var cached))
             {
-                try
-                {
-                    if (member.Sid != null)
-                        members.Add(member.Sid.Value);
-                }
-                catch
-                {
-                    /* skip unresolvable members */
-                }
-                finally
-                {
-                    member.Dispose();
-                }
+                result[sid] = cached;
+                continue;
             }
 
-            return members;
+            // Domain SIDs (non-local S-1-5-21-*) cannot be resolved via local SAM.
+            // Return null so they are reported as findings rather than triggering a DC lookup.
+            if (localDomainSid != null
+                && sid.StartsWith("S-1-5-21-", StringComparison.OrdinalIgnoreCase)
+                && !sid.StartsWith(localDomainSid + "-", StringComparison.OrdinalIgnoreCase))
+            {
+                result[sid] = null;
+                continue;
+            }
+
+            toResolve.Add(sid);
         }
-        catch
+
+        if (toResolve.Count == 0)
+            return result;
+
+        var localGroupNames = nativePolicy.ResolveLocalGroupNames(toResolve);
+        foreach (var sid in toResolve)
         {
-            return null;
+            if (localGroupNames.TryGetValue(sid, out var groupName))
+            {
+                var members = nativePolicy.GetLocalGroupMemberSids(groupName);
+                result[sid] = members;
+                if (members != null)
+                    _directMembersCache[sid] = members;
+            }
+            else
+            {
+                result[sid] = null; // not a local group (user SID, well-known, unresolvable)
+            }
         }
+
+        return result;
     }
 
     public string ResolveDisplayName(string sidString)
     {
         try
         {
-            var sid = new SecurityIdentifier(sidString);
-            return sid.Translate(typeof(NTAccount)).Value;
+            return ntTranslate.TranslateName(sidString).Value;
         }
         catch
         {

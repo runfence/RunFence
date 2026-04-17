@@ -1,12 +1,10 @@
-using System.Security.AccessControl;
-using RunFence.Acl.Permissions;
+using RunFence.Account;
 using RunFence.Acl.UI;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
-using RunFence.Persistence;
 
 namespace RunFence.Apps.UI;
 
@@ -15,15 +13,13 @@ namespace RunFence.Apps.UI;
 /// Callers read the selected <see cref="AppEntry"/> from the grid and pass it as a parameter.
 /// </summary>
 public class AppContextMenuOrchestrator(
-    IDatabaseProvider databaseProvider,
-    ISessionProvider sessionProvider,
-    IAppLaunchOrchestrator launchOrchestrator,
+    ILaunchFacade facade,
+    ISidNameCacheService sidNameCache,
     ILoggingService log,
     IInteractiveUserDesktopProvider interactiveUserDesktopProvider,
     IShortcutService shortcutService,
-    IPermissionGrantService permissionGrantService,
-    IAppHandlerRegistrationService handlerRegistrationService,
-    IHandlerMappingService handlerMappingService)
+    ShellHelper shellHelper,
+    DefaultBrowserManager defaultBrowserManager)
 {
     public event Action<string>? AccountNavigationRequested;
 
@@ -48,39 +44,19 @@ public class AppContextMenuOrchestrator(
         if (string.IsNullOrEmpty(parentDir))
             return;
 
-        var database = databaseProvider.GetDatabase();
-        var session = sessionProvider.GetSession();
-        var folderBrowserExe = PathHelper.ResolveExePath(database.Settings.FolderBrowserExePath);
-        var cred = session.CredentialStore.Credentials.FirstOrDefault(c =>
-            string.Equals(c.Sid, app.AccountSid, StringComparison.OrdinalIgnoreCase));
-        if (cred?.IsCurrentAccount != true)
-        {
-            var confirmFn = PermissionGrantService.AdaptConfirm(path =>
-                AclPermissionDialogHelper.ShowPermissionDialog(
-                    owner, "Missing permissions",
-                    $"The account needs access to:\n{path}"));
-
-            try
-            {
-                bool grantsAdded = false;
-                if (!string.IsNullOrEmpty(folderBrowserExe) && File.Exists(folderBrowserExe))
-                    grantsAdded |= permissionGrantService.EnsureExeDirectoryAccess(folderBrowserExe, app.AccountSid, confirmFn).DatabaseModified;
-                grantsAdded |= permissionGrantService.EnsureAccess(parentDir, app.AccountSid,
-                    FileSystemRights.ReadAndExecute, confirmFn).DatabaseModified;
-                if (grantsAdded)
-                    DataSaveAndRefreshRequested?.Invoke();
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-        }
-
-        var useSplitToken = shiftHeld ? false : app.RunAsSplitToken;
-        var launchAsLowIntegrity = shiftHeld ? false : app.LaunchAsLowIntegrity;
+        var privilegeLevel = shiftHeld ? (PrivilegeLevel?)PrivilegeLevel.HighestAllowed : app.PrivilegeLevel;
         try
         {
-            launchOrchestrator.LaunchFolderBrowser(app.AccountSid, parentDir, launchAsLowIntegrity, useSplitToken);
+            facade.LaunchFolderBrowser(
+                new AccountLaunchIdentity(app.AccountSid)
+                {
+                    PrivilegeLevel = privilegeLevel,
+                },
+                parentDir,
+                folderPermissionPrompt: AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache, owner));
+        }
+        catch (OperationCanceledException)
+        {
         }
         catch (Exception ex)
         {
@@ -96,7 +72,7 @@ public class AppContextMenuOrchestrator(
             return;
         try
         {
-            ShellHelper.OpenInExplorer(app.ExePath);
+            shellHelper.OpenInExplorer(app.ExePath);
         }
         catch (Exception ex)
         {
@@ -116,7 +92,7 @@ public class AppContextMenuOrchestrator(
         {
             try
             {
-                ShellHelper.OpenInExplorer(dir);
+                shellHelper.OpenInExplorer(dir);
             }
             catch (Exception ex)
             {
@@ -162,49 +138,7 @@ public class AppContextMenuOrchestrator(
 
     public void SetDefaultBrowser(AppEntry app)
     {
-        var database = databaseProvider.GetDatabase();
-        var effectiveMappings = handlerMappingService.GetEffectiveHandlerMappings(database);
-        var browserKeys = new[] { "http", "https", ".htm", ".html" };
-
-        var isCurrentDefault = browserKeys.All(key =>
-            effectiveMappings.TryGetValue(key, out var mappedId) &&
-            string.Equals(mappedId, app.Id, StringComparison.Ordinal));
-
-        if (isCurrentDefault)
-        {
-            foreach (var key in browserKeys)
-                handlerMappingService.RemoveHandlerMapping(key, database);
-            var updatedEffective = handlerMappingService.GetEffectiveHandlerMappings(database);
-            handlerRegistrationService.Sync(updatedEffective, database.Apps);
-        }
-        else
-        {
-            if (!app.AllowPassingArguments)
-                app.AllowPassingArguments = true;
-
-            if (string.IsNullOrEmpty(app.ArgumentsTemplate))
-                app.ArgumentsTemplate = "\"%1\"";
-
-            foreach (var key in browserKeys)
-                handlerMappingService.SetHandlerMapping(key, app.Id, database);
-
-            var updatedEffective = handlerMappingService.GetEffectiveHandlerMappings(database);
-            handlerRegistrationService.Sync(updatedEffective, database.Apps);
-
-            MessageBox.Show(
-                $"Registered as \"{Constants.HandlerRegisteredAppName}\".\n\n" +
-                "The Default Apps settings will now open. Find \"RunFence\" in the browser list and set it as default.",
-                "Default Browser", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            try
-            {
-                ShellHelper.OpenDefaultAppsSettings();
-            }
-            catch (Exception ex)
-            {
-                log.Warn($"Failed to open Default Apps settings: {ex.Message}");
-            }
-        }
-
+        defaultBrowserManager.SetDefaultBrowser(app);
         DataSaveAndRefreshRequested?.Invoke();
     }
 }

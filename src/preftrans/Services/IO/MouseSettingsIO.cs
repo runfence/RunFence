@@ -1,23 +1,24 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class MouseSettingsIO
+public class MouseSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static MouseSettings Read()
+    public MouseSettings Read()
     {
         var mouse = new MouseSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             int speed = 0;
             if (NativeMethods.SystemParametersInfo(Constants.SPI_GETMOUSESPEED, 0, ref speed, 0))
                 mouse.MouseSpeed = speed;
         }, "reading");
-        SafeExecutor.Try(() => mouse.ButtonsSwapped = NativeMethods.GetSystemMetrics(Constants.SM_SWAPBUTTON) != 0, "reading");
-        SafeExecutor.Try(() => mouse.DoubleClickTime = NativeMethods.GetDoubleClickTime(), "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() => mouse.ButtonsSwapped = NativeMethods.GetSystemMetrics(Constants.SM_SWAPBUTTON) != 0, "reading");
+        safe.Try(() => mouse.DoubleClickTime = NativeMethods.GetDoubleClickTime(), "reading");
+        safe.Try(() =>
         {
             int[] mouseParams = new int[3];
             if (NativeMethods.SystemParametersInfo(Constants.SPI_GETMOUSE, 0, mouseParams, 0))
@@ -27,7 +28,7 @@ public static class MouseSettingsIO
                 mouse.MouseAccelSpeed = mouseParams[2].ToString();
             }
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegCursors);
             if (key?.GetValue("CursorBaseSize") is int v)
@@ -36,14 +37,14 @@ public static class MouseSettingsIO
         return mouse;
     }
 
-    public static void Write(MouseSettings mouse)
+    public void Write(MouseSettings mouse)
     {
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (mouse.MouseSpeed.HasValue)
                 NativeMethods.SystemParametersInfo(Constants.SPI_SETMOUSESPEED, 0, mouse.MouseSpeed.Value, Constants.SPIF_UPDATEANDNOTIFY);
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (mouse.ButtonsSwapped.HasValue)
             {
@@ -52,12 +53,12 @@ public static class MouseSettingsIO
                 key.SetValue("SwapMouseButtons", mouse.ButtonsSwapped.Value ? "1" : "0", RegistryValueKind.String);
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (mouse.DoubleClickTime.HasValue)
                 NativeMethods.SystemParametersInfo(Constants.SPI_SETDOUBLECLICKTIME, mouse.DoubleClickTime.Value, IntPtr.Zero, Constants.SPIF_UPDATEANDNOTIFY);
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (mouse is { MouseThreshold1: not null, MouseThreshold2: not null, MouseAccelSpeed: not null })
             {
@@ -70,14 +71,18 @@ public static class MouseSettingsIO
                 NativeMethods.SystemParametersInfo(Constants.SPI_SETMOUSE, 0, mouseParams, Constants.SPIF_UPDATEANDNOTIFY);
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (mouse.CursorBaseSize.HasValue)
             {
                 using var key = Registry.CurrentUser.CreateSubKey(Constants.RegCursors);
                 key.SetValue("CursorBaseSize", mouse.CursorBaseSize.Value, RegistryValueKind.DWord);
-                BroadcastHelper.Broadcast();
+                broadcast.Broadcast();
             }
         }, "writing");
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Mouse = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Mouse != null) Write(s.Mouse); }
 }

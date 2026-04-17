@@ -81,14 +81,16 @@ public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
             return false;
 
         var (targetConfigPath, _) = GetSectionForGrid(grid, hitTest.RowIndex);
-        if (SameConfig(targetConfigPath, GetEffectiveConfigPath(draggedEntry)))
+        if (string.Equals(targetConfigPath, GetEffectiveConfigPath(draggedEntry), StringComparison.OrdinalIgnoreCase))
             return false;
 
         if (!draggedEntry.IsTraverseOnly)
         {
-            var key = (Path.GetFullPath(draggedEntry.Path), draggedEntry.IsDeny);
-            _pending.PendingConfigMoves[key] = targetConfigPath;
-            _pending.PendingRemoves.Remove(key);
+            var normalizedPath = Path.GetFullPath(draggedEntry.Path);
+            var configMoveKey = (normalizedPath, _pending.GetEffectiveIsDeny(draggedEntry));
+            var removeKey = (normalizedPath, draggedEntry.IsDeny);
+            _pending.PendingConfigMoves[configMoveKey] = targetConfigPath;
+            _pending.PendingRemoves.Remove(removeKey);
         }
         else
         {
@@ -110,7 +112,7 @@ public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
         }
 
         var (targetConfigPath, headerRow) = GetSectionForGrid(grid, hitTest.RowIndex);
-        if (headerRow == null || SameConfig(targetConfigPath, GetEffectiveConfigPath(_draggingEntry!)))
+        if (headerRow == null || string.Equals(targetConfigPath, GetEffectiveConfigPath(_draggingEntry!), StringComparison.OrdinalIgnoreCase))
         {
             ClearDropHighlight();
             return;
@@ -123,8 +125,8 @@ public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
     {
         if (_dropTargetRow == null)
             return;
-        _dropTargetRow.DefaultCellStyle.BackColor = Color.FromArgb(0xCC, 0xDD, 0xFF);
-        _dropTargetRow.DefaultCellStyle.SelectionBackColor = Color.Empty;
+        _dropTargetRow.DefaultCellStyle.BackColor = AclManagerSectionHeader.SectionHeaderBackColor;
+        _dropTargetRow.DefaultCellStyle.SelectionBackColor = AclManagerSectionHeader.SectionHeaderBackColor;
         _dropTargetRow = null;
     }
 
@@ -138,27 +140,8 @@ public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
         headerRow.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0xA0, 0xB5, 0xE5);
     }
 
-    private string? GetEffectiveConfigPath(GrantedPathEntry entry)
-    {
-        if (!entry.IsTraverseOnly)
-        {
-            var key = (Path.GetFullPath(entry.Path), entry.IsDeny);
-            if (_pending.PendingConfigMoves.TryGetValue(key, out var pendingTarget))
-                return pendingTarget;
-        }
-        else
-        {
-            var path = Path.GetFullPath(entry.Path);
-            if (_pending.PendingTraverseConfigMoves.TryGetValue(path, out var pendingTarget))
-                return pendingTarget;
-        }
-
-        return grantConfigTracker.GetGrantConfigPath(_sid, entry);
-    }
-
-    private static bool SameConfig(string? a, string? b) =>
-        (a == null && b == null) ||
-        (a != null && b != null && string.Equals(a, b, StringComparison.OrdinalIgnoreCase));
+    private string? GetEffectiveConfigPath(GrantedPathEntry entry) =>
+        _pending.GetEffectiveConfigPath(entry, grantConfigTracker, _sid);
 
     private static (string? ConfigPath, DataGridViewRow? HeaderRow) GetSectionForGrid(DataGridView grid, int rowIndex)
     {

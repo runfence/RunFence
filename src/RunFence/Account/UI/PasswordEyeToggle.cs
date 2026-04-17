@@ -1,5 +1,4 @@
 using System.Drawing.Drawing2D;
-using System.Runtime.InteropServices;
 
 namespace RunFence.Account.UI;
 
@@ -13,9 +12,6 @@ public static class PasswordEyeToggle
     private const int EC_RIGHTMARGIN = 2;
     private const int WM_COPY = 0x0301;
     private const int WM_CUT = 0x0300;
-
-    [DllImport("user32.dll", CharSet = CharSet.Auto)]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     /// <summary>
     /// Adds an eye toggle button inside the given password TextBox.
@@ -91,7 +87,7 @@ public static class PasswordEyeToggle
 
     private static void ApplyRightMargin(TextBox textBox, int margin)
     {
-        SendMessage(textBox.Handle, EM_SETMARGINS, EC_RIGHTMARGIN, margin << 16);
+        PasswordEyeToggleNative.SendMessage(textBox.Handle, EM_SETMARGINS, EC_RIGHTMARGIN, (IntPtr)(margin << 16));
     }
 
     private sealed class ClipboardInterceptor : NativeWindow
@@ -117,7 +113,7 @@ public static class PasswordEyeToggle
                     var dataObject = new DataObject(DataFormats.UnicodeText, text);
                     dataObject.SetData("ExcludeClipboardContentFromMonitorProcessing",
                         new MemoryStream(new byte[4]));
-                    Clipboard.SetDataObject(dataObject, copy: false);
+                    Clipboard.SetDataObject(dataObject, copy: true);
                     if (m.Msg == WM_CUT)
                     {
                         var selStart = _textBox.SelectionStart;

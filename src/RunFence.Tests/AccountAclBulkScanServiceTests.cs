@@ -299,6 +299,113 @@ public class AccountAclBulkScanServiceTests
         Assert.DoesNotContain(Sid1, (IDictionary<string, AccountScanResult>)result);
     }
 
+    // --- Cancellation ---
+
+    [Fact]
+    public async Task Scan_PreCancelledToken_ThrowsOrReturnsEmpty()
+    {
+        // Arrange: a pre-cancelled token so any cancellation-aware code exits immediately
+        var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var security = MakeSecurity([(Sid1, FileSystemRights.ReadData, AccessControlType.Allow)]);
+        var service = CreateService([(@"C:\Foo", security)]);
+        var knownSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 };
+
+        // Act: either returns gracefully with empty results or throws OperationCanceledException
+        try
+        {
+            var result = await service.ScanAllAccountsAsync(
+                @"C:\Foo", knownSids, new Progress<long>(), cts.Token);
+            // If it returns (didn't throw), it must produce an empty result due to cancellation
+            Assert.Empty(result);
+        }
+        catch (OperationCanceledException)
+        {
+            // Acceptable: cancellation propagated
+        }
+    }
+
+    // --- File-vs-directory branching (SpecialMask selection) ---
+
+    [Fact]
+    public async Task Scan_DirectoryPath_UsesSpecialFolderMask_IncludesDelete()
+    {
+        // SpecialFolderMask includes Delete; SpecialFileMask does not.
+        // Only Delete (without other write bits) triggers Special on folders but not on files.
+        // Use a real temp directory so Directory.Exists returns true for the scanned path.
+        using var tempDir = new TempDirectory();
+        var deleteOnlyRights = FileSystemRights.Delete;
+        var security = MakeSecurity([(Sid1, deleteOnlyRights, AccessControlType.Allow)]);
+        var service = new AccountAclBulkScanService(new StubTraverser([(tempDir.Path, security)]));
+
+        var result = await service.ScanAllAccountsAsync(
+            tempDir.Path, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 },
+            new Progress<long>(), CancellationToken.None);
+
+        Assert.Contains(Sid1, (IDictionary<string, AccountScanResult>)result);
+        var grant = result[Sid1].Grants.Single(g => !g.IsDeny);
+        // Directory branch: Delete is part of SpecialFolderMask → Special = true
+        Assert.True(grant.Special, "Directory path should use SpecialFolderMask (includes Delete)");
+    }
+
+    [Fact]
+    public async Task Scan_FilePath_UsesSpecialFileMask_DeleteNotSpecial()
+    {
+        // SpecialFileMask does NOT include Delete; for files Delete is part of WriteFileMask.
+        // Use a real temp file so Directory.Exists returns false for the scanned path.
+        using var tempDir = new TempDirectory();
+        var tempFile = Path.Combine(tempDir.Path, "test.txt");
+        File.WriteAllText(tempFile, "");
+
+        var deleteOnlyRights = FileSystemRights.Delete;
+        var security = MakeSecurity([(Sid1, deleteOnlyRights, AccessControlType.Allow)]);
+        var service = new AccountAclBulkScanService(new StubTraverser([(tempFile, security)]));
+
+        var result = await service.ScanAllAccountsAsync(
+            tempFile, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 },
+            new Progress<long>(), CancellationToken.None);
+
+        Assert.Contains(Sid1, (IDictionary<string, AccountScanResult>)result);
+        var grant = result[Sid1].Grants.Single(g => !g.IsDeny);
+        // File branch: Delete is part of WriteFileMask, not SpecialFileMask → Special = false, Write = true
+        Assert.False(grant.Special, "File path should use SpecialFileMask (Delete is Write, not Special)");
+        Assert.True(grant.Write, "File path: Delete right maps to Write for files");
+    }
+
+    // --- Strict cancellation contract ---
+
+    [Fact]
+    public async Task Scan_CancelledMidScan_DoesNotIncludeItemsAfterCancellation()
+    {
+        // Arrange: traverser yields 2 entries; cancels after the first one is produced.
+        var cts = new CancellationTokenSource();
+        var security1 = MakeSecurity([(Sid1, FileSystemRights.ReadData, AccessControlType.Allow)]);
+        var security2 = MakeSecurity([(Sid2, FileSystemRights.ReadData, AccessControlType.Allow)]);
+
+        // CancellingTraverser yields the first entry, then cancels the token and throws.
+        var service = new AccountAclBulkScanService(
+            new CancellingTraverser([security1, security2], cts));
+
+        var knownSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1, Sid2 };
+
+        // Act: either throws OperationCanceledException or returns partial results
+        Dictionary<string, AccountScanResult>? result = null;
+        try
+        {
+            result = await service.ScanAllAccountsAsync(
+                @"C:\Root", knownSids, new Progress<long>(), cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // Acceptable: cancellation propagated as exception — no items after cancel
+            return;
+        }
+
+        // If it returned normally, Sid2 must NOT be present (it was scanned after cancellation)
+        Assert.DoesNotContain(Sid2, (IDictionary<string, AccountScanResult>)result!);
+    }
+
     /// <summary>
     /// In-memory stub that returns a fixed set of (path, security) pairs without touching the filesystem.
     /// </summary>
@@ -308,5 +415,28 @@ public class AccountAclBulkScanServiceTests
         public IEnumerable<AclTraversalEntry> Traverse(
             IReadOnlyList<string> rootPaths, IProgress<long> progress, CancellationToken ct)
             => entries.Select(e => new AclTraversalEntry(e.Path, false, e.Security));
+    }
+
+    /// <summary>
+    /// Traverser that yields the first entry normally, then cancels the token and throws
+    /// <see cref="OperationCanceledException"/> to simulate mid-scan cancellation.
+    /// Each entry is returned at a synthetic path so Directory.Exists returns false (file branch).
+    /// </summary>
+    private sealed class CancellingTraverser(
+        IReadOnlyList<FileSystemSecurity> entries,
+        CancellationTokenSource cts) : IFileSystemAclTraverser
+    {
+        public IEnumerable<AclTraversalEntry> Traverse(
+            IReadOnlyList<string> rootPaths, IProgress<long> progress, CancellationToken ct)
+        {
+            for (int i = 0; i < entries.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var path = $@"C:\Root\Item{i}.txt";
+                yield return new AclTraversalEntry(path, false, entries[i]);
+                if (i == 0)
+                    cts.Cancel();
+            }
+        }
     }
 }

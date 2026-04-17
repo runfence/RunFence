@@ -68,12 +68,17 @@ public class RunAsCredentialPersister(
             using (var scope = session.PinDerivedKey.Unprotect())
                 encryptedPassword = encryptionService.Encrypt(result.AdHocPassword, scope.Data);
 
-            session.CredentialStore.Credentials.Add(new CredentialEntry
-            {
-                Id = Guid.NewGuid(),
-                Sid = result.Credential.Sid,
-                EncryptedPassword = encryptedPassword
-            });
+            var existing = session.CredentialStore.Credentials
+                .FirstOrDefault(c => string.Equals(c.Sid, result.Credential.Sid, StringComparison.OrdinalIgnoreCase));
+            if (existing != null)
+                existing.EncryptedPassword = encryptedPassword;
+            else
+                session.CredentialStore.Credentials.Add(new CredentialEntry
+                {
+                    Id = Guid.NewGuid(),
+                    Sid = result.Credential.Sid,
+                    EncryptedPassword = encryptedPassword
+                });
             databaseService.SaveCredentialStore(session.CredentialStore);
         }
         catch (Exception ex)

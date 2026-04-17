@@ -1,9 +1,11 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using RunFence.Acl.Permissions;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 
 namespace RunFence.Acl.UI;
@@ -13,7 +15,8 @@ namespace RunFence.Acl.UI;
 /// Export produces account-agnostic JSON (no SID). Import adds to pending state.
 /// </summary>
 public class AclManagerExportImport(
-    IGrantedPathAclService aclService,
+    IPathGrantService pathGrantService,
+    IAclPermissionService aclPermission,
     ILoggingService log,
     IDatabaseProvider databaseProvider)
 {
@@ -66,6 +69,7 @@ public class AclManagerExportImport(
         }
         else
         {
+            // No selection on the active tab: export everything from both tabs — by design.
             grantsToExport = BuildAllGrants();
             traverseToExport = BuildAllTraverse();
         }
@@ -83,6 +87,7 @@ public class AclManagerExportImport(
             Filter = "RunFence Grants (*.rfg)|*.rfg|JSON files (*.json)|*.json",
             DefaultExt = "rfg"
         };
+        FileDialogHelper.AddInteractiveUserCustomPlaces(sfd);
         if (sfd.ShowDialog(_owner) != DialogResult.OK)
             return;
 
@@ -111,6 +116,7 @@ public class AclManagerExportImport(
             Title = "Import Grants",
             Filter = "RunFence Grants (*.rfg;*.json)|*.rfg;*.json|All files (*.*)|*.*"
         };
+        FileDialogHelper.AddInteractiveUserCustomPlaces(ofd);
         if (ofd.ShowDialog(_owner) != DialogResult.OK)
             return;
 
@@ -163,47 +169,56 @@ public class AclManagerExportImport(
     private bool IsTraverseAlreadyPresent(string normalizedPath) =>
         _pending.ExistsTraverseInDbOrPending(databaseProvider.GetDatabase(), _sid, normalizedPath, checkUntrack: false);
 
-    private List<ExportGrantEntry> BuildAllGrants()
+    /// <summary>
+    /// Iterates grant entries from the database (filtered by <paramref name="dbFilter"/>),
+    /// applies <paramref name="selector"/> to produce export items, then appends pending adds
+    /// transformed via the same <paramref name="selector"/>. Items where <paramref name="selector"/>
+    /// returns null are skipped.
+    /// </summary>
+    private List<T> ScanPaths<T>(
+        IEnumerable<GrantedPathEntry>? dbEntries,
+        Func<GrantedPathEntry, bool> dbFilter,
+        Func<GrantedPathEntry, T?> selector,
+        IEnumerable<GrantedPathEntry> pendingEntries) where T : class
     {
-        var result = new List<ExportGrantEntry>();
+        var result = new List<T>();
 
-        // DB grants (excluding pending removes).
-        var dbGrants = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants;
-        if (dbGrants != null)
+        if (dbEntries != null)
         {
-            foreach (var entry in dbGrants.Where(e => !e.IsTraverseOnly &&
-                                                      !_pending.IsPendingRemove(e.Path, e.IsDeny)))
+            foreach (var entry in dbEntries.Where(dbFilter))
             {
-                var rights = GetExportRights(entry);
-                if (rights == null)
-                    continue;
-                result.Add(rights);
+                var item = selector(entry);
+                if (item != null)
+                    result.Add(item);
             }
         }
 
-        // Pending adds (not yet in DB).
-        result.AddRange(_pending.PendingAdds.Values.Select(entry => GetExportRights(entry)).OfType<ExportGrantEntry>());
-
+        result.AddRange(pendingEntries.Select(selector).OfType<T>());
         return result;
+    }
+
+    private List<ExportGrantEntry> BuildAllGrants()
+    {
+        var dbGrants = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants;
+        return ScanPaths(
+            dbGrants,
+            dbFilter: e => !e.IsTraverseOnly &&
+                           !_pending.IsPendingRemove(e.Path, e.IsDeny) &&
+                           !_pending.IsUntrackGrant(e.Path, e.IsDeny),
+            selector: GetExportRights,
+            pendingEntries: _pending.PendingAdds.Values);
     }
 
     private List<ExportTraverseEntry> BuildAllTraverse()
     {
-        var result = new List<ExportTraverseEntry>();
-
-        // DB traverse entries (excluding pending removes).
         var dbGrants = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants;
-        if (dbGrants != null)
-        {
-            foreach (var entry in dbGrants.Where(e => e.IsTraverseOnly &&
-                                                      !_pending.IsPendingTraverseRemove(e.Path)))
-                result.Add(new ExportTraverseEntry(entry.Path));
-        }
-
-        // Pending traverse adds (not yet in DB).
-        result.AddRange(_pending.PendingTraverseAdds.Values.Select(entry => new ExportTraverseEntry(entry.Path)));
-
-        return result;
+        return ScanPaths(
+            dbGrants,
+            dbFilter: e => e.IsTraverseOnly &&
+                           !_pending.IsPendingTraverseRemove(e.Path) &&
+                           !_pending.IsUntrackTraverse(e.Path),
+            selector: e => new ExportTraverseEntry(e.Path),
+            pendingEntries: _pending.PendingTraverseAdds.Values);
     }
 
     private List<ExportGrantEntry> BuildGrantsFromSelection(DataGridView grantsGrid)
@@ -243,10 +258,10 @@ public class AclManagerExportImport(
             // Auto-populate from NTFS before export.
             try
             {
-                var groupSids = new List<string>(); // group SIDs not needed for export population
-                var state = aclService.ReadRights(entry.Path, _sid, groupSids);
+                var groupSids = aclPermission.ResolveAccountGroupSids(_sid);
+                var state = pathGrantService.ReadGrantState(entry.Path, _sid, groupSids);
                 // Use comparer to build the saved rights using the same rules as auto-populate.
-                var populated = SavedRightsComparer.Instance.AutoPopulateMissingSavedRights(
+                _ = SavedRightsComparer.Instance.AutoPopulateMissingSavedRights(
                     [entry], _ => state, _isContainer);
                 saved = entry.SavedRights;
                 if (saved == null)
@@ -373,8 +388,9 @@ public class AclManagerExportImport(
                 traverseAdded++;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            log.Error("ProcessImport: failed to process import entry — rolling back", ex);
             foreach (var key in addedGrantKeys)
                 _pending.PendingAdds.Remove(key);
             foreach (var key in addedTraverseKeys)

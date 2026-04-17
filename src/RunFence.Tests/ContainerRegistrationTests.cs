@@ -1,7 +1,9 @@
 using Autofac;
+using RunFence.Apps.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.SidMigration;
 using RunFence.Startup;
 using RunFence.UI.Forms;
 using Xunit;
@@ -48,6 +50,12 @@ public class ContainerRegistrationTests
 
                 // Verify AppLifecycleStarter (lifecycle wiring) also resolves
                 sessionScope.Resolve<AppLifecycleStarter>();
+
+                // Explicitly resolve types that are only created via Func<T> factory delegates —
+                // these escape the MainForm transitive resolution above and would otherwise hide
+                // scope mismatches (e.g. a SingleInstance in foundation depending on a session-scope type).
+                using var appEditDialog = sessionScope.Resolve<AppEditDialog>();
+                sessionScope.Resolve<InAppMigrationHandler>();
             }
             catch (Exception ex)
             {

@@ -8,16 +8,9 @@ namespace RunFence.Tests;
 
 public class LicenseValidatorTests
 {
-    // Test key pair — generated fresh for tests, completely separate from production keys
-    private static readonly ECDsa TestKey = GenerateTestKey();
-    private static readonly byte[] TestPublicKeyBytes = TestKey.ExportSubjectPublicKeyInfo();
+    // Shared test key fixture — same key used by LicenseServiceTests to avoid duplication.
+    private static readonly byte[] TestPublicKeyBytes = LicenseTestKey.PublicKeyBytes;
     private static readonly LicenseValidator Validator = new LicenseValidator(TestPublicKeyBytes);
-
-    private static ECDsa GenerateTestKey()
-    {
-        var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        return ecdsa;
-    }
 
     private static readonly byte[] TestMachineHash = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C];
 
@@ -28,10 +21,13 @@ public class LicenseValidatorTests
         LicenseTier tier = LicenseTier.Annual,
         string licenseeName = "Test User",
         ECDsa? signingKey = null)
-        => TestKeyBuilder.BuildKey(
-            signingKey ?? TestKey,
+    {
+        using var ownedKey = signingKey == null ? LicenseTestKey.CreateSigningKey() : null;
+        return TestKeyBuilder.BuildKey(
+            signingKey ?? ownedKey!,
             machineHash ?? TestMachineHash,
             version, expiryDays, tier, licenseeName);
+    }
 
     [Fact]
     public void ValidKey_MatchingMachine_FutureExpiry_ReturnsValid()
@@ -180,7 +176,7 @@ public class LicenseValidatorTests
     [Fact]
     public void ValidateKey_WrongSigningKey_ReturnsInvalidSignature()
     {
-        var otherKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var otherKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var key = BuildKey(signingKey: otherKey);
         var (result, _) = Validator.Validate(key, TestMachineHash, DateTime.Today);
         Assert.Equal(LicenseActivationResult.InvalidSignature, result);
@@ -201,7 +197,8 @@ public class LicenseValidatorTests
         payload.AddRange(nameBytes);
 
         var payloadBytes = payload.ToArray();
-        var signature = TestKey.SignData(payloadBytes, HashAlgorithmName.SHA256);
+        using var signingKey = LicenseTestKey.CreateSigningKey();
+        var signature = signingKey.SignData(payloadBytes, HashAlgorithmName.SHA256);
         var combined = payloadBytes.Concat(signature).ToArray();
         var base32 = MachineIdProvider.Base32Encode(combined);
         var key = "RAME-" + base32;

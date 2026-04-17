@@ -65,6 +65,8 @@ partial class CallerIdentityDialog
         _cancelButton.FlatStyle = FlatStyle.System;
 
         // CallerIdentityDialog
+        AutoScaleDimensions = new SizeF(7F, 15F);
+        AutoScaleMode = AutoScaleMode.Font;
         Text = "Add Allowed Caller";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;

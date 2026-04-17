@@ -1,3 +1,4 @@
+using RunFence.Core;
 using RunFence.Infrastructure;
 
 namespace RunFence.DragBridge.UI.Forms;
@@ -14,7 +15,7 @@ public class DragBridgeAccessPrompt(IModalTracker modalTracker) : IDragBridgeAcc
         try
         {
             using var dlg = new DragBridgeAccessDialog(targetDisplayName, inaccessiblePaths, totalSizeBytes);
-            dlg.Shown += (_, _) => NativeInterop.ForceToForeground(dlg);
+            dlg.Shown += (_, _) => { WindowForegroundHelper.ForceToForeground(dlg.Handle); dlg.BringToFront(); };
             dlg.ShowDialog();
             return dlg.ChosenAction;
         }

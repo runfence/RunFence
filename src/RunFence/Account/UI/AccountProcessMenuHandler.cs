@@ -7,7 +7,7 @@ namespace RunFence.Account.UI;
 /// Handles context menu interactions for process rows in the accounts grid,
 /// including visibility setup and click actions (copy path, close, kill, properties).
 /// </summary>
-public class AccountProcessMenuHandler
+public class AccountProcessMenuHandler(ShellHelper shellHelper)
 {
     private DataGridView _grid = null!;
     private IAccountsPanelContext _context = null!;
@@ -108,8 +108,16 @@ public class AccountProcessMenuHandler
     {
         try
         {
-            using var p = DiagProcess.GetProcessById(pr.Process.Pid);
-            p.CloseMainWindow();
+            var p = pr.Process.ProcessHandle;
+            if (p != null)
+            {
+                p.CloseMainWindow();
+            }
+            else
+            {
+                using var byPid = DiagProcess.GetProcessById(pr.Process.Pid);
+                byPid.CloseMainWindow();
+            }
         }
         catch (ArgumentException)
         {
@@ -143,8 +151,16 @@ public class AccountProcessMenuHandler
 
         try
         {
-            using var p = DiagProcess.GetProcessById(pr.Process.Pid);
-            p.Kill();
+            var p = pr.Process.ProcessHandle;
+            if (p != null)
+            {
+                p.Kill();
+            }
+            else
+            {
+                using var byPid = DiagProcess.GetProcessById(pr.Process.Pid);
+                byPid.Kill();
+            }
         }
         catch (ArgumentException)
         {
@@ -166,6 +182,6 @@ public class AccountProcessMenuHandler
             return;
         if (string.IsNullOrEmpty(pr.Process.ExecutablePath))
             return;
-        ShellHelper.ShowProperties(pr.Process.ExecutablePath, _context.OwnerControl.FindForm());
+        shellHelper.ShowProperties(pr.Process.ExecutablePath, _context.OwnerControl.FindForm());
     }
 }

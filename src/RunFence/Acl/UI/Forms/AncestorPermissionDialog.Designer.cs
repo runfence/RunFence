@@ -26,6 +26,7 @@ partial class AncestorPermissionDialog
         if (disposing)
         {
             _shieldIcon.Image?.Dispose();
+            _headingFont?.Dispose();
             components?.Dispose();
         }
         base.Dispose(disposing);
@@ -78,6 +79,7 @@ partial class AncestorPermissionDialog
         // _addButton
         _addButton.Text = "Add Permissions";
         _addButton.AutoSize = true;
+        _addButton.FlatStyle = FlatStyle.System;
         _addButton.MinimumSize = new Size(0, 28);
         _addButton.Height = 28;
         _addButton.DialogResult = DialogResult.Yes;
@@ -85,6 +87,7 @@ partial class AncestorPermissionDialog
         // _addWithWriteButton
         _addWithWriteButton.Text = "Grant Write too";
         _addWithWriteButton.AutoSize = true;
+        _addWithWriteButton.FlatStyle = FlatStyle.System;
         _addWithWriteButton.MinimumSize = new Size(0, 28);
         _addWithWriteButton.Height = 28;
         _addWithWriteButton.DialogResult = DialogResult.OK;
@@ -93,6 +96,7 @@ partial class AncestorPermissionDialog
         // _skipButton
         _skipButton.Text = "Launch Without";
         _skipButton.AutoSize = true;
+        _skipButton.FlatStyle = FlatStyle.System;
         _skipButton.MinimumSize = new Size(0, 28);
         _skipButton.Height = 28;
         _skipButton.DialogResult = DialogResult.No;
@@ -100,6 +104,7 @@ partial class AncestorPermissionDialog
         // _cancelButton
         _cancelButton.Text = "Cancel";
         _cancelButton.AutoSize = true;
+        _cancelButton.FlatStyle = FlatStyle.System;
         _cancelButton.MinimumSize = new Size(75, 28);
         _cancelButton.Height = 28;
         _cancelButton.DialogResult = DialogResult.Cancel;
@@ -122,7 +127,7 @@ partial class AncestorPermissionDialog
         StartPosition = FormStartPosition.CenterParent;
         TopMost = true; // Required on secure desktop — custom Forms lose z-order without this
         ClientSize = new Size(560, 210);
-        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleMode = AutoScaleMode.Font;
         AcceptButton = _addButton;
         CancelButton = _cancelButton;
         Controls.AddRange(new Control[] { _shieldIcon, _headingLabel, _textLabel, _pathComboBox, _fullPathLabel, _buttonPanel });

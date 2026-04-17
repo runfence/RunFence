@@ -1,57 +1,38 @@
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
 namespace RunFence.Account.Lifecycle;
 
-public class EphemeralAccountService : IDisposable, IBackgroundService
+public class EphemeralAccountService(
+    IAccountLifecycleManager lifecycleManager,
+    IAccountDeletionService accountDeletion,
+    SessionPersistenceHelper persistenceHelper,
+    ILocalUserProvider localUserProvider,
+    ILoggingService log,
+    IAccountValidationService accountValidation,
+    ISessionProvider sessionProvider,
+    IUiThreadInvoker uiThreadInvoker,
+    ISidResolver sidResolver,
+    IPathGrantService pathGrantService)
+    : IDisposable, IBackgroundService
 {
-    private readonly IAccountLifecycleManager _lifecycleManager;
-    private readonly IAccountDeletionService _accountDeletion;
-    private readonly IAccountCredentialManager _credentialManager;
-    private readonly ILocalUserProvider _localUserProvider;
-    private readonly ILoggingService _log;
-    private readonly IAccountValidationService _accountValidation;
-    private readonly ISidResolver _sidResolver;
-    private readonly ISessionProvider _sessionProvider;
-    private readonly IUiThreadInvoker _uiThreadInvoker;
     private EphemeralTimerHelper? _timer;
 
     public event Action? AccountsChanged;
 
-    public EphemeralAccountService(
-        IAccountLifecycleManager lifecycleManager,
-        IAccountDeletionService accountDeletion,
-        IAccountCredentialManager credentialManager,
-        ILocalUserProvider localUserProvider,
-        ILoggingService log,
-        IAccountValidationService accountValidation,
-        ISessionProvider sessionProvider,
-        IUiThreadInvoker uiThreadInvoker,
-        ISidResolver sidResolver)
-    {
-        _lifecycleManager = lifecycleManager;
-        _accountDeletion = accountDeletion;
-        _credentialManager = credentialManager;
-        _localUserProvider = localUserProvider;
-        _log = log;
-        _accountValidation = accountValidation;
-        _sessionProvider = sessionProvider;
-        _uiThreadInvoker = uiThreadInvoker;
-        _sidResolver = sidResolver;
-    }
-
     public void Start()
     {
-        _log.Info("EphemeralAccountService: starting.");
-        _timer = new EphemeralTimerHelper(_uiThreadInvoker, ProcessExpiredAccounts);
+        log.Info("EphemeralAccountService: starting.");
+        _timer = new EphemeralTimerHelper(uiThreadInvoker, ProcessExpiredAccounts);
         _timer.Start();
-        _log.Info("EphemeralAccountService: started.");
+        log.Info("EphemeralAccountService: started.");
     }
 
     public void ProcessExpiredAccounts()
     {
-        var session = _sessionProvider.GetSession();
+        var session = sessionProvider.GetSession();
         var database = session.Database;
         var credentialStore = session.CredentialStore;
 
@@ -59,28 +40,30 @@ public class EphemeralAccountService : IDisposable, IBackgroundService
 
         var ephemeralAccounts = database.Accounts.Where(a => a.DeleteAfterUtc.HasValue).ToList();
         var (orphaned, expired) = ClassifyEntries(ephemeralAccounts, credentialStore);
-        _log.Info($"EphemeralAccountService: processing expired accounts ({orphaned.Count} orphaned, {expired.Count} expired).");
+        log.Info($"EphemeralAccountService: processing expired accounts ({orphaned.Count} orphaned, {expired.Count} expired).");
         changed |= RemoveOrphanedEntries(orphaned, database);
 
-        changed |= ProcessExpiredEntries(expired, database, _accountValidation, _sidResolver, _log,
+        changed |= ProcessExpiredEntries(expired, database,
             logContext: null,
             deleteEntry: (entry, username) =>
             {
                 try
                 {
-                    _accountDeletion.DeleteAccount(entry.Sid, username, credentialStore);
+                    accountDeletion.DeleteAccount(entry.Sid, username, credentialStore);
                 }
                 catch (Exception ex)
                 {
-                    _log.Warn($"Failed to delete ephemeral account {entry.Sid}: {ex.Message}");
+                    log.Warn($"Failed to delete ephemeral account {entry.Sid}: {ex.Message}");
                     return false;
                 }
 
-                _ = _lifecycleManager.DeleteProfileAsync(entry.Sid)
+                // Profile deletion is fire-and-forget: failure leaves an orphaned profile on disk,
+                // which is detected and offered for cleanup during the next startup sequence.
+                _ = lifecycleManager.DeleteProfileAsync(entry.Sid)
                     .ContinueWith(t =>
                     {
                         if (t.IsFaulted)
-                            _log.Warn($"Failed to delete profile for ephemeral account {entry.Sid}: {(t.Exception!.InnerException ?? t.Exception).Message}. " +
+                            log.Warn($"Failed to delete profile for ephemeral account {entry.Sid}: {(t.Exception!.InnerException ?? t.Exception).Message}. " +
                                       "The orphaned profile will be detected and offered for cleanup on next startup.");
                     }, TaskContinuationOptions.OnlyOnFaulted);
                 return true;
@@ -88,12 +71,12 @@ public class EphemeralAccountService : IDisposable, IBackgroundService
 
         if (changed)
         {
-            _credentialManager.SaveCredentialStoreAndConfig(credentialStore, database, session.PinDerivedKey);
-            _localUserProvider.InvalidateCache();
+            persistenceHelper.SaveCredentialStoreAndConfig(credentialStore, database, session.PinDerivedKey);
+            localUserProvider.InvalidateCache();
             AccountsChanged?.Invoke();
         }
 
-        _log.Info("EphemeralAccountService: expired account processing complete.");
+        log.Info("EphemeralAccountService: expired account processing complete.");
     }
 
     /// <summary>
@@ -101,12 +84,9 @@ public class EphemeralAccountService : IDisposable, IBackgroundService
     /// Calls <paramref name="deleteEntry"/> for each entry ready for deletion.
     /// Returns true if any changes were made.
     /// </summary>
-    private static bool ProcessExpiredEntries(
+    private bool ProcessExpiredEntries(
         List<AccountEntry> expired,
         AppDatabase database,
-        IAccountValidationService accountValidation,
-        ISidResolver sidResolver,
-        ILoggingService log,
         string? logContext,
         Func<AccountEntry, string, bool> deleteEntry)
     {
@@ -127,7 +107,9 @@ public class EphemeralAccountService : IDisposable, IBackgroundService
             var username = SidNameResolver.ResolveUsername(entry.Sid, sidResolver, database.SidNames);
             if (username == null)
             {
+                log.Info($"EphemeralAccountService: permanentizing expired entry for SID {entry.Sid} (username not resolvable); clearing grants to prevent stale state.");
                 entry.DeleteAfterUtc = null;
+                pathGrantService.RemoveAll(entry.Sid, updateFileSystem: false);
                 database.RemoveAccountIfEmpty(entry.Sid);
                 changed = true;
                 continue;
@@ -140,11 +122,13 @@ public class EphemeralAccountService : IDisposable, IBackgroundService
         return changed;
     }
 
-    private static bool RemoveOrphanedEntries(List<AccountEntry> orphaned, AppDatabase database)
+    private bool RemoveOrphanedEntries(List<AccountEntry> orphaned, AppDatabase database)
     {
         foreach (var entry in orphaned)
         {
+            log.Info($"EphemeralAccountService: permanentizing orphaned entry for SID {entry.Sid} (account not found on system and no credentials); clearing grants to prevent stale state.");
             entry.DeleteAfterUtc = null;
+            pathGrantService.RemoveAll(entry.Sid, updateFileSystem: false);
             database.RemoveAccountIfEmpty(entry.Sid);
         }
 
@@ -152,11 +136,7 @@ public class EphemeralAccountService : IDisposable, IBackgroundService
     }
 
     private (List<AccountEntry> orphaned, List<AccountEntry> expired) ClassifyEntries(
-        List<AccountEntry> ephemeralAccounts, CredentialStore credentialStore) =>
-        ClassifyEntriesStatic(ephemeralAccounts, credentialStore, _sidResolver);
-
-    private static (List<AccountEntry> orphaned, List<AccountEntry> expired) ClassifyEntriesStatic(
-        List<AccountEntry> ephemeralAccounts, CredentialStore credentialStore, ISidResolver sidResolver)
+        List<AccountEntry> ephemeralAccounts, CredentialStore credentialStore)
     {
         var orphaned = ephemeralAccounts
             .Where(e =>

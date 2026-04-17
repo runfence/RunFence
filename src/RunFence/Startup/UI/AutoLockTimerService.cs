@@ -2,14 +2,14 @@ using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Startup.UI;
 
-public class AutoLockTimerService : IDisposable
+public class AutoLockTimerService : IAutoLockTimerService, IDisposable
 {
     private Timer? _timer;
 
     public void Start(int timeoutSeconds, Action onTimeout)
     {
         Stop();
-        var timeoutMs = timeoutSeconds * 1000;
+        var timeoutMs = (int)Math.Min((long)timeoutSeconds * 1000, int.MaxValue);
         _timer = new Timer { Interval = timeoutMs };
         _timer.Tick += (_, _) =>
         {

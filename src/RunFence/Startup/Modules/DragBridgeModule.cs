@@ -12,7 +12,9 @@ public class DragBridgeModule : Module
     protected override void Load(ContainerBuilder builder)
     {
         builder.RegisterType<DragBridgeProcessLauncher>()
-            .AsSelf()
+            .As<IDragBridgeProcessLauncher>()
+            .As<IDragBridgeSessionManager>()
+            .As<IDragBridgePipeLauncher>()
             .SingleInstance();
 
         builder.RegisterType<CapturedFileStore>()
@@ -24,6 +26,10 @@ public class DragBridgeModule : Module
             .SingleInstance();
 
         builder.RegisterType<DragBridgePasteHandler>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<DragBridgeResolveOrchestrator>()
             .AsSelf()
             .SingleInstance();
 
@@ -59,6 +65,10 @@ public class DragBridgeModule : Module
 
         builder.RegisterType<WindowOwnerDetector>()
             .As<IWindowOwnerDetector>()
+            .SingleInstance();
+
+        builder.RegisterType<TempDirectoryAclHelper>()
+            .As<ITempDirectoryAclHelper>()
             .SingleInstance();
 
         builder.RegisterType<DragBridgeTempFileManager>()

@@ -1,7 +1,8 @@
+using RunFence.Account.UI;
 using RunFence.Core.Models;
-using RunFence.Firewall;
+using RunFence.Firewall.UI;
 using RunFence.Firewall.UI.Forms;
-using RunFence.Licensing;
+using RunFence.Launch;
 using RunFence.Persistence;
 
 namespace RunFence.Wizard.Templates;
@@ -12,15 +13,14 @@ namespace RunFence.Wizard.Templates;
 /// post-wizard action that opens the allowlist and blocked-connections dialogs.
 /// </summary>
 public class AiAgentFirewallOrchestrator(
-    IFirewallService firewallService,
-    ILicenseService licenseService,
-    IFirewallNetworkInfo? firewallNetworkInfo,
-    IBlockedConnectionReader? blockedConnectionReader,
-    IDnsResolver? dnsResolver,
-    IDatabaseProvider databaseProvider)
+    FirewallApplyHelper firewallApplyHelper,
+    FirewallDialogFactory dialogFactory,
+    IDatabaseProvider databaseProvider,
+    ILaunchFacade launchFacade,
+    AccountToolResolver accountToolResolver)
 {
     /// <summary>
-    /// Updates firewall settings in the database and applies rules via <see cref="IFirewallService"/>.
+    /// Updates firewall settings in the database and applies rules via <see cref="FirewallApplyHelper"/>.
     /// Reports progress and non-fatal errors via <paramref name="progress"/>.
     /// </summary>
     public async Task ApplyRestrictiveRulesAsync(
@@ -30,83 +30,106 @@ public class AiAgentFirewallOrchestrator(
         IWizardProgressReporter progress)
     {
         var database = databaseProvider.GetDatabase();
+        var previousSettings = (database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings()).Clone();
         FirewallAccountSettings.UpdateOrRemove(database, sid, settings);
         progress.ReportStatus("Applying firewall rules...");
-        try
-        {
-            await Task.Run(() => firewallService.ApplyFirewallRules(sid, username, settings));
-        }
-        catch (Exception ex)
-        {
-            progress.ReportError($"Firewall rules: {ex.Message}");
-        }
+        await firewallApplyHelper.ApplyWithRollbackAsync(
+            sid: sid,
+            username: username,
+            previous: previousSettings,
+            final: settings,
+            database: database,
+            saveAction: () => { },
+            reportError: progress.ReportError);
     }
 
     /// <summary>
-    /// Builds the post-wizard action that opens the firewall allowlist dialog followed by the
-    /// blocked-connections dialog, allowing the user to whitelist required domains immediately.
+    /// Builds the post-wizard action that:
+    /// <list type="number">
+    ///   <item>Launches the AI tool (<paramref name="toolPath"/>) or a terminal when no tool path is set.</item>
+    ///   <item>Opens the firewall allowlist dialog so the user can whitelist required domains.</item>
+    ///   <item>Automatically opens the blocked-connections dialog (with audit logging enabled) when the
+    ///         allowlist dialog first appears, so the user can see real traffic without closing the allowlist.</item>
+    /// </list>
     /// Returns <c>null</c> when firewall network info is unavailable (firewall not configured).
     /// </summary>
     public Action<IWin32Window>? BuildPostWizardAction(
         string sid,
         string username,
         SessionContext session,
-        IWizardSessionSaver sessionSaver)
+        IWizardSessionSaver sessionSaver,
+        string? toolPath)
     {
-        if (firewallNetworkInfo == null)
+        if (!dialogFactory.IsAvailable)
             return null;
 
         return owner =>
         {
+            // Launch the tool or terminal first so the agent can start while the user configures firewall.
+            try
+            {
+                if (!string.IsNullOrEmpty(toolPath))
+                {
+                    launchFacade.LaunchFile(new ProcessLaunchTarget(toolPath), new AccountLaunchIdentity(sid), permissionPrompt: (_, _) => true);
+                }
+                else
+                {
+                    var terminalExe = accountToolResolver.ResolveTerminalExe(sid);
+                    var profilePath = accountToolResolver.GetProfileRoot(sid);
+                    launchFacade.LaunchFile(new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath), new AccountLaunchIdentity(sid), permissionPrompt: (_, _) => true);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                MessageBox.Show(owner, $"Failed to launch: {ex.Message}", "RunFence",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+
             var currentSettings = session.Database.GetAccount(sid)?.Firewall
                                   ?? new FirewallAccountSettings();
 
-            using var allowlistDlg = new FirewallAllowlistDialog(
+            using var allowlistDlg = dialogFactory.CreateAllowlistDialog(
                 current: currentSettings.Allowlist.ToList(),
-                firewallNetworkInfo: firewallNetworkInfo,
                 displayName: username,
                 allowInternet: currentSettings.AllowInternet,
                 allowLan: currentSettings.AllowLan,
                 allowLocalhost: currentSettings.AllowLocalhost,
-                licenseService: licenseService,
-                sid: sid,
-                blockedConnectionReader: blockedConnectionReader,
-                dnsResolver: dnsResolver);
+                allowedLocalhostPorts: currentSettings.LocalhostPortExemptions,
+                filterEphemeralLoopback: currentSettings.FilterEphemeralLoopback);
 
-            if (allowlistDlg.ShowDialog(owner) == DialogResult.OK)
+            if (allowlistDlg != null)
             {
-                var existing = session.Database.GetAccount(sid)?.Firewall
-                               ?? new FirewallAccountSettings();
-                existing.AllowInternet = allowlistDlg.AllowInternet;
-                existing.AllowLan = allowlistDlg.AllowLan;
-                existing.AllowLocalhost = allowlistDlg.AllowLocalhost;
-                existing.Allowlist = allowlistDlg.Result;
-                FirewallAccountSettings.UpdateOrRemove(session.Database, sid, existing);
-                sessionSaver.SaveAndRefresh();
-                var finalSettings = session.Database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings();
-                firewallService.ApplyFirewallRules(sid, username, finalSettings);
-            }
-
-            // Open blocked connections dialog so the user can audit what the AI agent is
-            // trying to reach and quickly add allowlist entries from real connection data.
-            if (blockedConnectionReader != null && dnsResolver != null)
-            {
-                var latestSettings = session.Database.GetAccount(sid)?.Firewall
-                                     ?? new FirewallAccountSettings();
-                using var blockedDlg = new BlockedConnectionsDialog(
-                    displayName: username,
-                    reader: blockedConnectionReader,
-                    dnsResolver: dnsResolver,
-                    existingAllowlist: latestSettings.Allowlist.AsReadOnly(),
-                    enableAuditLogging: true);
-                if (blockedDlg.ShowDialog(owner) == DialogResult.OK && blockedDlg.SelectedEntries.Count > 0)
+                allowlistDlg.Applied += (_, args) =>
                 {
-                    var settings = session.Database.GetAccount(sid)?.Firewall
+                    var existing = session.Database.GetAccount(sid)?.Firewall
                                    ?? new FirewallAccountSettings();
-                    settings.Allowlist.AddRange(blockedDlg.SelectedEntries);
-                    FirewallAccountSettings.UpdateOrRemove(session.Database, sid, settings);
+                    var previousSettings = existing.Clone();
+                    existing.AllowInternet = allowlistDlg.AllowInternet;
+                    existing.AllowLan = allowlistDlg.AllowLan;
+                    existing.AllowLocalhost = allowlistDlg.AllowLocalhost;
+                    existing.LocalhostPortExemptions = allowlistDlg.AllowedLocalhostPorts.ToList();
+                    existing.FilterEphemeralLoopback = allowlistDlg.FilterEphemeralLoopback;
+                    existing.Allowlist = allowlistDlg.Result;
+                    FirewallAccountSettings.UpdateOrRemove(session.Database, sid, existing);
                     sessionSaver.SaveAndRefresh();
-                }
+                    var finalSettings = session.Database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings();
+                    bool rolledBack = firewallApplyHelper.ApplyWithRollback(
+                        owner: owner,
+                        sid: sid,
+                        username: username,
+                        previous: previousSettings,
+                        final: finalSettings,
+                        database: session.Database,
+                        saveAction: sessionSaver.SaveAndRefresh);
+                    if (rolledBack)
+                        args.RolledBack = true;
+                };
+                // Open blocked-connections dialog automatically when the allowlist dialog appears,
+                // so the user can see what the agent is trying to reach and add allowlist entries
+                // without closing the allowlist first. Audit logging is enabled inside that dialog.
+                allowlistDlg.AutoOpenBlockedConnectionsOnShow();
+                allowlistDlg.ShowDialog(owner);
             }
         };
     }

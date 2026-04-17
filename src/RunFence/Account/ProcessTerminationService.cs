@@ -8,7 +8,7 @@ public class ProcessTerminationService(ILoggingService log) : IProcessTerminatio
 {
     public (int Killed, int Failed) KillProcesses(string sid)
     {
-        int tokenInfoClass = NativeMethods.GetTokenInfoClass(sid);
+        int tokenInfoClass = ProcessNative.GetTokenInfoClass(sid);
 
         // Shared deadline: both the original and any newly spawned processes get time within this window
         var deadline = DateTime.UtcNow.AddSeconds(5);
@@ -16,12 +16,14 @@ public class ProcessTerminationService(ILoggingService log) : IProcessTerminatio
         // Pass 1: collect matching processes
         var matching = GetMatchingProcesses(sid, tokenInfoClass);
 
-        // Pass 2: send graceful close to all original processes
+        // Pass 2: send graceful close to all original processes; track which ones received it
+        var closeWindowSent = new HashSet<int>();
         foreach (var proc in matching)
         {
             try
             {
-                proc.CloseMainWindow();
+                if (proc.CloseMainWindow())
+                    closeWindowSent.Add(proc.Id);
             }
             catch
             {
@@ -32,9 +34,14 @@ public class ProcessTerminationService(ILoggingService log) : IProcessTerminatio
         // Pass 3: wait for graceful exits within the shared deadline
         WaitForExitByDeadline(matching, deadline);
 
-        // Count graceful exits before disposing
+        // Count processes that received CloseMainWindow and then exited within the timeout.
+        // Note: this count may include processes that exited for reasons other than the close
+        // message (e.g. they were already in the process of terminating). The count is used
+        // only for informational logging, so a slight over-count is acceptable.
         int gracefullyExited = matching.Count(p =>
         {
+            if (!closeWindowSent.Contains(p.Id))
+                return false;
             try
             {
                 return p.HasExited;
@@ -106,16 +113,16 @@ public class ProcessTerminationService(ILoggingService log) : IProcessTerminatio
             }
 
             bool isMatch = false;
-            IntPtr hProcess = NativeMethods.OpenProcess(NativeMethods.ProcessQueryLimitedInformation, false, proc.Id);
+            IntPtr hProcess = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, proc.Id);
             if (hProcess != IntPtr.Zero)
             {
                 try
                 {
-                    isMatch = string.Equals(NativeMethods.GetTokenSid(hProcess, tokenInfoClass), sid, StringComparison.OrdinalIgnoreCase);
+                    isMatch = string.Equals(ProcessNative.GetTokenSid(hProcess, tokenInfoClass), sid, StringComparison.OrdinalIgnoreCase);
                 }
                 finally
                 {
-                    NativeMethods.CloseHandle(hProcess);
+                    ProcessNative.CloseHandle(hProcess);
                 }
             }
 

@@ -4,7 +4,13 @@ using RunFence.Core.Models;
 
 namespace RunFence.SecurityScanner;
 
-public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheckHelper aclCheck)
+public class MachineLevelRegistryScanner(
+    IAutorunRegistryAccess autorunRegistry,
+    IWinlogonRegistryAccess winlogonRegistry,
+    IIfeoRegistryAccess ifeoRegistry,
+    IWindowsComponentRegistryAccess windowsComponentRegistry,
+    IFileSystemDataAccess fileSystem,
+    AclCheckHelper aclCheck)
 {
     private const RegistryRights IfeoRegistryWriteRightsMask =
         RegistryRights.SetValue | RegistryRights.CreateSubKey |
@@ -19,7 +25,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
             ctx.AdminSids, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, null,
             @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce");
 
-        foreach (var (path, display) in dataAccess.GetWow6432RunKeyPaths(null))
+        foreach (var (path, display) in autorunRegistry.GetWow6432RunKeyPaths(null))
         {
             aclCheck.CheckRegistryKey(Registry.LocalMachine, path, display,
                 ctx.AdminSids, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, null,
@@ -31,7 +37,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
     {
         try
         {
-            var security = dataAccess.GetWinlogonRegistryKeySecurity();
+            var security = winlogonRegistry.GetWinlogonRegistryKeySecurity();
             if (security != null)
             {
                 aclCheck.CheckRegistryKeyAcl(security, @"HKLM\...\Winlogon", ctx.AdminSids,
@@ -39,7 +45,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
                     @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon");
             }
 
-            foreach (var exePath in dataAccess.GetWinlogonExePaths())
+            foreach (var exePath in winlogonRegistry.GetWinlogonExePaths())
             {
                 if (!string.IsNullOrEmpty(exePath))
                     SecurityScanner.AddAutorunPath(ctx.Autorun, exePath, null, StartupSecurityCategory.RegistryRunKey);
@@ -47,7 +53,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to check Winlogon: {ex.Message}");
+            fileSystem.LogError($"Failed to check Winlogon: {ex.Message}");
         }
     }
 
@@ -55,7 +61,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
     {
         try
         {
-            foreach (var (security, displayPath, dllPaths) in dataAccess.GetAppInitDllEntries())
+            foreach (var (security, displayPath, dllPaths) in winlogonRegistry.GetAppInitDllEntries())
             {
                 if (security != null)
                 {
@@ -76,7 +82,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to check AppInit_DLLs: {ex.Message}");
+            fileSystem.LogError($"Failed to check AppInit_DLLs: {ex.Message}");
         }
     }
 
@@ -84,7 +90,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
     {
         try
         {
-            var ifeoSecurity = dataAccess.GetIfeoRegistryKeySecurity();
+            var ifeoSecurity = ifeoRegistry.GetIfeoRegistryKeySecurity();
             if (ifeoSecurity != null)
             {
                 aclCheck.CheckRegistryKeyAcl(ifeoSecurity, @"HKLM\...\Image File Execution Options",
@@ -93,7 +99,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
                     @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options");
             }
 
-            var ifeoWow = dataAccess.GetIfeoWow6432RegistryKeySecurity();
+            var ifeoWow = ifeoRegistry.GetIfeoWow6432RegistryKeySecurity();
             if (ifeoWow != null)
             {
                 aclCheck.CheckRegistryKeyAcl(ifeoWow, @"HKLM\...\Wow6432Node\Image File Execution Options",
@@ -102,13 +108,13 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
                     @"HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options");
             }
 
-            foreach (var exeName in dataAccess.GetIfeoSubkeyNames())
+            foreach (var exeName in ifeoRegistry.GetIfeoSubkeyNames())
             {
-                var debugger = dataAccess.GetIfeoDebuggerPath(exeName);
+                var debugger = ifeoRegistry.GetIfeoDebuggerPath(exeName);
                 if (!string.IsNullOrEmpty(debugger))
                     SecurityScanner.AddAutorunPath(ctx.Autorun, debugger, null, StartupSecurityCategory.RegistryRunKey);
 
-                var verifierDlls = dataAccess.GetIfeoVerifierDlls(exeName);
+                var verifierDlls = ifeoRegistry.GetIfeoVerifierDlls(exeName);
                 if (!string.IsNullOrEmpty(verifierDlls))
                 {
                     foreach (var dll in verifierDlls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -121,7 +127,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to scan IFEO: {ex.Message}");
+            fileSystem.LogError($"Failed to scan IFEO: {ex.Message}");
         }
     }
 
@@ -129,7 +135,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
     {
         try
         {
-            foreach (var (keyDisplayPath, security, dllPaths, navigationTarget) in dataAccess.GetPrintMonitorEntries())
+            foreach (var (keyDisplayPath, security, dllPaths, navigationTarget) in windowsComponentRegistry.GetPrintMonitorEntries())
             {
                 if (security != null)
                 {
@@ -148,12 +154,12 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to scan Print Monitors: {ex.Message}");
+            fileSystem.LogError($"Failed to scan Print Monitors: {ex.Message}");
         }
 
         try
         {
-            foreach (var (security, dllPaths) in dataAccess.GetLsaPackageEntries())
+            foreach (var (security, dllPaths) in windowsComponentRegistry.GetLsaPackageEntries())
             {
                 if (security != null)
                 {
@@ -172,12 +178,12 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to scan LSA packages: {ex.Message}");
+            fileSystem.LogError($"Failed to scan LSA packages: {ex.Message}");
         }
 
         try
         {
-            foreach (var (keyDisplayPath, security, dllPaths, navigationTarget) in dataAccess.GetNetworkProviderEntries())
+            foreach (var (keyDisplayPath, security, dllPaths, navigationTarget) in windowsComponentRegistry.GetNetworkProviderEntries())
             {
                 if (security != null)
                 {
@@ -196,7 +202,7 @@ public class MachineLevelRegistryScanner(IScannerDataAccess dataAccess, AclCheck
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to scan Network Providers: {ex.Message}");
+            fileSystem.LogError($"Failed to scan Network Providers: {ex.Message}");
         }
     }
 }

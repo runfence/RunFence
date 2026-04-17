@@ -1,10 +1,10 @@
-using RunFence.Account.OrphanedProfiles;
 using RunFence.Acl;
 using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Firewall;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 
 namespace RunFence.SidMigration;
@@ -14,11 +14,12 @@ public class InAppMigrationHandler(
     IAppConfigService appConfigService,
     ILoggingService log,
     IAclService aclService,
-    IShortcutService shortcutService,
+    IShortcutDiscoveryService shortcutDiscovery,
     AppEntryEnforcementHelper enforcementHelper,
-    IOrphanedProfileService orphanedProfileService,
-    IGrantedPathAclService grantedPathAcl,
-    IFirewallService firewallService)
+    IFirewallCleanupService firewallCleanupService,
+    IFirewallEnforcementOrchestrator firewallEnforcementOrchestrator,
+    SidDeletionHandler sidDeletionHandler,
+    UiThreadDatabaseAccessor dbAccessor)
 {
     /// <summary>
     /// Validates that no SID appears in both migration targets and the delete list.
@@ -34,10 +35,13 @@ public class InAppMigrationHandler(
     }
 
     /// <summary>
-    /// Applies in-app SID migration and deletion. Returns messages describing what was done,
-    /// a success flag, and an optional save error message.
+    /// Applies in-app SID migration and deletion. Heavy IO (ACL reverts, shortcut cleanup,
+    /// firewall removal) runs on a background thread via <see cref="Task.Run"/>. All
+    /// <see cref="AppDatabase"/> and <see cref="CredentialStore"/> mutations are marshaled to the
+    /// UI thread via <see cref="UiThreadDatabaseAccessor"/>. Returns messages describing what was
+    /// done, a success flag, and an optional save error message.
     /// </summary>
-    public (List<string> messages, bool success, string? saveError) Apply(
+    public async Task<(List<string> messages, bool success, string? saveError)> ApplyAsync(
         IReadOnlyList<SidMigrationMapping> mappings,
         IReadOnlyList<string> sidsToDelete,
         SessionContext session)
@@ -46,23 +50,27 @@ public class InAppMigrationHandler(
         {
             var messages = new List<string>();
 
-            if (mappings.Count > 0)
-                ApplyMigrations(mappings, session, messages);
-
-            if (sidsToDelete.Count > 0)
-                ApplyDeletions(sidsToDelete, session, messages);
-
-            try
+            await Task.Run(() =>
             {
-                using var scope = session.PinDerivedKey.Unprotect();
-                appConfigService.ReencryptAndSaveAll(session.CredentialStore, session.Database, scope.Data);
-                return (messages, true, null);
-            }
-            catch (Exception saveEx)
-            {
-                log.Error("In-app migration save failed", saveEx);
-                return (messages, true, saveEx.Message);
-            }
+                if (mappings.Count > 0)
+                    ApplyMigrations(mappings, session, messages);
+
+                if (sidsToDelete.Count > 0)
+                    ApplyDeletions(sidsToDelete, session, messages);
+
+                try
+                {
+                    var snapshot = dbAccessor.CreateSnapshot();
+                    firewallEnforcementOrchestrator.EnforceAll(snapshot);
+                }
+                catch (Exception ex)
+                {
+                    log.Warn($"Firewall enforcement after SID migration failed: {ex.Message}");
+                }
+            });
+
+            var saveError = SaveAfterMigration(session);
+            return (messages, true, saveError);
         }
         catch (Exception ex)
         {
@@ -76,45 +84,35 @@ public class InAppMigrationHandler(
         SessionContext session,
         List<string> messages)
     {
-        var counts = sidMigrationService.MigrateAppData(mappings, session.CredentialStore);
+        MigrationCounts counts = default;
+        dbAccessor.Write(_ => { counts = sidMigrationService.MigrateAppData(mappings, session.CredentialStore); });
         messages.Add($"Migrated {counts.Credentials} credential(s), {counts.Apps} app(s), " +
                      $"{counts.IpcCallers} IPC caller(s), {counts.AllowEntries} allow entry/entries.");
 
-        // Re-apply firewall rules: remove under old SID, apply under new SID
+        // Remove firewall rules under the old SID; EnforceAll is run after all SID changes.
         foreach (var mapping in mappings)
         {
             try
             {
-                firewallService.RemoveAllRules(mapping.OldSid);
+                firewallCleanupService.RemoveAllRules(mapping.OldSid);
             }
             catch (Exception ex)
             {
                 log.Warn($"Failed to remove firewall rules for old SID '{mapping.OldSid}': {ex.Message}");
             }
-
-            var newSettings = session.Database.GetAccount(mapping.NewSid)?.Firewall;
-            if (newSettings is { IsDefault: false })
-            {
-                var newUsername = session.Database.SidNames.GetValueOrDefault(mapping.NewSid) ?? mapping.Username;
-                try
-                {
-                    firewallService.ApplyFirewallRules(mapping.NewSid, newUsername, newSettings);
-                }
-                catch (Exception ex)
-                {
-                    log.Warn($"Failed to apply firewall rules for new SID '{mapping.NewSid}': {ex.Message}");
-                }
-            }
         }
 
         var migratedSids = mappings.Select(m => m.NewSid).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var app in session.Database.Apps)
+        var snapshot = dbAccessor.CreateSnapshot();
+        var migratedApps = snapshot.Apps
+            .Where(app => migratedSids.Contains(app.AccountSid))
+            .ToList();
+        var shortcutCache = CreateShortcutCacheIfNeeded(migratedApps);
+        foreach (var app in migratedApps)
         {
-            if (!migratedSids.Contains(app.AccountSid))
-                continue;
             try
             {
-                enforcementHelper.RevertChanges(app, session.Database.Apps);
+                enforcementHelper.RevertChanges(app, snapshot.Apps, shortcutCache);
             }
             catch (Exception ex)
             {
@@ -123,7 +121,7 @@ public class InAppMigrationHandler(
 
             try
             {
-                enforcementHelper.ApplyChanges(app, session.Database.Apps, session.Database.SidNames);
+                enforcementHelper.ApplyChanges(app, snapshot.Apps, shortcutCache);
             }
             catch (Exception ex)
             {
@@ -133,7 +131,7 @@ public class InAppMigrationHandler(
 
         try
         {
-            aclService.RecomputeAllAncestorAcls(session.Database.Apps);
+            aclService.RecomputeAllAncestorAcls(snapshot.Apps);
         }
         catch (Exception ex)
         {
@@ -146,89 +144,31 @@ public class InAppMigrationHandler(
         SessionContext session,
         List<string> messages)
     {
-        foreach (var sid in sidsToDelete)
-        {
-            var affectedApps = session.Database.Apps
-                .Where(a => string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            foreach (var app in affectedApps)
-            {
-                try
-                {
-                    if (app.RestrictAcl)
-                        aclService.RevertAcl(app, session.Database.Apps);
-                }
-                catch (Exception ex)
-                {
-                    log.Warn($"Failed to revert ACL for {app.Name}: {ex.Message}");
-                }
-
-                try
-                {
-                    if (app.ManageShortcuts)
-                        shortcutService.RevertShortcuts(app);
-                }
-                catch (Exception ex)
-                {
-                    log.Warn($"Failed to revert shortcuts for {app.Name}: {ex.Message}");
-                }
-
-                try
-                {
-                    shortcutService.RemoveBesideTargetShortcut(app);
-                }
-                catch (Exception ex)
-                {
-                    log.Warn($"Failed to remove shortcut for {app.Name}: {ex.Message}");
-                }
-            }
-
-            try
-            {
-                orphanedProfileService.CleanupLogonScripts(sid);
-            }
-            catch (Exception ex)
-            {
-                log.Warn($"Failed to cleanup logon scripts for {sid}: {ex.Message}");
-            }
-        }
-
-        // Remove firewall rules for deleted SIDs
-        foreach (var sid in sidsToDelete)
-        {
-            try
-            {
-                firewallService.RemoveAllRules(sid);
-            }
-            catch (Exception ex)
-            {
-                log.Warn($"Failed to remove firewall rules for SID '{sid}': {ex.Message}");
-            }
-        }
-
-        // Revert filesystem grants before removing database entries
-        foreach (var sid in sidsToDelete)
-        {
-            var grants = session.Database.GetAccount(sid)?.Grants;
-            if (grants is { Count: > 0 })
-            {
-                try
-                {
-                    grantedPathAcl.RevertAllGrantsBatch(grants, sid);
-                }
-                catch (Exception ex)
-                {
-                    log.Warn($"Failed to revert grants for SID '{sid}': {ex.Message}");
-                }
-            }
-        }
-
-        var (deletedCreds, deletedApps, deletedCallers) =
-            sidMigrationService.DeleteSidsFromAppData(sidsToDelete, session.CredentialStore);
-
-        aclService.RecomputeAllAncestorAcls(session.Database.Apps);
-
-        messages.Add($"Deleted {deletedCreds} credential(s), {deletedApps} app(s), {deletedCallers} IPC caller(s).");
+        var snapshot = dbAccessor.CreateSnapshot();
+        var affectedApps = sidsToDelete
+            .SelectMany(sid => snapshot.Apps
+                .Where(a => string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase)));
+        var shortcutCache = CreateShortcutCacheIfNeeded(affectedApps);
+        sidDeletionHandler.Apply(sidsToDelete, snapshot, session.CredentialStore, shortcutCache, messages);
     }
+
+    private string? SaveAfterMigration(SessionContext session)
+    {
+        try
+        {
+            using var scope = session.PinDerivedKey.Unprotect();
+            appConfigService.ReencryptAndSaveAll(session.CredentialStore, session.Database, scope.Data);
+            return null;
+        }
+        catch (Exception saveEx)
+        {
+            log.Error("In-app migration save failed", saveEx);
+            return saveEx.Message;
+        }
+    }
+
+    private ShortcutTraversalCache CreateShortcutCacheIfNeeded(IEnumerable<AppEntry> apps)
+        => apps.Any(a => a.ManageShortcuts)
+            ? shortcutDiscovery.CreateTraversalCache()
+            : new ShortcutTraversalCache([]);
 }

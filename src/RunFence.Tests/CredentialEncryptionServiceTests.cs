@@ -61,6 +61,36 @@ public class CredentialEncryptionServiceTests
         Assert.Equal(decrypted1, decrypted2);
     }
 
+    [Fact]
+    public void Decrypt_EmptyPassword_RoundTrips()
+    {
+        // Arrange: empty SecureString (zero-length BSTR = 0 chars)
+        var empty = new SecureString();
+        empty.MakeReadOnly();
+
+        var encrypted = _service.Encrypt(empty, _pinDerivedKey);
+        var decrypted = _service.Decrypt(encrypted, _pinDerivedKey);
+
+        Assert.NotNull(decrypted);
+        Assert.Equal(0, decrypted.Length);
+    }
+
+    [Theory]
+    [InlineData("P@ssw0rd!")]
+    [InlineData("a")]
+    [InlineData("Unicode: \u00e9\u00e0\u00fc")]
+    [InlineData("Symbols: ~`!@#$%^&*()-_=+[]{}|;':\",./<>?")]
+    public void Decrypt_VariousPasswords_RoundTripPreservesContent(string passwordValue)
+    {
+        // Decrypt is tested directly: result of Decrypt(Encrypt(x)) must equal x
+        var password = CreateSecureString(passwordValue);
+        var encrypted = _service.Encrypt(password, _pinDerivedKey);
+
+        var decrypted = _service.Decrypt(encrypted, _pinDerivedKey);
+
+        Assert.Equal(passwordValue, SecureStringToString(decrypted));
+    }
+
     private static SecureString CreateSecureString(string value)
     {
         var ss = new SecureString();

@@ -1,18 +1,16 @@
-using System.Security;
 using RunFence.Account.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Firewall;
+using RunFence.Firewall.UI;
 using RunFence.Infrastructure;
-using RunFence.Launch;
 using RunFence.Persistence;
 using RunFence.PrefTrans;
 
 namespace RunFence.RunAs;
 
 /// <summary>
-/// Applies post-creation account settings: split-token/low-integrity defaults, firewall DB settings,
-/// desktop settings import, and firewall rule enforcement. Extracted from RunAsAccountCreator to
+/// Applies post-creation account settings: privilege level, firewall DB settings,
+/// desktop settings import, and firewall rule enforcement. Extracted from RunAsUserAccountCreator to
 /// reduce its dependency count.
 /// </summary>
 public class RunAsAccountSettingsApplier(
@@ -21,19 +19,15 @@ public class RunAsAccountSettingsApplier(
     IDatabaseService databaseService,
     ILoggingService log,
     ISettingsTransferService settingsTransferService,
-    IFirewallService firewallService)
+    FirewallApplyHelper firewallApplyHelper)
 {
     /// <summary>
-    /// Applies split-token and low-integrity defaults for a newly created account.
+    /// Applies the privilege level default for a newly created account.
     /// </summary>
-    public void ApplyLaunchDefaults(string sid, bool useSplitTokenDefault, bool useLowIntegrityDefault)
+    public void ApplyLaunchDefaults(string sid, PrivilegeLevel privilegeLevel)
     {
-        var db = appState.Database;
-
-        var entry = db.GetOrCreateAccount(sid);
-        entry.SplitTokenOptOut = !useSplitTokenDefault;
-        if (useLowIntegrityDefault)
-            entry.LowIntegrityDefault = true;
+        var entry = appState.Database.GetOrCreateAccount(sid);
+        entry.PrivilegeLevel = privilegeLevel;
     }
 
     /// <summary>
@@ -58,7 +52,6 @@ public class RunAsAccountSettingsApplier(
         string sid,
         string username,
         string? settingsImportPath,
-        SecureString? createdPassword,
         bool firewallSettingsChanged,
         List<string> errors)
     {
@@ -75,9 +68,8 @@ public class RunAsAccountSettingsApplier(
                         progressForm.SetStatus($"Importing desktop settings for {username}...");
                         try
                         {
-                            var creds = new LaunchCredentials(createdPassword, ".", username);
                             var (error, _) = await SettingsImportHelper.ImportAsync(
-                                settingsImportPath, creds, sid,
+                                settingsImportPath, sid,
                                 settingsTransferService);
                             if (error != null)
                                 errors.Add($"Settings import: {error}");
@@ -98,15 +90,14 @@ public class RunAsAccountSettingsApplier(
                                           ?? username;
                         var fwSettings = appState.Database.GetAccount(sid)?.Firewall
                                          ?? new FirewallAccountSettings();
-                        try
-                        {
-                            await Task.Run(() => firewallService.ApplyFirewallRules(sid, displayName, fwSettings));
-                        }
-                        catch (Exception ex)
-                        {
-                            log.Error($"Firewall rules failed for {username}", ex);
-                            errors.Add($"Firewall rules: {ex.Message}");
-                        }
+                        await firewallApplyHelper.ApplyWithRollbackAsync(
+                            sid: sid,
+                            username: displayName,
+                            previous: null,
+                            final: fwSettings,
+                            database: appState.Database,
+                            saveAction: SaveConfig,
+                            reportError: errors.Add);
                     }
                 }
                 catch (Exception ex)

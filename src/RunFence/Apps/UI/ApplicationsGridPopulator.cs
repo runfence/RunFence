@@ -1,5 +1,5 @@
+using RunFence.Account;
 using RunFence.Apps.UI.Forms;
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
@@ -11,26 +11,20 @@ namespace RunFence.Apps.UI;
 /// Extracts all grid-building methods from the panel to reduce its size and separate
 /// data presentation from event handling.
 /// </summary>
-public class ApplicationsGridPopulator
+public class ApplicationsGridPopulator(
+    IIconService iconService,
+    IAppConfigService appConfigService,
+    ISidNameCacheService sidNameCache)
 {
-    private readonly IIconService _iconService;
-    private readonly IAppConfigService _appConfigService;
-    private readonly ISidResolver _sidResolver;
+    // Shared fallback icon used when no app icon is available. Avoids allocating a new Bitmap
+    // per row (which would leak GDI handles since DataGridView does not dispose cell images).
+    private static readonly Bitmap FallbackIcon = new(16, 16);
+
     private DataGridView _grid = null!;
     private IApplicationsPanelState _state = null!;
     private Func<IEnumerable<AppEntry>, Func<AppEntry, string>, IOrderedEnumerable<AppEntry>> _sortByActiveColumn = null!;
 
     private Font? _groupHeaderFont;
-
-    public ApplicationsGridPopulator(
-        IIconService iconService,
-        IAppConfigService appConfigService,
-        ISidResolver sidResolver)
-    {
-        _iconService = iconService;
-        _appConfigService = appConfigService;
-        _sidResolver = sidResolver;
-    }
 
     public void Initialize(DataGridView grid, IApplicationsPanelState state,
         Func<IEnumerable<AppEntry>, Func<AppEntry, string>, IOrderedEnumerable<AppEntry>> sortByActiveColumn)
@@ -54,19 +48,19 @@ public class ApplicationsGridPopulator
         setIsRefreshing(true);
         _grid.Rows.Clear();
 
-        bool hasAdditionalConfigs = _appConfigService.HasLoadedConfigs;
+        bool hasAdditionalConfigs = appConfigService.HasLoadedConfigs;
         var database = _state.Database;
 
         var mainApps = SortApps(database.Apps
-            .Where(a => _appConfigService.GetConfigPath(a.Id) == null));
+            .Where(a => appConfigService.GetConfigPath(a.Id) == null));
 
-        var additionalGroups = _appConfigService.GetLoadedConfigPaths()
+        var additionalGroups = appConfigService.GetLoadedConfigPaths()
             .OrderBy(p => Path.GetFileName(p), StringComparer.OrdinalIgnoreCase)
             .Select(p => new
             {
                 Path = p,
                 Apps = SortApps(database.Apps
-                    .Where(a => string.Equals(_appConfigService.GetConfigPath(a.Id), p,
+                    .Where(a => string.Equals(appConfigService.GetConfigPath(a.Id), p,
                         StringComparison.OrdinalIgnoreCase)))
             })
             .ToList();
@@ -94,7 +88,7 @@ public class ApplicationsGridPopulator
 
     /// <summary>
     /// Resolves the display name for an app entry's account using the canonical path:
-    /// SidNameCache (live OS lookup) -> registry profile -> SidNames map -> raw SID.
+    /// live OS lookup -> registry profile -> SidNames map -> raw SID.
     /// Applies credential-type labels (current / interactive). Returns the container name for AppContainer apps.
     /// </summary>
     public string ResolveAppAccountName(AppEntry app)
@@ -106,28 +100,15 @@ public class ApplicationsGridPopulator
         var cred = credentialStore.Credentials.FirstOrDefault(c =>
             string.Equals(c.Sid, app.AccountSid, StringComparison.OrdinalIgnoreCase));
 
-        var session = _state.Session;
-        if (!session.SidNameCache.TryGetValue(app.AccountSid, out var cachedResolved))
-        {
-            cachedResolved = _sidResolver.TryResolveName(app.AccountSid);
-            session.SidNameCache[app.AccountSid] = cachedResolved;
-        }
-
-        var database = _state.Database;
+        var displayName = sidNameCache.GetDisplayName(app.AccountSid);
         if (cred != null)
         {
-            if (cachedResolved != null)
-            {
-                var username = SidNameResolver.ExtractUsername(cachedResolved);
-                return cred.IsCurrentAccount ? $"{username} (current)"
-                    : cred.IsInteractiveUser ? $"{username} (interactive)"
-                    : username;
-            }
-
-            return SidNameResolver.GetDisplayName(cred, _sidResolver, database.SidNames);
+            return cred.IsCurrentAccount ? $"{displayName} (current)"
+                : cred.IsInteractiveUser ? $"{displayName} (interactive)"
+                : displayName;
         }
 
-        return SidNameResolver.GetDisplayName(app.AccountSid, cachedResolved, _sidResolver, database.SidNames);
+        return displayName;
     }
 
     public void SelectAppById(string? appId)
@@ -208,7 +189,7 @@ public class ApplicationsGridPopulator
             : $"Deny/{app.AclTarget}";
         var shortcutInfo = app.ManageShortcuts ? "Yes" : "No";
 
-        Image icon = _iconService.GetOriginalAppIcon(app) ?? new Bitmap(16, 16);
+        Image icon = iconService.GetOriginalAppIcon(app) ?? FallbackIcon;
         var idx = _grid.Rows.Add(icon, app.Name, app.ExePath, accountName, aclInfo, shortcutInfo);
         _grid.Rows[idx].Tag = app;
     }
@@ -216,7 +197,7 @@ public class ApplicationsGridPopulator
     private void AddGroupHeader(string label, string? configPath)
     {
         _groupHeaderFont ??= new Font(_grid.Font, FontStyle.Bold);
-        var headerIdx = _grid.Rows.Add(new Bitmap(16, 16), label, "", "", "", "");
+        var headerIdx = _grid.Rows.Add(FallbackIcon, label, "", "", "", "");
         var hr = _grid.Rows[headerIdx];
         hr.Tag = new ApplicationsPanel.ConfigGroupHeaderTag(configPath);
         hr.DefaultCellStyle.BackColor = Color.FromArgb(0xE4, 0xEA, 0xF4);

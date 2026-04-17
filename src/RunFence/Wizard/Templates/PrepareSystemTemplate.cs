@@ -13,26 +13,14 @@ namespace RunFence.Wizard.Templates;
 /// Before modifying each drive, backs up its current ACLs via <c>icacls /save</c> to
 /// <c>%LOCALAPPDATA%\RunFence\drive-acl-backup.txt</c> (append-only with timestamp header per run).
 /// </summary>
-public class PrepareSystemTemplate : IWizardTemplate
+public class PrepareSystemTemplate(
+    DriveAclReplacer driveAclReplacer,
+    IWizardSessionSaver sessionSaver,
+    SessionContext session,
+    IQuickAccessPinService quickAccessPinService)
+    : IWizardTemplate
 {
-    private readonly DriveAclReplacer _driveAclReplacer;
-    private readonly IWizardSessionSaver _sessionSaver;
-    private readonly SessionContext _session;
-    private readonly IQuickAccessPinService _quickAccessPinService;
-
     private readonly CommitData _data = new();
-
-    public PrepareSystemTemplate(
-        DriveAclReplacer driveAclReplacer,
-        IWizardSessionSaver sessionSaver,
-        SessionContext session,
-        IQuickAccessPinService quickAccessPinService)
-    {
-        _driveAclReplacer = driveAclReplacer;
-        _sessionSaver = sessionSaver;
-        _session = session;
-        _quickAccessPinService = quickAccessPinService;
-    }
 
     public string DisplayName => "Prepare System";
     public string Description => "Replace broad ACEs on data drives so only you (or Administrators) can read files.";
@@ -47,24 +35,37 @@ public class PrepareSystemTemplate : IWizardTemplate
 
     /// <summary>
     /// True when at least one non-system fixed drive has replaceable broad ACEs.
-    /// Re-evaluated on each wizard open so the template disappears after ACLs are applied.
+    /// The result is pre-computed by <see cref="WarmCacheAsync"/> to avoid disk I/O on the UI
+    /// thread; <see cref="IsAvailable"/> returns the cached value after warm-up.
     /// </summary>
-    public bool IsAvailable => HasAnyApplicableDrive();
+    public bool IsAvailable => _cachedIsAvailable ?? HasAnyApplicableDrive();
+
+    private bool? _cachedIsAvailable;
+
+    /// <summary>
+    /// Pre-scans drives on a background thread so that <see cref="IsAvailable"/> never performs
+    /// disk I/O on the UI thread. Called by the wizard launcher for all templates concurrently
+    /// before the dialog is constructed.
+    /// </summary>
+    public Task WarmCacheAsync()
+    {
+        return Task.Run(() => { _cachedIsAvailable = HasAnyApplicableDrive(); });
+    }
 
     private bool HasAnyApplicableDrive()
     {
         var systemDrive = Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\";
         return DriveInfo.GetDrives().Where(drive => drive.DriveType == DriveType.Fixed)
             .Where(drive => !string.Equals(drive.RootDirectory.FullName, systemDrive, StringComparison.OrdinalIgnoreCase))
-            .Any(drive => _driveAclReplacer.HasReplaceableBroadAces(drive.RootDirectory.FullName));
+            .Any(drive => driveAclReplacer.HasReplaceableBroadAces(drive.RootDirectory.FullName));
     }
 
     public IReadOnlyList<WizardStepPage> CreateSteps() =>
     [
         new PrepareSystemDriveStep(
             selections => _data.DriveSelections = selections,
-            _session.Database.SidNames,
-            _driveAclReplacer)
+            session.Database.SidNames,
+            driveAclReplacer)
     ];
 
     public async Task ExecuteAsync(IWizardProgressReporter progress)
@@ -72,11 +73,10 @@ public class PrepareSystemTemplate : IWizardTemplate
         if (_data.DriveSelections == null || _data.DriveSelections.Count == 0)
         {
             progress.ReportError("No drives were selected.");
-            _sessionSaver.SaveAndRefresh();
+            sessionSaver.SaveAndRefresh();
             return;
         }
 
-        var savedRights = new SavedRightsState(Execute: true, Write: true, Read: true, Special: true, Own: true);
         var backupPath = GetAclBackupPath();
 
         foreach (var (drivePath, targetSid) in _data.DriveSelections)
@@ -85,17 +85,17 @@ public class PrepareSystemTemplate : IWizardTemplate
             await Task.Run(() => BackupDriveAcl(drivePath, backupPath, progress));
 
             progress.ReportStatus($"Replacing ACLs on {drivePath}...");
-            var error = await Task.Run(() => _driveAclReplacer.ReplaceDriveAcl(drivePath, targetSid, savedRights));
+            var error = await Task.Run(() => driveAclReplacer.ReplaceDriveAcl(drivePath, targetSid));
             if (error != null)
                 progress.ReportError($"{drivePath}: {error}");
             else
             {
                 progress.ReportStatus($"{drivePath}: done.");
-                _quickAccessPinService.PinFolders(targetSid, [drivePath]);
+                quickAccessPinService.PinFolders(targetSid, [drivePath]);
             }
         }
 
-        _sessionSaver.SaveAndRefresh();
+        sessionSaver.SaveAndRefresh();
     }
 
     /// <summary>
@@ -121,7 +121,8 @@ public class PrepareSystemTemplate : IWizardTemplate
                 };
 
                 using (var proc = Process.Start(psi))
-                    proc?.WaitForExit(10_000);
+                    if (proc != null && !proc.WaitForExit(10_000))
+                        proc.Kill();
 
                 var header = $"=== ACL backup: {drivePath} at {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==={Environment.NewLine}";
                 File.AppendAllText(backupFilePath, header);

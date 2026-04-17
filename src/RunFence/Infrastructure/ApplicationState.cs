@@ -3,20 +3,9 @@ using RunFence.Startup.UI;
 
 namespace RunFence.Infrastructure;
 
-public class ApplicationState : IAppStateProvider, IAppLockControl, IDataChangeNotifier
+public class ApplicationState(ISessionProvider sessionProvider, ILockManager lockManager, IModalTracker modalTracker) : IAppStateProvider, IAppLockControl, IDataChangeNotifier
 {
-    private readonly ISessionProvider _sessionProvider;
-    private readonly LockManager _lockManager;
-    private readonly IModalTracker _modalTracker;
-
     private volatile bool _isShuttingDown;
-
-    public ApplicationState(ISessionProvider sessionProvider, LockManager lockManager, IModalTracker modalTracker)
-    {
-        _sessionProvider = sessionProvider;
-        _lockManager = lockManager;
-        _modalTracker = modalTracker;
-    }
 
     public OperationGuard EnforcementGuard { get; } = new();
 
@@ -34,16 +23,16 @@ public class ApplicationState : IAppStateProvider, IAppLockControl, IDataChangeN
     public bool IsOperationInProgress => EnforcementGuard.IsInProgress;
 
     /// <summary>True when any panel modal dialog is currently open.</summary>
-    public bool IsModalOpen => _modalTracker.AnyModalOpen;
+    public bool IsModalOpen => modalTracker.AnyModalOpen;
 
-    public AppDatabase Database => _sessionProvider.GetSession().Database;
+    public AppDatabase Database => sessionProvider.GetSession().Database;
 
     // IAppLockControl
-    public bool IsLocked => _lockManager.IsLocked;
-    public bool IsUnlockPolling => _lockManager.IsUnlockPolling;
-    public void Lock() => _lockManager.LockWindow();
-    public void Unlock() => _lockManager.Unlock();
-    public bool TryUnlock(bool isAdmin) => _lockManager.TryUnlock(isAdmin);
+    public bool IsLocked => lockManager.IsLocked;
+    public bool IsUnlockPolling => lockManager.IsUnlockPolling;
+    public void Lock() => lockManager.LockWindow();
+    public void Unlock() => lockManager.Unlock();
+    public Task<bool> TryUnlockAsync(bool isAdmin) => lockManager.TryUnlockAsync(isAdmin);
 
     // IDataChangeNotifier
     public event Action? DataChanged;

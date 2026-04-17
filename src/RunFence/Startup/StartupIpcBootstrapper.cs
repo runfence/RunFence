@@ -14,7 +14,7 @@ public class StartupIpcBootstrapper(
     MainForm mainForm,
     IIpcServerService ipcServer,
     IIpcMessageHandler ipcHandler,
-    IFirewallService firewallService,
+    IFirewallEnforcementOrchestrator firewallEnforcementOrchestrator,
     ISessionProvider sessionProvider,
     ILoggingService log)
 {
@@ -41,7 +41,7 @@ public class StartupIpcBootstrapper(
             {
                 try
                 {
-                    firewallService.EnforceAll(enforcementSnapshot);
+                    firewallEnforcementOrchestrator.EnforceAll(enforcementSnapshot);
                 }
                 catch (Exception ex)
                 {
@@ -52,8 +52,8 @@ public class StartupIpcBootstrapper(
                 }
             });
 
-            ipcServer.Start((message, callerIdentity, callerSid, isAdmin) =>
-                ipcHandler.HandleIpcMessage(message, callerIdentity, callerSid, isAdmin));
+            ipcServer.Start((message, context) =>
+                ipcHandler.HandleIpcMessage(message, context));
         };
     }
 }

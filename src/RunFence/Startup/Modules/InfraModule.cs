@@ -14,6 +14,7 @@ public class InfraModule : Module
             .As<IUiThreadInvoker>()
             .SingleInstance();
 
+        builder.RegisterType<UiThreadDatabaseAccessor>().AsSelf().SingleInstance();
         builder.RegisterType<ModalTracker>().As<IModalTracker>().SingleInstance();
         builder.RegisterType<AppIconProvider>().As<IAppIconProvider>().SingleInstance();
         builder.RegisterType<SystemTimeProvider>().As<ITimeProvider>().SingleInstance();
@@ -24,5 +25,6 @@ public class InfraModule : Module
         builder.RegisterType<IdleMonitorService>().As<IIdleMonitorService>().SingleInstance();
         builder.RegisterType<PreviousWindowTracker>().As<IPreviousWindowTracker>().SingleInstance();
         builder.RegisterType<InteractiveUserDesktopProvider>().As<IInteractiveUserDesktopProvider>().SingleInstance();
+        builder.RegisterType<ShellHelper>().AsSelf().SingleInstance();
     }
 }

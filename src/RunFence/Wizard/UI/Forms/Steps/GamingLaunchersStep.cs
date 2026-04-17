@@ -1,5 +1,6 @@
-using System.ComponentModel;
 using Microsoft.Win32;
+using RunFence.Apps.Shortcuts;
+using RunFence.Apps.UI.Forms;
 using RunFence.UI;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
@@ -12,15 +13,12 @@ namespace RunFence.Wizard.UI.Forms.Steps;
 public class GamingLaunchersStep : WizardStepPage
 {
     private readonly Action<List<string>> _setLauncherPaths;
+    private readonly IShortcutDiscoveryService _discoveryService;
+    private readonly Func<string?>? _getAccountSid;
 
-    private Label _infoLabel = null!;
-    private ToolStrip _toolStrip = null!;
-    private ToolStripButton _addButton = null!;
-    private ToolStripButton _removeButton = null!;
-    private ListBox _launcherListBox = null!;
-    private ContextMenuStrip _contextMenu = null!;
-    private ToolStripMenuItem _ctxAdd = null!;
-    private ToolStripMenuItem _ctxRemove = null!;
+    private FolderListEditor _editor = null!;
+    private ToolStripButton _discoverButton = null!;
+    private ToolStripMenuItem _ctxDiscover = null!;
 
     private static readonly Func<string?>[] KnownLauncherDetectors =
     [
@@ -86,142 +84,6 @@ public class GamingLaunchersStep : WizardStepPage
         return File.Exists(path) ? path : null;
     }
 
-    private readonly Func<string?>? _getAccountSid;
-    private bool _autoDetected;
-
-    /// <param name="setLauncherPaths">Callback invoked by <see cref="Collect"/> with the final path list.</param>
-    /// <param name="getSid">
-    /// Optional callback invoked on activation to get the target account SID.
-    /// When non-null and returns a SID, launchers installed in that account's user profile
-    /// (e.g., Playnite) are detected in addition to system-wide ones.
-    /// Returns null for new accounts (profile not yet created) — only system-wide detection runs.
-    /// </param>
-    public GamingLaunchersStep(Action<List<string>> setLauncherPaths, Func<string?>? getSid = null)
-    {
-        _setLauncherPaths = setLauncherPaths;
-        _getAccountSid = getSid;
-        BuildContent();
-    }
-
-    public override string StepTitle => "Game Launchers";
-
-    public override void OnActivated() => AutoDetectLaunchers();
-
-    public override string? Validate()
-    {
-        if (_launcherListBox.Items.Count == 0)
-            return "Please add at least one game launcher executable.";
-        return null;
-    }
-
-    public override void Collect()
-    {
-        _setLauncherPaths(_launcherListBox.Items.Cast<string>().ToList());
-    }
-
-    private void BuildContent()
-    {
-        SuspendLayout();
-        Padding = new Padding(8);
-
-        _infoLabel = new Label
-        {
-            Text = "Specify the executables for your game launchers. Known launchers are detected automatically.",
-            AutoSize = false,
-            Font = new Font("Segoe UI", 9.5f),
-            Dock = DockStyle.Top,
-            Padding = new Padding(0, 0, 0, 8)
-        };
-        TrackWrappingLabel(_infoLabel);
-
-        _toolStrip = new ToolStrip
-        {
-            Dock = DockStyle.Top,
-            GripStyle = ToolStripGripStyle.Hidden,
-            RenderMode = ToolStripRenderMode.System,
-            BackColor = Color.White
-        };
-        _addButton = new ToolStripButton
-        {
-            DisplayStyle = ToolStripItemDisplayStyle.Image,
-            ToolTipText = "Add Launcher…",
-            Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22))
-        };
-        _addButton.Click += OnAddLauncher;
-
-        _removeButton = new ToolStripButton
-        {
-            DisplayStyle = ToolStripItemDisplayStyle.Image,
-            ToolTipText = "Remove",
-            Enabled = false,
-            Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33))
-        };
-        _removeButton.Click += OnRemoveLauncher;
-        _toolStrip.Items.AddRange(_addButton, _removeButton);
-
-        _launcherListBox = new ListBox
-        {
-            Font = new Font("Segoe UI", 9.5f),
-            Dock = DockStyle.Fill,
-            SelectionMode = SelectionMode.One,
-            IntegralHeight = false
-        };
-        _launcherListBox.SelectedIndexChanged += (_, _) => UpdateButtons();
-        _launcherListBox.MouseDown += OnMouseDown;
-        _launcherListBox.KeyDown += OnKeyDown;
-
-        _contextMenu = new ContextMenuStrip();
-        _ctxAdd = new ToolStripMenuItem("Add Launcher…")
-        {
-            Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 16)
-        };
-        _ctxAdd.Click += OnAddLauncher;
-        _ctxRemove = new ToolStripMenuItem("Remove")
-        {
-            Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33), 16)
-        };
-        _ctxRemove.Click += OnRemoveLauncher;
-        _contextMenu.Items.AddRange(_ctxAdd, _ctxRemove);
-        _contextMenu.Opening += OnContextMenuOpening;
-        _launcherListBox.ContextMenuStrip = _contextMenu;
-
-        // Fill first, then Top items (last added = topmost in DockStyle.Top stack).
-        Controls.Add(_launcherListBox);
-        Controls.Add(_toolStrip);
-        Controls.Add(_infoLabel);
-        ResumeLayout(false);
-    }
-
-    private void AutoDetectLaunchers()
-    {
-        if (_autoDetected)
-            return;
-        _autoDetected = true;
-
-        var existing = _launcherListBox.Items.Cast<string>()
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        // System-wide launchers installed in Program Files
-        foreach (var detect in KnownLauncherDetectors)
-        {
-            var path = detect();
-            if (path != null && existing.Add(path))
-                _launcherListBox.Items.Add(path);
-        }
-
-        // Per-account launchers installed in the account's user profile (e.g. Playnite)
-        var accountSid = _getAccountSid?.Invoke();
-        if (!string.IsNullOrEmpty(accountSid))
-        {
-            foreach (var relPath in PerAccountLauncherRelativePaths)
-            {
-                var path = TryProfilePath(accountSid, relPath);
-                if (path != null && existing.Add(path))
-                    _launcherListBox.Items.Add(path);
-            }
-        }
-    }
-
     // Paths relative to %LOCALAPPDATA% for launchers that install per-user
     private static readonly string[] PerAccountLauncherRelativePaths =
     [
@@ -247,46 +109,122 @@ public class GamingLaunchersStep : WizardStepPage
         }
     }
 
-    private void OnAddLauncher(object? sender, EventArgs e)
+    private bool _autoDetected;
+
+    /// <param name="setLauncherPaths">Callback invoked by <see cref="Collect"/> with the final path list.</param>
+    /// <param name="discoveryService">Used by the Discover button to find installed apps.</param>
+    /// <param name="getSid">
+    /// Optional callback invoked on activation to get the target account SID.
+    /// When non-null and returns a SID, launchers installed in that account's user profile
+    /// (e.g., Playnite) are detected in addition to system-wide ones.
+    /// Returns null for new accounts (profile not yet created) — only system-wide detection runs.
+    /// </param>
+    public GamingLaunchersStep(
+        Action<List<string>> setLauncherPaths,
+        IShortcutDiscoveryService discoveryService,
+        Func<string?>? getSid = null)
     {
-        using var dlg = new OpenFileDialog();
-        dlg.Title = "Select Game Launcher Executable";
-        dlg.Filter = "Executable files (*.exe)|*.exe|All files (*.*)|*.*";
-        dlg.CheckFileExists = true;
-        if (dlg.ShowDialog(this) == DialogResult.OK)
+        _setLauncherPaths = setLauncherPaths;
+        _discoveryService = discoveryService;
+        _getAccountSid = getSid;
+        BuildContent();
+    }
+
+    public override string StepTitle => "Game Launchers";
+
+    public override void OnActivated() => AutoDetectLaunchers();
+
+    public override string? Validate()
+    {
+        if (_editor.GetItems().Count == 0)
+            return "Please add at least one game launcher executable.";
+        return null;
+    }
+
+    public override void Collect()
+    {
+        _setLauncherPaths(_editor.GetItems().ToList());
+    }
+
+    private void BuildContent()
+    {
+        SuspendLayout();
+        Padding = new Padding(8);
+
+        _editor = new FolderListEditor();
+        _editor.Initialize(
+            "Specify the executables for your game launchers. Known launchers are detected automatically.",
+            FolderBrowseDialogType.ExecutableFile,
+            browseDialogTitle: "Select Game Launcher Executable");
+
+        _discoverButton = new ToolStripButton
         {
-            var path = dlg.FileName;
-            if (!_launcherListBox.Items.Contains(path))
-                _launcherListBox.Items.Add(path);
+            DisplayStyle = ToolStripItemDisplayStyle.ImageAndText,
+            Text = "Discover…",
+            ToolTipText = "Discover installed apps",
+            Image = UiIconFactory.CreateToolbarIcon("\U0001F50D", Color.FromArgb(0x22, 0x6A, 0xB8))
+        };
+        _discoverButton.Click += OnDiscoverLauncher;
+        _editor.AddExtraToolbarButton(_discoverButton);
+
+        _ctxDiscover = new ToolStripMenuItem("Discover…")
+        {
+            Image = UiIconFactory.CreateToolbarIcon("\U0001F50D", Color.FromArgb(0x22, 0x6A, 0xB8), 16)
+        };
+        _ctxDiscover.Click += OnDiscoverLauncher;
+        _editor.AddExtraContextMenuItem(_ctxDiscover);
+
+        Controls.Add(_editor);
+        ResumeLayout(false);
+    }
+
+    private void AutoDetectLaunchers()
+    {
+        if (_autoDetected)
+            return;
+        _autoDetected = true;
+
+        foreach (var detect in KnownLauncherDetectors)
+        {
+            var path = detect();
+            if (path != null)
+                _editor.AddItem(path);
+        }
+
+        var accountSid = _getAccountSid?.Invoke();
+        if (!string.IsNullOrEmpty(accountSid))
+        {
+            foreach (var relPath in PerAccountLauncherRelativePaths)
+            {
+                var path = TryProfilePath(accountSid, relPath);
+                if (path != null)
+                    _editor.AddItem(path);
+            }
         }
     }
 
-    private void OnRemoveLauncher(object? sender, EventArgs e)
+    private async void OnDiscoverLauncher(object? sender, EventArgs e)
     {
-        if (_launcherListBox.SelectedIndex >= 0)
-            _launcherListBox.Items.RemoveAt(_launcherListBox.SelectedIndex);
-    }
+        _discoverButton.Enabled = false;
+        _ctxDiscover.Enabled = false;
+        Cursor = Cursors.WaitCursor;
+        try
+        {
+            var apps = await Task.Run(() => _discoveryService.DiscoverApps());
+            if (IsDisposed) return;
 
-    private void UpdateButtons()
-    {
-        _removeButton.Enabled = _launcherListBox.SelectedIndex >= 0;
-    }
-
-    private void OnMouseDown(object? sender, MouseEventArgs e)
-    {
-        if (e.Button == MouseButtons.Right)
-            _launcherListBox.SelectedIndex = _launcherListBox.IndexFromPoint(e.Location);
-    }
-
-    private void OnKeyDown(object? sender, KeyEventArgs e)
-    {
-        if (e.KeyCode == Keys.Delete && _launcherListBox.SelectedIndex >= 0)
-            OnRemoveLauncher(sender, e);
-    }
-
-    private void OnContextMenuOpening(object? sender, CancelEventArgs e)
-    {
-        _ctxAdd.Visible = _launcherListBox.SelectedIndex < 0;
-        _ctxRemove.Visible = _launcherListBox.SelectedIndex >= 0;
+            using var dlg = new AppDiscoveryDialog(apps);
+            if (dlg.ShowDialog(this) == DialogResult.OK && dlg.SelectedPath != null)
+                _editor.AddItem(dlg.SelectedPath);
+        }
+        finally
+        {
+            if (!IsDisposed)
+            {
+                Cursor = Cursors.Default;
+                _discoverButton.Enabled = true;
+                _ctxDiscover.Enabled = true;
+            }
+        }
     }
 }

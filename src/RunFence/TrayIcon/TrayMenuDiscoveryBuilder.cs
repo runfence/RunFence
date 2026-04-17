@@ -3,15 +3,14 @@ using RunFence.Core;
 
 namespace RunFence.TrayIcon;
 
-public static class TrayMenuDiscoveryBuilder
+public class TrayMenuDiscoveryBuilder(ILoggingService log)
 {
-    public static List<ToolStripItem> BuildMenuItems(
+    public List<ToolStripItem> BuildMenuItems(
         List<StartMenuEntry> entries,
         IReadOnlyDictionary<string, string> sidNames,
         Dictionary<string, Image?> iconCache,
         Action<string, string> onLaunch,
-        SidDisplayNameResolver displayNameResolver,
-        ILoggingService? log = null)
+        SidDisplayNameResolver displayNameResolver)
     {
         var topLevelItems = new List<ToolStripItem>();
 
@@ -27,7 +26,7 @@ public static class TrayMenuDiscoveryBuilder
             {
                 var entry = accountEntries[0];
                 var label = $"{entry.Name} as {GetDisplayUsername(sid, sidNames, displayNameResolver)}";
-                topLevelItems.Add(CreateMenuItem(label, entry, iconCache, onLaunch, log));
+                topLevelItems.Add(CreateMenuItem(label, entry, iconCache, onLaunch));
             }
             else
             {
@@ -47,7 +46,7 @@ public static class TrayMenuDiscoveryBuilder
                     var subfolderMenu = new ToolStripMenuItem(subfolder);
                     foreach (var e in group.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
                     {
-                        subfolderMenu.DropDownItems.Add(CreateMenuItem(e.Name, e, iconCache, onLaunch, log));
+                        subfolderMenu.DropDownItems.Add(CreateMenuItem(e.Name, e, iconCache, onLaunch));
                         usedInSubfolder.Add(e);
                     }
 
@@ -58,7 +57,7 @@ public static class TrayMenuDiscoveryBuilder
                              .Where(e => !usedInSubfolder.Contains(e))
                              .OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
                 {
-                    accountMenu.DropDownItems.Add(CreateMenuItem(e.Name, e, iconCache, onLaunch, log));
+                    accountMenu.DropDownItems.Add(CreateMenuItem(e.Name, e, iconCache, onLaunch));
                 }
 
                 topLevelItems.Add(accountMenu);
@@ -71,11 +70,11 @@ public static class TrayMenuDiscoveryBuilder
         return topLevelItems;
     }
 
-    private static ToolStripMenuItem CreateMenuItem(string label, StartMenuEntry entry,
-        Dictionary<string, Image?> iconCache, Action<string, string> onLaunch, ILoggingService? log)
+    private ToolStripMenuItem CreateMenuItem(string label, StartMenuEntry entry,
+        Dictionary<string, Image?> iconCache, Action<string, string> onLaunch)
     {
         var item = new ToolStripMenuItem(label);
-        item.Image = GetOrLoadIcon(entry.ExePath, iconCache, log);
+        item.Image = GetOrLoadIcon(entry.ExePath, iconCache);
         var capturedExe = entry.ExePath;
         var capturedSid = entry.AccountSid;
         item.Click += (_, _) => onLaunch(capturedExe, capturedSid);
@@ -90,7 +89,7 @@ public static class TrayMenuDiscoveryBuilder
         return slash >= 0 ? display[(slash + 1)..] : display;
     }
 
-    private static Image? GetOrLoadIcon(string exePath, Dictionary<string, Image?> iconCache, ILoggingService? log)
+    private Image? GetOrLoadIcon(string exePath, Dictionary<string, Image?> iconCache)
     {
         if (iconCache.TryGetValue(exePath, out var cached))
             return (Image?)cached?.Clone();

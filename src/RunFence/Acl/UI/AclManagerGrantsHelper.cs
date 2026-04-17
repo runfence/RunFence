@@ -10,17 +10,17 @@ namespace RunFence.Acl.UI;
 /// <summary>
 /// Encapsulates grants-grid population, rights display, and deferred ACE change tracking for
 /// <see cref="AclManagerDialog"/>. Owns the suppressEvents flag and all direct interactions
-/// with <see cref="IGrantedPathAclService"/>.
+/// with <see cref="IPathGrantService"/> via <see cref="AclManagerGrantRowRenderer"/>.
 /// </summary>
 public class AclManagerGrantsHelper(
-    IGrantedPathAclService aclService,
     IAppConfigService appConfigService,
-    ILoggingService log,
     IGrantConfigTracker grantConfigTracker,
     IDatabaseProvider databaseProvider,
     ISessionSaver sessionSaver,
-    TraverseAutoManager traverseAutoManager)
+    TraverseAutoManager traverseAutoManager,
+    Func<AclManagerGrantRowRenderer> rendererFactory)
 {
+    private readonly AclManagerGrantRowRenderer _renderer = rendererFactory();
     // Column name constants shared with AclManagerDialog and AclManagerTraverseHelper
     public const string ColIcon = "Icon";
     public const string ColPath = "Path";
@@ -40,7 +40,6 @@ public class AclManagerGrantsHelper(
     private bool _isContainer;
     private AclManagerPendingChanges _pending = null!;
     private GridSortHelper? _sortHelper;
-    private AclManagerGrantRowRenderer _renderer = null!;
 
     public bool IsSuppressed { get; private set; }
 
@@ -58,8 +57,7 @@ public class AclManagerGrantsHelper(
         _pending = pending;
         _sortHelper = sortHelper;
 
-        _renderer = new AclManagerGrantRowRenderer(
-            grid, sid, isContainer, aclService, log, groupSids, pending);
+        _renderer.Initialize(grid, sid, isContainer, groupSids, pending);
     }
 
     // --- Populate ---
@@ -99,7 +97,7 @@ public class AclManagerGrantsHelper(
             var allEntriesToShow = grantEntries.Concat(_pending.PendingAdds.Values).ToList();
 
             var mainEntries = allEntriesToShow
-                .Where(e => GetEffectiveGrantConfigPath(e) == null)
+                .Where(e => _pending.GetEffectiveConfigPath(e, grantConfigTracker, _sid) == null)
                 .ToList();
             AddGrantRows(mainEntries, "Main Config", configPath: null, showIfEmpty: hasLoadedConfigs);
 
@@ -107,7 +105,7 @@ public class AclManagerGrantsHelper(
             {
                 var configEntries = allEntriesToShow
                     .Where(e => string.Equals(
-                        GetEffectiveGrantConfigPath(e), configPath, StringComparison.OrdinalIgnoreCase))
+                        _pending.GetEffectiveConfigPath(e, grantConfigTracker, _sid), configPath, StringComparison.OrdinalIgnoreCase))
                     .ToList();
                 AddGrantRows(configEntries, Path.GetFileName(configPath), configPath, showIfEmpty: true);
             }
@@ -117,18 +115,6 @@ public class AclManagerGrantsHelper(
             _grid.ClearSelection();
             IsSuppressed = false;
         }
-    }
-
-    /// <summary>
-    /// Returns the effective config path for a grant entry, accounting for any pending
-    /// config-section move that hasn't been applied yet.
-    /// </summary>
-    private string? GetEffectiveGrantConfigPath(GrantedPathEntry e)
-    {
-        var key = (Path.GetFullPath(e.Path), e.IsDeny);
-        if (_pending.PendingConfigMoves.TryGetValue(key, out var pendingTarget))
-            return pendingTarget;
-        return grantConfigTracker.GetGrantConfigPath(_sid, e);
     }
 
     private void AddGrantRows(List<GrantedPathEntry> entries, string sectionTitle, string? configPath, bool showIfEmpty = false)
@@ -176,7 +162,10 @@ public class AclManagerGrantsHelper(
     {
         var newMode = row.Cells[ColMode].Value as string;
         bool newIsDeny = newMode == ModeDeny;
-        if (newIsDeny == entry.IsDeny)
+
+        // Use the effective current mode (from pending mod if a prior switch exists) to detect no-ops.
+        bool effectiveIsDeny = _pending.GetEffectiveIsDeny(entry);
+        if (newIsDeny == effectiveIsDeny)
             return false;
 
         // Check if an entry with the new (target) mode already exists in DB or pending adds.
@@ -192,7 +181,7 @@ public class AclManagerGrantsHelper(
             IsSuppressed = true;
             try
             {
-                row.Cells[ColMode].Value = entry.IsDeny ? ModeDeny : ModeAllow;
+                row.Cells[ColMode].Value = effectiveIsDeny ? ModeDeny : ModeAllow;
             }
             finally
             {
@@ -203,32 +192,55 @@ public class AclManagerGrantsHelper(
             return false;
         }
 
-        bool wasAllow = !entry.IsDeny;
-        bool wasIsDeny = entry.IsDeny;
+        bool wasAllow = !effectiveIsDeny;
 
-        // Preserve Own from existing saved rights (mode switch does not change ownership).
-        bool ownValue = entry.SavedRights?.Own ?? false;
+        // Preserve Own from existing pending rights or original DB rights (mode switch does not change ownership).
+        bool ownValue = _pending.GetEffectiveRights(entry)?.Own ?? false;
 
-        // Update entry mode and reset saved rights to mode defaults.
-        entry.IsDeny = newIsDeny;
-        entry.SavedRights = SavedRightsState.DefaultForMode(newIsDeny, own: ownValue);
+        var newSavedRights = SavedRightsState.DefaultForMode(newIsDeny, own: ownValue);
 
-        // Track in pending state. Must re-key if the entry was a pending add,
-        // because the key includes isDeny which has now changed.
-        var oldKey = (entry.Path, wasIsDeny);
-        var newKey = (entry.Path, newIsDeny);
-        _pending.PendingModifications.Remove(oldKey);
-        if (_pending.PendingAdds.Remove(oldKey))
+        // The original DB key is (entry.Path, entry.IsDeny) — entry.IsDeny is NOT mutated.
+        var dbKey = (entry.Path, entry.IsDeny);
+
+        // Track in pending state. Must re-key PendingAdds if the entry was a pending add,
+        // because PendingAdds key includes isDeny which has conceptually changed.
+        var newPendingAddKey = (entry.Path, newIsDeny);
+
+        // Preserve the true original NTFS wasIsDeny across multiple mode switches: if there is
+        // already a pending modification under dbKey, its WasIsDeny reflects the actual NTFS state.
+        // This ensures double-switch (Allow→Deny→Allow) does not try to revert a non-existent ACE.
+        bool originalWasIsDeny = _pending.PendingModifications.TryGetValue(dbKey, out var existingMod)
+            ? existingMod.WasIsDeny
+            : entry.IsDeny;
+
+        if (_pending.PendingAdds.Remove(dbKey))
         {
-            _pending.PendingAdds[newKey] = entry;
-            if (_pending.PendingConfigMoves.Remove(oldKey, out var configTarget))
-                _pending.PendingConfigMoves[newKey] = configTarget;
+            // Was a pending add — re-key the pending add entry to the new mode.
+            entry.IsDeny = newIsDeny;
+            entry.SavedRights = newSavedRights;
+            _pending.PendingAdds[newPendingAddKey] = entry;
+            if (_pending.PendingConfigMoves.Remove(dbKey, out var configTarget))
+                _pending.PendingConfigMoves[newPendingAddKey] = configTarget;
         }
         else
         {
-            _pending.PendingModifications[newKey] = entry;
-            if (_pending.PendingConfigMoves.Remove(oldKey, out var configTarget))
-                _pending.PendingConfigMoves[newKey] = configTarget;
+            // DB entry — store new mode and rights in PendingModification WITHOUT mutating entry.
+            // originalWasIsDeny is the mode that exists on NTFS — used by the applier to revert
+            // the correct ACE before applying the new mode's ACE. When originalWasIsDeny == newIsDeny
+            // (double-switch back to original mode), the applier falls through to the rights-diff path.
+            // ownValue is the Own value captured before the mode switch.
+            _pending.PendingModifications[dbKey] = new PendingModification(
+                entry, WasIsDeny: originalWasIsDeny, WasOwn: ownValue,
+                NewIsDeny: newIsDeny, NewRights: newSavedRights);
+            // Re-key the config move from wherever it currently lives to the new mode key.
+            // On a first switch the move lives at dbKey; on a subsequent switch it already lives
+            // at the previous effective mode key (existingMod.NewIsDeny), so check that key first.
+            var prevEffectiveKey = existingMod != null ? (entry.Path, existingMod.NewIsDeny) : dbKey;
+            bool hadConfigMove = _pending.PendingConfigMoves.Remove(prevEffectiveKey, out var configTarget);
+            if (!hadConfigMove && prevEffectiveKey != dbKey)
+                hadConfigMove = _pending.PendingConfigMoves.Remove(dbKey, out configTarget);
+            if (hadConfigMove)
+                _pending.PendingConfigMoves[newPendingAddKey] = configTarget;
         }
 
         // Auto-manage traverse entries on mode switch.
@@ -249,57 +261,82 @@ public class AclManagerGrantsHelper(
     }
 
     /// <summary>
-    /// Updates <see cref="GrantedPathEntry.SavedRights"/> from the current checkbox values in the row,
-    /// then marks the entry as a pending modification (or updates it in PendingAdds if already there).
+    /// Computes new SavedRights from the current checkbox values in the row, then marks the entry
+    /// as a pending modification (or updates it in PendingAdds if already there), without mutating
+    /// the live DB entry.
     /// </summary>
     private void UpdateSavedRightsFromRow(GrantedPathEntry entry, DataGridViewRow row)
     {
         bool ownValue = false;
         if (!_isContainer && _grid.Columns.Contains(ColOwner))
-            ownValue = GetCheck(row, ColOwner) == CheckState.Checked;
+            ownValue = GetCheck(row, ColOwner) == RightCheckState.Checked;
 
-        if (entry.IsDeny)
+        // Capture original Own from the entry's NTFS-committed rights (before any pending change),
+        // so WasOwn can reflect the true NTFS state. entry.SavedRights is never mutated.
+        bool originalOwn = entry.SavedRights?.Own == true;
+
+        // Use the effective IsDeny (from pending mode switch if any) to compute the correct rights.
+        bool effectiveIsDeny = _pending.GetEffectiveIsDeny(entry);
+
+        SavedRightsState newSavedRights;
+        if (effectiveIsDeny)
         {
-            entry.SavedRights = SavedRightsState.DefaultForMode(true, own: ownValue) with
+            newSavedRights = SavedRightsState.DefaultForMode(true, own: ownValue) with
             {
-                Execute = GetCheck(row, ColExecute) == CheckState.Checked,
-                Read = GetCheck(row, ColRead) == CheckState.Checked
+                Execute = GetCheck(row, ColExecute) == RightCheckState.Checked,
+                Read = GetCheck(row, ColRead) == RightCheckState.Checked
             };
         }
         else
         {
-            entry.SavedRights = SavedRightsState.DefaultForMode(false, own: ownValue) with
+            newSavedRights = SavedRightsState.DefaultForMode(false, own: ownValue) with
             {
-                Execute = GetCheck(row, ColExecute) == CheckState.Checked,
-                Write = GetCheck(row, ColWrite) == CheckState.Checked,
-                Special = GetCheck(row, ColSpecial) == CheckState.Checked
+                Execute = GetCheck(row, ColExecute) == RightCheckState.Checked,
+                Write = GetCheck(row, ColWrite) == RightCheckState.Checked,
+                Special = GetCheck(row, ColSpecial) == RightCheckState.Checked
             };
         }
 
-        var key = (entry.Path, entry.IsDeny);
-        if (_pending.PendingAdds.ContainsKey(key))
+        // PendingAdds are keyed by (path, effectiveIsDeny) for mode-switched entries.
+        var addKey = (entry.Path, effectiveIsDeny);
+        if (_pending.PendingAdds.ContainsKey(addKey))
         {
-            _pending.PendingAdds[key] = entry;
+            // For pending adds the entry itself is the only record — update SavedRights directly.
+            entry.SavedRights = newSavedRights;
+            _pending.PendingAdds[addKey] = entry;
             _renderer.RefreshRowBackground(row, entry);
             return;
         }
 
-        // DB entry: check if the change has been reverted (new SavedRights matches NTFS state).
+        // DB entry: check if the change has been reverted (new rights match NTFS state for the effective mode).
+        // Use a temporary entry to pass effective IsDeny + new rights to MatchesSavedRights without mutating.
         var ntfsState = _renderer.TryReadRightsForEntry(entry);
-        if (ntfsState != null && SavedRightsComparer.Instance.MatchesSavedRights(entry, ntfsState, _isContainer))
+        bool isFolder = Directory.Exists(entry.Path);
+        if (ntfsState != null)
         {
-            // Effectively reverted — remove pending modification and restore row color.
-            _pending.PendingModifications.Remove(key);
-            _renderer.ReapplyRowStatus(row, entry, ntfsState);
-            return;
+            var tempEntry = new GrantedPathEntry { Path = entry.Path, IsDeny = effectiveIsDeny, SavedRights = newSavedRights };
+            if (SavedRightsComparer.Instance.MatchesSavedRights(tempEntry, ntfsState, _isContainer, isFolder))
+            {
+                // Effectively reverted — remove pending modification and restore row color.
+                _pending.PendingModifications.Remove((entry.Path, entry.IsDeny));
+                _renderer.ReapplyRowStatus(row, entry, ntfsState);
+                return;
+            }
         }
 
-        _pending.PendingModifications[key] = entry;
+        // Store new rights in PendingModification without mutating entry.SavedRights.
+        // Preserve WasIsDeny and WasOwn from any existing modification, which reflect the true NTFS state.
+        var dbKey = (entry.Path, entry.IsDeny);
+        bool wasIsDeny = _pending.PendingModifications.TryGetValue(dbKey, out var existingMod)
+            ? existingMod.WasIsDeny
+            : entry.IsDeny;
+        bool newIsDeny = existingMod?.NewIsDeny ?? effectiveIsDeny;
+        bool wasOwn = existingMod?.WasOwn ?? originalOwn;
+        _pending.PendingModifications[dbKey] = new PendingModification(
+            entry, WasIsDeny: wasIsDeny, WasOwn: wasOwn,
+            NewIsDeny: newIsDeny, NewRights: newSavedRights);
         _renderer.RefreshRowBackground(row, entry);
     }
-    
-    public GrantRightsState ReadRightsForEntry(GrantedPathEntry entry)
-        => _renderer.ReadRightsForEntry(entry);
 
     public GrantRightsState? TryReadRightsForEntry(GrantedPathEntry entry)
         => _renderer.TryReadRightsForEntry(entry);
@@ -307,11 +344,11 @@ public class AclManagerGrantsHelper(
     public void FixBrokenGrant(GrantedPathEntry entry, DataGridViewRow row)
         => _renderer.FixBrokenGrant(entry, row);
 
-    private static CheckState GetCheck(DataGridViewRow row, string colName)
+    private static RightCheckState GetCheck(DataGridViewRow row, string colName)
     {
         if (row.DataGridView == null || !row.DataGridView.Columns.Contains(colName))
-            return CheckState.Unchecked;
+            return RightCheckState.Unchecked;
         var val = row.Cells[colName].Value;
-        return val is CheckState cs ? cs : CheckState.Unchecked;
+        return val is RightCheckState cs ? cs : RightCheckState.Unchecked;
     }
 }

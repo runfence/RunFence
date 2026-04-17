@@ -5,6 +5,7 @@ using RunFence.Account.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Licensing;
 using RunFence.Persistence;
 using RunFence.Security;
 using Xunit;
@@ -13,6 +14,7 @@ namespace RunFence.Tests;
 
 public class AccountPasswordHandlerTests : IDisposable
 {
+    private readonly Mock<IModalCoordinator> _modalCoordinator = new();
     private readonly Mock<IAccountCredentialManager> _credentialManager = new();
     private readonly Mock<IAccountPasswordService> _accountPassword = new();
     private readonly Mock<IPinService> _pinService = new();
@@ -20,6 +22,7 @@ public class AccountPasswordHandlerTests : IDisposable
     private readonly Mock<IWindowsHelloService> _windowsHello = new();
     private readonly Mock<IPasswordAutoTyper> _autoTyper = new();
     private readonly Mock<ISecureDesktopRunner> _secureDesktop = new();
+    private readonly Mock<IEvaluationLimitHelper> _evaluationLimitHelper = new();
 
     private readonly AppDatabase _database = new();
     private readonly ProtectedBuffer _pinKey;
@@ -63,21 +66,23 @@ public class AccountPasswordHandlerTests : IDisposable
     }
 
     private AccountPasswordHandler CreateHandler() =>
-        new(_credentialManager.Object, _accountPassword.Object, _pinService.Object,
+        new(_modalCoordinator.Object, _credentialManager.Object, _accountPassword.Object, _pinService.Object,
             _log.Object, new SidDisplayNameResolver(new Mock<ISidResolver>().Object),
             _autoTyper.Object, _secureDesktop.Object, _windowsHello.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            new LambdaDatabaseProvider(() => new AppDatabase()),
+            _evaluationLimitHelper.Object,
+            new SecureClipboardService());
 
     [Fact]
-    public void TypePassword_HelloVerified_UpdatesLastPinVerifiedAtAndDecryptsCredential()
+    public async Task TypePassword_HelloVerified_UpdatesLastPinVerifiedAtAndDecryptsCredential()
     {
-        _windowsHello.Setup(h => h.VerifySync(It.IsAny<string>()))
-            .Returns(HelloVerificationResult.Verified);
+        _windowsHello.Setup(h => h.VerifyAsync(It.IsAny<string>()))
+            .ReturnsAsync(HelloVerificationResult.Verified);
 
         var handler = CreateHandler();
         var accountRow = new AccountRow(null, "test", "S-1-5-21-1", false);
 
-        handler.TypePassword(accountRow, _session, _store, _guard, _parent,
+        await handler.TypePasswordAsync(accountRow, _session, _store, _guard, _parent,
             new IntPtr(1), _ => { });
 
         Assert.NotNull(_session.LastPinVerifiedAt);
@@ -90,15 +95,15 @@ public class AccountPasswordHandlerTests : IDisposable
     [InlineData(HelloVerificationResult.Canceled)]
     [InlineData(HelloVerificationResult.NotAvailable)]
     [InlineData(HelloVerificationResult.Failed)]
-    public void TypePassword_HelloNotVerified_PromptsPinAndReturnsEarlyWhenPinNotEntered(HelloVerificationResult helloResult)
+    public async Task TypePassword_HelloNotVerified_PromptsPinAndReturnsEarlyWhenPinNotEntered(HelloVerificationResult helloResult)
     {
-        _windowsHello.Setup(h => h.VerifySync(It.IsAny<string>()))
-            .Returns(helloResult);
+        _windowsHello.Setup(h => h.VerifyAsync(It.IsAny<string>()))
+            .ReturnsAsync(helloResult);
 
         var handler = CreateHandler();
         var accountRow = new AccountRow(null, "test", "S-1-5-21-1", false);
 
-        handler.TypePassword(accountRow, _session, _store, _guard, _parent,
+        await handler.TypePasswordAsync(accountRow, _session, _store, _guard, _parent,
             new IntPtr(1), _ => { });
 
         _secureDesktop.Verify(s => s.Run(It.IsAny<Action>()), Times.Once);
@@ -109,23 +114,23 @@ public class AccountPasswordHandlerTests : IDisposable
     }
 
     [Fact]
-    public void TypePassword_RecentlyVerified_SkipsHelloAndDecryptsCredential()
+    public async Task TypePassword_RecentlyVerified_SkipsHelloAndDecryptsCredential()
     {
         _session.LastPinVerifiedAt = DateTime.UtcNow;
 
         var handler = CreateHandler();
         var accountRow = new AccountRow(null, "test", "S-1-5-21-1", false);
 
-        handler.TypePassword(accountRow, _session, _store, _guard, _parent,
+        await handler.TypePasswordAsync(accountRow, _session, _store, _guard, _parent,
             new IntPtr(1), _ => { });
 
-        _windowsHello.Verify(h => h.VerifySync(It.IsAny<string>()), Times.Never);
+        _windowsHello.Verify(h => h.VerifyAsync(It.IsAny<string>()), Times.Never);
         _credentialManager.Verify(m => m.DecryptCredential(
             accountRow.Sid, _store, _pinKey, out It.Ref<SecureString?>.IsAny), Times.Once);
     }
 
     [Fact]
-    public void TypePassword_NonHelloMode_SkipsHelloService()
+    public async Task TypePassword_NonHelloMode_SkipsHelloService()
     {
         _database.Settings.UnlockMode = UnlockMode.Pin;
         _session.LastPinVerifiedAt = DateTime.UtcNow;
@@ -133,11 +138,40 @@ public class AccountPasswordHandlerTests : IDisposable
         var handler = CreateHandler();
         var accountRow = new AccountRow(null, "test", "S-1-5-21-1", false);
 
-        handler.TypePassword(accountRow, _session, _store, _guard, _parent,
+        await handler.TypePasswordAsync(accountRow, _session, _store, _guard, _parent,
             new IntPtr(1), _ => { });
 
-        _windowsHello.Verify(h => h.VerifySync(It.IsAny<string>()), Times.Never);
+        _windowsHello.Verify(h => h.VerifyAsync(It.IsAny<string>()), Times.Never);
         _credentialManager.Verify(m => m.DecryptCredential(
             accountRow.Sid, _store, _pinKey, out It.Ref<SecureString?>.IsAny), Times.Once);
+    }
+
+    [Theory]
+    [InlineData(CredentialLookupStatus.NotFound)]
+    [InlineData(CredentialLookupStatus.MissingPassword)]
+    public async Task TypePassword_NonSuccessCredentialStatus_DoesNotTypePasswordAndSetsStatus(CredentialLookupStatus status)
+    {
+        // Arrange: PIN already verified → EnsurePinVerifiedAsync bypassed.
+        // DecryptCredential returns a non-success status (no stored password found).
+        _session.LastPinVerifiedAt = DateTime.UtcNow;
+
+        SecureString? nullPwd = null;
+        _credentialManager.Setup(m => m.DecryptCredential(
+                It.IsAny<string>(), It.IsAny<CredentialStore>(), It.IsAny<ProtectedBuffer>(),
+                out nullPwd))
+            .Returns(status);
+
+        var handler = CreateHandler();
+        var accountRow = new AccountRow(null, "test", "S-1-5-21-1", false);
+
+        string? capturedStatus = null;
+        await handler.TypePasswordAsync(accountRow, _session, _store, _guard, _parent,
+            new IntPtr(1), s => capturedStatus = s);
+
+        // DecryptCredential was called but no typing should occur
+        _credentialManager.Verify(m => m.DecryptCredential(
+            accountRow.Sid, _store, _pinKey, out It.Ref<SecureString?>.IsAny), Times.Once);
+        _autoTyper.Verify(a => a.TypeToWindow(It.IsAny<IntPtr>(), It.IsAny<SecureString>()), Times.Never);
+        Assert.Equal("No stored password found.", capturedStatus);
     }
 }

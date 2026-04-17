@@ -24,21 +24,15 @@ public class UsernameHelperTests
         Assert.StartsWith(expectedPrefix, result);
     }
 
-    [Fact]
-    public void GenerateFromPath_TruncationAt20Chars()
+    [Theory]
+    [InlineData(@"C:\Apps\ThisIsAVeryLongApplicationName.exe", 20, "ThisIsAVer")]
+    [InlineData(@"C:\Apps\LongNameApp.exe", 14, "Long")]
+    public void GenerateFromPath_TruncatesNameToFitTimestamp(string path, int maxLength, string expectedPrefix)
     {
-        var result = UsernameHelper.GenerateFromPath(@"C:\Apps\ThisIsAVeryLongApplicationName.exe");
-        Assert.Equal(20, result.Length);
-        // App name truncated to 10 chars + 10 char timestamp
-        Assert.StartsWith("ThisIsAVer", result);
-    }
-
-    [Fact]
-    public void GenerateFromPath_CustomMaxLength()
-    {
-        var result = UsernameHelper.GenerateFromPath(@"C:\Apps\LongNameApp.exe", maxLength: 14);
-        Assert.Equal(14, result.Length); // 4 chars name + 10 timestamp
-        Assert.StartsWith("Long", result);
+        // Result length = maxLength; name portion = maxLength - 10 (10-digit timestamp)
+        var result = UsernameHelper.GenerateFromPath(path, maxLength: maxLength);
+        Assert.Equal(maxLength, result.Length);
+        Assert.StartsWith(expectedPrefix, result);
     }
 
     [Fact]

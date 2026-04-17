@@ -1,6 +1,7 @@
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 
 namespace RunFence.Acl.UI;
@@ -13,9 +14,11 @@ public class AclManagerModificationHandler(
     IAppConfigService appConfigService,
     ILoggingService log,
     IAclManagerScanService scanService,
+    IDatabaseProvider databaseProvider,
     AclManagerTraverseHelper traverseHelper,
     AclManagerDragDropHandler dragDropHandler,
-    AclManagerActionOrchestrator actionHandler)
+    AclManagerActionOrchestrator actionHandler,
+    IReparsePointPromptHelper reparsePointHelper)
 {
     private readonly AclManagerTraverseHelper _traverseHelper = traverseHelper;
     private readonly AclManagerDragDropHandler _dragDropHandler = dragDropHandler;
@@ -28,7 +31,7 @@ public class AclManagerModificationHandler(
     private Action _refreshTraverseGrid = null!;
     private Action _updateActionButtons = null!;
 
-    public CancellationTokenSource? CancelScanCts { get; set; }
+    public CancellationTokenSource? CancelScanCts { get; private set; }
 
     public void Initialize(
         IAclManagerDialogHost dialogHost,
@@ -68,7 +71,7 @@ public class AclManagerModificationHandler(
         _controls.ScanStatusLabel.Visible = true;
 
         CancelScanCts = new CancellationTokenSource();
-        ScanResult found;
+        int updated;
         try
         {
             var progress = new Progress<long>(n =>
@@ -76,7 +79,7 @@ public class AclManagerModificationHandler(
                 if (!_dialogHost.IsDisposed)
                     _controls.ScanStatusLabel.Text = $"Scanning... ({n} items scanned)";
             });
-            found = await scanService.ScanAsync(selectedPath, _sid, progress, CancelScanCts.Token);
+            updated = await scanService.ScanAsync(selectedPath, _sid, progress, CancelScanCts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -100,19 +103,33 @@ public class AclManagerModificationHandler(
             }
         }
 
-        try
+        if (updated == 0)
+            MessageBox.Show("No new grants or traverse paths found.", "Scan Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        else
         {
-            int grantsAdded = _actionHandler.BatchAddGrantPaths(found.GrantPaths, found.DiscoveredRights);
-            int traverseAdded = _actionHandler.BatchAddTraversePaths(found.TraversePaths);
-            if (grantsAdded + traverseAdded == 0)
-                MessageBox.Show("No new grants or traverse paths found.", "Scan Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            else
-                _updateActionButtons();
-        }
-        catch (Exception ex)
-        {
-            log.Error("Failed to register scan results", ex);
-            MessageBox.Show($"Failed to register scan results: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            // Clear pending adds/modifications for paths the scan just added to the DB.
+            // Without this, the grid would show the same path twice: once as a pending add
+            // and once as a committed DB entry.
+            var database = databaseProvider.GetDatabase();
+            var accountGrants = database.GetAccount(_sid)?.Grants;
+            if (accountGrants != null)
+            {
+                var dbPaths = new HashSet<(string, bool)>(
+                    accountGrants.Select(g => (Path.GetFullPath(g.Path), g.IsDeny)),
+                    new GrantPathKeyComparer());
+                var pendingAddKeysToRemove = _pending.PendingAdds.Keys
+                    .Where(k => dbPaths.Contains(k)).ToList();
+                foreach (var key in pendingAddKeysToRemove)
+                    _pending.PendingAdds.Remove(key);
+                var pendingModKeysToRemove = _pending.PendingModifications.Keys
+                    .Where(k => dbPaths.Contains(k)).ToList();
+                foreach (var key in pendingModKeysToRemove)
+                    _pending.PendingModifications.Remove(key);
+            }
+
+            _refreshGrantsGrid();
+            _refreshTraverseGrid();
+            _updateActionButtons();
         }
     }
 
@@ -146,6 +163,9 @@ public class AclManagerModificationHandler(
         }
     }
 
+    // Toolbar "Add File" / "Add Folder" always adds as Allow by design: the user explicitly
+    // chooses to grant access. Deny grants are added via shell drag-drop or context menu,
+    // where the mode prompt makes the distinction explicit.
     private void AddGrantPath(bool isFolder)
     {
         string? selectedPath;
@@ -163,12 +183,13 @@ public class AclManagerModificationHandler(
             using var ofd = new OpenFileDialog();
             ofd.Title = "Select file to add Allow grant";
             ofd.Filter = "All files (*.*)|*.*";
+            FileDialogHelper.AddInteractiveUserCustomPlaces(ofd);
             if (ofd.ShowDialog(_dialogHost) != DialogResult.OK)
                 return;
             selectedPath = ofd.FileName;
         }
 
-        var pathsToAdd = ReparsePointPromptHelper.ResolveForAdd(selectedPath, _dialogHost);
+        var pathsToAdd = reparsePointHelper.ResolveForAdd(selectedPath, _dialogHost);
         foreach (var p in pathsToAdd)
         {
             var error = _actionHandler.AddGrantPathDirect(p, isDeny: false);

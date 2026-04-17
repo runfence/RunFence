@@ -2,27 +2,17 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
+using RunFence.Persistence;
 
 namespace RunFence.Acl;
 
-public class AclService : IAclService
+public class AclService(
+    ILoggingService log,
+    IAclDenyModeService denyService,
+    IAclAllowModeService allowService,
+    IDatabaseProvider databaseProvider)
+    : IAclService
 {
-    private readonly ILoggingService _log;
-    private readonly IAppContainerService _appContainerService;
-    private readonly AclDenyModeService _denyService;
-    private readonly AclAllowModeService _allowService;
-
-    public AclService(ILoggingService log, AclDenyModeService denyService,
-        AclAllowModeService allowService,
-        IAppContainerService appContainerService)
-    {
-        _log = log;
-        _appContainerService = appContainerService;
-        _denyService = denyService;
-        _allowService = allowService;
-    }
-
     public void ApplyAcl(AppEntry app, IReadOnlyList<AppEntry> allApps)
     {
         if (app.IsUrlScheme || !app.RestrictAcl)
@@ -33,15 +23,15 @@ public class AclService : IAclService
         var targetPath = ResolveAclTargetPath(app);
         if (IsBlockedPath(targetPath))
         {
-            _log.Warn($"Blocked ACL target path: {targetPath}");
+            log.Warn($"Blocked ACL target path: {targetPath}");
             return;
         }
 
         // Allow mode: standalone, no deny-mode combining needed
         if (app.AclMode == AclMode.Allow)
         {
-            if (_allowService.ApplyAllowAcl(app, targetPath))
-                _log.Info($"Applied allow-mode ACL to {targetPath} for app {app.Name}");
+            if (allowService.ApplyAllowAcl(app, targetPath))
+                log.Info($"Applied allow-mode ACL to {targetPath} for app {app.Name}");
 
             // Also grant AppContainer SID ReadAndExecute so the sandboxed process can access its exe
             if (app.AppContainerName != null)
@@ -53,7 +43,7 @@ public class AclService : IAclService
         // Deny mode: clean up any leftover allow-mode ACEs first (e.g., if mode was switched).
         // Must happen before TryGrantContainerSid — CleanupAllowModeAces removes all explicit
         // allow ACEs when inheritance is broken, which would wipe the container SID grant.
-        _allowService.CleanupAllowModeAces(targetPath, app.AclTarget == AclTarget.Folder);
+        allowService.CleanupAllowModeAces(targetPath, app.AclTarget == AclTarget.Folder);
 
         // Deny mode with AppContainer: grant the container SID so it can reach its exe
         if (app.AppContainerName != null)
@@ -61,20 +51,28 @@ public class AclService : IAclService
 
         // Deny mode
         var isFolderTarget = app.AclTarget == AclTarget.Folder;
-        var allowedSids = _denyService.GetAllowedSidsForPath(targetPath, allApps, isFolderTarget, ResolveAclTargetPath);
+        var allowedSids = denyService.GetAllowedSidsForPath(targetPath, allApps, isFolderTarget, ResolveAclTargetPath);
 
-        bool aclChanged = _denyService.ApplyDeny(targetPath, isFolderTarget, allowedSids, app.DeniedRights);
+        bool aclChanged = denyService.ApplyDeny(targetPath, isFolderTarget, allowedSids, app.DeniedRights);
 
         if (aclChanged)
-            _log.Info($"Applied deny ACL to {targetPath} for app {app.Name}");
+            log.Info($"Applied deny ACL to {targetPath} for app {app.Name}");
     }
 
     public void RevertAcl(AppEntry app, IReadOnlyList<AppEntry> allApps)
     {
         if (app.IsUrlScheme || !app.RestrictAcl)
             return;
+        if (app is { IsFolder: true, AclTarget: AclTarget.File })
+            return;
 
         var targetPath = ResolveAclTargetPath(app);
+        if (IsBlockedPath(targetPath))
+        {
+            log.Warn($"Blocked ACL target path on revert: {targetPath}");
+            return;
+        }
+
         if (!File.Exists(targetPath) && !Directory.Exists(targetPath))
             return;
 
@@ -84,8 +82,8 @@ public class AclService : IAclService
             // Revoke the container SID grant added separately by ApplyAcl (not part of AllowedAclEntries)
             if (app.AppContainerName != null)
                 TryRevokeContainerSid(app.AppContainerName, targetPath);
-            _allowService.RevertAllowAcl(targetPath, app);
-            _log.Info($"Reverted allow-mode ACL on {targetPath} for app {app.Name}");
+            allowService.RevertAllowAcl(targetPath, app);
+            log.Info($"Reverted allow-mode ACL on {targetPath} for app {app.Name}");
             return;
         }
 
@@ -111,10 +109,10 @@ public class AclService : IAclService
         }
         else
         {
-            _denyService.RemoveManagedDenyAces(targetPath, app.AclTarget == AclTarget.Folder);
+            denyService.RemoveManagedDenyAces(targetPath, app.AclTarget == AclTarget.Folder);
         }
 
-        _log.Info($"Reverted ACL on {targetPath} for app {app.Name}");
+        log.Info($"Reverted ACL on {targetPath} for app {app.Name}");
     }
 
     public void RecomputeAllAncestorAcls(IReadOnlyList<AppEntry> allApps)
@@ -146,13 +144,13 @@ public class AclService : IAclService
 
             if (IsBlockedPath(ancestorPath))
             {
-                _log.Warn($"Blocked ancestor ACL target path: {ancestorPath}");
+                log.Warn($"Blocked ancestor ACL target path: {ancestorPath}");
                 continue;
             }
 
-            var deniedRightsPerSid = _denyService.GetDeniedRightsPerSid(ancestorPath, allApps, isFolderTarget: true, ResolveAclTargetPath);
-            if (_denyService.ApplyDenyToFolderPerSid(ancestorPath, deniedRightsPerSid))
-                _log.Info($"Recomputed ancestor ACL for folder {ancestorPath}");
+            var deniedRightsPerSid = denyService.GetDeniedRightsPerSid(ancestorPath, allApps, isFolderTarget: true, ResolveAclTargetPath);
+            if (denyService.ApplyDenyToFolderPerSid(ancestorPath, deniedRightsPerSid))
+                log.Info($"Recomputed ancestor ACL for folder {ancestorPath}");
             recomputedPaths.Add(ancestorPath);
         }
     }
@@ -196,66 +194,79 @@ public class AclService : IAclService
 
     /// <summary>
     /// Returns the set of SIDs that are allowed (not denied) for a given path.
-    /// Exposed internally for tests.
+    /// This method exists solely to give tests direct access to <see cref="IAclDenyModeService.GetAllowedSidsForPath"/>;
+    /// it is NOT part of the <see cref="IAclService"/> interface.
     /// </summary>
     public HashSet<string> GetAllowedSidsForPath(
         string targetPath, IReadOnlyList<AppEntry> allApps, bool isFolderTarget)
-        => _denyService.GetAllowedSidsForPath(targetPath, allApps, isFolderTarget, ResolveAclTargetPath);
+        => denyService.GetAllowedSidsForPath(targetPath, allApps, isFolderTarget, ResolveAclTargetPath);
 
     // --- AppContainer SID helpers ---
 
     private void TryGrantContainerSid(string containerName, string targetPath)
     {
-        try
-        {
-            var containerSid = _appContainerService.GetSid(containerName);
-            var sid = new SecurityIdentifier(containerSid);
-            var isDirectory = Directory.Exists(targetPath);
-            var isFile = File.Exists(targetPath);
-            if (!isDirectory && !isFile)
-                return;
-
-            var inhFlags = AclHelper.InheritanceFlagsFor(isDirectory);
-
-            var rule = new FileSystemAccessRule(
-                sid,
-                FileSystemRights.ReadAndExecute,
-                inhFlags, PropagationFlags.None, AccessControlType.Allow);
-
-            AclHelper.ModifyAcl(targetPath, isDirectory, security => security.AddAccessRule(rule));
-            _log.Info($"Granted AppContainer SID '{containerSid}' ReadAndExecute on '{targetPath}'");
-        }
-        catch (Exception ex)
-        {
-            _log.Warn($"Failed to grant AppContainer SID for '{containerName}' on '{targetPath}': {ex.Message}");
-        }
+        TryModifyContainerSid(containerName, targetPath, "grant",
+            (sid, isDirectory) =>
+            {
+                var inhFlags = AclHelper.InheritanceFlagsFor(isDirectory);
+                var rule = new FileSystemAccessRule(
+                    sid,
+                    FileSystemRights.ReadAndExecute,
+                    inhFlags, PropagationFlags.None, AccessControlType.Allow);
+                AclHelper.ModifyAcl(targetPath, isDirectory, security => security.AddAccessRule(rule));
+                log.Info($"Granted AppContainer SID '{sid.Value}' ReadAndExecute on '{targetPath}'");
+            });
     }
 
     private void TryRevokeContainerSid(string containerName, string targetPath)
     {
+        TryModifyContainerSid(containerName, targetPath, "revoke",
+            (sid, isDirectory) =>
+            {
+                AclHelper.ModifyAcl(targetPath, isDirectory, security =>
+                {
+                    var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
+                    foreach (FileSystemAccessRule rule in rules)
+                    {
+                        if (rule.IdentityReference is SecurityIdentifier ruleSid && ruleSid == sid)
+                            security.RemoveAccessRuleSpecific(rule);
+                    }
+                });
+                log.Info($"Revoked AppContainer SID '{sid.Value}' from '{targetPath}'");
+            });
+    }
+
+    /// <summary>
+    /// Resolves the AppContainer SID for <paramref name="containerName"/>, verifies the target path
+    /// exists, then invokes <paramref name="operation"/> with the resolved SID and isDirectory flag.
+    /// Logs and swallows exceptions so ACL failures never block launch.
+    /// </summary>
+    private void TryModifyContainerSid(
+        string containerName, string targetPath, string actionName,
+        Action<SecurityIdentifier, bool> operation)
+    {
         try
         {
-            var containerSid = _appContainerService.GetSid(containerName);
-            var sid = new SecurityIdentifier(containerSid);
+            var containerSid = ResolveContainerSid(containerName);
+            if (containerSid == null)
+            {
+                log.Warn($"AppContainer SID not resolved for '{containerName}' — skipping {actionName} on '{targetPath}'");
+                return;
+            }
+
             var isDirectory = Directory.Exists(targetPath);
-            var isFile = File.Exists(targetPath);
-            if (!isDirectory && !isFile)
+            if (!isDirectory && !File.Exists(targetPath))
                 return;
 
-            AclHelper.ModifyAcl(targetPath, isDirectory, security =>
-            {
-                var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
-                foreach (FileSystemAccessRule rule in rules)
-                {
-                    if (rule.IdentityReference is SecurityIdentifier ruleSid && ruleSid == sid)
-                        security.RemoveAccessRuleSpecific(rule);
-                }
-            });
-            _log.Info($"Revoked AppContainer SID '{containerSid}' from '{targetPath}'");
+            var sid = new SecurityIdentifier(containerSid);
+            operation(sid, isDirectory);
         }
         catch (Exception ex)
         {
-            _log.Warn($"Failed to revoke AppContainer SID for '{containerName}' on '{targetPath}': {ex.Message}");
+            log.Warn($"Failed to {actionName} AppContainer SID for '{containerName}' on '{targetPath}': {ex.Message}");
         }
     }
+
+    private string? ResolveContainerSid(string containerName)
+        => AclHelper.ResolveContainerSid(databaseProvider.GetDatabase(), containerName);
 }

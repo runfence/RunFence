@@ -4,6 +4,21 @@ namespace RunFence.Core;
 
 public static class PathHelper
 {
+    public static bool IsOwnDir(string? path)
+    {
+        if (path == null)
+            return false;
+        var baseDirectory = Path.GetFullPath(AppContext.BaseDirectory).Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        if (!baseDirectory.EndsWith(Path.DirectorySeparatorChar))
+            baseDirectory += Path.DirectorySeparatorChar;
+
+        path = Path.GetFullPath(path).Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        if (!path.EndsWith(Path.DirectorySeparatorChar))
+            path += Path.DirectorySeparatorChar;
+
+        return path.StartsWith(baseDirectory, StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>
     /// Returns true if the path looks like a URL scheme (e.g., "https://..." or "myapp:..."),
     /// as opposed to a drive letter path (e.g., "C:\...") or UNC path (e.g., "\\server\...").

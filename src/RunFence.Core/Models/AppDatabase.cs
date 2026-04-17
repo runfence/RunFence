@@ -62,6 +62,11 @@ public class AppDatabase
     /// All list and dictionary properties are cloned so concurrent modification on the
     /// UI thread does not corrupt the snapshot.
     /// </summary>
+    /// <remarks>
+    /// Convention: background consumers must treat <see cref="AppEntry"/> objects in the snapshot
+    /// as read-only. Deep-cloning every AppEntry would be prohibitively expensive and is unnecessary
+    /// because all existing background consumers only read entry fields — they never mutate them.
+    /// </remarks>
     public AppDatabase CreateSnapshot() => new()
     {
         Version = Version,

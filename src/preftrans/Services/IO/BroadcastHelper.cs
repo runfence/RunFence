@@ -2,9 +2,9 @@ using PrefTrans.Native;
 
 namespace PrefTrans.Services.IO;
 
-public static class BroadcastHelper
+public class BroadcastHelper : IBroadcastHelper
 {
-    public static void Broadcast()
+    public void Broadcast()
     {
         NativeMethods.SendMessageTimeoutW(
             Constants.HWND_BROADCAST, Constants.WM_SETTINGCHANGE,
@@ -12,7 +12,7 @@ public static class BroadcastHelper
             Constants.SMTO_ABORTIFHUNG, 1000, out _);
     }
 
-    public static void BroadcastEnvironment()
+    public void BroadcastEnvironment()
     {
         NativeMethods.SendMessageTimeoutW(
             Constants.HWND_BROADCAST, Constants.WM_SETTINGCHANGE,
@@ -20,7 +20,7 @@ public static class BroadcastHelper
             Constants.SMTO_ABORTIFHUNG, 1000, out _);
     }
 
-    public static void BroadcastIntl()
+    public void BroadcastIntl()
     {
         NativeMethods.SendMessageTimeoutW(
             Constants.HWND_BROADCAST, Constants.WM_SETTINGCHANGE,

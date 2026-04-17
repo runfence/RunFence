@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Security;
 using RunFence.Apps.UI;
 using RunFence.Core;
@@ -12,10 +13,12 @@ public partial class CredentialEditDialog : Form
     public SecureString? Password { get; private set; }
     public string? Sid { get; private set; }
     public bool OpenCreateUser { get; private set; }
-    public string? CapturedPasswordText { get; private set; }
+    // Plain string by design: TextBox.Text is unavoidably a .NET managed string.
+    // Cleared by the consumer (AccountCredentialOperations) immediately after reading.
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string? CapturedPasswordText { get; set; }
 
     private CredentialEntry? _existing;
-    private bool _hasStoredPassword;
     private List<LocalUserAccount> _localUsers = [];
     private string? _defaultUsername;
     private bool _isEditMode;
@@ -42,14 +45,12 @@ public partial class CredentialEditDialog : Form
     /// </summary>
     public void Initialize(
         CredentialEntry? existing = null,
-        bool hasStoredPassword = false,
         List<LocalUserAccount>? localUsers = null,
         string? defaultUsername = null,
         IReadOnlyDictionary<string, string>? sidNames = null,
         IReadOnlyCollection<string>? existingSids = null)
     {
         _existing = existing;
-        _hasStoredPassword = existing != null && hasStoredPassword;
         _localUsers = localUsers ?? [];
         _defaultUsername = defaultUsername;
         _isEditMode = existing != null;
@@ -178,32 +179,31 @@ public partial class CredentialEditDialog : Form
             Sid = resolvedSid;
         }
 
-        // Password validation — runas requires a password for non-current accounts
-        if (!_hasStoredPassword || _passwordTextBox.Text.Length > 0)
+        // Password validation — runas requires a password for non-current accounts.
+        // In edit mode, OK is only enabled when password text is non-empty (UpdateOkButtonState),
+        // so the text is guaranteed non-empty here.
+        if (_passwordTextBox.Text.Length == 0)
         {
-            if (_passwordTextBox.Text.Length == 0)
+            _statusLabel.Text = "Password is required. RunAs will not work without a password.";
+            return;
+        }
+
+        // Validate credentials via LogonUser (skip for current account)
+        var isCurrentAccount = _existing?.IsCurrentAccount == true;
+        if (!isCurrentAccount && Sid != null)
+        {
+            var validationResult = _accountService.ValidatePassword(Sid, _passwordTextBox.Text, _usernameComboBox.Text.Trim());
+            if (validationResult != null)
             {
-                _statusLabel.Text = "Password is required. RunAs will not work without a password.";
+                _statusLabel.Text = validationResult;
                 return;
             }
-
-            // Validate credentials via LogonUser (skip for current account)
-            var isCurrentAccount = _existing?.IsCurrentAccount == true;
-            if (!isCurrentAccount && Sid != null)
-            {
-                var validationResult = _accountService.ValidatePassword(Sid, _passwordTextBox.Text, _usernameComboBox.Text.Trim());
-                if (validationResult != null)
-                {
-                    _statusLabel.Text = validationResult;
-                    return;
-                }
-            }
-
-            Password = new SecureString();
-            foreach (char c in _passwordTextBox.Text)
-                Password.AppendChar(c);
-            Password.MakeReadOnly();
         }
+
+        Password = new SecureString();
+        foreach (char c in _passwordTextBox.Text)
+            Password.AppendChar(c);
+        Password.MakeReadOnly();
 
         DialogResult = DialogResult.OK;
         Close();

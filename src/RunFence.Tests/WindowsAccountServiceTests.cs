@@ -2,26 +2,28 @@ using Moq;
 using RunFence.Account;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Launch;
 using Xunit;
 
 namespace RunFence.Tests;
 
 public class WindowsAccountServiceTests
 {
-    private readonly Mock<IAccountRestrictionService> _restrictions;
+    private readonly Mock<IAccountLoginRestrictionService> _restrictions;
     private readonly Mock<IAccountValidationService> _accountValidation;
     private readonly WindowsAccountService _service;
 
     public WindowsAccountServiceTests()
     {
         var log = new Mock<ILoggingService>();
-        _restrictions = new Mock<IAccountRestrictionService>();
+        _restrictions = new Mock<IAccountLoginRestrictionService>();
         _accountValidation = new Mock<IAccountValidationService>();
         var sidResolver = new Mock<ISidResolver>();
         _service = new WindowsAccountService(
             log.Object, _accountValidation.Object,
             _restrictions.Object, sidResolver.Object,
-            new Mock<ILocalUserProvider>().Object);
+            new Mock<ILocalUserProvider>().Object,
+            new Mock<IFolderHandlerService>().Object);
     }
 
     // --- RenameAccount orchestration ---

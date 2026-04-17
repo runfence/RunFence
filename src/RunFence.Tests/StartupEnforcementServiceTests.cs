@@ -17,6 +17,8 @@ public class StartupEnforcementServiceTests : IDisposable
 
     private readonly Mock<IAclService> _aclService;
     private readonly Mock<IShortcutService> _shortcutService;
+    private readonly Mock<IBesideTargetShortcutService> _besideTargetShortcutService;
+    private readonly Mock<IShortcutDiscoveryService> _shortcutDiscovery;
     private readonly Mock<IIconService> _iconService;
     private readonly Mock<ILoggingService> _log;
     private readonly StartupEnforcementService _service;
@@ -27,11 +29,16 @@ public class StartupEnforcementServiceTests : IDisposable
     {
         _aclService = new Mock<IAclService>();
         _shortcutService = new Mock<IShortcutService>();
+        _besideTargetShortcutService = new Mock<IBesideTargetShortcutService>();
+        _shortcutDiscovery = new Mock<IShortcutDiscoveryService>();
+        _shortcutDiscovery.Setup(d => d.CreateTraversalCache()).Returns(() => new ShortcutTraversalCache([]));
         _iconService = new Mock<IIconService>();
         _log = new Mock<ILoggingService>();
         var appContainerService = new Mock<IAppContainerService>();
         _service = new StartupEnforcementService(
             _aclService.Object, _shortcutService.Object,
+            _besideTargetShortcutService.Object,
+            _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
             DefaultDisplayNameResolver,
             appContainerService.Object);
@@ -55,7 +62,7 @@ public class StartupEnforcementServiceTests : IDisposable
     private Func<AppEntry, (string, string)?> CaptureShortcutResolver(AppDatabase db)
     {
         Func<AppEntry, (string, string)?>? capturedResolver = null;
-        _shortcutService
+        _besideTargetShortcutService
             .Setup(s => s.EnforceBesideTargetShortcuts(
                 It.IsAny<IEnumerable<AppEntry>>(),
                 It.IsAny<string>(),
@@ -74,30 +81,6 @@ public class StartupEnforcementServiceTests : IDisposable
         var db = new AppDatabase();
         _service.Enforce(db);
         _aclService.Verify(a => a.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
-    }
-
-    [Fact]
-    public void Enforce_UrlSchemeApp_SkipsAcl()
-    {
-        var db = new AppDatabase
-        {
-            Apps = [new AppEntry { Name = "UrlApp", IsUrlScheme = true, RestrictAcl = true, ExePath = "steam://run/123" }]
-        };
-
-        _service.Enforce(db);
-        _aclService.Verify(a => a.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
-    }
-
-    [Fact]
-    public void Enforce_UrlSchemeApp_SkipsIconRegeneration()
-    {
-        var db = new AppDatabase
-        {
-            Apps = [new AppEntry { Name = "UrlApp", IsUrlScheme = true, ExePath = "steam://run/123" }]
-        };
-
-        _service.Enforce(db);
-        _iconService.Verify(i => i.NeedsRegeneration(It.IsAny<AppEntry>()), Times.Never);
     }
 
     [Fact]
@@ -204,12 +187,16 @@ public class StartupEnforcementServiceTests : IDisposable
         };
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
         var db = new AppDatabase { Apps = [app] };
+        var cache = new ShortcutTraversalCache([]);
+        _shortcutDiscovery.Setup(d => d.CreateTraversalCache()).Returns(cache);
 
         _service.Enforce(db);
 
         _shortcutService.Verify(s => s.EnforceShortcuts(
             It.Is<IEnumerable<AppEntry>>(apps => apps.Contains(app)),
-            It.IsAny<string>()), Times.Once);
+            It.IsAny<string>(),
+            cache), Times.Once);
+        _shortcutDiscovery.Verify(d => d.CreateTraversalCache(), Times.Once);
     }
 
     [Fact]
@@ -230,7 +217,9 @@ public class StartupEnforcementServiceTests : IDisposable
 
         _shortcutService.Verify(s => s.EnforceShortcuts(
             It.IsAny<IEnumerable<AppEntry>>(),
-            It.IsAny<string>()), Times.Never);
+            It.IsAny<string>(),
+            It.IsAny<ShortcutTraversalCache>()), Times.Never);
+        _shortcutDiscovery.Verify(d => d.CreateTraversalCache(), Times.Never);
     }
 
     [Fact]
@@ -251,7 +240,8 @@ public class StartupEnforcementServiceTests : IDisposable
 
         _shortcutService.Verify(s => s.EnforceShortcuts(
             It.Is<IEnumerable<AppEntry>>(apps => apps.Contains(app)),
-            It.IsAny<string>()), Times.Once);
+            It.IsAny<string>(),
+            It.IsAny<ShortcutTraversalCache>()), Times.Once);
     }
 
     // --- Multiple apps with mixed settings ---
@@ -311,7 +301,8 @@ public class StartupEnforcementServiceTests : IDisposable
         // shortcutApp should have EnforceShortcuts called
         _shortcutService.Verify(s => s.EnforceShortcuts(
             It.Is<IEnumerable<AppEntry>>(apps => apps.Any(a => a.Name == "ShortcutApp")),
-            It.IsAny<string>()), Times.Once);
+            It.IsAny<string>(),
+            It.IsAny<ShortcutTraversalCache>()), Times.Once);
     }
 
     [Fact]
@@ -409,7 +400,8 @@ public class StartupEnforcementServiceTests : IDisposable
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
         _shortcutService.Setup(s => s.EnforceShortcuts(
                 It.IsAny<IEnumerable<AppEntry>>(),
-                It.IsAny<string>()))
+                It.IsAny<string>(),
+                It.IsAny<ShortcutTraversalCache>()))
             .Throws(new IOException("Test shortcut failure"));
 
         var db = new AppDatabase { Apps = [app] };
@@ -473,6 +465,34 @@ public class StartupEnforcementServiceTests : IDisposable
 
         // Icon check should still happen for non-URL apps
         _iconService.Verify(i => i.NeedsRegeneration(app), Times.Once);
+    }
+
+    // --- ACL lockout enforcement scenarios ---
+
+    [Theory]
+    [InlineData(true, false, true)]   // RestrictAcl=true, IsUrlScheme=false → ApplyAcl called
+    [InlineData(true, true, false)]   // RestrictAcl=true, IsUrlScheme=true  → ApplyAcl skipped (url scheme)
+    [InlineData(false, false, false)] // RestrictAcl=false, IsUrlScheme=false → ApplyAcl not called
+    [InlineData(false, true, false)]  // RestrictAcl=false, IsUrlScheme=true  → ApplyAcl not called
+    public void Enforce_AclLockoutScenarios_AclAppliedOnlyWhenRestricted(
+        bool restrictAcl, bool isUrlScheme, bool expectAclApplied)
+    {
+        var app = new AppEntry
+        {
+            Name = "LockoutScenarioApp",
+            IsUrlScheme = isUrlScheme,
+            ExePath = isUrlScheme ? "steam://run/123" : _fakeExePath,
+            RestrictAcl = restrictAcl,
+            ManageShortcuts = false
+        };
+        _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
+        var db = new AppDatabase { Apps = [app] };
+
+        _service.Enforce(db);
+
+        _aclService.Verify(a => a.ApplyAcl(
+            It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()),
+            expectAclApplied ? Times.Once() : Times.Never());
     }
 
     // --- Folder app tests ---
@@ -568,6 +588,8 @@ public class StartupEnforcementServiceTests : IDisposable
         var containerService = new Mock<IAppContainerService>();
         var service = new StartupEnforcementService(
             _aclService.Object, _shortcutService.Object,
+            new Mock<IBesideTargetShortcutService>().Object,
+            _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
             DefaultDisplayNameResolver, containerService.Object);
 
@@ -596,13 +618,15 @@ public class StartupEnforcementServiceTests : IDisposable
         var containerService = new Mock<IAppContainerService>();
         var service = new StartupEnforcementService(
             _aclService.Object, _shortcutService.Object,
+            new Mock<IBesideTargetShortcutService>().Object,
+            _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
             DefaultDisplayNameResolver, containerService.Object);
 
         var fakeExe2 = Path.Combine(_tempDir.Path, "app2.exe");
         File.WriteAllBytes(fakeExe2, []);
 
-        var containerEntry = new AppContainerEntry { Name = "ram_fail" };
+        var containerEntry = new AppContainerEntry { Name = "ram_fail", Sid = "S-1-15-2-1" };
         var containerApp = new AppEntry
         {
             Name = "FailContainer",
@@ -623,6 +647,9 @@ public class StartupEnforcementServiceTests : IDisposable
         containerService
             .Setup(s => s.EnsureProfile(containerEntry))
             .Throws(new InvalidOperationException("Test failure"));
+        containerService
+            .Setup(s => s.EnsureTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<string>()))
+            .Returns((false, new List<string>()));
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
 
         var db = new AppDatabase { Apps = [containerApp, normalApp], AppContainers = [containerEntry] };
@@ -643,10 +670,12 @@ public class StartupEnforcementServiceTests : IDisposable
         var containerService = new Mock<IAppContainerService>();
         var service = new StartupEnforcementService(
             _aclService.Object, _shortcutService.Object,
+            new Mock<IBesideTargetShortcutService>().Object,
+            _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
             DefaultDisplayNameResolver, containerService.Object);
 
-        var containerEntry = new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser" };
+        var containerEntry = new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = "S-1-15-2-1" };
         var app = new AppEntry
         {
             Name = "BrowserApp",
@@ -677,11 +706,14 @@ public class StartupEnforcementServiceTests : IDisposable
     }
 
     [Fact]
-    public void Enforce_AppContainerApp_ShortcutResolver_ReturnsNullForEmptyAccountSid()
+    public void Enforce_AppContainerApp_ShortcutResolver_ReturnsNullForEmptyAccountSid_WhenNoInteractiveSession()
     {
-        // Container apps have empty AccountSid. The resolver must not use "" as the SID
-        // (which would produce shortcut paths like "\\app.lnk"). In a non-interactive test
-        // environment with no interactive user SID, it must return null.
+        // Container apps have empty AccountSid. In CI environments with no interactive user
+        // session the resolver must return null rather than producing a path with an empty SID.
+        // xunit v2 dynamic skip shows as Fail in CLI; use early return for environment mismatch.
+        if (SidResolutionHelper.GetInteractiveUserSid() != null)
+            return; // Interactive session present — the resolver may resolve a username, not null.
+
         var app = new AppEntry
         {
             Name = "ContainerApp",
@@ -693,26 +725,40 @@ public class StartupEnforcementServiceTests : IDisposable
         };
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
 
-        // Use a database with no SidNames entries for "" — ensures any result would require
-        // a non-empty SID to produce a username
         var db = new AppDatabase { Apps = [app] };
         var resolver = CaptureShortcutResolver(db);
 
-        // The resolver must return null when empty string "" is the AccountSid and no
-        // interactive user SID is available (standard in CI environments)
-        var appWithEmptyOnly = new AppEntry
+        var result = resolver(new AppEntry { AccountSid = "", AppContainerName = "ram_browser", ExePath = _fakeExePath });
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void Enforce_AppContainerApp_ShortcutResolver_ResolvesInteractiveUser_WhenSessionAvailable()
+    {
+        // When an interactive desktop session exists, the resolver for a container app with
+        // empty AccountSid should resolve the interactive user's username and return non-empty.
+        // xunit v2 dynamic skip shows as Fail in CLI; use early return for environment mismatch.
+        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
+        if (interactiveSid == null)
+            return; // No explorer.exe session — resolver returns null, covered by the other test.
+
+        var app = new AppEntry
         {
+            Name = "ContainerApp",
+            ExePath = _fakeExePath,
             AccountSid = "",
             AppContainerName = "ram_browser",
-            ExePath = _fakeExePath
+            ManageShortcuts = false,
+            RestrictAcl = false
         };
-        var result = resolver(appWithEmptyOnly);
-        // Container apps with empty AccountSid must either return null (no interactive session)
-        // or return a non-empty username resolved from the interactive user SID.
-        // In CI with no interactive session the resolver returns null — that is a valid result.
-        if (!result.HasValue)
-            return;
-        Assert.NotEmpty(result.Value.Item1);
+        _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
+
+        var db = new AppDatabase { Apps = [app] };
+        var resolver = CaptureShortcutResolver(db);
+
+        var result = resolver(new AppEntry { AccountSid = "", AppContainerName = "ram_browser", ExePath = _fakeExePath });
+        Assert.NotNull(result);
+        Assert.NotEmpty(result!.Value.Item1);
     }
 
     [Fact]
@@ -732,7 +778,7 @@ public class StartupEnforcementServiceTests : IDisposable
 
         _service.Enforce(db);
 
-        _shortcutService.Verify(s => s.EnforceBesideTargetShortcuts(
+        _besideTargetShortcutService.Verify(s => s.EnforceBesideTargetShortcuts(
             It.IsAny<IEnumerable<AppEntry>>(),
             It.IsAny<string>(),
             It.IsAny<Func<AppEntry, (string, string)?>>()), Times.Once);

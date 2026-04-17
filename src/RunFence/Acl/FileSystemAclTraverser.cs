@@ -56,8 +56,9 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
             {
                 files = Directory.GetFiles(current);
             }
-            catch
+            catch (Exception ex)
             {
+                log.Debug($"ACL access failed for '{current}': {ex.Message}");
             }
 
             if (files != null)
@@ -73,8 +74,9 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
                         var fileInfo = new FileInfo(file);
                         fileSecurity = fileInfo.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
                     }
-                    catch
+                    catch (Exception ex)
                     {
+                        log.Debug($"ACL access failed for '{file}': {ex.Message}");
                     }
 
                     if (fileSecurity != null)
@@ -92,8 +94,9 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
             {
                 subdirs = Directory.GetDirectories(current);
             }
-            catch
+            catch (Exception ex)
             {
+                log.Debug($"ACL access failed for '{current}': {ex.Message}");
             }
 
             if (subdirs != null)

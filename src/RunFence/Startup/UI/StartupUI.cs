@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.Security;
 using RunFence.Startup.UI.Forms;
@@ -12,43 +13,29 @@ namespace RunFence.Startup.UI;
 /// <see cref="PinDialog"/>, secure desktop via <see cref="ISecureDesktopRunner"/>,
 /// and error messages via <see cref="MessageBox"/>.
 /// </summary>
-public class StartupUI : IStartupUI
+public class StartupUI(
+    ISecureDesktopRunner secureDesktop,
+    IPinService pinService,
+    IDatabaseService databaseService,
+    ILoggingService log,
+    IPinResetFlowRunner pinResetFlowRunner)
+    : IStartupUI
 {
-    private readonly ISecureDesktopRunner _secureDesktop;
-    private readonly IAppInitializationHelper _appInit;
-    private readonly IPinService _pinService;
-    private readonly IDatabaseService _databaseService;
-    private readonly ILoggingService _log;
-
-    public StartupUI(
-        IAppInitializationHelper appInit,
-        ISecureDesktopRunner secureDesktop,
-        IPinService pinService,
-        IDatabaseService databaseService,
-        ILoggingService log)
-    {
-        _secureDesktop = secureDesktop;
-        _appInit = appInit;
-        _pinService = pinService;
-        _databaseService = databaseService;
-        _log = log;
-    }
-
     public (CredentialStore store, byte[] key)? PromptNewPin()
     {
         CredentialStore? store = null;
         byte[]? key = null;
         DialogResult dlgResult = DialogResult.Cancel;
 
-        _secureDesktop.Run(() =>
+        secureDesktop.Run(() =>
         {
             using var dlg = new PinDialog(PinDialogMode.Set);
             dlg.ProcessingCallback = async (newPin, _) =>
             {
                 try
                 {
-                    (store, key) = await Task.Run(() => _pinService.ResetPin(newPin));
-                    _databaseService.SaveCredentialStore(store);
+                    (store, key) = await Task.Run(() => pinService.ResetPin(newPin));
+                    databaseService.SaveCredentialStore(store);
                     return null;
                 }
                 catch (Exception ex)
@@ -77,7 +64,7 @@ public class StartupUI : IStartupUI
             (CredentialStore Store, byte[] Key)? resetResult = null;
             DialogResult result = DialogResult.Cancel;
 
-            _secureDesktop.Run(() =>
+            secureDesktop.Run(() =>
             {
                 using var dlg = new PinDialog(PinDialogMode.Verify,
                     configSalt != null
@@ -85,11 +72,11 @@ public class StartupUI : IStartupUI
                         : null);
                 dlg.VerifyCallback = pin =>
                 {
-                    if (!_pinService.VerifyPin(pin, store, out var k))
+                    if (!pinService.VerifyPin(pin, store, out var k))
                         return false;
                     verifiedKey = k;
                     if (configSalt != null)
-                        mismatchKey = _pinService.DeriveKey(pin, configSalt);
+                        mismatchKey = pinService.DeriveKey(pin, configSalt);
                     return true;
                 };
 
@@ -98,7 +85,7 @@ public class StartupUI : IStartupUI
                     return;
 
                 resetRequested = true;
-                resetResult = PinResetFlowRunner.RunResetFlow(_pinService, _databaseService, _appInit);
+                resetResult = pinResetFlowRunner.RunResetFlow();
             });
 
             if (result == DialogResult.OK)
@@ -133,7 +120,7 @@ public class StartupUI : IStartupUI
         byte[]? recoveredMismatchKey = null;
         DialogResult dlgResult = DialogResult.Cancel;
 
-        _secureDesktop.Run(() =>
+        secureDesktop.Run(() =>
         {
             using var dlg = new PinDialog(PinDialogMode.Set);
             dlg.ProcessingCallback = async (newPin, _) =>
@@ -142,18 +129,18 @@ public class StartupUI : IStartupUI
                 {
                     await Task.Run(() =>
                     {
-                        (newStore, newKey) = _pinService.ResetPin(newPin);
+                        (newStore, newKey) = pinService.ResetPin(newPin);
                         recoveredMismatchKey = configSalt != null
-                            ? _pinService.DeriveKey(newPin, configSalt)
+                            ? pinService.DeriveKey(newPin, configSalt)
                             : null;
                     });
-                    _databaseService.SaveCredentialStore(newStore!);
-                    _log.Info("Credential store recreated after DPAPI loss");
+                    databaseService.SaveCredentialStore(newStore!);
+                    log.Info("Credential store recreated after DPAPI loss");
                     return null;
                 }
                 catch (Exception ex)
                 {
-                    _log.Error("PIN creation failed during recovery", ex);
+                    log.Error("PIN creation failed during recovery", ex);
                     return $"PIN creation failed: {ex.Message}";
                 }
             };
@@ -191,5 +178,25 @@ public class StartupUI : IStartupUI
             "RunFence is running in another session. Take over?",
             "Already Running", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         return takeoverResult == DialogResult.Yes;
+    }
+
+    public bool ConfirmStartFresh()
+    {
+        var startFreshButton = new TaskDialogButton("Start Fresh");
+        var exitButton = new TaskDialogButton("Exit");
+
+        var errorPage = new TaskDialogPage
+        {
+            Caption = "Configuration Error",
+            Heading = "Could not decrypt configuration file.",
+            Text = "Your app configuration cannot be read.\n\n" +
+                   "\"Start Fresh\" will discard it and create an empty configuration.",
+            Icon = TaskDialogIcon.Error,
+            Buttons = { startFreshButton, exitButton },
+            DefaultButton = exitButton
+        };
+
+        var result = TaskDialog.ShowDialog(errorPage);
+        return result == startFreshButton;
     }
 }

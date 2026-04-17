@@ -1,15 +1,18 @@
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
+using RunFence.Startup;
 
 namespace RunFence.Startup.UI.Forms;
 
 public partial class StartupSecurityDialog : Form
 {
     private readonly List<StartupSecurityFinding> _findings;
+    private readonly FindingLocationHelper _findingLocationHelper;
 
-    public StartupSecurityDialog(List<StartupSecurityFinding> findings)
+    public StartupSecurityDialog(List<StartupSecurityFinding> findings, FindingLocationHelper findingLocationHelper)
     {
         _findings = findings;
+        _findingLocationHelper = findingLocationHelper;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         PopulateFindings();
@@ -38,10 +41,8 @@ public partial class StartupSecurityDialog : Form
                 StartupSecurityCategory.DiskRootAcl => _listView.Groups["DiskRootAcl"],
                 StartupSecurityCategory.AccountPolicy => _listView.Groups["AccountPolicy"],
                 StartupSecurityCategory.FirewallPolicy => _listView.Groups["FirewallPolicy"],
-                _ => null
+                _ => _listView.Groups["Other"]
             };
-            if (group == null)
-                continue;
             var item = new ListViewItem(finding.TargetDescription)
             {
                 Group = group,
@@ -58,7 +59,7 @@ public partial class StartupSecurityDialog : Form
         if (_listView.SelectedItems.Count > 0 &&
             _listView.SelectedItems[0].Tag is StartupSecurityFinding finding)
         {
-            FindingLocationHelper.OpenLocation(finding);
+            _findingLocationHelper.OpenLocation(finding);
         }
     }
 

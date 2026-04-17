@@ -6,7 +6,7 @@ namespace RunFence.Infrastructure;
 /// </summary>
 public class ModalTracker : IModalTracker
 {
-    private volatile int _modalDepth;
+    private int _modalDepth;
 
     public void BeginModal() => Interlocked.Increment(ref _modalDepth);
 

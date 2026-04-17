@@ -35,8 +35,7 @@ public class AppEditPopulator(AppEditDialogController controller)
             WorkingDirectory: app.WorkingDirectory ?? "",
             AllowPassingWorkingDirectory: app.AllowPassingWorkingDirectory,
             ManageShortcuts: app.ManageShortcuts,
-            LaunchAsLowIlCheckState: result.LaunchAsLowIlCheckState,
-            SplitTokenCheckState: result.SplitTokenCheckState,
+            SelectedPrivilegeLevel: result.SelectedPrivilegeLevel,
             OverrideIpcCallers: result.OverrideIpcCallers);
     }
 }
@@ -54,6 +53,5 @@ public record AppEditState(
     string WorkingDirectory,
     bool AllowPassingWorkingDirectory,
     bool ManageShortcuts,
-    CheckState LaunchAsLowIlCheckState,
-    CheckState SplitTokenCheckState,
+    PrivilegeLevel? SelectedPrivilegeLevel,
     bool OverrideIpcCallers);

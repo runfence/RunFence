@@ -1,3 +1,0 @@
-namespace RunFence.Account;
-
-public interface IAccountRestrictionService : IAccountLoginRestrictionService, IAccountLsaRestrictionService;

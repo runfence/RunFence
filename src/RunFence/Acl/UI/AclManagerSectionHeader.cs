@@ -14,6 +14,9 @@ public record struct ConfigSectionHeader(string? ConfigPath);
 /// </summary>
 public static class AclManagerSectionHeader
 {
+    /// <summary>Background color used for section header rows (also used when clearing drag-drop highlight).</summary>
+    public static readonly Color SectionHeaderBackColor = Color.FromArgb(0xE4, 0xEA, 0xF4);
+
     private static readonly Dictionary<DataGridView, Font> _boldFontCache = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>
@@ -97,9 +100,9 @@ public static class AclManagerSectionHeader
         }
 
         headerRow.Cells[titleCellIndex].Value = sectionTitle;
-        headerRow.DefaultCellStyle.BackColor = Color.FromArgb(0xE4, 0xEA, 0xF4);
+        headerRow.DefaultCellStyle.BackColor = SectionHeaderBackColor;
         headerRow.DefaultCellStyle.ForeColor = Color.Black;
-        headerRow.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0xE4, 0xEA, 0xF4);
+        headerRow.DefaultCellStyle.SelectionBackColor = SectionHeaderBackColor;
         headerRow.DefaultCellStyle.SelectionForeColor = Color.Black;
         headerRow.DefaultCellStyle.Font = GetOrCreateBoldFont(grid);
         headerRow.ReadOnly = true;

@@ -1,10 +1,10 @@
 using System.Security.AccessControl;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.QuickAccess;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
 using RunFence.Persistence;
 
 namespace RunFence.RunAs.UI;
@@ -13,31 +13,13 @@ namespace RunFence.RunAs.UI;
 /// Shows permission grant dialogs when an app entry is created or edited.
 /// Handles both regular account apps and AppContainer apps.
 /// </summary>
-public class AppEntryPermissionPrompter
+public class AppEntryPermissionPrompter(
+    ILoggingService log,
+    IAclPermissionService aclPermission,
+    IPathGrantService pathGrantService,
+    IDatabaseProvider databaseProvider,
+    IQuickAccessPinService quickAccessPinService)
 {
-    private readonly IAppContainerService _appContainerService;
-    private readonly ILoggingService _log;
-    private readonly IAclPermissionService _aclPermission;
-    private readonly IPermissionGrantService _permissionGrantService;
-    private readonly IDatabaseProvider _databaseProvider;
-    private readonly IQuickAccessPinService _quickAccessPinService;
-
-    public AppEntryPermissionPrompter(
-        IAppContainerService appContainerService,
-        ILoggingService log,
-        IAclPermissionService aclPermission,
-        IPermissionGrantService permissionGrantService,
-        IDatabaseProvider databaseProvider,
-        IQuickAccessPinService quickAccessPinService)
-    {
-        _appContainerService = appContainerService;
-        _log = log;
-        _aclPermission = aclPermission;
-        _permissionGrantService = permissionGrantService;
-        _databaseProvider = databaseProvider;
-        _quickAccessPinService = quickAccessPinService;
-    }
-
     /// <returns>true if any grant was applied and AccountGrants was updated (caller must save config).</returns>
     public bool PromptAndGrant(IWin32Window owner, AppEntry app)
     {
@@ -50,10 +32,10 @@ public class AppEntryPermissionPrompter
         if (string.IsNullOrEmpty(app.AccountSid))
             return false;
 
-        if (!_aclPermission.NeedsPermissionGrantOrParent(app.ExePath, app.AccountSid))
+        if (!aclPermission.NeedsPermissionGrantOrParent(app.ExePath, app.AccountSid))
             return false;
 
-        var ancestors = _aclPermission.GetGrantableAncestors(app.ExePath);
+        var ancestors = aclPermission.GetGrantableAncestors(app.ExePath);
         if (ancestors.Count == 0)
             return false;
 
@@ -65,11 +47,11 @@ public class AppEntryPermissionPrompter
                 return false;
 
             // User already selected the path in the ancestor dialog — silent grant.
-            // PermissionGrantService handles: ACE + AddGrant + traverse on ancestor directories.
-            var grantResult = _permissionGrantService.EnsureAccess(selection.Path, app.AccountSid,
+            // PathGrantService handles: ACE + AddGrant + traverse on ancestor directories.
+            var grantResult = pathGrantService.EnsureAccess(app.AccountSid, selection.Path,
                 selection.Rights, confirm: null);
             if (grantResult.GrantAdded)
-                _quickAccessPinService.PinFolders(app.AccountSid, [selection.Path]);
+                quickAccessPinService.PinFolders(app.AccountSid, [selection.Path]);
             return grantResult.DatabaseModified;
         }
         catch (OperationCanceledException)
@@ -77,7 +59,7 @@ public class AppEntryPermissionPrompter
         }
         catch (Exception ex)
         {
-            _log.Error("Failed to grant permission for app entry", ex);
+            log.Error("Failed to grant permission for app entry", ex);
         }
 
         return false;
@@ -85,7 +67,7 @@ public class AppEntryPermissionPrompter
 
     private bool PromptAndGrantContainerPermission(IWin32Window owner, AppEntry app)
     {
-        var database = _databaseProvider.GetDatabase();
+        var database = databaseProvider.GetDatabase();
         var containerEntry = database.AppContainers.FirstOrDefault(c => c.Name == app.AppContainerName);
         if (containerEntry == null)
             return false;
@@ -94,12 +76,14 @@ public class AppEntryPermissionPrompter
         if (string.IsNullOrEmpty(directory) || PathHelper.IsBlockedAclPath(directory))
             return false;
 
-        var containerSid = _appContainerService.GetSid(app.AppContainerName!);
-
-        if (!_aclPermission.NeedsPermissionGrant(directory, containerSid))
+        var containerSid = containerEntry.Sid;
+        if (string.IsNullOrEmpty(containerSid))
             return false;
 
-        var ancestors = _aclPermission.GetGrantableAncestors(app.ExePath);
+        if (!aclPermission.NeedsPermissionGrant(directory, containerSid))
+            return false;
+
+        var ancestors = aclPermission.GetGrantableAncestors(app.ExePath);
         if (ancestors.Count == 0)
             return false;
 
@@ -111,9 +95,9 @@ public class AppEntryPermissionPrompter
                 return false;
 
             // User already selected the path — silent grant.
-            // PermissionGrantService handles: ACE + AddGrant + traverse + interactive user auto-grant
+            // PathGrantService handles: ACE + AddGrant + traverse + interactive user auto-grant
             // (for AppContainer SIDs, it automatically also grants the interactive desktop user).
-            return _permissionGrantService.EnsureAccess(selection.Path, containerSid,
+            return pathGrantService.EnsureAccess(containerSid, selection.Path,
                 selection.Rights, confirm: null).DatabaseModified;
         }
         catch (OperationCanceledException)
@@ -122,7 +106,7 @@ public class AppEntryPermissionPrompter
         }
         catch (Exception ex)
         {
-            _log.Error("Failed to grant permission for container app entry", ex);
+            log.Error("Failed to grant permission for container app entry", ex);
             return false;
         }
     }

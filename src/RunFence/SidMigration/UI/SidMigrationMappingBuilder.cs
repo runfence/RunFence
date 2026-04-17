@@ -16,13 +16,18 @@ namespace RunFence.SidMigration.UI;
 public class SidMigrationMappingBuilder(
     SidMigrationMappingLogic logic,
     ILoggingService log,
-    Control stepPanel,
     IEnumerable<OrphanedSid> orphanedSids)
 {
     private Dictionary<string, string> _sidDisplayNames = new(StringComparer.OrdinalIgnoreCase);
 
     public event Action? Ready;
     public event Action? Failed;
+
+    /// <summary>
+    /// The populated content panel. Set before <see cref="Ready"/> fires; null until then.
+    /// The caller is responsible for adding this control to its own layout.
+    /// </summary>
+    public Control? Content { get; private set; }
 
     private DataGridView? MappingGrid { get; set; }
 
@@ -50,11 +55,18 @@ public class SidMigrationMappingBuilder(
             return;
 
         loadingLabel.Visible = false;
-        PopulateMappingGrid(allMappings);
+        Content = BuildContentPanel(allMappings);
         Ready?.Invoke();
     }
 
-    private void PopulateMappingGrid(Dictionary<string, (string guessedName, string? newSid)> allMappings)
+    private Panel BuildContentPanel(Dictionary<string, (string guessedName, string? newSid)> allMappings)
+    {
+        var panel = new Panel { Dock = DockStyle.Fill };
+        PopulatePanel(panel, allMappings);
+        return panel;
+    }
+
+    private void PopulatePanel(Panel panel, Dictionary<string, (string guessedName, string? newSid)> allMappings)
     {
         _sidDisplayNames = logic.BuildSidDisplayNames();
 
@@ -99,58 +111,12 @@ public class SidMigrationMappingBuilder(
         // NewSid uses DropDown (editable) style so auto-open would be disruptive.
         DataGridViewComboHelper.EnableComboOpenOnFirstClick(MappingGrid,
             col => MappingGrid.Columns[col].Name == "Action");
-        MappingGrid.CellValueChanged += (_, args) =>
-        {
-            if (args.RowIndex < 0)
-                return;
-            if (MappingGrid.Columns[args.ColumnIndex].Name == "Action")
-            {
-                var action = MappingGrid.Rows[args.RowIndex].Cells["Action"].Value?.ToString();
-                MappingGrid.Rows[args.RowIndex].Cells["NewSid"].ReadOnly = action != "Migrate";
-            }
-        };
-
-        MappingGrid.CellPainting += (_, e) => AccountGridHelper.PaintSidCell(MappingGrid, e, "OldSid");
-
-        MappingGrid.CellFormatting += (_, e) =>
-        {
-            if (e.RowIndex < 0 || MappingGrid.Columns[e.ColumnIndex].Name != "NewSid")
-                return;
-            if (e.Value is string sid && _sidDisplayNames.TryGetValue(sid, out var display))
-            {
-                e.Value = display;
-                e.FormattingApplied = true;
-            }
-        };
-
-        MappingGrid.EditingControlShowing += (_, e) =>
-        {
-            if (MappingGrid.CurrentCell == null ||
-                MappingGrid.Columns[MappingGrid.CurrentCell.ColumnIndex].Name != "NewSid")
-                return;
-            if (e.Control is not ComboBox combo)
-                return;
-
-            combo.DropDownStyle = ComboBoxStyle.DropDown;
-            combo.Format -= OnNewSidComboFormat;
-            combo.Format += OnNewSidComboFormat;
-            combo.TextChanged -= OnNewSidComboTextChanged;
-            combo.TextChanged += OnNewSidComboTextChanged;
-            combo.Validating -= OnNewSidComboValidating;
-            combo.Validating += OnNewSidComboValidating;
-        };
-
-        MappingGrid.DataError += (_, e) =>
-        {
-            if (MappingGrid.Columns[e.ColumnIndex].Name == "NewSid")
-                e.Cancel = true;
-        };
-
-        MappingGrid.CellEndEdit += (_, e) =>
-        {
-            if (e.RowIndex >= 0)
-                MappingGrid.Rows[e.RowIndex].ErrorText = "";
-        };
+        MappingGrid.CellValueChanged += OnMappingGridCellValueChanged;
+        MappingGrid.CellPainting += OnMappingGridCellPainting;
+        MappingGrid.CellFormatting += OnMappingGridCellFormatting;
+        MappingGrid.EditingControlShowing += OnMappingGridEditingControlShowing;
+        MappingGrid.DataError += OnMappingGridDataError;
+        MappingGrid.CellEndEdit += OnMappingGridCellEndEdit;
 
         foreach (var (oldSid, (name, newSid)) in allMappings)
         {
@@ -164,16 +130,16 @@ public class SidMigrationMappingBuilder(
             MappingGrid.Rows[idx].Cells["NewSid"].ReadOnly = action != "Migrate";
         }
 
-        stepPanel.Controls.Add(MappingGrid);
+        panel.Controls.Add(MappingGrid);
 
         var pathsDetail = new ListBox
         {
             Location = new Point(15, 198),
             Size = new Size(560, 100),
             SelectionMode = SelectionMode.None,
-            Font = new Font(stepPanel.Font.FontFamily, 8f)
+            Font = new Font(panel.Font.FontFamily, 8f)
         };
-        stepPanel.Controls.Add(pathsDetail);
+        panel.Controls.Add(pathsDetail);
 
         MappingGrid.SelectionChanged += (_, _) =>
         {
@@ -209,9 +175,9 @@ public class SidMigrationMappingBuilder(
             var idx = MappingGrid.Rows.Add("Migrate", "(manual)", "", "");
             MappingGrid.Rows[idx].Cells["NewSid"].ReadOnly = false;
         };
-        stepPanel.Controls.Add(addButton);
+        panel.Controls.Add(addButton);
 
-        stepPanel.Controls.Add(new Label
+        panel.Controls.Add(new Label
         {
             Text = "Action: Skip = ignore, Migrate = change SID to New SID, Delete = remove from all references.",
             Location = new Point(15, 346),
@@ -249,6 +215,17 @@ public class SidMigrationMappingBuilder(
                 }
             }
 
+            // Validate new SID format (user may type a free-form value in the combo)
+            try
+            {
+                _ = new SecurityIdentifier(newSid);
+            }
+            catch
+            {
+                row.ErrorText = $"'{newSid}' is not a valid SID.";
+                continue;
+            }
+
             result.Add(new SidMigrationMapping(oldSid, newSid, name));
         }
 
@@ -269,6 +246,60 @@ public class SidMigrationMappingBuilder(
             select oldSid);
 
         return result;
+    }
+
+    private void OnMappingGridCellValueChanged(object? sender, DataGridViewCellEventArgs args)
+    {
+        if (args.RowIndex < 0)
+            return;
+        if (MappingGrid!.Columns[args.ColumnIndex].Name == "Action")
+        {
+            var action = MappingGrid.Rows[args.RowIndex].Cells["Action"].Value?.ToString();
+            MappingGrid.Rows[args.RowIndex].Cells["NewSid"].ReadOnly = action != "Migrate";
+        }
+    }
+
+    private void OnMappingGridCellPainting(object? sender, DataGridViewCellPaintingEventArgs e)
+        => AccountGridHelper.PaintSidCell(MappingGrid!, e, "OldSid");
+
+    private void OnMappingGridCellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+    {
+        if (e.RowIndex < 0 || MappingGrid!.Columns[e.ColumnIndex].Name != "NewSid")
+            return;
+        if (e.Value is string sid && _sidDisplayNames.TryGetValue(sid, out var display))
+        {
+            e.Value = display;
+            e.FormattingApplied = true;
+        }
+    }
+
+    private void OnMappingGridEditingControlShowing(object? sender, DataGridViewEditingControlShowingEventArgs e)
+    {
+        if (MappingGrid!.CurrentCell == null ||
+            MappingGrid.Columns[MappingGrid.CurrentCell.ColumnIndex].Name != "NewSid")
+            return;
+        if (e.Control is not ComboBox combo)
+            return;
+
+        combo.DropDownStyle = ComboBoxStyle.DropDown;
+        combo.Format -= OnNewSidComboFormat;
+        combo.Format += OnNewSidComboFormat;
+        combo.TextChanged -= OnNewSidComboTextChanged;
+        combo.TextChanged += OnNewSidComboTextChanged;
+        combo.Validating -= OnNewSidComboValidating;
+        combo.Validating += OnNewSidComboValidating;
+    }
+
+    private void OnMappingGridDataError(object? sender, DataGridViewDataErrorEventArgs e)
+    {
+        if (MappingGrid!.Columns[e.ColumnIndex].Name == "NewSid")
+            e.Cancel = true;
+    }
+
+    private void OnMappingGridCellEndEdit(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex >= 0)
+            MappingGrid!.Rows[e.RowIndex].ErrorText = "";
     }
 
     private void OnNewSidComboFormat(object? sender, ListControlConvertEventArgs e)

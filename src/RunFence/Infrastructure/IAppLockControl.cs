@@ -6,5 +6,5 @@ public interface IAppLockControl
     bool IsUnlockPolling { get; }
     void Lock();
     void Unlock();
-    bool TryUnlock(bool isAdmin);
+    Task<bool> TryUnlockAsync(bool isAdmin);
 }

@@ -10,17 +10,16 @@ namespace RunFence.Acl.UI.Forms;
 /// ACL Manager dialog — manages per-path allow/deny grants and traverse paths for
 /// a single account or AppContainer SID.
 /// </summary>
+/// <remarks>Deps above threshold: All 11 deps share one mutable <see cref="AclManagerPendingChanges"/> object for atomic-apply semantics. Extracting a subset would split the atomic state across classes, requiring a shared state holder that adds indirection without reducing coupling. Reviewed 2026-04-14.</remarks>
 public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclManagerDialogHost
 {
     private readonly ILoggingService _log;
     private readonly IAclPermissionService _aclPermission;
-    private readonly IInteractiveUserResolver _interactiveUserResolver;
     private readonly TraverseAutoManager _traverseAutoManager;
     private readonly AclManagerGrantsHelper _grantsHelper;
     private readonly AclManagerTraverseHelper _traverseHelper;
     private readonly AclManagerDragDropHandler _dragDropHandler;
     private readonly AclManagerActionOrchestrator _actionHandler;
-    private readonly GrantEntryNtfsOperations _ntfsOps;
     private readonly AclManagerApplyOrchestrator _applyHandler;
     private readonly AclManagerExportImport _exportImport;
     private readonly AclManagerSelectionHandler _selectionHandler;
@@ -35,13 +34,11 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     public AclManagerDialog(
         IAclPermissionService aclPermission,
         ILoggingService log,
-        IInteractiveUserResolver interactiveUserResolver,
         TraverseAutoManager traverseAutoManager,
         AclManagerGrantsHelper grantsHelper,
         AclManagerTraverseHelper traverseHelper,
         AclManagerDragDropHandler dragDropHandler,
         AclManagerActionOrchestrator actionHandler,
-        GrantEntryNtfsOperations ntfsOps,
         AclManagerApplyOrchestrator applyHandler,
         AclManagerExportImport exportImport,
         AclManagerSelectionHandler selectionHandler,
@@ -49,13 +46,11 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     {
         _aclPermission = aclPermission;
         _log = log;
-        _interactiveUserResolver = interactiveUserResolver;
         _traverseAutoManager = traverseAutoManager;
         _grantsHelper = grantsHelper;
         _traverseHelper = traverseHelper;
         _dragDropHandler = dragDropHandler;
         _actionHandler = actionHandler;
-        _ntfsOps = ntfsOps;
         _applyHandler = applyHandler;
         _exportImport = exportImport;
         _selectionHandler = selectionHandler;
@@ -74,25 +69,19 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         var groupSids = _aclPermission.ResolveAccountGroupSids(sid);
 
         _traverseAutoManager.Initialize(_pending, sid, groupSids);
-        _ntfsOps.Initialize(sid, groupSids);
 
         _grantsHelper.Initialize(
             _grantsGrid, sid, isContainer, groupSids,
             _pending, _grantsSortHelper);
 
         _traverseHelper.Initialize(
-            _traverseGrid, sid, _pending, isContainer, _traverseSortHelper);
+            _traverseGrid, sid, _pending, _traverseSortHelper);
 
         _dragDropHandler.Initialize(sid, _pending);
 
         _actionHandler.Initialize(sid, isContainer, this, _pending, this);
 
-        string? interactiveUserSid = null;
-        if (isContainer)
-            interactiveUserSid = _interactiveUserResolver.GetInteractiveUserSid();
-
-        _applyHandler.Initialize(
-            _pending, sid, isContainer, this, interactiveUserSid);
+        _applyHandler.Initialize(_pending, sid, isContainer, this);
 
         _exportImport.Initialize(_pending, sid, isContainer, this);
 
@@ -206,6 +195,10 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
             return;
         }
 
+        // Discard all pending changes without applying — DB entries retain their original committed
+        // state (they were never mutated; pending mode/rights changes live only in _pending).
+        _pending.Clear();
+
         base.OnFormClosing(e);
     }
 
@@ -252,7 +245,21 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     private void OnTraverseSelectionChanged(object? sender, EventArgs e) => _selectionHandler.HandleSelectionChanged();
     private void OnGrantsCellValueChanged(object? sender, DataGridViewCellEventArgs e) => _selectionHandler.HandleGrantsCellValueChanged(e);
     private void OnGrantsCurrentCellDirtyStateChanged(object? sender, EventArgs e) => _selectionHandler.HandleGrantsDirtyStateChanged();
-    private void OnScanFolderClick(object? sender, EventArgs e) => _modificationHandler.ScanFolder();
+    private async void OnScanFolderClick(object? sender, EventArgs e)
+    {
+        if (_pending.HasPendingChanges)
+        {
+            var result = MessageBox.Show(
+                "You have unapplied changes. Apply them first?",
+                "ACL Manager", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+            if (result == DialogResult.Cancel)
+                return;
+            if (!await ExecuteApplyAsync())
+                return;
+        }
+        _modificationHandler.ScanFolder();
+    }
+
     private void OnGrantsContextMenuOpening(object? sender, CancelEventArgs e) => _selectionHandler.HandleGrantsContextMenuOpening();
     private void OnTraverseContextMenuOpening(object? sender, CancelEventArgs e) => _selectionHandler.HandleTraverseContextMenuOpening();
     private void OnGridKeyDown(object? sender, KeyEventArgs e) => _selectionHandler.HandleGridKeyDown(e);
@@ -267,7 +274,9 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     private void OnUntrackTraverseClick(object? sender, EventArgs e) => _modificationHandler.UntrackTraverse();
     private void OnFixAclsClick(object? sender, EventArgs e) => _modificationHandler.FixAcls();
 
-    private async void OnApplyClick(object? sender, EventArgs e)
+    private async void OnApplyClick(object? sender, EventArgs e) => await ExecuteApplyAsync();
+
+    private async Task<bool> ExecuteApplyAsync()
     {
         try
         {
@@ -275,12 +284,14 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
                 enabled => _applyButton.Enabled = enabled,
                 enabled => Enabled = enabled,
                 RefreshGrids);
+            return true;
         }
         catch (Exception ex)
         {
             _log.Error("Unexpected error during Apply", ex);
             MessageBox.Show($"An unexpected error occurred during Apply: {ex.Message}",
                 "ACL Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
         }
     }
 
@@ -297,9 +308,19 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     private void OnOpenFolderTraverseClick(object? sender, EventArgs e) => _selectionHandler.OpenFolderTraverse();
     private void OnCopyPathTraverseClick(object? sender, EventArgs e) => _selectionHandler.CopyPathTraverse();
     private void OnPropertiesTraverseClick(object? sender, EventArgs e) => _selectionHandler.ShowPropertiesTraverse();
-    private void OnGrantsGridMouseDown(object? sender, MouseEventArgs e) => _modificationHandler.HandleGrantsMouseDown(e);
+    private void OnGrantsGridMouseDown(object? sender, MouseEventArgs e)
+    {
+        _selectionHandler.HandleGrantsRightClickDown(e);
+        _modificationHandler.HandleGrantsMouseDown(e);
+    }
+
     private void OnGrantsGridMouseMove(object? sender, MouseEventArgs e) => _modificationHandler.HandleGrantsMouseMove(e);
-    private void OnTraverseGridMouseDown(object? sender, MouseEventArgs e) => _modificationHandler.HandleTraverseMouseDown(e);
+
+    private void OnTraverseGridMouseDown(object? sender, MouseEventArgs e)
+    {
+        _selectionHandler.HandleTraverseRightClickDown(e);
+        _modificationHandler.HandleTraverseMouseDown(e);
+    }
     private void OnTraverseGridMouseMove(object? sender, MouseEventArgs e) => _modificationHandler.HandleTraverseMouseMove(e);
     private void OnGrantsGridMouseUp(object? sender, MouseEventArgs e) => _modificationHandler.HandleGrantsMouseUp(e);
     private void OnTraverseGridMouseUp(object? sender, MouseEventArgs e) => _modificationHandler.HandleTraverseMouseUp(e);

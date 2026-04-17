@@ -18,8 +18,8 @@ partial class RunAsDialog
     private ListBox _credentialListBox;
     private CheckBox _updateShortcutCheckBox;
     private CheckBox _showAllAccountsCheckBox;
-    private CheckBox _lowIlCheckBox;
-    private CheckBox _splitTokenCheckBox;
+    private Label _privilegeLevelLabel;
+    private ComboBox _privilegeLevelComboBox;
     private Button _revertButton;
     private Button _launchButton;
     private Button _addAppButton;
@@ -30,7 +30,10 @@ partial class RunAsDialog
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
+            _toolTip?.Dispose();
             components?.Dispose();
+        }
         base.Dispose(disposing);
     }
 
@@ -46,8 +49,8 @@ partial class RunAsDialog
         _credentialListBox = new ListBox();
         _updateShortcutCheckBox = new CheckBox();
         _showAllAccountsCheckBox = new CheckBox();
-        _lowIlCheckBox = new CheckBox();
-        _splitTokenCheckBox = new CheckBox();
+        _privilegeLevelLabel = new Label();
+        _privilegeLevelComboBox = new ComboBox();
         _revertButton = new Button();
         _launchButton = new Button();
         _addAppButton = new Button();
@@ -63,7 +66,7 @@ partial class RunAsDialog
         {
             _pathHeaderLabel, _pathLabel, _shortcutLabel,
             _argsLabel, _argsTextBox, _credLabel, _credentialListBox,
-            _updateShortcutCheckBox, _showAllAccountsCheckBox, _lowIlCheckBox, _splitTokenCheckBox,
+            _updateShortcutCheckBox, _showAllAccountsCheckBox, _privilegeLevelLabel, _privilegeLevelComboBox,
             _revertButton, _launchButton, _addAppButton, _cancelButton
         });
 
@@ -121,17 +124,16 @@ partial class RunAsDialog
         _showAllAccountsCheckBox.Visible = false;
         _showAllAccountsCheckBox.CheckedChanged += OnShowAllAccountsChanged;
 
-        // _lowIlCheckBox
-        _lowIlCheckBox.Text = "Launch as low integrity level";
-        _lowIlCheckBox.AutoSize = true;
-        _lowIlCheckBox.Checked = false;
-        _lowIlCheckBox.Location = new Point(15, 295);
+        // _privilegeLevelLabel (position set in code)
+        _privilegeLevelLabel.Text = "Privilege level:";
+        _privilegeLevelLabel.AutoSize = true;
+        _privilegeLevelLabel.Location = new Point(15, 300);
 
-        // _splitTokenCheckBox (position set in code)
-        _splitTokenCheckBox.Text = "De-elevate";
-        _splitTokenCheckBox.AutoSize = true;
-        _splitTokenCheckBox.Checked = false;
-        _splitTokenCheckBox.Location = new Point(15, 320);
+        // _privilegeLevelComboBox (position set in code)
+        _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        _privilegeLevelComboBox.Size = new Size(200, 23);
+        _privilegeLevelComboBox.Location = new Point(265, 295);
+        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Basic", "Low Integrity" });
 
         // _revertButton (shown when shortcutContext.IsAlreadyManaged && ManagedApp != null)
         _revertButton.Text = "Revert Shortcut";
@@ -165,6 +167,8 @@ partial class RunAsDialog
         _cancelButton.Click += OnCancelClick;
 
         // RunAsDialog
+        AutoScaleDimensions = new SizeF(7F, 15F);
+        AutoScaleMode = AutoScaleMode.Font;
         Text = "RunFence";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;

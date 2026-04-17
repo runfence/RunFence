@@ -1,5 +1,6 @@
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 
 namespace RunFence.Acl.UI.Forms;
 
@@ -7,15 +8,8 @@ namespace RunFence.Acl.UI.Forms;
 /// Validates ACL configuration settings and detects path conflicts between apps.
 /// Extracted from <see cref="AclConfigSection"/> to keep the section focused on UI.
 /// </summary>
-public class AclConfigValidator
+public class AclConfigValidator(IAclService aclService, ILoggingService log)
 {
-    private readonly IAclService _aclService;
-
-    public AclConfigValidator(IAclService aclService)
-    {
-        _aclService = aclService;
-    }
-
     /// <summary>
     /// Validates ACL settings for the given path and mode. Returns an error message or null if valid.
     /// </summary>
@@ -25,11 +19,11 @@ public class AclConfigValidator
         if (!restrictAcl || PathHelper.IsUrlScheme(exePath))
             return null;
 
-        var targetPath = _aclService.ResolveAclTargetPath(new AppEntry
+        var targetPath = aclService.ResolveAclTargetPath(new AppEntry
         {
             ExePath = exePath, IsFolder = isFolder, AclTarget = aclTarget, FolderAclDepth = depth
         });
-        if (_aclService.IsBlockedPath(targetPath))
+        if (aclService.IsBlockedPath(targetPath))
             return $"Cannot restrict access on: {targetPath}";
 
         var conflict = checkPathConflict();
@@ -55,13 +49,14 @@ public class AclConfigValidator
         string targetPath;
         try
         {
-            targetPath = _aclService.ResolveAclTargetPath(new AppEntry
+            targetPath = aclService.ResolveAclTargetPath(new AppEntry
             {
                 ExePath = exePath, IsFolder = isFolder, AclTarget = aclTarget, FolderAclDepth = depth
             });
         }
-        catch
+        catch (Exception ex)
         {
+            log.Debug($"CheckPathConflict: failed to resolve target path for '{exePath}': {ex.Message}");
             return null;
         }
 
@@ -77,10 +72,11 @@ public class AclConfigValidator
             string otherTarget;
             try
             {
-                otherTarget = _aclService.ResolveAclTargetPath(other);
+                otherTarget = aclService.ResolveAclTargetPath(other);
             }
-            catch
+            catch (Exception ex)
             {
+                log.Debug($"CheckPathConflict: failed to resolve target path for app '{other.Name}': {ex.Message}");
                 continue;
             }
 

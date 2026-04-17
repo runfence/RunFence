@@ -1,8 +1,8 @@
 namespace PrefTrans.Services;
 
-public static class UserProfileFilter
+public class UserProfileFilter : IUserProfileFilter
 {
-    public static string[] GetUserProfilePaths()
+    public string[] GetUserProfilePaths()
     {
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (string.IsNullOrEmpty(userProfile))
@@ -16,7 +16,7 @@ public static class UserProfileFilter
         return [userProfile, systemDriveVariant];
     }
 
-    public static bool ContainsUserProfilePath(string? value, string[] profilePaths)
+    public bool ContainsUserProfilePath(string? value, string[] profilePaths)
     {
         if (string.IsNullOrEmpty(value) || profilePaths.Length == 0)
             return false;
@@ -50,7 +50,7 @@ public static class UserProfileFilter
     // C:\Program Files\WindowsApps\ is owned by TrustedInstaller and cannot be
     // executed by arbitrary user accounts. Per-user execution aliases under
     // %LOCALAPPDATA%\Microsoft\WindowsApps\ are already caught by ContainsUserProfilePath.
-    public static bool ContainsWindowsAppsPath(string? value)
+    public bool ContainsWindowsAppsPath(string? value)
     {
         if (string.IsNullOrEmpty(value))
             return false;
@@ -61,7 +61,7 @@ public static class UserProfileFilter
     // AppX<hex> ProgIds are system-hashed package identities; AUMIDs use the
     // PackageFamilyName!AppId format with '!' as the separator. Both are
     // user-specific package registrations that cannot be transferred between accounts.
-    public static bool IsUwpProgId(string? progId)
+    public bool IsUwpProgId(string? progId)
     {
         if (string.IsNullOrEmpty(progId))
             return false;

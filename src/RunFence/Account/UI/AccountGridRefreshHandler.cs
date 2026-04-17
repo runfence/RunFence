@@ -11,11 +11,12 @@ namespace RunFence.Account.UI;
 /// </summary>
 public class AccountGridRefreshHandler(
     IAccountSidResolutionService sidResolution,
-    IAccountCredentialManager credentialManager,
+    SessionPersistenceHelper persistenceHelper,
     ILoggingService log,
     AccountGridPopulator gridPopulator,
     ISessionProvider sessionProvider,
-    GrantReconciliationService reconciler)
+    GrantReconciliationService reconciler,
+    ReconciliationGuard reconciliationGuard)
 {
     private DataGridView _grid = null!;
     private IGridSortState _sortState = null!;
@@ -51,7 +52,7 @@ public class AccountGridRefreshHandler(
 
             var session = sessionProvider.GetSession();
             var db = session.Database;
-            credentialManager.ApplyStaleNameUpdates(resolutions, db, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
+            persistenceHelper.ApplyStaleNameUpdates(resolutions, db, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
 
             foreach (var kvp in resolutions)
                 session.SidNameCache[kvp.Key] = kvp.Value;
@@ -81,11 +82,23 @@ public class AccountGridRefreshHandler(
         var cts = new CancellationTokenSource();
         _refreshCts = cts;
 
-        // Reconcile group membership changes synchronously before populating the grid.
-        // If the timer already reconciled, this is a no-op (snapshot already updated).
+        // Reconcile group membership changes before populating the grid.
+        // If the timer is already reconciling, skip to avoid concurrent reconciliation.
+        // If the timer already reconciled, ReconcileIfGroupsChanged is a no-op (snapshot already updated).
         var session = sessionProvider.GetSession();
         var db = session.Database;
-        await reconciler.ReconcileIfGroupsChanged();
+        if (!reconciliationGuard.IsInProgress)
+        {
+            reconciliationGuard.IsInProgress = true;
+            try
+            {
+                await reconciler.ReconcileIfGroupsChanged();
+            }
+            finally
+            {
+                reconciliationGuard.IsInProgress = false;
+            }
+        }
 
         Dictionary<string, string?> sidResolutions;
         try
@@ -110,7 +123,7 @@ public class AccountGridRefreshHandler(
                 return;
         }
 
-        credentialManager.ApplyStaleNameUpdates(sidResolutions, db, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
+        persistenceHelper.ApplyStaleNameUpdates(sidResolutions, db, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
 
         var displayNameCache = BuildDisplayNameCache(sidResolutions);
         PopulateGrid(displayNameCache, sidResolutions);

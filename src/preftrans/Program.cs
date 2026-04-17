@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PrefTrans.Services;
+using PrefTrans.Services.IO;
 using PrefTrans.Settings;
 
 namespace PrefTrans;
@@ -30,11 +31,12 @@ public static class Program
             var command = args[0].ToLowerInvariant();
             try
             {
+                var (reader, writer) = CreateServices();
                 return command switch
                 {
-                    "store" => Store(args.Length > 1 ? args[1] : "user-settings.json"),
-                    "load" => Load(args.Length > 1 ? args[1] : "user-settings.json"),
-                    "show" => Show(),
+                    "store" => Store(reader, args.Length > 1 ? args[1] : "user-settings.json"),
+                    "load" => Load(writer, args.Length > 1 ? args[1] : "user-settings.json"),
+                    "show" => Show(reader),
                     _ => PrintUsage(),
                 };
             }
@@ -50,8 +52,45 @@ public static class Program
         }
     }
 
+    private static (ISettingsReader reader, ISettingsWriter writer) CreateServices()
+    {
+        var safe = new SafeExecutor();
+        var broadcast = new BroadcastHelper();
+        var userProfileFilter = new UserProfileFilter();
+
+        var mouse = new MouseSettingsIO(safe, broadcast);
+        var keyboard = new KeyboardSettingsIO(safe, broadcast);
+        var scroll = new ScrollSettingsIO(safe, broadcast);
+        var explorer = new ExplorerSettingsIO(safe, broadcast);
+        var desktop = new DesktopSettingsIO(safe, broadcast);
+        var taskbar = new TaskbarSettingsIO(safe, broadcast, userProfileFilter);
+        var theme = new ThemeSettingsIO(safe, broadcast);
+        var screenSaver = new ScreenSaverSettingsIO(safe, broadcast);
+        var inputLanguage = new InputLanguageSettingsIO(safe, broadcast);
+        var accessibility = new AccessibilitySettingsIO(safe, broadcast);
+        var regional = new RegionalSettingsIO(safe, broadcast);
+        var trayIcons = new TrayIconsSettingsIO(safe, broadcast);
+        var notifications = new NotificationsSettingsIO(safe, broadcast);
+        var userFolders = new UserFoldersSettingsIO(safe, broadcast, userProfileFilter);
+        var environment = new EnvironmentSettingsIO(safe, broadcast);
+        var fileAssociations = new FileAssociationsSettingsIO(safe);
+        var nightLight = new NightLightSettingsIO(safe);
+        var settingsFilter = new SettingsFilter(userProfileFilter);
+
+        ISettingsIO[] allIO = [mouse, keyboard, scroll, explorer, desktop, taskbar, theme,
+            screenSaver, inputLanguage, accessibility, regional, trayIcons,
+            notifications, userFolders, environment, fileAssociations, nightLight];
+        var reader = new SettingsReader(allIO, settingsFilter);
+        var writer = new SettingsWriter(allIO);
+
+        return (reader, writer);
+    }
+
     /// <summary>
-    /// Strips --logfile &lt;path&gt; from args and redirects Console.Error to that file.
+    /// Strips --logfile &lt;path&gt; from args and redirects console output to that file.
+    /// Console.SetError always redirects (warnings/errors go to log for all commands).
+    /// Console.SetOut only redirects for non-'show' commands — 'show' pipes JSON to stdout,
+    /// so redirecting stdout would break callers that consume the JSON output.
     /// Returns the filtered args and the opened writer (null if not specified or on open failure).
     /// </summary>
     private static (string[] args, TextWriter? writer) ExtractLogFile(string[] args)
@@ -66,11 +105,15 @@ public static class Program
             try
             {
                 var writer = new StreamWriter(path, append: false) { AutoFlush = true };
+                var command = filteredArgs.Length > 0 ? filteredArgs[0].ToLowerInvariant() : "";
+                if (command != "show")
+                    Console.SetOut(writer);
                 Console.SetError(writer);
                 return (filteredArgs, writer);
             }
-            catch
+            catch (Exception ex)
             {
+                Console.Error.WriteLine($"Warning: Unable to open log file: {ex.Message}");
                 return (filteredArgs, null);
             }
         }
@@ -78,9 +121,9 @@ public static class Program
         return (args, null);
     }
 
-    private static int Store(string filename)
+    private static int Store(ISettingsReader reader, string filename)
     {
-        var settings = SettingsReader.ReadAll();
+        var settings = reader.ReadAll();
         var json = JsonSerializer.Serialize(settings, JsonOptions);
         var tempFile = filename + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -98,7 +141,7 @@ public static class Program
         return 0;
     }
 
-    private static int Load(string filename)
+    private static int Load(ISettingsWriter writer, string filename)
     {
         if (!File.Exists(filename))
         {
@@ -114,14 +157,14 @@ public static class Program
             return 1;
         }
 
-        SettingsWriter.WriteAll(settings);
+        writer.WriteAll(settings);
         Console.Error.WriteLine($"Settings applied from {filename}");
         return 0;
     }
 
-    private static int Show()
+    private static int Show(ISettingsReader reader)
     {
-        var settings = SettingsReader.ReadAll();
+        var settings = reader.ReadAll();
         var json = JsonSerializer.Serialize(settings, JsonOptions);
         Console.WriteLine(json);
         return 0;

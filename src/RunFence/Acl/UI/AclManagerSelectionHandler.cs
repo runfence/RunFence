@@ -13,12 +13,14 @@ public class AclManagerSelectionHandler(
     AclManagerGrantsHelper grantsHelper,
     AclManagerTraverseHelper traverseHelper,
     AclManagerActionOrchestrator actionHandler,
-    AclManagerApplyOrchestrator applyHandler)
+    AclManagerApplyOrchestrator applyHandler,
+    ShellHelper shellHelper)
 {
     private readonly AclManagerGrantsHelper _grantsHelper = grantsHelper;
     private readonly AclManagerTraverseHelper _traverseHelper = traverseHelper;
     private readonly AclManagerActionOrchestrator _actionHandler = actionHandler;
     private readonly AclManagerApplyOrchestrator _applyHandler = applyHandler;
+    private readonly ShellHelper _shellHelper = shellHelper;
     private IWin32Window _owner = null!;
     private bool _isContainer;
     private AclManagerPendingChanges _pending = null!;
@@ -200,6 +202,31 @@ public class AclManagerSelectionHandler(
         e.SuppressKeyPress = true;
     }
 
+    public void HandleGrantsRightClickDown(MouseEventArgs e)
+        => HandleRightClickDown(e, _controls.GrantsGrid);
+
+    public void HandleTraverseRightClickDown(MouseEventArgs e)
+        => HandleRightClickDown(e, _controls.TraverseGrid);
+
+    private static void HandleRightClickDown(MouseEventArgs e, DataGridView grid)
+    {
+        if (e.Button != MouseButtons.Right) return;
+        var hit = grid.HitTest(e.X, e.Y);
+        if (hit.RowIndex >= 0)
+        {
+            var row = grid.Rows[hit.RowIndex];
+            if (!row.Selected)
+            {
+                grid.ClearSelection();
+                row.Selected = true;
+            }
+        }
+        else
+        {
+            grid.ClearSelection();
+        }
+    }
+
     public void HandleGrantsMouseClick(MouseEventArgs e)
         => OnGridMouseClick(e, _controls.GrantsGrid);
 
@@ -208,23 +235,8 @@ public class AclManagerSelectionHandler(
 
     private static void OnGridMouseClick(MouseEventArgs e, DataGridView grid)
     {
-        var hit = grid.HitTest(e.X, e.Y);
-        if (e.Button == MouseButtons.Right)
-        {
-            if (hit.RowIndex >= 0)
-            {
-                var row = grid.Rows[hit.RowIndex];
-                if (!row.Selected)
-                {
-                    grid.ClearSelection();
-                    row.Selected = true;
-                }
-            }
-        }
-        else if (e.Button == MouseButtons.Left && hit.Type == DataGridViewHitTestType.None)
-        {
+        if (e.Button == MouseButtons.Left && grid.HitTest(e.X, e.Y).Type == DataGridViewHitTestType.None)
             grid.ClearSelection();
-        }
     }
 
     // --- Path helpers for context menu ---
@@ -243,20 +255,20 @@ public class AclManagerSelectionHandler(
     }
 
     public void OpenFolderGrants()
-        => AclManagerActionOrchestrator.OpenInExplorer(GetSelectedGrantPath()!);
+        => _actionHandler.OpenInExplorer(GetSelectedGrantPath()!);
 
     public void CopyPathGrants()
         => Clipboard.SetText(GetSelectedGrantPath()!);
 
     public void ShowPropertiesGrants()
-        => ShellHelper.ShowProperties(GetSelectedGrantPath()!, _owner);
+        => _shellHelper.ShowProperties(GetSelectedGrantPath()!, _owner);
 
     public void OpenFolderTraverse()
-        => AclManagerActionOrchestrator.OpenInExplorer(GetSelectedTraversePath()!);
+        => _actionHandler.OpenInExplorer(GetSelectedTraversePath()!);
 
     public void CopyPathTraverse()
         => Clipboard.SetText(GetSelectedTraversePath()!);
 
     public void ShowPropertiesTraverse()
-        => ShellHelper.ShowProperties(GetSelectedTraversePath()!, _owner);
+        => _shellHelper.ShowProperties(GetSelectedTraversePath()!, _owner);
 }

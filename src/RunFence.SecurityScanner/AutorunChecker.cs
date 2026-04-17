@@ -5,12 +5,16 @@ namespace RunFence.SecurityScanner;
 
 public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper aclCheck)
 {
-    public void CheckAutorunExecutables(HashSet<string> adminSids,
-        string? interactiveUserSid, Dictionary<string, string> userProfilePaths,
-        AutorunContext autorun, HashSet<string> autorunLocationPaths,
-        HashSet<string> insecureContainers, List<StartupSecurityFinding> findings,
-        HashSet<(string, string)> seen)
+    public void CheckAutorunExecutables(ScanContext ctx, Dictionary<string, string> userProfilePaths)
     {
+        var adminSids = ctx.AdminSids;
+        var interactiveUserSid = ctx.InteractiveUserSid;
+        var autorun = ctx.Autorun;
+        var autorunLocationPaths = ctx.AutorunLocationPaths;
+        var insecureContainers = ctx.InsecureContainers;
+        var findings = ctx.Findings;
+        var seen = ctx.Seen;
+
         foreach (var rawExePath in autorun.Paths)
         {
             try

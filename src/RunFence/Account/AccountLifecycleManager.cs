@@ -7,7 +7,8 @@ namespace RunFence.Account;
 
 public class AccountLifecycleManager(
     IWindowsAccountService windowsAccountService,
-    IAccountRestrictionService accountRestriction,
+    IAccountLoginRestrictionService loginRestriction,
+    IAccountLsaRestrictionService lsaRestriction,
     IOrphanedProfileService orphanedProfileService,
     IOrphanedAclCleanupService aclCleanupService,
     ILoggingService log,
@@ -32,7 +33,7 @@ public class AccountLifecycleManager(
 
         try
         {
-            accountValidation.ValidateNotLastAdmin(sid, "delete");
+            await Task.Run(() => accountValidation.ValidateNotLastAdmin(sid, "delete"));
         }
         catch (InvalidOperationException ex)
         {
@@ -61,7 +62,7 @@ public class AccountLifecycleManager(
     {
         try
         {
-            accountRestriction.SetAccountHidden(username, sid, false);
+            loginRestriction.SetAccountHidden(username, sid, false);
         }
         catch
         {
@@ -69,7 +70,7 @@ public class AccountLifecycleManager(
 
         try
         {
-            accountRestriction.SetLocalOnlyBySid(sid, false);
+            lsaRestriction.SetLocalOnlyBySid(sid, false);
         }
         catch
         {
@@ -77,7 +78,7 @@ public class AccountLifecycleManager(
 
         try
         {
-            accountRestriction.SetLoginBlockedBySid(sid, username, false);
+            loginRestriction.SetLoginBlockedBySid(sid, username, false);
         }
         catch
         {
@@ -85,7 +86,7 @@ public class AccountLifecycleManager(
 
         try
         {
-            accountRestriction.SetNoBgAutostartBySid(sid, false);
+            lsaRestriction.SetNoBgAutostartBySid(sid, false);
         }
         catch
         {

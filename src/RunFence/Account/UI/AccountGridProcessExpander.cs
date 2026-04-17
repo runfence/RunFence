@@ -193,8 +193,11 @@ public class AccountGridProcessExpander(IProcessListService processListService)
     private static void RemoveProcessRowsBelow(DataGridView grid, DataGridViewRow parentRow)
     {
         int index = parentRow.Index + 1;
-        while (index < grid.Rows.Count && grid.Rows[index].Tag is ProcessRow)
+        while (index < grid.Rows.Count && grid.Rows[index].Tag is ProcessRow pr)
+        {
+            pr.Process.Dispose();
             grid.Rows.RemoveAt(index);
+        }
     }
 
     private static void ConfigureProcessRow(DataGridViewRow row, ProcessInfo process, string ownerSid, bool isLast, int pidColumnChars)
@@ -223,6 +226,7 @@ public class AccountGridProcessExpander(IProcessListService processListService)
     {
         if (row.Tag is not ProcessRow pr)
             return;
+        pr.Process.Dispose();
         var displayLine = FormatDisplayLine(process);
         row.Tag = new ProcessRow(process, pr.OwnerSid, isLast, displayLine, pr.PidColumnChars);
         row.Cells["Account"].Value = "";

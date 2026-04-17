@@ -17,18 +17,18 @@ public sealed class WindowSecurityService : IDisposable
     private const int ObjidWindow = 0;
 
     // ReSharper disable once PrivateFieldCanBeConvertedToLocalVariable
-    private readonly NativeInterop.WinEventDelegate _delegate;
+    private readonly WindowNative.WinEventDelegate _delegate;
     private readonly IntPtr _hook;
 
     public WindowSecurityService()
     {
         _delegate = OnObjectCreate; // keep delegate alive for the lifetime of the hook
         uint pid = (uint)Environment.ProcessId;
-        _hook = NativeInterop.SetWinEventHook(
+        _hook = WindowNative.SetWinEventHook(
             EventObjectCreate, EventObjectCreate,
             IntPtr.Zero, _delegate,
             pid, 0,
-            NativeInterop.WinEventOutOfContext);
+            WindowNative.WinEventOutOfContext);
     }
 
     private static void OnObjectCreate(IntPtr hook, uint eventType, IntPtr hwnd,
@@ -36,14 +36,14 @@ public sealed class WindowSecurityService : IDisposable
     {
         if (hwnd == IntPtr.Zero || idObject != ObjidWindow || idChild != 0)
             return;
-        NativeMethods.ChangeWindowMessageFilterEx(hwnd, NativeMethods.WM_GETOBJECT,
-            NativeMethods.MSGFLT_DISALLOW, IntPtr.Zero);
-        NativeMethods.AllowDropFromLowIL(hwnd);
+        WindowNative.ChangeWindowMessageFilterEx(hwnd, WindowNative.WM_GETOBJECT,
+            WindowNative.MSGFLT_DISALLOW, IntPtr.Zero);
+        WindowNative.AllowDropFromLowIL(hwnd);
     }
 
     public void Dispose()
     {
         if (_hook != IntPtr.Zero)
-            NativeInterop.UnhookWinEvent(_hook);
+            WindowNative.UnhookWinEvent(_hook);
     }
 }

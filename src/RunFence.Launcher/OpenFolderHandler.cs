@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Security.Principal;
 using Microsoft.Win32;
 using RunFence.Core;
@@ -150,18 +149,10 @@ public static class OpenFolderHandler
             Registry.CurrentUser.DeleteSubKeyTree(
                 @"Software\Classes\CLSID\{9BA05972-F6A8-11CF-A442-00A0C90A8F39}",
                 throwOnMissingSubKey: false);
-            SHChangeNotify(ShcneAssocChanged, ShcnfIdlist, IntPtr.Zero, IntPtr.Zero);
+            OpenFolderNative.SHChangeNotify(OpenFolderNative.SHCNE_ASSOCCHANGED, OpenFolderNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
         }
         catch
         {
         }
     }
-
-    // ── P/Invoke ──────────────────────────────────────────────────────────────
-
-    private const int ShcneAssocChanged = 0x08000000;
-    private const int ShcnfIdlist = 0x0000;
-
-    [DllImport("shell32.dll")]
-    private static extern void SHChangeNotify(int wEventId, int uFlags, IntPtr dwItem1, IntPtr dwItem2);
 }

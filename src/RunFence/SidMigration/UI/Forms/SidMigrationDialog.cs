@@ -6,6 +6,7 @@ using RunFence.Infrastructure;
 
 namespace RunFence.SidMigration.UI.Forms;
 
+/// <remarks>Deps above threshold: 7 wizard steps share mutable state (<c>_rootPaths</c>, <c>_mappings</c>, <c>_sidsToDelete</c>, <c>_orphanedSids</c>, <c>_scanResults</c>, <c>_applyResult</c>) that flows step→step. Extracting steps into classes requires passing all shared state as parameters or a shared context object, creating the same coupling through a different mechanism. Each step is only 11-40 lines — too small to justify a separate class. Reviewed 2026-04-08.</remarks>
 public partial class SidMigrationDialog : Form
 {
     private readonly SessionContext _session;
@@ -30,7 +31,6 @@ public partial class SidMigrationDialog : Form
     private List<OrphanedSid> _orphanedSids = new();
     private List<SidMigrationMatch> _scanResults = new();
     private (long applied, long errors) _applyResult;
-    private bool _skippedDiscovery;
 
     public bool InAppMigrationApplied { get; private set; }
 
@@ -154,8 +154,8 @@ public partial class SidMigrationDialog : Form
     private void ShowStep1_PathSelection()
     {
         var returningFromManual = _mappings.Count > 0;
-        _stepTitleLabel.Text = returningFromManual || _skippedDiscovery
-            ? "Select Paths to Scan"
+        _stepTitleLabel.Text = returningFromManual
+            ? "Step 1: Select Paths to Re-scan"
             : "Step 1: Select Paths to Scan";
         _nextButton.Text = returningFromManual ? "Start Scan" : "Discover";
 
@@ -171,7 +171,6 @@ public partial class SidMigrationDialog : Form
         {
             _rootPaths = _pathStep.CollectSelectedPaths();
             _savedPathState = _pathStep.SavedState;
-            _skippedDiscovery = true;
             ShowStep(3);
         };
 
@@ -191,7 +190,6 @@ public partial class SidMigrationDialog : Form
     private void ShowStep2_DiscoveryScan()
     {
         _stepTitleLabel.Text = "Step 2: Discovering Orphaned SIDs";
-        _skippedDiscovery = false;
 
         var (progressBar, statusLabel, ct) = BeginProgressStep();
         var progress = new Progress<(long scanned, long sidsFound)>(p =>
@@ -302,8 +300,10 @@ public partial class SidMigrationDialog : Form
 
         var pathLabel = new Label
         {
-            Location = new Point(15, 95),
-            Size = new Size(560, 25),
+            Dock = DockStyle.Top,
+            Padding = new Padding(12, 4, 12, 0),
+            AutoSize = false,
+            Height = 22,
             ForeColor = Color.DarkGray,
             Font = new Font(Font.FontFamily, 8f)
         };
@@ -468,6 +468,12 @@ public partial class SidMigrationDialog : Form
             e.Cancel = true;
             if (_operationGuard.IsInProgress)
                 _cts?.Cancel();
+            else
+                MessageBox.Show(
+                    "Step 7 (In-App Migration) must be completed before closing.\n\n" +
+                    "Click \"Next\" to proceed to the in-app migration step, which updates RunFence's " +
+                    "internal data to match the disk changes applied in this step.",
+                    "Cannot Close", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 

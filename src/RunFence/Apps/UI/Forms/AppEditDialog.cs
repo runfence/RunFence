@@ -2,7 +2,8 @@ using RunFence.Account.UI;
 using RunFence.Account.UI.AppContainer;
 using RunFence.Acl.UI;
 using RunFence.Acl.UI.Forms;
-using RunFence.Apps.Shortcuts;
+using RunFence.Apps;
+using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -12,21 +13,6 @@ using RunFence.UI;
 using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI.Forms;
-
-/// <summary>
-/// Optional initial values for a new app entry — used when opening the dialog from an account
-/// or from the RunAs flow with pre-populated fields.
-/// </summary>
-public record AppEditDialogOptions(
-    string? ConfigPath = null,
-    string? ExePath = null,
-    string? AccountSid = null,
-    string? ContainerName = null,
-    bool RestrictAcl = false,
-    bool ManageShortcuts = false,
-    bool? LaunchAsLowIl = null,
-    bool? RunAsSplitToken = null,
-    bool LaunchNow = false);
 
 public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContextProvider
 {
@@ -40,8 +26,9 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
     private IReadOnlyDictionary<string, string>? _sidNames;
     private AppDatabase? _database;
 
-    private readonly IShortcutDiscoveryService _shortcutService;
     private readonly IAppConfigService _appConfigService;
+    private readonly IExeAssociationRegistryReader _reader;
+    private readonly IAppEntryIdGenerator _idGenerator;
 
     private readonly AclConfigSection _aclSection;
     private IpcCallerSection _ipcSection = null!;
@@ -53,6 +40,7 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
     private readonly AppEditAssociationHandler _associationHandler;
     private readonly AppEditPopulator _populator;
     private readonly AppEditDialogPopulator _appEditDialogPopulator;
+    private readonly Func<IpcCallerSection> _ipcCallerSectionFactory;
 
     public AppEntry Result { get; private set; } = null!;
     public bool ResultReady { get; private set; }
@@ -95,8 +83,8 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
     bool IAppEditDialogState.IsFolder => _isFolder;
     object? IAppEditDialogState.SelectedAccountItem => _accountComboBox.SelectedItem;
     bool IAppEditDialogState.ManageShortcuts => _manageShortcutsCheckBox.Checked;
-    CheckState IAppEditDialogState.LaunchAsLowIlCheckState => _launchAsLowIlCheckBox.CheckState;
-    CheckState IAppEditDialogState.SplitTokenCheckState => _splitTokenCheckBox.CheckState;
+    PrivilegeLevel? IAppEditDialogState.SelectedPrivilegeLevel =>
+        PrivilegeLevelComboHelper.IndexToMode(_privilegeLevelComboBox.SelectedIndex);
     bool IAppEditDialogState.OverrideIpcCallers => _overrideIpcCallersCheckBox.Checked;
     string IAppEditDialogState.DefaultArgsText => _defaultArgsTextBox.Text;
     bool IAppEditDialogState.AllowPassArgs => _allowPassArgsCheckBox.Checked;
@@ -113,37 +101,30 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
     public event Action? ApplyRequested;
     public event Action? RemoveRequested;
 
-    private readonly ILocalUserProvider _localUserProvider;
-
-    private readonly ISidEntryHelper _sidEntryHelper;
-    private readonly SidDisplayNameResolver _displayNameResolver;
-
     public AppEditDialog(
-        IShortcutDiscoveryService shortcutService,
         IAppConfigService appConfigService,
-        ILocalUserProvider localUserProvider,
         AclConfigSection aclSection,
         AppEditBrowseHelper browseHelper,
         AppEditAssociationHandler associationHandler,
         AppEditAccountSwitchHandler switchHandler,
         AppEditDialogController controller,
         AppEditPopulator populator,
-        ISidEntryHelper sidEntryHelper,
-        SidDisplayNameResolver displayNameResolver,
-        AppEditDialogPopulator appEditDialogPopulator)
+        AppEditDialogPopulator appEditDialogPopulator,
+        Func<IpcCallerSection> ipcCallerSectionFactory,
+        IExeAssociationRegistryReader reader,
+        IAppEntryIdGenerator idGenerator)
     {
-        _shortcutService = shortcutService;
         _appConfigService = appConfigService;
-        _localUserProvider = localUserProvider;
         _aclSection = aclSection;
         _browseHelper = browseHelper;
         _associationHandler = associationHandler;
         _switchHandler = switchHandler;
         _controller = controller;
         _populator = populator;
-        _sidEntryHelper = sidEntryHelper;
-        _displayNameResolver = displayNameResolver;
         _appEditDialogPopulator = appEditDialogPopulator;
+        _ipcCallerSectionFactory = ipcCallerSectionFactory;
+        _reader = reader;
+        _idGenerator = idGenerator;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
     }
@@ -167,10 +148,10 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _sidNames = sidNames;
         _database = database;
 
-        _ipcSection = new IpcCallerSection(() => _localUserProvider.GetLocalUserAccounts(), _sidEntryHelper, _displayNameResolver);
+        _ipcSection = _ipcCallerSectionFactory();
         _ipcSection.SetSidNames(sidNames, database != null ? (sid, name) => database.UpdateSidName(sid, name) : null);
 
-        _switchHandler.Initialize(_launchAsLowIlCheckBox, _splitTokenCheckBox, _aclSection);
+        _switchHandler.Initialize(_privilegeLevelComboBox, _aclSection);
         _controller.Initialize(_switchHandler);
 
         // Add IpcCallerSection to its container (in Access tab — fixed position above AclSection)
@@ -193,6 +174,18 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _associationsSection.Dock = DockStyle.Fill;
         _tabAssociations.Controls.Add(_associationsSection);
         _associationsSection.Changed += OnAssociationsSectionChanged;
+        _associationsSection.RegistrySuggestionFactory =
+            () => _reader.GetHandledAssociations(_filePathTextBox.Text.Trim());
+        _associationsSection.RegistryTemplateLoader =
+            key => _reader.GetNonDefaultArguments(_filePathTextBox.Text.Trim(), key);
+
+        // Populate privilege level combobox before account combo (switch handler reads it on selection change)
+        _privilegeLevelComboBox.Items.Clear();
+        _privilegeLevelComboBox.Items.Add("(Account default)");
+        _privilegeLevelComboBox.Items.Add("Highest Allowed");
+        _privilegeLevelComboBox.Items.Add("Basic");
+        _privilegeLevelComboBox.Items.Add("Low Integrity");
+        _privilegeLevelComboBox.SelectedIndex = 0;
 
         // Populate account combo with credentials and AppContainer items
         _appEditDialogPopulator.PopulateAccountCombo(_accountComboBox, _credentials, _sidNames, _existing, database);
@@ -207,12 +200,10 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _appEditDialogPopulator.PopulateConfigCombo(_configComboBox);
         _hasLoadedConfigs = _appConfigService.HasLoadedConfigs;
         _configComboBox.Enabled = _hasLoadedConfigs;
-        if (!_hasLoadedConfigs)
-            _configToolTip = new ToolTip();
-        _configToolTip?.SetToolTip(_configComboBox, "Load additional configs in Options to save to a different file");
         _configToolTip ??= new ToolTip();
-        _configToolTip.SetToolTip(_launchAsLowIlCheckBox, "\u25a0 = use account default");
-        _configToolTip.SetToolTip(_splitTokenCheckBox, LaunchFlags.DeElevateTooltip + "\n\u25a0 = use account default");
+        if (!_hasLoadedConfigs)
+            _configToolTip.SetToolTip(_configComboBox, "Load additional configs in Options to save to a different file");
+        _configToolTip.SetToolTip(_privilegeLevelComboBox, LaunchUiConstants.PrivilegeLevelTooltip);
 
         // Runtime-dependent values
         Text = _existing != null ? "Edit Application" : "Add Application";
@@ -264,20 +255,7 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
 
             _aclSection.RestrictAcl = options.RestrictAcl;
             _manageShortcutsCheckBox.Checked = options.ManageShortcuts;
-            _launchAsLowIlCheckBox.CheckState = options.LaunchAsLowIl switch
-            {
-                true => CheckState.Checked,
-                false => CheckState.Unchecked,
-                null => CheckState.Indeterminate
-            };
-            _splitTokenCheckBox.CheckState = options.RunAsSplitToken switch
-            {
-                true => CheckState.Checked,
-                false => CheckState.Unchecked,
-                null => CheckState.Indeterminate
-            };
-            if (!_splitTokenCheckBox.Enabled)
-                _splitTokenCheckBox.CheckState = CheckState.Indeterminate;
+            _privilegeLevelComboBox.SelectedIndex = PrivilegeLevelComboHelper.ModeToIndex(options.PrivilegeLevel);
 
             // Populate associations section for new app (uses pre-generated ID)
             PopulateAssociationsSection(_preGeneratedId);
@@ -310,7 +288,7 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
 
     private void PreGenerateId()
     {
-        _preGeneratedId = AppEntryBuilder.GenerateUniqueId(_existingApps);
+        _preGeneratedId = _idGenerator.GenerateUniqueId(_existingApps.Select(a => a.Id));
         _launcherArgsTextBox.Text = _preGeneratedId;
         _launcherArgsTextBox.ForeColor = SystemColors.ControlText;
     }
@@ -387,7 +365,7 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _discoverButton.Enabled = false;
         try
         {
-            var apps = await Task.Run(() => _shortcutService.DiscoverApps());
+            var apps = await Task.Run(() => _browseHelper.DiscoverApps());
 
             if (IsDisposed)
                 return;
@@ -449,7 +427,6 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _filePathTextBox.Text = state.ExePath;
         _filePathTextBox.ReadOnly = true;
         _filePathTextBox.BackColor = SystemColors.Control;
-        _filePathTextBox.Size = new Size(470, 23);
         _browseButton.Visible = false;
         _browseFolderButton.Visible = false;
         _discoverButton.Visible = false;
@@ -460,12 +437,11 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _allowPassWorkDirCheckBox.Checked = state.AllowPassingWorkingDirectory;
 
         _manageShortcutsCheckBox.Checked = state.ManageShortcuts;
-        _launchAsLowIlCheckBox.CheckState = state.LaunchAsLowIlCheckState;
-        _splitTokenCheckBox.CheckState = state.SplitTokenCheckState;
+        _privilegeLevelComboBox.SelectedIndex = PrivilegeLevelComboHelper.ModeToIndex(state.SelectedPrivilegeLevel);
         _overrideIpcCallersCheckBox.Checked = state.OverrideIpcCallers;
 
-        // Phase 2: Account combo selection — MUST come after LaunchAsLowIl/SplitToken are set,
-        // because the switch handler captures their state as "prior" when a container is selected.
+        // Phase 2: Account combo selection — MUST come after PrivilegeLevel combobox is set,
+        // because the switch handler captures its state as "prior" when a container is selected.
         _controller.SelectAccountComboForExisting(app, _sidNames, _accountComboBox);
 
         // Phase 3: ACL path + config combo
@@ -499,49 +475,53 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
             Enabled = false;
             _statusLabel.ForeColor = SystemColors.ControlText;
             _statusLabel.Text = "Applying ACLs and shortcuts...";
+            // Snapshot original associations before applying changes so we can roll back on failure.
+            IReadOnlyList<HandlerAssociationItem> originalAssociations = _database != null
+                ? _associationHandler.GetCurrentAssociations(result.Id) ?? []
+                : [];
+            bool saved = false;
             try
             {
                 // Apply in-memory handler mapping changes before invoking ApplyRequested so they
                 // are included in the save. Registry sync is deferred until after save succeeds to
                 // avoid a diverged registry state if the save throws.
                 if (_database != null)
-                    ApplyAssociationDbChanges(result.Id);
+                    _associationHandler.ApplyChanges(result.Id, _associationsSection.GetAssociations() ?? []);
                 ApplyRequested.Invoke();
-                // Sync registry only after the save has succeeded.
-                if (_database != null)
-                    SyncHandlerRegistrations();
+                saved = true;
             }
             catch (Exception ex)
             {
+                // Roll back in-memory association changes if save failed
+                if (_database != null)
+                    _associationHandler.RevertChanges(result.Id, originalAssociations);
                 Enabled = true;
                 _statusLabel.ForeColor = Color.Red;
                 _statusLabel.Text = $"Failed: {ex.Message}";
+            }
+            // Sync registry only after the save has succeeded; runs outside the save catch so
+            // registry errors never trigger a rollback of already-persisted DB changes.
+            if (saved && _database != null)
+            {
+                try
+                {
+                    _associationHandler.SyncRegistry();
+                }
+                catch (Exception ex)
+                {
+                    // Registry sync is best-effort post-save; log to status bar but do not roll back.
+                    _statusLabel.ForeColor = Color.DarkOrange;
+                    _statusLabel.Text = $"Saved, but handler sync failed: {ex.Message}";
+                }
             }
         }
         else
         {
             if (_database != null)
-            {
-                ApplyAssociationDbChanges(result.Id);
-                SyncHandlerRegistrations();
-            }
+                _associationHandler.ApplyAndSync(result.Id, _associationsSection.GetAssociations() ?? []);
 
             DialogResult = DialogResult.OK;
             Close();
         }
-    }
-
-    private void ApplyAssociationDbChanges(string appId)
-    {
-        if (_database == null)
-            return;
-        _associationHandler.ApplyChanges(appId, _associationsSection.GetAssociations() ?? []);
-    }
-
-    private void SyncHandlerRegistrations()
-    {
-        if (_database == null)
-            return;
-        _associationHandler.SyncRegistry();
     }
 }

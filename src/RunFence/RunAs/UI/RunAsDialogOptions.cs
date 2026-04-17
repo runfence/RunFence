@@ -19,5 +19,4 @@ public record RunAsDialogOptions(
     List<AppContainerEntry>? AppContainers = null,
     string? LastUsedContainerName = null,
     string? CurrentUserSid = null,
-    IReadOnlyList<string>? SplitTokenOptOutSids = null,
-    IReadOnlyList<string>? LowIntegrityDefaultSids = null);
+    IReadOnlyDictionary<string, PrivilegeLevel>? AccountPrivilegeLevels = null);

@@ -48,14 +48,6 @@ public record WizardStandardFlowParams(
     /// </summary>
     Func<SessionContext, IReadOnlyList<AppEntry>, Task>? PostEnforcementAction = null,
     /// <summary>
-    /// Credential ID to pass to <c>SaveAndRefresh</c> when the template creates a credential
-    /// outside of the standard <see cref="SetupOptions"/> path (e.g. via direct
-    /// <c>CredentialManager.StoreCreatedUserCredential</c> calls). Ignored when
-    /// <see cref="SetupOptions"/> is non-null because the executor derives the credential ID
-    /// from <c>SetupAsync</c>.
-    /// </summary>
-    Guid? ExistingCredentialId = null,
-    /// <summary>
     /// When true, the executor creates a shortcut on the interactive user's desktop for each
     /// app entry built during this flow (in addition to the standard beside-target shortcut).
     /// </summary>

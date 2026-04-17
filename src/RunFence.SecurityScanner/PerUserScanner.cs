@@ -3,21 +3,10 @@ using RunFence.Core.Models;
 
 namespace RunFence.SecurityScanner;
 
-public class PerUserScanner
+public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclCheck, AutorunChecker autorunChecker)
 {
     private const string RunKeyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
     private const string RunOnceKeyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce";
-
-    private readonly IScannerDataAccess _dataAccess;
-    private readonly AclCheckHelper _aclCheck;
-    private readonly AutorunChecker _autorunChecker;
-
-    public PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclCheck, AutorunChecker autorunChecker)
-    {
-        _dataAccess = dataAccess;
-        _aclCheck = aclCheck;
-        _autorunChecker = autorunChecker;
-    }
 
     public void ScanPerUserLocations(ScanContext ctx,
         List<(string Sid, string? ProfilePath)> allProfiles,
@@ -26,20 +15,20 @@ public class PerUserScanner
         bool skipInteractive = ctx.InteractiveUserSid != null &&
                                string.Equals(ctx.InteractiveUserSid, ctx.CurrentUserSid, StringComparison.OrdinalIgnoreCase);
 
+        var excludedForCurrentUser = BuildPerUserExcluded(ctx.AdminSids, ctx.CurrentUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
+
         // Current user startup folder
-        var currentUserStartup = _dataAccess.GetCurrentUserStartupPath();
+        var currentUserStartup = dataAccess.GetCurrentUserStartupPath();
         if (!string.IsNullOrEmpty(currentUserStartup))
         {
-            var excludedForCurrentUser = BuildPerUserExcluded(ctx.AdminSids, ctx.CurrentUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
             ctx.AutorunLocationPaths.Add(currentUserStartup);
-            ScanStartupFolder(currentUserStartup, excludedForCurrentUser, excludedForCurrentUser, ctx.Findings, ctx.Seen, ctx.InsecureContainers, ctx.Autorun);
+            ScanStartupFolder(ctx, currentUserStartup, excludedForCurrentUser, excludedForCurrentUser);
         }
 
         // Current user logon scripts
         if (ctx.CurrentUserSid != null)
         {
-            var excludedForCurrentUser = BuildPerUserExcluded(ctx.AdminSids, ctx.CurrentUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
-            ScanUserLogonScripts(ctx.CurrentUserSid, excludedForCurrentUser, ctx.Findings, ctx.Seen, ctx.InsecureContainers, ctx.AutorunLocationPaths, ctx.Autorun);
+            ScanUserLogonScripts(ctx, ctx.CurrentUserSid, excludedForCurrentUser);
         }
 
         // Interactive user startup folder and logon scripts
@@ -47,42 +36,41 @@ public class PerUserScanner
         {
             var excludedForInteractive = BuildPerUserExcluded(ctx.AdminSids, ctx.InteractiveUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
 
-            var profilePath = _dataAccess.GetInteractiveUserProfilePath(ctx.InteractiveUserSid);
+            var profilePath = dataAccess.GetInteractiveUserProfilePath(ctx.InteractiveUserSid);
             if (!string.IsNullOrEmpty(profilePath))
             {
                 var interactiveStartup = Path.Combine(profilePath,
                     @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup");
                 ctx.AutorunLocationPaths.Add(interactiveStartup);
-                ScanStartupFolder(interactiveStartup, excludedForInteractive, excludedForInteractive, ctx.Findings, ctx.Seen, ctx.InsecureContainers, ctx.Autorun);
+                ScanStartupFolder(ctx, interactiveStartup, excludedForInteractive, excludedForInteractive);
             }
 
-            ScanUserLogonScripts(ctx.InteractiveUserSid, excludedForInteractive, ctx.Findings, ctx.Seen, ctx.InsecureContainers, ctx.AutorunLocationPaths, ctx.Autorun);
+            ScanUserLogonScripts(ctx, ctx.InteractiveUserSid, excludedForInteractive);
         }
 
         ct.ThrowIfCancellationRequested();
 
-        ScanPerUserRegistryRunKeys(ctx, skipInteractive);
+        ScanPerUserRegistryRunKeys(ctx, skipInteractive, excludedForCurrentUser);
 
         ct.ThrowIfCancellationRequested();
 
         ScanAllUserProfiles(ctx, allProfiles, ct);
     }
 
-    private void ScanPerUserRegistryRunKeys(ScanContext ctx, bool skipInteractive)
+    private void ScanPerUserRegistryRunKeys(ScanContext ctx, bool skipInteractive, HashSet<string> hkcuExcluded)
     {
-        var hkcuExcluded = BuildPerUserExcluded(ctx.AdminSids, ctx.CurrentUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
-        _aclCheck.CheckRegistryKey(Registry.CurrentUser, RunKeyPath, @"HKCU\...\Run",
+        aclCheck.CheckRegistryKey(Registry.CurrentUser, RunKeyPath, @"HKCU\...\Run",
             hkcuExcluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, hkcuExcluded,
             @"HKEY_CURRENT_USER\" + RunKeyPath);
-        _aclCheck.CheckRegistryKey(Registry.CurrentUser, RunOnceKeyPath, @"HKCU\...\RunOnce",
+        aclCheck.CheckRegistryKey(Registry.CurrentUser, RunOnceKeyPath, @"HKCU\...\RunOnce",
             hkcuExcluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, hkcuExcluded,
             @"HKEY_CURRENT_USER\" + RunOnceKeyPath);
 
-        foreach (var (path, display) in _dataAccess.GetWow6432RunKeyPaths(ctx.CurrentUserSid))
+        foreach (var (path, display) in dataAccess.GetWow6432RunKeyPaths(ctx.CurrentUserSid))
         {
             if (!path.StartsWith(ctx.CurrentUserSid ?? "---", StringComparison.OrdinalIgnoreCase))
                 continue;
-            _aclCheck.CheckRegistryKey(Registry.Users, path, display,
+            aclCheck.CheckRegistryKey(Registry.Users, path, display,
                 hkcuExcluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, hkcuExcluded,
                 @"HKEY_USERS\" + path);
         }
@@ -92,18 +80,18 @@ public class PerUserScanner
             var hkuExcluded = BuildPerUserExcluded(ctx.AdminSids, ctx.InteractiveUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
             var hkuRunPath = $@"{ctx.InteractiveUserSid}\{RunKeyPath}";
             var hkuRunOncePath = $@"{ctx.InteractiveUserSid}\{RunOnceKeyPath}";
-            _aclCheck.CheckRegistryKey(Registry.Users, hkuRunPath, $@"HKU\{ctx.InteractiveUserSid}\...\Run",
+            aclCheck.CheckRegistryKey(Registry.Users, hkuRunPath, $@"HKU\{ctx.InteractiveUserSid}\...\Run",
                 hkuExcluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, hkuExcluded,
                 @"HKEY_USERS\" + hkuRunPath);
-            _aclCheck.CheckRegistryKey(Registry.Users, hkuRunOncePath, $@"HKU\{ctx.InteractiveUserSid}\...\RunOnce",
+            aclCheck.CheckRegistryKey(Registry.Users, hkuRunOncePath, $@"HKU\{ctx.InteractiveUserSid}\...\RunOnce",
                 hkuExcluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, hkuExcluded,
                 @"HKEY_USERS\" + hkuRunOncePath);
 
-            foreach (var (path, display) in _dataAccess.GetWow6432RunKeyPaths(ctx.InteractiveUserSid))
+            foreach (var (path, display) in dataAccess.GetWow6432RunKeyPaths(ctx.InteractiveUserSid))
             {
                 if (!path.StartsWith(ctx.InteractiveUserSid, StringComparison.OrdinalIgnoreCase))
                     continue;
-                _aclCheck.CheckRegistryKey(Registry.Users, path, display,
+                aclCheck.CheckRegistryKey(Registry.Users, path, display,
                     hkuExcluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, hkuExcluded,
                     @"HKEY_USERS\" + path);
             }
@@ -131,17 +119,17 @@ public class PerUserScanner
                 {
                     var startupPath = Path.Combine(profilePath,
                         @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup");
-                    if (_dataAccess.DirectoryExists(startupPath))
+                    if (dataAccess.DirectoryExists(startupPath))
                     {
                         ctx.AutorunLocationPaths.Add(startupPath);
-                        ScanStartupFolder(startupPath, excluded, excluded, ctx.Findings, ctx.Seen, ctx.InsecureContainers, ctx.Autorun);
+                        ScanStartupFolder(ctx, startupPath, excluded, excluded);
                     }
                 }
 
                 try
                 {
                     var hkuRunPath = $@"{userSid}\{RunKeyPath}";
-                    _aclCheck.CheckRegistryKey(Registry.Users, hkuRunPath, $@"HKU\{userSid}\...\Run",
+                    aclCheck.CheckRegistryKey(Registry.Users, hkuRunPath, $@"HKU\{userSid}\...\Run",
                         excluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, excluded,
                         @"HKEY_USERS\" + hkuRunPath);
                 }
@@ -153,7 +141,7 @@ public class PerUserScanner
                 try
                 {
                     var hkuRunOncePath = $@"{userSid}\{RunOnceKeyPath}";
-                    _aclCheck.CheckRegistryKey(Registry.Users, hkuRunOncePath, $@"HKU\{userSid}\...\RunOnce",
+                    aclCheck.CheckRegistryKey(Registry.Users, hkuRunOncePath, $@"HKU\{userSid}\...\RunOnce",
                         excluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, excluded,
                         @"HKEY_USERS\" + hkuRunOncePath);
                 }
@@ -162,13 +150,13 @@ public class PerUserScanner
                     /* HKU hive not loaded */
                 }
 
-                foreach (var (path, display) in _dataAccess.GetWow6432RunKeyPaths(userSid))
+                foreach (var (path, display) in dataAccess.GetWow6432RunKeyPaths(userSid))
                 {
                     if (!path.StartsWith(userSid, StringComparison.OrdinalIgnoreCase))
                         continue;
                     try
                     {
-                        _aclCheck.CheckRegistryKey(Registry.Users, path, display,
+                        aclCheck.CheckRegistryKey(Registry.Users, path, display,
                             excluded, SecurityScanner.RunRegistryWriteRightsMask, StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen, ctx.Autorun, excluded,
                             @"HKEY_USERS\" + path);
                     }
@@ -178,7 +166,7 @@ public class PerUserScanner
                     }
                 }
 
-                ScanUserLogonScripts(userSid, excluded, ctx.Findings, ctx.Seen, ctx.InsecureContainers, ctx.AutorunLocationPaths, ctx.Autorun);
+                ScanUserLogonScripts(ctx, userSid, excluded);
             }
         }
         catch (OperationCanceledException)
@@ -187,92 +175,87 @@ public class PerUserScanner
         }
         catch (Exception ex)
         {
-            _dataAccess.LogError($"Failed to enumerate user profiles: {ex.Message}");
+            dataAccess.LogError($"Failed to enumerate user profiles: {ex.Message}");
         }
     }
 
-    private void ScanUserLogonScripts(string userSid, HashSet<string> excludedSids,
-        List<StartupSecurityFinding> findings, HashSet<(string, string)> seen,
-        HashSet<string> insecureContainers, HashSet<string> autorunLocationPaths,
-        AutorunContext autorun)
+    private void ScanUserLogonScripts(ScanContext ctx, string userSid, HashSet<string> excludedSids)
     {
         try
         {
-            var gpDir = _dataAccess.GetGpScriptsDir(userSid);
-            if (!string.IsNullOrEmpty(gpDir) && _dataAccess.DirectoryExists(gpDir))
+            var gpDir = dataAccess.GetGpScriptsDir(userSid);
+            if (!string.IsNullOrEmpty(gpDir) && dataAccess.DirectoryExists(gpDir))
             {
-                autorunLocationPaths.Add(gpDir);
+                ctx.AutorunLocationPaths.Add(gpDir);
                 try
                 {
-                    var dirSecurity = _dataAccess.GetDirectorySecurity(gpDir);
-                    bool insecure = _aclCheck.CheckContainerAcl(dirSecurity, gpDir, excludedSids,
-                        StartupSecurityCategory.LogonScript, SecurityScanner.ContainerWriteRightsMask, findings, seen);
+                    var dirSecurity = dataAccess.GetDirectorySecurity(gpDir);
+                    bool insecure = aclCheck.CheckContainerAcl(dirSecurity, gpDir, excludedSids,
+                        StartupSecurityCategory.LogonScript, SecurityScanner.ContainerWriteRightsMask, ctx.Findings, ctx.Seen);
                     if (insecure)
-                        insecureContainers.Add(gpDir);
+                        ctx.InsecureContainers.Add(gpDir);
                 }
                 catch (Exception ex)
                 {
-                    _dataAccess.LogError($"Failed to read ACL for GP scripts dir '{gpDir}': {ex.Message}");
+                    dataAccess.LogError($"Failed to read ACL for GP scripts dir '{gpDir}': {ex.Message}");
                 }
             }
 
-            foreach (var scriptPath in _dataAccess.GetLogonScriptPaths(userSid))
+            foreach (var scriptPath in dataAccess.GetLogonScriptPaths(userSid))
             {
                 if (!string.IsNullOrEmpty(scriptPath))
-                    SecurityScanner.AddAutorunPath(autorun, scriptPath, excludedSids, StartupSecurityCategory.LogonScript);
+                    SecurityScanner.AddAutorunPath(ctx.Autorun, scriptPath, excludedSids, StartupSecurityCategory.LogonScript);
             }
         }
         catch (Exception ex)
         {
-            _dataAccess.LogError($"Failed to scan logon scripts for {userSid}: {ex.Message}");
+            dataAccess.LogError($"Failed to scan logon scripts for {userSid}: {ex.Message}");
         }
     }
 
-    public void ScanStartupFolder(string folderPath, HashSet<string> excludedSids,
-        HashSet<string>? ownerExcluded, List<StartupSecurityFinding> findings,
-        HashSet<(string, string)> seen, HashSet<string> insecureContainers,
-        AutorunContext autorun)
+    public void ScanStartupFolder(ScanContext ctx, string folderPath, HashSet<string> excludedSids,
+        HashSet<string>? ownerExcluded)
     {
         try
         {
-            if (!_dataAccess.DirectoryExists(folderPath))
+            if (!dataAccess.DirectoryExists(folderPath))
                 return;
 
             try
             {
-                var dirSecurity = _dataAccess.GetDirectorySecurity(folderPath);
-                var folderInsecure = _aclCheck.CheckContainerAcl(dirSecurity, folderPath, excludedSids,
-                    StartupSecurityCategory.StartupFolder, SecurityScanner.ContainerWriteRightsMask, findings, seen);
+                var dirSecurity = dataAccess.GetDirectorySecurity(folderPath);
+                var folderInsecure = aclCheck.CheckContainerAcl(dirSecurity, folderPath, excludedSids,
+                    StartupSecurityCategory.StartupFolder, SecurityScanner.ContainerWriteRightsMask, ctx.Findings, ctx.Seen);
                 if (folderInsecure)
-                    insecureContainers.Add(folderPath);
+                    ctx.InsecureContainers.Add(folderPath);
             }
             catch (Exception ex)
             {
-                _dataAccess.LogError($"Failed to read ACL for folder '{folderPath}': {ex.Message}");
+                dataAccess.LogError($"Failed to read ACL for folder '{folderPath}': {ex.Message}");
             }
 
-            foreach (var filePath in _dataAccess.GetFilesInFolder(folderPath))
+            foreach (var filePath in dataAccess.GetFilesInFolder(folderPath))
             {
                 try
                 {
                     if (SecurityScanner.IsInertStartupFile(filePath))
                         continue;
 
-                    var fileSecurity = _dataAccess.GetFileSecurity(filePath);
-                    _aclCheck.CheckFileInsideLocationAcl(fileSecurity, filePath, excludedSids,
-                        StartupSecurityCategory.StartupFolder, findings, seen);
+                    var fileSecurity = dataAccess.GetFileSecurity(filePath);
+                    aclCheck.CheckFileInsideLocationAcl(fileSecurity, filePath, excludedSids,
+                        StartupSecurityCategory.StartupFolder, ctx.Findings, ctx.Seen);
                 }
                 catch (Exception ex)
                 {
-                    _dataAccess.LogError($"Failed to read ACL for file '{filePath}': {ex.Message}");
+                    dataAccess.LogError($"Failed to read ACL for file '{filePath}': {ex.Message}");
                 }
             }
 
-            _autorunChecker.CollectStartupFolderExecutables(folderPath, autorun, ownerExcluded, StartupSecurityCategory.StartupFolder);
+            autorunChecker.CollectStartupFolderExecutables(folderPath, ctx.Autorun, ownerExcluded, StartupSecurityCategory.StartupFolder);
         }
         catch (Exception ex)
         {
-            _dataAccess.LogError($"Failed to check startup folder '{folderPath}': {ex.Message}");
+            dataAccess.LogError($"Failed to check startup folder '{folderPath}': {ex.Message}");
         }
     }
 

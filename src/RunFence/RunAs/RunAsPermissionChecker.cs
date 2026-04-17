@@ -1,7 +1,6 @@
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
 
 namespace RunFence.RunAs;
 
@@ -10,18 +9,8 @@ namespace RunFence.RunAs;
 /// This computation runs outside the secure desktop so it can access the file system and
 /// COM services without the restrictions of the secure desktop session.
 /// </summary>
-public class RunAsPermissionChecker
+public class RunAsPermissionChecker(IAclPermissionService aclPermission)
 {
-    private readonly IAppContainerService _appContainerService;
-    private readonly IAclPermissionService _aclPermission;
-
-    public RunAsPermissionChecker(IAclPermissionService aclPermission,
-        IAppContainerService appContainerService)
-    {
-        _appContainerService = appContainerService;
-        _aclPermission = aclPermission;
-    }
-
     /// <summary>
     /// Returns the set of SIDs (user accounts + AppContainer SIDs) that need permission grants
     /// for the given file path, or null if the path is a blocked ACL root (cannot be granted).
@@ -39,7 +28,7 @@ public class RunAsPermissionChecker
 
         foreach (var cred in credentials)
         {
-            if (!cred.IsCurrentAccount && _aclPermission.NeedsPermissionGrantOrParent(filePath, cred.Sid))
+            if (!cred.IsCurrentAccount && aclPermission.NeedsPermissionGrantOrParent(filePath, cred.Sid))
                 sidsNeedingPermission.Add(cred.Sid);
         }
 
@@ -52,16 +41,12 @@ public class RunAsPermissionChecker
 
         foreach (var container in appContainers)
         {
-            try
-            {
-                var containerSid = _appContainerService.GetSid(container.Name);
-                if (_aclPermission.NeedsPermissionGrantOrParent(filePath, containerSid) ||
-                    (isCrossUser && _aclPermission.NeedsPermissionGrantOrParent(filePath, interactiveSid!)))
-                    sidsNeedingPermission.Add(containerSid);
-            }
-            catch
-            {
-            }
+            var containerSid = container.Sid;
+            if (string.IsNullOrEmpty(containerSid))
+                continue;
+            if (aclPermission.NeedsPermissionGrantOrParent(filePath, containerSid) ||
+                (isCrossUser && aclPermission.NeedsPermissionGrantOrParent(filePath, interactiveSid!)))
+                sidsNeedingPermission.Add(containerSid);
         }
 
         return sidsNeedingPermission;

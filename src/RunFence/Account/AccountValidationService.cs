@@ -1,10 +1,9 @@
-using System.Diagnostics;
-using System.DirectoryServices.AccountManagement;
 using RunFence.Core;
+using RunFence.Infrastructure;
 
 namespace RunFence.Account;
 
-public class AccountValidationService(ILoggingService log) : IAccountValidationService
+public class AccountValidationService(ILoggingService log, ILocalGroupMembershipService localGroupMembership, IProcessListService processListService) : IAccountValidationService
 {
     public void ValidateNotCurrentAccount(string sid, string action)
     {
@@ -53,28 +52,19 @@ public class AccountValidationService(ILoggingService log) : IAccountValidationS
 
     public List<string> GetProcessesRunningAsSid(string targetSid)
     {
-        var processNames = new List<string>();
+        var processes = processListService.GetProcessesForSid(targetSid);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var processNames = new List<string>();
 
-        foreach (var proc in Process.GetProcesses())
+        foreach (var proc in processes)
         {
-            try
+            using (proc)
             {
-                var sid = NativeTokenHelper.TryGetProcessOwnerSid(proc.Handle);
-                if (sid != null && string.Equals(sid.Value, targetSid, StringComparison.OrdinalIgnoreCase))
-                {
-                    var name = proc.ProcessName;
-                    if (seen.Add(name))
-                        processNames.Add(name);
-                }
-            }
-            catch
-            {
-                /* skip inaccessible processes */
-            }
-            finally
-            {
-                proc.Dispose();
+                var name = proc.ExecutablePath != null
+                    ? Path.GetFileNameWithoutExtension(proc.ExecutablePath)
+                    : $"pid:{proc.Pid}";
+                if (seen.Add(name))
+                    processNames.Add(name);
             }
         }
 
@@ -85,21 +75,15 @@ public class AccountValidationService(ILoggingService log) : IAccountValidationS
     {
         try
         {
-            using var context = new PrincipalContext(ContextType.Machine);
-            using var adminGroup = GroupPrincipal.FindByIdentity(context, IdentityType.Sid, "S-1-5-32-544");
-            if (adminGroup == null)
-                return false;
-
-            using var members = adminGroup.GetMembers();
-            var adminMembers = members
-                .OfType<UserPrincipal>()
-                .Where(u => u.Enabled != false)
-                .Select(u => u.Sid?.Value)
-                .Where(s => s != null)
+            var members = localGroupMembership.GetMembersOfGroup("S-1-5-32-544");
+            var enabledAdminSids = members
+                .Where(m => !localGroupMembership.IsLocalGroup(m.Sid))
+                .Where(m => localGroupMembership.IsUserAccountEnabled(m.Username))
+                .Select(m => m.Sid)
                 .ToList();
 
-            return adminMembers.Count <= 1 &&
-                   adminMembers.Any(s => string.Equals(s, sid, StringComparison.OrdinalIgnoreCase));
+            return enabledAdminSids.Count <= 1 &&
+                   enabledAdminSids.Any(s => string.Equals(s, sid, StringComparison.OrdinalIgnoreCase));
         }
         catch (Exception ex)
         {

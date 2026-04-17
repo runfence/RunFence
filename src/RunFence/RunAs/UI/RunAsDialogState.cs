@@ -12,27 +12,16 @@ namespace RunFence.RunAs.UI;
 /// Holds the resolved selection state of a RunAs dialog and contains the logic to
 /// populate it from the user's current list box selection.
 /// </summary>
-public class RunAsDialogState
+public class RunAsDialogState(
+    string filePath,
+    HashSet<string>? sidsNeedingPermission,
+    IAclPermissionService aclPermission)
 {
     public CredentialEntry? SelectedCredential { get; private set; }
     public AppContainerEntry? SelectedContainer { get; private set; }
     public bool CreateNewAccountRequested { get; private set; }
     public bool CreateNewContainerRequested { get; private set; }
     public AncestorPermissionResult? PermissionGrant { get; private set; }
-
-    private readonly string _filePath;
-    private readonly HashSet<string>? _sidsNeedingPermission;
-    private readonly IAclPermissionService _aclPermission;
-
-    public RunAsDialogState(
-        string filePath,
-        HashSet<string>? sidsNeedingPermission,
-        IAclPermissionService aclPermission)
-    {
-        _filePath = filePath;
-        _sidsNeedingPermission = sidsNeedingPermission;
-        _aclPermission = aclPermission;
-    }
 
     /// <summary>
     /// Resolves the output state from the current list box selection.
@@ -42,11 +31,9 @@ public class RunAsDialogState
         object? selectedItem,
         Form? dialogOwner,
         AppEntry? currentExistingApp,
-        bool lowIntegrityChecked,
-        bool splitTokenChecked,
+        PrivilegeLevel selectedPrivilegeLevel,
         bool updateShortcutChecked,
-        out bool launchAsLowIntegrity,
-        out bool launchAsSplitToken,
+        out PrivilegeLevel privilegeLevel,
         out bool updateOriginalShortcut,
         out AppEntry? existingAppForLaunch)
     {
@@ -57,8 +44,7 @@ public class RunAsDialogState
         CreateNewContainerRequested = false;
         PermissionGrant = null;
 
-        launchAsLowIntegrity = lowIntegrityChecked;
-        launchAsSplitToken = splitTokenChecked;
+        privilegeLevel = selectedPrivilegeLevel;
         updateOriginalShortcut = updateShortcutChecked;
         existingAppForLaunch = currentExistingApp;
 
@@ -102,10 +88,10 @@ public class RunAsDialogState
 
     private bool TryResolvePermissionGrant(string sid, Form? owner)
     {
-        if (_sidsNeedingPermission?.Contains(sid) != true)
+        if (sidsNeedingPermission?.Contains(sid) != true)
             return true;
 
-        var ancestors = _aclPermission.GetGrantableAncestors(_filePath);
+        var ancestors = aclPermission.GetGrantableAncestors(filePath);
         if (ancestors.Count == 0)
             return true;
 

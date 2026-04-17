@@ -1,5 +1,7 @@
 using Autofac;
 using RunFence.Apps;
+using RunFence.Infrastructure;
+using RunFence.Persistence;
 using RunFence.Persistence.UI;
 using RunFence.PrefTrans;
 
@@ -9,11 +11,19 @@ public class PersistenceModule : Module
 {
     protected override void Load(ContainerBuilder builder)
     {
+        builder.RegisterType<ConfigAvailabilityMonitor>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<ConfigMismatchKeyResolver>()
             .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<HandlerSyncHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ConfigSaveOrchestrator>()
             .AsSelf()
             .SingleInstance();
 
@@ -23,6 +33,7 @@ public class PersistenceModule : Module
             .SingleInstance();
 
         builder.RegisterType<ConfigEnforcementOrchestrator>()
+            .As<ILoadedAppsCleanup>()
             .AsSelf()
             .SingleInstance();
 
@@ -36,6 +47,12 @@ public class PersistenceModule : Module
 
         builder.RegisterType<AppHandlerRegistrationService>()
             .As<IAppHandlerRegistrationService>()
+            .SingleInstance();
+
+        builder.RegisterType<AppEntryEnforcementHelper>().AsSelf().SingleInstance();
+
+        builder.RegisterType<ConfigImportHandler>()
+            .AsSelf()
             .SingleInstance();
     }
 }

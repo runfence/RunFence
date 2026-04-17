@@ -5,11 +5,11 @@ using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.SidMigration;
 using RunFence.SidMigration.UI.Forms;
-using RunFence.UI.Forms;
 
 namespace RunFence.Account.UI;
 
 public class AccountMigrationOrchestrator(
+    IModalCoordinator modalCoordinator,
     ISidMigrationService sidMigrationService,
     Func<InAppMigrationHandler> createMigrationHandler,
     IOrphanedProfileService orphanedProfileService,
@@ -32,7 +32,7 @@ public class AccountMigrationOrchestrator(
     public void MigrateSids(SessionContext session, Form? parent, Action onMigrationApplied)
     {
         using var dlg = new SidMigrationDialog(session, sidMigrationService, createMigrationHandler(), localUserProvider, log, sidResolver, sidNameCache);
-        DataPanel.ShowModal(dlg, parent);
+        modalCoordinator.ShowModal(dlg, parent);
         if (dlg.InAppMigrationApplied)
             onMigrationApplied();
     }
@@ -40,7 +40,7 @@ public class AccountMigrationOrchestrator(
     public void DeleteProfiles(Form? parent)
     {
         using var dlg = new OrphanedProfilesDialog(orphanedProfileService);
-        DataPanel.ShowModal(dlg, parent);
+        modalCoordinator.ShowModal(dlg, parent);
     }
 
     public async Task StartBackgroundAclCleanupAsync(string sid, Action<string> setStatus, Func<bool> isAlive)

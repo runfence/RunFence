@@ -2,12 +2,17 @@ using Autofac;
 using RunFence.Account.UI;
 using RunFence.Account.UI.Forms;
 using RunFence.Acl;
+using RunFence.Acl.UI;
+using RunFence.Apps;
 using RunFence.Apps.UI;
 using RunFence.Apps.UI.Forms;
+using RunFence.DragBridge.UI.Forms;
 using RunFence.Groups.UI;
 using RunFence.Groups.UI.Forms;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Licensing.UI.Forms;
+using RunFence.Persistence.UI.Forms;
 using RunFence.TrayIcon;
 using RunFence.UI;
 using RunFence.UI.Forms;
@@ -28,7 +33,16 @@ public class UiModule : Module
                 var lazyForm = c.Resolve<Lazy<MainForm>>();
                 var log = c.Resolve<ILoggingService>();
                 return new LambdaUiThreadInvoker(
-                    a => lazyForm.Value.Invoke(a),
+                    a =>
+                    {
+                        var form = lazyForm.Value;
+                        if (!form.InvokeRequired)
+                        {
+                            a();
+                            return;
+                        }
+                        form.Invoke(a);
+                    },
                     a => lazyForm.Value.BeginInvoke(a),
                     a =>
                     {
@@ -59,6 +73,12 @@ public class UiModule : Module
             .As<ISidEntryHelper>()
             .SingleInstance();
 
+        builder.RegisterType<AllowListEntryFactory>().AsSelf().SingleInstance();
+
+        builder.RegisterType<ExeAssociationRegistryReader>()
+            .As<IExeAssociationRegistryReader>()
+            .InstancePerDependency();
+
         builder.RegisterType<AppEditBrowseHelper>().AsSelf().InstancePerDependency();
         builder.RegisterType<AppEditAssociationHandler>().AsSelf().InstancePerDependency();
         builder.RegisterType<AppEditAccountSwitchHandler>().AsSelf().InstancePerDependency();
@@ -81,9 +101,49 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<DefaultBrowserManager>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<AppContextMenuOrchestrator>()
             .AsSelf()
             .SingleInstance();
+
+        builder.RegisterType<HandlerMappingAddDialog>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<HandlerMappingEditDirectDialog>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<HandlerMappingEditAppDialog>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<HandlerMappingGridBuilder>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<HandlerMappingMutationHandler>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<HandlerMappingSyncService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<DirectHandlerResolver>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<HandlerMappingsController>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<HandlerMappingsDialog>()
+            .AsSelf()
+            .InstancePerDependency();
 
         builder.RegisterType<ApplicationsHandlerSyncHelper>()
             .AsSelf()
@@ -112,7 +172,19 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<GroupRefreshController>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<GroupDescriptionEditor>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<AccountAclManagerLauncher>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<GroupSidMigrationLauncher>()
             .AsSelf()
             .SingleInstance();
 
@@ -136,11 +208,56 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<OptionsFolderBrowserSection>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<OptionsPanelCheckboxHandler>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<MainFormFirstRunExporter>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<OptionsPanelDataLoader>()
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<OptionsIcmpSection>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.Register(c =>
+            {
+                var localUserProvider = c.Resolve<ILocalUserProvider>();
+                var sidEntryHelper = c.Resolve<ISidEntryHelper>();
+                var displayNameResolver = c.Resolve<SidDisplayNameResolver>();
+                return new IpcCallerSection(
+                    () => localUserProvider.GetLocalUserAccounts(),
+                    sidEntryHelper,
+                    displayNameResolver);
+            })
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<ConfigManagerSection>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<DragBridgeSection>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<TrayMenuDiscoveryBuilder>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<TrayIconManager>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AboutPanel>()
             .AsSelf()
             .SingleInstance();
 
@@ -156,10 +273,6 @@ public class UiModule : Module
             .SingleInstance();
 
         builder.RegisterType<AccountContainerOrchestrator>()
-            .AsSelf()
-            .SingleInstance();
-
-        builder.RegisterType<AccountLaunchOrchestrator>()
             .AsSelf()
             .SingleInstance();
 
@@ -192,6 +305,7 @@ public class UiModule : Module
             .SingleInstance();
 
         builder.RegisterType<AccountBulkScanHandler>()
+            .As<IAccountBulkScanHandler>()
             .AsSelf()
             .SingleInstance();
 
@@ -214,6 +328,8 @@ public class UiModule : Module
         builder.RegisterType<TrayLaunchHandler>()
             .AsSelf()
             .SingleInstance();
+
+        builder.RegisterType<EnforcementResultApplier>().AsSelf().SingleInstance();
 
         builder.RegisterType<StartupEnforcementRunner>()
             .AsSelf()

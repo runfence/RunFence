@@ -78,9 +78,9 @@ public static class AclManagerDialogGridSetup
             Name = name, HeaderText = header, Width = width,
             ThreeState = false,
             AutoSizeMode = DataGridViewAutoSizeColumnMode.None,
-            TrueValue = CheckState.Checked,
-            FalseValue = CheckState.Unchecked,
-            IndeterminateValue = CheckState.Indeterminate,
+            TrueValue = RightCheckState.Checked,
+            FalseValue = RightCheckState.Unchecked,
+            IndeterminateValue = RightCheckState.Indeterminate,
             SortMode = DataGridViewColumnSortMode.NotSortable
         };
 }

@@ -60,6 +60,9 @@ partial class DragBridgeSection
         _hotkeyBox.KeyDown += OnHotkeyKeyDown;
 
         // DragBridgeSection
+        // AutoScaleMode.Inherit: DPI scaling is delegated to the parent container (OptionsPanel).
+        // Fixed pixel values (Height, control locations) are intentionally not scaled here —
+        // the parent must use AutoScaleMode.Font to provide the correct scaling context.
         AutoScaleMode = AutoScaleMode.Inherit;
         Margin = Padding.Empty;
         Height = 55;

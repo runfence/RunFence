@@ -1,8 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using Microsoft.Win32;
-using RunFence.Acl.Traverse;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -10,18 +9,16 @@ using RunFence.Launch.Tokens;
 
 namespace RunFence.Launch.Container;
 
-public class AppContainerService(ILoggingService log, IUserTraverseService userTraverseService, IAppContainerEnvironmentSetup environmentSetup, AppContainerProfileSetup appContainerProfileSetup)
+public class AppContainerService(ILoggingService log, IPathGrantService pathGrantService, AppContainerProfileSetup appContainerProfileSetup, AppContainerDataFolderService dataFolderService, Func<AppContainerComAccessService> comServiceFactory, IExplorerTokenProvider explorerTokenProvider, IAppContainerSidProvider sidProvider)
     : IAppContainerService
 {
-    private readonly AppContainerComAccessService _comService = new(log);
-    private readonly AppContainerDataFolderService _dataFolderService = new(log, userTraverseService);
 
     public void CreateProfile(AppContainerEntry entry)
     {
         var hToken = IntPtr.Zero;
         try
         {
-            hToken = ExplorerTokenHelper.GetSessionExplorerToken(log);
+            hToken = explorerTokenProvider.GetSessionExplorerToken();
             appContainerProfileSetup.EnsureProfileUnderToken(entry, hToken);
         }
         catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
@@ -35,7 +32,7 @@ public class AppContainerService(ILoggingService log, IUserTraverseService userT
                     IntPtr.Zero, 0, out var sid);
 
                 if (sid != IntPtr.Zero)
-                    NativeMethods.LocalFree(sid);
+                    ProcessNative.LocalFree(sid);
 
                 if (hr != 0 && hr != ProcessLaunchNative.HrAlreadyExists)
                     throw new InvalidOperationException(
@@ -45,17 +42,19 @@ public class AppContainerService(ILoggingService log, IUserTraverseService userT
         finally
         {
             if (hToken != IntPtr.Zero)
-                NativeMethods.CloseHandle(hToken);
+                ProcessNative.CloseHandle(hToken);
         }
 
-        _dataFolderService.EnsureContainerDataFolder(entry, GetSid(entry.Name));
-        _dataFolderService.EnsureInteractiveUserAccess(entry);
+        dataFolderService.EnsureContainerDataFolder(entry, GetSid(entry.Name));
+        dataFolderService.EnsureInteractiveUserAccess(entry);
     }
 
     public void EnsureProfile(AppContainerEntry entry)
     {
-        // DeriveAppContainerSidFromAppContainerName cannot reliably detect whether
-        // the OS profile actually exists (it's a pure computation).
+        // Skip creation when the profile already exists to avoid the overhead of calling
+        // CreateAppContainerProfile (and the explorer token acquisition it triggers) on every launch.
+        if (ProfileExists(entry.Name))
+            return;
         CreateProfile(entry);
     }
 
@@ -66,31 +65,7 @@ public class AppContainerService(ILoggingService log, IUserTraverseService userT
         // For cross-user setups, EnsureProfile's idempotent CreateProfile call is the safe fallback.
         try
         {
-            var hr = AppContainerNative.DeriveAppContainerSidFromAppContainerName(name, out var pSid);
-            if (hr != 0 || pSid == IntPtr.Zero)
-                return false;
-            string? sidStr = null;
-            try
-            {
-                if (AppContainerNative.ConvertSidToStringSid(pSid, out var pStr))
-                {
-                    try
-                    {
-                        sidStr = Marshal.PtrToStringUni(pStr);
-                    }
-                    finally
-                    {
-                        NativeMethods.LocalFree(pStr);
-                    }
-                }
-            }
-            finally
-            {
-                NativeMethods.LocalFree(pSid);
-            }
-
-            if (sidStr == null)
-                return false;
+            var sidStr = sidProvider.GetSidString(name);
             const string mappingsPath =
                 @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings";
             using var key = Registry.CurrentUser.OpenSubKey($@"{mappingsPath}\{sidStr}");
@@ -125,68 +100,16 @@ public class AppContainerService(ILoggingService log, IUserTraverseService userT
         }
     }
 
-    public string GetSid(string name)
-    {
-        var hr = AppContainerNative.DeriveAppContainerSidFromAppContainerName(name, out var pSid);
-        if (hr != 0 || pSid == IntPtr.Zero)
-            throw new InvalidOperationException(
-                $"DeriveAppContainerSidFromAppContainerName failed with HRESULT 0x{hr:X8} for '{name}'");
-
-        try
-        {
-            if (!AppContainerNative.ConvertSidToStringSid(pSid, out var strPtr))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-
-            try
-            {
-                return Marshal.PtrToStringUni(strPtr) ?? throw new InvalidOperationException("Null SID string");
-            }
-            finally
-            {
-                NativeMethods.LocalFree(strPtr);
-            }
-        }
-        finally
-        {
-            NativeMethods.LocalFree(pSid);
-        }
-    }
+    public string GetSid(string name) => sidProvider.GetSidString(name);
 
     public string GetContainerDataPath(string name)
         => AppContainerPaths.GetContainerDataPath(name);
 
-    public void Launch(AppEntry app, AppContainerEntry entry, string? launcherArguments, string? launcherWorkingDirectory = null)
-    {
-        var containerSid = GetSid(entry.Name);
-        _dataFolderService.EnsureContainerDataFolder(entry, containerSid); // idempotent: creates dirs + ACLs if missing
-
-        // Ensure the container can traverse to its data folder (Roaming etc.)
-        // CreateProfile sets this up initially, but re-apply on every launch in case
-        // ACLs were lost (e.g., after RevertTraverseAccess, Windows Update, etc.)
-        _dataFolderService.EnsureDataFolderTraverse(entry, containerSid);
-
-        // AppContainer dual access check: the interactive user's token must also have
-        // access to the data folder (step 1 of the dual check). When elevated ≠ interactive,
-        // the container SID ACEs alone (step 2) aren't sufficient.
-        _dataFolderService.EnsureInteractiveUserAccess(entry);
-
-        var workingDirectory = ProcessLaunchHelper.DetermineWorkingDirectory(app, launcherWorkingDirectory)
-                               ?? Path.GetDirectoryName(Path.GetFullPath(app.ExePath))
-                               ?? "";
-
-        var psi = new ProcessStartInfo
-        {
-            FileName = app.ExePath,
-            WorkingDirectory = workingDirectory
-        };
-
-        var args = ProcessLaunchHelper.DetermineArguments(app, launcherArguments);
-        if (!string.IsNullOrEmpty(args))
-            psi.Arguments = args;
-
-        AppContainerLauncher.Launch(psi, entry, log, environmentSetup, appContainerProfileSetup, app.EnvironmentVariables);
-    }
-
+    /// <remarks>
+    /// <see cref="Process.WaitForExit(int)"/> with a 5000ms timeout blocks the calling thread for up to 5 seconds.
+    /// Callers that run on the UI thread (<c>AppContainerEditService</c>, <c>AccountContainerOrchestrator</c>)
+    /// will freeze the UI for up to 5 seconds. Callers should ideally dispatch to a background thread.
+    /// </remarks>
     public bool SetLoopbackExemption(string name, bool enable)
     {
         var arg = enable ? "-a" : "-d";
@@ -243,26 +166,26 @@ public class AppContainerService(ILoggingService log, IUserTraverseService userT
     }
 
     public void GrantComAccess(string containerSid, string clsid)
-        => _comService.GrantComAccess(containerSid, clsid);
+        => comServiceFactory().GrantComAccess(containerSid, clsid);
 
     public void RevokeComAccess(string containerSid, string clsid)
-        => _comService.RevokeComAccess(containerSid, clsid);
+        => comServiceFactory().RevokeComAccess(containerSid, clsid);
 
     public (bool Modified, List<string> AppliedPaths) EnsureTraverseAccess(AppContainerEntry entry, string path)
     {
         var containerSid = GetSid(entry.Name);
-        return userTraverseService.EnsureTraverseAccess(containerSid, path);
+        return pathGrantService.AddTraverse(containerSid, path);
     }
 
     public void RevertTraverseAccess(AppContainerEntry entry, AppDatabase database)
     {
         var containerSid = GetSid(entry.Name);
-        userTraverseService.RevertTraverseAccess(containerSid, database);
+        pathGrantService.RemoveAll(containerSid, updateFileSystem: true);
     }
 
     public void RevertTraverseAccessForPath(AppContainerEntry entry, GrantedPathEntry grantedEntry, AppDatabase database)
     {
         var containerSid = GetSid(entry.Name);
-        userTraverseService.RevertTraverseAccessForPath(containerSid, grantedEntry, database);
+        pathGrantService.RemoveTraverse(containerSid, grantedEntry.Path, updateFileSystem: true);
     }
 }

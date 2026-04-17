@@ -39,6 +39,12 @@ public interface ISidResolver
     string? TryGetStartMenuProgramsPath(string sid, bool isCurrentAccount);
 
     /// <summary>
+    /// Returns the taskbar pinned shortcuts folder path for the given SID.
+    /// Returns null for non-current accounts whose profile is not registered.
+    /// </summary>
+    string? TryGetTaskBarPath(string sid, bool isCurrentAccount);
+
+    /// <summary>
     /// Resolves an account name to a SID, checking local users first for unambiguous
     /// resolution, then falling back to NTAccount for explicit domain prefixes.
     /// Returns null if resolution fails.

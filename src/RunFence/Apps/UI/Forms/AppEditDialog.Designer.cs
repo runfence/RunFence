@@ -20,8 +20,8 @@ partial class AppEditDialog
     private Label _configLabel;
     private ComboBox _configComboBox;
     private CheckBox _manageShortcutsCheckBox;
-    private CheckBox _launchAsLowIlCheckBox;
-    private CheckBox _splitTokenCheckBox;
+    private Label _privilegeLevelLabel;
+    private ComboBox _privilegeLevelComboBox;
     private TabControl _tabControl;
     private TabPage _tabMain;
     private TabPage _tabParameters;
@@ -75,8 +75,8 @@ partial class AppEditDialog
         _configLabel = new Label();
         _configComboBox = new ComboBox();
         _manageShortcutsCheckBox = new CheckBox();
-        _launchAsLowIlCheckBox = new CheckBox();
-        _splitTokenCheckBox = new CheckBox();
+        _privilegeLevelLabel = new Label();
+        _privilegeLevelComboBox = new ComboBox();
         _tabControl = new TabControl();
         _tabMain = new TabPage();
         _tabParameters = new TabPage();
@@ -224,36 +224,34 @@ partial class AppEditDialog
         _manageShortcutsCheckBox.AutoSize = true;
         _manageShortcutsCheckBox.Checked = true;
 
-        // _launchAsLowIlCheckBox (three-state for null/true/false)
-        _launchAsLowIlCheckBox.Text = "Launch as low integrity level";
-        _launchAsLowIlCheckBox.ThreeState = true;
-        _launchAsLowIlCheckBox.Location = new Point(10, 326);
-        _launchAsLowIlCheckBox.AutoSize = true;
+        // _privilegeLevelLabel
+        _privilegeLevelLabel.Text = "Privilege Level:";
+        _privilegeLevelLabel.Location = new Point(10, 326);
+        _privilegeLevelLabel.AutoSize = true;
 
-        // _splitTokenCheckBox (three-state for null/true/false)
-        _splitTokenCheckBox.Text = "De-elevate";
-        _splitTokenCheckBox.Location = new Point(10, 351);
-        _splitTokenCheckBox.AutoSize = true;
-        _splitTokenCheckBox.ThreeState = true;
+        // _privilegeLevelComboBox (items and tooltip configured in code)
+        _privilegeLevelComboBox.Location = new Point(10, 346);
+        _privilegeLevelComboBox.Size = new Size(300, 23);
+        _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
 
         // _launcherPathLabel
         _launcherPathLabel.Text = "Launcher Path:";
-        _launcherPathLabel.Location = new Point(10, 377);
+        _launcherPathLabel.Location = new Point(10, 379);
         _launcherPathLabel.AutoSize = true;
 
         // _launcherPathTextBox (Text set in code: launcher application path)
-        _launcherPathTextBox.Location = new Point(10, 397);
+        _launcherPathTextBox.Location = new Point(10, 399);
         _launcherPathTextBox.Size = new Size(480, 23);
         _launcherPathTextBox.ReadOnly = true;
         _launcherPathTextBox.BackColor = SystemColors.Control;
 
         // _launcherArgsLabel
         _launcherArgsLabel.Text = "Launcher Arguments (App ID):";
-        _launcherArgsLabel.Location = new Point(10, 425);
+        _launcherArgsLabel.Location = new Point(10, 427);
         _launcherArgsLabel.AutoSize = true;
 
         // _launcherArgsTextBox (Text and ForeColor set in code based on _existing)
-        _launcherArgsTextBox.Location = new Point(10, 445);
+        _launcherArgsTextBox.Location = new Point(10, 447);
         _launcherArgsTextBox.Size = new Size(480, 23);
         _launcherArgsTextBox.ReadOnly = true;
         _launcherArgsTextBox.BackColor = SystemColors.Control;
@@ -275,8 +273,8 @@ partial class AppEditDialog
         _tabMain.Controls.Add(_workingDirBrowseButton);
         _tabMain.Controls.Add(_allowPassWorkDirCheckBox);
         _tabMain.Controls.Add(_manageShortcutsCheckBox);
-        _tabMain.Controls.Add(_launchAsLowIlCheckBox);
-        _tabMain.Controls.Add(_splitTokenCheckBox);
+        _tabMain.Controls.Add(_privilegeLevelLabel);
+        _tabMain.Controls.Add(_privilegeLevelComboBox);
         _tabMain.Controls.Add(_launcherPathLabel);
         _tabMain.Controls.Add(_launcherPathTextBox);
         _tabMain.Controls.Add(_launcherArgsLabel);

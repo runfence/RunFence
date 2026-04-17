@@ -8,25 +8,11 @@ namespace RunFence.Account.UI;
 /// Builds the Ephemeral, Unavailable, and App Containers grid sections for the accounts grid.
 /// Extracted from <see cref="AccountGridPopulator"/> to keep each section independently maintainable.
 /// </summary>
-public class AccountGridSupplementarySections
+public class AccountGridSupplementarySections(
+    IWindowsAccountService windowsAccountService,
+    IAccountLoginRestrictionService accountRestriction,
+    SidDisplayNameResolver displayNameResolver)
 {
-    private readonly IWindowsAccountService _windowsAccountService;
-    private readonly IAccountRestrictionService _accountRestriction;
-    private readonly IAppContainerService _appContainerService;
-    private readonly SidDisplayNameResolver _displayNameResolver;
-
-    public AccountGridSupplementarySections(
-        IWindowsAccountService windowsAccountService,
-        IAccountRestrictionService accountRestriction,
-        SidDisplayNameResolver displayNameResolver,
-        IAppContainerService appContainerService)
-    {
-        _windowsAccountService = windowsAccountService;
-        _accountRestriction = accountRestriction;
-        _displayNameResolver = displayNameResolver;
-        _appContainerService = appContainerService;
-    }
-
     public void AddEphemeralSection(
         DataGridView grid,
         PopulateData data,
@@ -56,7 +42,7 @@ public class AccountGridSupplementarySections
             var accountRow = new AccountRow(cred, username, cred.Sid, hasStoredPassword, isEphemeral: true);
             Image credIcon = hasStoredPassword ? lockIcon : AccountGridHelper.EmptyIcon;
             var appsText = GetAccountAppsText(data.Database, cred.Sid);
-            var profilePath = _windowsAccountService.GetProfilePath(cred.Sid) ?? "";
+            var profilePath = windowsAccountService.GetProfilePath(cred.Sid) ?? "";
             var ephCredAllowInternet = data.Database.GetAccount(cred.Sid)?.Firewall.AllowInternet ?? true;
             var idx = grid.Rows.Add(false, credIcon, displayName, state.NoLogonState == false, ephCredAllowInternet, appsText, profilePath, cred.Sid);
             var row = grid.Rows[idx];
@@ -83,7 +69,7 @@ public class AccountGridSupplementarySections
             var displayName = state.IsInteractive ? localUser.Username + " (interactive)" : localUser.Username;
             var accountRow = new AccountRow(null, localUser.Username, localUser.Sid, false, isEphemeral: true);
             var appsText = GetAccountAppsText(data.Database, localUser.Sid);
-            var profilePath = _windowsAccountService.GetProfilePath(localUser.Sid) ?? "";
+            var profilePath = windowsAccountService.GetProfilePath(localUser.Sid) ?? "";
             var ephLocalAllowInternet = data.Database.GetAccount(localUser.Sid)?.Firewall.AllowInternet ?? true;
             var idx = grid.Rows.Add(false, AccountGridHelper.EmptyIcon, displayName, state.NoLogonState == false, ephLocalAllowInternet, appsText, profilePath, localUser.Sid);
             var row = grid.Rows[idx];
@@ -164,7 +150,7 @@ public class AccountGridSupplementarySections
         foreach (var sid in sorter.SortUnavailableSids(data, unavailableSids))
         {
             var mapName = data.Database.SidNames.GetValueOrDefault(sid, sid);
-            var displayName = _displayNameResolver.GetDisplayName(sid, null, data.Database.SidNames);
+            var displayName = displayNameResolver.GetDisplayName(sid, null, data.Database.SidNames);
             var cred = data.CredentialStore.Credentials.FirstOrDefault(c =>
                 string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase));
             var hasStoredPassword = cred is { EncryptedPassword.Length: > 0 };
@@ -191,16 +177,7 @@ public class AccountGridSupplementarySections
         var containerIcon = AccountGridHelper.CreateContainerIcon();
         foreach (var container in database.AppContainers.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
         {
-            string containerSid;
-            try
-            {
-                containerSid = _appContainerService.GetSid(container.Name);
-            }
-            catch
-            {
-                containerSid = "";
-            }
-
+            var containerSid = container.Sid;
             var appsText = GetContainerAppsText(database, container.Name);
             var dataPath = AppContainerPaths.GetContainerDataPath(container.Name);
             var displayName = container.DisplayName;
@@ -256,7 +233,7 @@ public class AccountGridSupplementarySections
     public record struct AccountState(bool? NoLogonState, bool IsInteractive);
 
     public AccountState LookupAccountState(string sid, string? username, string? interactiveSid) => new(
-        _accountRestriction.GetNoLogonState(sid, username),
+        accountRestriction.GetNoLogonState(sid, username),
         !string.IsNullOrEmpty(interactiveSid) && string.Equals(sid, interactiveSid, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>

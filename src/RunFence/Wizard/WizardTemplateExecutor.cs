@@ -1,6 +1,7 @@
 using RunFence.Account.UI;
 using RunFence.Acl;
 using RunFence.Apps;
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
 
@@ -18,6 +19,7 @@ public class WizardTemplateExecutor(
     WizardAccountSetupHelperFactory setupHelperFactory,
     AppEntryBuilder appEntryBuilder,
     AppEntryEnforcementHelper enforcementHelper,
+    IShortcutDiscoveryService shortcutDiscovery,
     IAclService aclService,
     IWizardSessionSaver sessionSaver,
     SessionContext session,
@@ -40,7 +42,6 @@ public class WizardTemplateExecutor(
     public async Task ExecuteAsync(WizardStandardFlowParams flowParams, IWizardProgressReporter progress)
     {
         string sid;
-        Guid? credId = flowParams.ExistingCredentialId;
 
         if (flowParams.Request != null)
         {
@@ -73,8 +74,7 @@ public class WizardTemplateExecutor(
                     Password: result.Password,
                     StoreCredential: flowParams.SetupOptions.StoreCredential,
                     IsEphemeral: flowParams.SetupOptions.IsEphemeral,
-                    SplitTokenOptOut: flowParams.SetupOptions.SplitTokenOptOut,
-                    LowIntegrityDefault: flowParams.SetupOptions.LowIntegrityDefault,
+                    PrivilegeLevel: flowParams.SetupOptions.PrivilegeLevel,
                     FirewallSettings: flowParams.SetupOptions.FirewallSettings,
                     DesktopSettingsPath: flowParams.SetupOptions.DesktopSettingsPath,
                     InstallPackages: flowParams.SetupOptions.InstallPackages,
@@ -110,6 +110,7 @@ public class WizardTemplateExecutor(
         var createdApps = new List<AppEntry>();
         if (buildOptionsList is { Count: > 0 })
         {
+            ShortcutTraversalCache? shortcutCache = null;
             foreach (var opts in buildOptionsList)
             {
                 // Per-entry license check (app count grows as entries are added)
@@ -119,13 +120,16 @@ public class WizardTemplateExecutor(
                 progress.ReportStatus($"Creating app entry for {opts.Name}...");
                 try
                 {
-                    var app = appEntryBuilder.Build(opts);
+                    var app = appEntryBuilder.Build(opts with { ExistingApps = session.Database.Apps });
                     session.Database.Apps.Add(app);
                     createdApps.Add(app);
 
                     await Task.Run(() =>
                     {
-                        enforcementHelper.ApplyChanges(app, session.Database.Apps, session.Database.SidNames);
+                        var appShortcutCache = app.ManageShortcuts
+                            ? shortcutCache ??= shortcutDiscovery.CreateTraversalCache()
+                            : new ShortcutTraversalCache([]);
+                        enforcementHelper.ApplyChanges(app, session.Database.Apps, appShortcutCache);
                         if (flowParams.CreateDesktopShortcut)
                             enforcementHelper.CreateDesktopShortcut(app);
                     });

@@ -11,8 +11,9 @@ namespace RunFence.Account.Lifecycle;
 public class AccountDeletionService(
     IAccountLifecycleManager lifecycleManager,
     IAccountCredentialManager credentialManager,
-    IGrantedPathAclService grantedPathAcl,
-    IFirewallService firewallService,
+    IPathGrantService pathGrantService,
+    IFirewallCleanupService firewallCleanupService,
+    IGlobalIcmpSettingsApplier globalIcmpSettingsApplier,
     ISidCleanupHelper sidCleanup,
     ILoggingService log,
     IAclService aclService,
@@ -39,7 +40,7 @@ public class AccountDeletionService(
 
         try
         {
-            firewallService.RemoveAllRules(sid);
+            firewallCleanupService.RemoveAllRules(sid);
         }
         catch (Exception ex)
         {
@@ -48,14 +49,22 @@ public class AccountDeletionService(
 
         credentialManager.RemoveCredentialsBySid(sid, credentialStore);
 
-        var grants = database.GetAccount(sid)?.Grants;
-        if (grants is { Count: > 0 })
-            grantedPathAcl.RevertAllGrantsBatch(grants, sid);
+        if (database.GetAccount(sid)?.Grants is { Count: > 0 })
+            pathGrantService.RemoveAll(sid, updateFileSystem: true);
 
         // Revert filesystem ACEs before database cleanup (AllowedAclEntries must still be intact).
         var (appsExcludingDeleted, allowModeAppsToReapply) = RevertDeletedAccountAcls(sid, database, aclService);
 
         sidCleanup.CleanupSidFromAppData(sid, removeApps);
+
+        try
+        {
+            globalIcmpSettingsApplier.ApplyGlobalIcmpSetting(database);
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"EnforceGlobalIcmpBlock failed after deletion of {sid}: {ex.Message}");
+        }
 
         // Reapply allow-mode apps that lost the deleted SID entry, and recompute ancestor ACLs.
         ReapplyAndRecomputeAcls(appsExcludingDeleted, allowModeAppsToReapply, aclService);

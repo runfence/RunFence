@@ -10,6 +10,22 @@ namespace RunFence.Acl;
 /// </summary>
 public static class AclHelper
 {
+    public const string ContainerSidPrefix = "S-1-15-2-";
+
+    public static bool IsContainerSid(string sid)
+        => sid.StartsWith(ContainerSidPrefix, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Returns the SID string for the AppContainer with the given name, or null if not found or empty.
+    /// </summary>
+    public static string? ResolveContainerSid(AppDatabase db, string containerName)
+    {
+        var container = db.AppContainers.FirstOrDefault(c =>
+            string.Equals(c.Name, containerName, StringComparison.OrdinalIgnoreCase));
+        var sid = container?.Sid;
+        return string.IsNullOrEmpty(sid) ? null : sid;
+    }
+
     public static HashSet<SecurityIdentifier> BuildLocalUserSidSet(IEnumerable<LocalUserAccount> users)
     {
         var result = new HashSet<SecurityIdentifier>();
@@ -29,6 +45,8 @@ public static class AclHelper
 
     public static string NormalizePath(string path)
         => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+
+    public static bool PathExists(string path) => Directory.Exists(path) || File.Exists(path);
 
     public static bool PathIsAtOrBelow(string candidatePath, string ancestorPath)
     {
@@ -95,6 +113,32 @@ public static class AclHelper
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Removes all RunFence-managed deny ACEs (those matching <paramref name="knownSids"/>
+    /// whose rights are a subset of <see cref="AclRightsHelper.ManagedDenyRightsMask"/>) from the security descriptor.
+    /// Using a subset check (rather than any-overlap) prevents removing external deny ACEs that happen to share
+    /// bits with the managed mask.
+    /// Returns true if any ACE was removed.
+    /// </summary>
+    public static bool RemoveManagedDenyAces(FileSystemSecurity security, HashSet<SecurityIdentifier> knownSids)
+    {
+        var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
+        var changed = false;
+        foreach (FileSystemAccessRule rule in rules)
+        {
+            if (rule.AccessControlType == AccessControlType.Deny &&
+                rule.IdentityReference is SecurityIdentifier sid &&
+                knownSids.Contains(sid) &&
+                (rule.FileSystemRights & ~AclRightsHelper.ManagedDenyRightsMask) == 0)
+            {
+                security.RemoveAccessRuleSpecific(rule);
+                changed = true;
+            }
+        }
+
+        return changed;
     }
 
     public static InheritanceFlags InheritanceFlagsFor(bool isFolder)

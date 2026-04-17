@@ -1,15 +1,16 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class ScrollSettingsIO
+public class ScrollSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static ScrollSettings Read()
+    public ScrollSettings Read()
     {
         var scroll = new ScrollSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegDesktop);
             scroll.WheelScrollLines = key?.GetValue("WheelScrollLines") as string;
@@ -18,10 +19,10 @@ public static class ScrollSettingsIO
         return scroll;
     }
 
-    public static void Write(ScrollSettings scroll)
+    public void Write(ScrollSettings scroll)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegDesktop);
             if (scroll.WheelScrollLines != null)
@@ -37,6 +38,10 @@ public static class ScrollSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Scroll = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Scroll != null) Write(s.Scroll); }
 }

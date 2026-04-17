@@ -30,7 +30,7 @@ public class TraverseAutoManagerTests
         return db;
     }
 
-    private static readonly Mock<IAclPermissionService> DefaultAclPermission = new();
+    private readonly Mock<IAclPermissionService> _defaultAclPermission = new();
 
     private static GrantedPathEntry AllowEntry(string path) =>
         new() { Path = path, IsDeny = false, IsTraverseOnly = false };
@@ -38,14 +38,14 @@ public class TraverseAutoManagerTests
     private static GrantedPathEntry TraverseEntry(string path) =>
         new() { Path = path, IsTraverseOnly = true };
 
-    private static TraverseAutoManager CreateManager(
+    private TraverseAutoManager CreateManager(
         AclManagerPendingChanges pending,
         AppDatabase db,
         IAclPermissionService? aclPermission = null,
         IReadOnlyList<string>? groupSids = null)
     {
         var dbProvider = new LambdaDatabaseProvider(() => db);
-        var mgr = new TraverseAutoManager(aclPermission ?? DefaultAclPermission.Object, dbProvider);
+        var mgr = new TraverseAutoManager(aclPermission ?? _defaultAclPermission.Object, dbProvider);
         mgr.Initialize(pending, Sid, groupSids ?? []);
         return mgr;
     }
@@ -189,6 +189,29 @@ public class TraverseAutoManagerTests
     }
 
     [Fact]
+    public void AutoRemove_DbGrantPendingModeSwitchToDeny_TreatedAsNoDependency()
+    {
+        // R2_D12: an entry with a pending Allow→Deny mode switch must NOT count as an
+        // allow dependency when deciding whether to auto-remove the traverse entry.
+        var allowEntry = AllowEntry(AppPath);
+        var db = MakeDatabase([
+            allowEntry,
+            TraverseEntry(AppDir)
+        ]);
+        var pending = new AclManagerPendingChanges();
+        // Simulate the allow entry having been mode-switched to Deny (pending, not yet applied).
+        pending.PendingModifications[(AppPath, false)] = new PendingModification(
+            allowEntry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: null);
+        var mgr = CreateManager(pending, db);
+
+        // Act — the only allow grant is pending switch to Deny; AppDir traverse is no longer needed.
+        mgr.AutoRemoveTraverseIfUnneeded(AppDir);
+
+        // Assert — entry pending switch to Deny is not counted as an allow dependency; traverse removed.
+        Assert.True(pending.IsPendingTraverseRemove(AppDir));
+    }
+
+    [Fact]
     public void AutoRemove_TraverseWasInPendingAdds_CancelsAdd()
     {
         // Arrange — traverse is only queued as a pending add (not yet in DB); removing grant cancels it
@@ -285,7 +308,7 @@ public class TraverseAutoManagerTests
     }
 
     [Fact]
-    public void AutoRemove_FolderGrant_OtherFilGrantInSameFolder_DoesNotRemove()
+    public void AutoRemove_FolderGrant_OtherFileGrantInSameFolder_DoesNotRemove()
     {
         // A file grant whose parent is the folder grant's directory depends on the same
         // traverse entry (the folder itself). Removing the folder grant must NOT remove

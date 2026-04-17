@@ -1,7 +1,8 @@
-using System.Security.AccessControl;
 using RunFence.Account.UI;
 using RunFence.Apps;
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Persistence;
 using RunFence.UI;
@@ -21,7 +22,8 @@ public class BrowserTemplate(
     WizardAccountSetupHelperFactory setupHelperFactory,
     IHandlerMappingService mappingService,
     IAppHandlerRegistrationService registrationService,
-    WizardFolderGrantHelper grantHelper)
+    WizardFolderGrantHelper grantHelper,
+    IShortcutDiscoveryService discoveryService)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -30,8 +32,6 @@ public class BrowserTemplate(
     public string Description => "Isolated browser account with selected folder access and URL handler associations";
     public string IconEmoji => "\U0001F310"; // 🌐
     public Action<IWin32Window>? PostWizardAction => null;
-
-    private static readonly string[] BrowserAssociations = ["http", "https", ".htm", ".html"];
 
     public void Cleanup()
     {
@@ -53,6 +53,7 @@ public class BrowserTemplate(
                     _data.AppPath = path;
                     _data.AppName = name;
                 },
+                discoveryService,
                 description: "Select the browser executable. The app name will appear in the RunFence app list " +
                              "and as the desktop shortcut label."),
             new AllowedPathsStep(
@@ -93,19 +94,14 @@ public class BrowserTemplate(
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
             IsEphemeral: false,
-            SplitTokenOptOut: false,
-            LowIntegrityDefault: false,
-            FirewallSettings: null,
+            PrivilegeLevel: PrivilegeLevel.Basic,
+            FirewallSettings: new FirewallAccountSettings { AllowLan = true, AllowLocalhost = false },
             DesktopSettingsPath: defaults.DesktopSettingsPath,
             InstallPackages: null,
             TrayTerminal: false);
 
         var appName = _data.AppName;
         var appPath = _data.AppPath;
-        var allowedPaths = _data.AllowedPaths;
-        var handlerMappingService = mappingService;
-        var handlerRegistrationService = registrationService;
-        var folderGrantHelper = grantHelper;
 
         var flowParams = new WizardStandardFlowParams(
             Request: request,
@@ -124,36 +120,32 @@ public class BrowserTemplate(
             {
                 var readWriteRights = new SavedRightsState(
                     Execute: false, Write: true, Read: true, Special: false, Own: false);
-                const FileSystemRights readWriteFileRights = FileSystemRights.ReadData | FileSystemRights.WriteData
-                                                                                       | FileSystemRights.AppendData | FileSystemRights.ReadExtendedAttributes
-                                                                                       | FileSystemRights.WriteExtendedAttributes | FileSystemRights.ReadAttributes
-                                                                                       | FileSystemRights.WriteAttributes | FileSystemRights.ReadPermissions
-                                                                                       | FileSystemRights.Synchronize;
-                await folderGrantHelper.GrantFolderAccessAsync(
-                    allowedPaths, sid, readWriteFileRights, readWriteRights, session, progress);
+                await grantHelper.GrantFolderAccessAsync(
+                    _data.AllowedPaths, sid, readWriteRights, progress);
             },
-            PostEnforcementAction: async (session, apps) =>
+            PostEnforcementAction: (session, apps) =>
             {
                 var app = apps.FirstOrDefault();
-                if (app == null)
-                    return;
-
-                progress.ReportStatus("Registering handler associations...");
-                try
+                if (app != null)
                 {
-                    foreach (var key in BrowserAssociations)
-                        handlerMappingService.SetHandlerMapping(key, app.Id, session.Database);
+                    progress.ReportStatus("Registering handler associations...");
+                    try
+                    {
+                        foreach (var key in Constants.BrowserAssociations)
+                            mappingService.SetHandlerMapping(key, new HandlerMappingEntry(app.Id), session.Database);
 
-                    var effectiveMappings = handlerMappingService.GetEffectiveHandlerMappings(session.Database);
-                    handlerRegistrationService.Sync(effectiveMappings, session.Database.Apps);
-                }
-                catch (Exception ex)
-                {
-                    progress.ReportError($"Handler associations: {ex.Message}");
+                        var effectiveMappings = mappingService.GetEffectiveHandlerMappings(session.Database);
+                        registrationService.Sync(effectiveMappings, session.Database.Apps);
+                    }
+                    catch (Exception ex)
+                    {
+                        progress.ReportError($"Handler associations: {ex.Message}");
+                    }
                 }
 
-                await Task.CompletedTask;
-            });
+                return Task.CompletedTask;
+            },
+            CreateDesktopShortcut: true);
 
         await executor.ExecuteAsync(flowParams, progress);
     }

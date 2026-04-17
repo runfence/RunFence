@@ -1,3 +1,5 @@
+using RunFence.UI;
+
 namespace RunFence.Wizard.UI.Forms;
 
 /// <summary>
@@ -85,17 +87,7 @@ public abstract class WizardStepPage : UserControl
     /// </summary>
     protected void TrackWrappingLabel(Label label)
     {
-        Resize += (_, _) => UpdateWrappingLabelHeight(label);
-        UpdateWrappingLabelHeight(label);
-    }
-
-    private void UpdateWrappingLabelHeight(Label label)
-    {
-        var w = ClientSize.Width - Padding.Horizontal - label.Padding.Horizontal;
-        if (w <= 0)
-            return;
-        var sz = TextRenderer.MeasureText(label.Text, label.Font, new Size(w, int.MaxValue),
-            TextFormatFlags.WordBreak);
-        label.Height = sz.Height + label.Padding.Vertical;
+        Resize += (_, _) => WrappingLabelHelper.UpdateHeight(this, label);
+        WrappingLabelHelper.UpdateHeight(this, label);
     }
 }

@@ -1,21 +1,22 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class UserFoldersSettingsIO
+public class UserFoldersSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast, IUserProfileFilter userProfileFilter) : ISettingsIO
 {
-    public static UserFoldersSettings Read()
+    public UserFoldersSettings Read()
     {
         var userFolders = new UserFoldersSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegUserShellFolders);
             if (key == null)
                 return;
 
-            var profilePaths = UserProfileFilter.GetUserProfilePaths();
+            var profilePaths = userProfileFilter.GetUserProfilePaths();
 
             string? ReadIfNonDefault(string valueName, string defaultSuffix)
             {
@@ -24,7 +25,7 @@ public static class UserFoldersSettingsIO
                 if (string.Equals(val, @"%USERPROFILE%\" + defaultSuffix, StringComparison.OrdinalIgnoreCase))
                     return null;
                 // Skip values containing the literal source profile path
-                if (UserProfileFilter.ContainsUserProfilePath(val, profilePaths))
+                if (userProfileFilter.ContainsUserProfilePath(val, profilePaths))
                     return null;
                 // Keep only %USERPROFILE%\... ExpandString values; skip non-standard absolute paths
                 if (!val.StartsWith(@"%USERPROFILE%\", StringComparison.OrdinalIgnoreCase)
@@ -43,10 +44,10 @@ public static class UserFoldersSettingsIO
         return userFolders;
     }
 
-    public static void Write(UserFoldersSettings userFolders)
+    public void Write(UserFoldersSettings userFolders)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegUserShellFolders);
 
@@ -76,7 +77,11 @@ public static class UserFoldersSettingsIO
         if (changed)
         {
             NativeMethods.SHChangeNotify(Constants.SHCNE_ALLEVENTS, Constants.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
         }
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.UserFolders = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.UserFolders != null) Write(s.UserFolders); }
 }

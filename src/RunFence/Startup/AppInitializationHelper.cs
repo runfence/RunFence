@@ -74,4 +74,10 @@ public class AppInitializationHelper(ISidResolver sidResolver) : IAppInitializat
                 sidResolver.TryResolveName(interactiveUserSid) ?? interactiveUserSid);
         }
     }
+
+    public void InitializeNewDatabase(AppDatabase database)
+    {
+        PopulateDefaultIpcCallers(database);
+        EnsureInteractiveUserSidName(database);
+    }
 }

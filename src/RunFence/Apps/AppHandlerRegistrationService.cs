@@ -8,21 +8,19 @@ using RunFence.Licensing;
 namespace RunFence.Apps;
 
 /// <summary>
-/// Registers per-association ProgIds for RunFence-managed file/URL handlers in the interactive
-/// user's registry hive. All writes target HKU\&lt;interactive-user-SID&gt; (not the current admin's HKCU),
-/// because RunFence runs elevated under a separate admin account.
+/// Registers per-association ProgIds for RunFence-managed file/URL handlers in HKLM.
+/// ProgIds go under HKLM\Software\Classes; Capabilities go under HKLM\Software\RunFence\Capabilities
+/// (the standard location — keeping Capabilities outside Software\Classes prevents Windows from
+/// double-discovering RunFence in Default Apps).
 /// </summary>
-public class AppHandlerRegistrationService : IAppHandlerRegistrationService
+public class AppHandlerRegistrationService(
+    ILoggingService log,
+    ILicenseService licenseService,
+    RegistryKey? hklmOverride = null,
+    string? launcherPathOverride = null)
+    : IAppHandlerRegistrationService
 {
-    private readonly ILoggingService _log;
-    private readonly ILicenseService _licenseService;
-    private readonly RegistryKey _hku;
-    private readonly string? _sidOverride;
-    private readonly string? _launcherPathOverride;
-
-    /// <summary>Browser-only associations always allowed in evaluation mode.</summary>
-    private static readonly HashSet<string> BrowserAssociations =
-        new(StringComparer.OrdinalIgnoreCase) { "http", "https", ".htm", ".html" };
+    private readonly RegistryKey _hklm = hklmOverride ?? Registry.LocalMachine;
 
     /// <summary>
     /// Characters allowed in association keys (alphanumeric, dot, dash, plus).
@@ -31,35 +29,12 @@ public class AppHandlerRegistrationService : IAppHandlerRegistrationService
     private static readonly Regex SafeKeyPattern =
         new(@"^[a-zA-Z0-9.\-+]+$", RegexOptions.Compiled);
 
-    public AppHandlerRegistrationService(
-        ILoggingService log,
-        ILicenseService licenseService,
-        RegistryKey? hkuOverride = null,
-        string? sidOverride = null,
-        string? launcherPathOverride = null)
+    public void Sync(Dictionary<string, HandlerMappingEntry> effectiveHandlerMappings, List<AppEntry> apps)
     {
-        _log = log;
-        _licenseService = licenseService;
-        _hku = hkuOverride ?? Registry.Users;
-        _sidOverride = sidOverride;
-        _launcherPathOverride = launcherPathOverride;
-    }
-
-    private string? GetSid() => _sidOverride ?? SidResolutionHelper.GetInteractiveUserSid();
-
-    public void Sync(Dictionary<string, string> effectiveHandlerMappings, List<AppEntry> apps)
-    {
-        var sid = GetSid();
-        if (string.IsNullOrEmpty(sid))
-        {
-            _log.Warn("AppHandlerRegistrationService.Sync: interactive user SID unavailable, skipping");
-            return;
-        }
-
-        var launcherPath = _launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+        var launcherPath = launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
-            _log.Warn($"AppHandlerRegistrationService.Sync: launcher not found at {launcherPath}, skipping");
+            log.Warn($"AppHandlerRegistrationService.Sync: launcher not found at {launcherPath}, skipping");
             return;
         }
 
@@ -72,21 +47,21 @@ public class AppHandlerRegistrationService : IAppHandlerRegistrationService
         {
             if (!IsValidKey(kvp.Key))
             {
-                _log.Warn($"AppHandlerRegistrationService.Sync: skipping association key '{kvp.Key}' (contains unsafe characters)");
+                log.Warn($"AppHandlerRegistrationService.Sync: skipping association key '{kvp.Key}' (contains unsafe characters)");
                 continue;
             }
 
-            var appEntry = apps.FirstOrDefault(a => a.Id == kvp.Value);
+            var appEntry = apps.FirstOrDefault(a => a.Id == kvp.Value.AppId);
             if (appEntry == null)
             {
-                _log.Warn($"AppHandlerRegistrationService.Sync: skipping association '{kvp.Key}' → '{kvp.Value}' (app not found)");
+                log.Warn($"AppHandlerRegistrationService.Sync: skipping association '{kvp.Key}' → '{kvp.Value.AppId}' (app not found)");
                 continue;
             }
 
-            validMappings[kvp.Key] = kvp.Value;
+            validMappings[kvp.Key] = kvp.Value.AppId;
         }
 
-        _log.Info($"AppHandlerRegistrationService.Sync: registering {validMappings.Count} association(s) for user {sid}");
+        log.Info($"AppHandlerRegistrationService.Sync: registering {validMappings.Count} association(s) in HKLM");
 
         if (validMappings.Count == 0)
         {
@@ -97,45 +72,39 @@ public class AppHandlerRegistrationService : IAppHandlerRegistrationService
 
         try
         {
-            // Remove stale ProgIds (RunFence_* subkeys not in current valid mappings)
-            RemoveStaleProgIds(sid, validMappings);
+            // Remove stale ProgIds (RunFence_* subkeys not in current valid mappings);
+            // also removes legacy RunFence_Handler key if present from an older installation
+            RemoveStaleProgIds(validMappings);
 
-            // Ensure parent Capabilities key exists
-            EnsureParentCapabilities(sid, launcherPath);
+            // Ensure Capabilities key exists at the standard location (Software\RunFence\Capabilities)
+            EnsureCapabilities();
 
             // Clear and rebuild URLAssociations and FileAssociations
-            RebuildCapabilities(sid, validMappings);
+            RebuildCapabilities(validMappings);
 
             // Create/update per-association ProgIds
             foreach (var (association, appId) in validMappings)
             {
-                RegisterAssociationProgId(sid, association, apps.First(a => a.Id == appId), launcherPath);
+                RegisterAssociationProgId(association, apps.First(a => a.Id == appId), launcherPath);
             }
 
-            NativeMethods.SHChangeNotify(NativeMethods.SHCNE_ASSOCCHANGED, NativeMethods.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
-            _log.Info("AppHandlerRegistrationService.Sync: complete");
+            ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
+            log.Info("AppHandlerRegistrationService.Sync: complete");
         }
         catch (Exception ex)
         {
-            _log.Error("AppHandlerRegistrationService.Sync: failed", ex);
+            log.Error("AppHandlerRegistrationService.Sync: failed", ex);
         }
     }
 
     public void UnregisterAll()
     {
-        var sid = GetSid();
-        if (string.IsNullOrEmpty(sid))
-        {
-            _log.Warn("AppHandlerRegistrationService.UnregisterAll: interactive user SID unavailable, skipping");
-            return;
-        }
-
-        _log.Info($"AppHandlerRegistrationService.UnregisterAll: removing all handler registrations for user {sid}");
+        log.Info("AppHandlerRegistrationService.UnregisterAll: removing all handler registrations from HKLM");
 
         try
         {
             // Delete all RunFence_* ProgIds under Software\Classes
-            using var classesKey = _hku.OpenSubKey($@"{sid}\Software\Classes", writable: true);
+            using var classesKey = _hklm.OpenSubKey(@"Software\Classes", writable: true);
             if (classesKey != null)
             {
                 var subKeyNames = classesKey.GetSubKeyNames()
@@ -149,72 +118,74 @@ public class AppHandlerRegistrationService : IAppHandlerRegistrationService
                     }
                     catch (Exception ex)
                     {
-                        _log.Warn($"Failed to delete ProgId '{name}': {ex.Message}");
+                        log.Warn($"Failed to delete ProgId '{name}': {ex.Message}");
                     }
                 }
             }
 
+            // Remove Capabilities key (standard location)
+            try
+            {
+                _hklm.DeleteSubKeyTree(Constants.HandlerCapabilitiesRegistryPath, throwOnMissingSubKey: false);
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"Failed to delete Capabilities key: {ex.Message}");
+            }
+
             // Remove RegisteredApplications entry
-            using var regAppsKey = _hku.OpenSubKey($@"{sid}\Software\RegisteredApplications", writable: true);
+            using var regAppsKey = _hklm.OpenSubKey(@"Software\RegisteredApplications", writable: true);
             regAppsKey?.DeleteValue(Constants.HandlerRegisteredAppName, throwOnMissingValue: false);
 
-            NativeMethods.SHChangeNotify(NativeMethods.SHCNE_ASSOCCHANGED, NativeMethods.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
-            _log.Info("AppHandlerRegistrationService.UnregisterAll: complete");
+            ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
+            log.Info("AppHandlerRegistrationService.UnregisterAll: complete");
         }
         catch (Exception ex)
         {
-            _log.Error("AppHandlerRegistrationService.UnregisterAll: failed", ex);
+            log.Error("AppHandlerRegistrationService.UnregisterAll: failed", ex);
         }
     }
 
-    private void RegisterAssociationProgId(string sid, string association, AppEntry app, string launcherPath)
+    private void RegisterAssociationProgId(string association, AppEntry app, string launcherPath)
     {
         var progId = Constants.HandlerProgIdPrefix + association;
-        var classesPrefix = $@"{sid}\Software\Classes\{progId}";
+        var classesPrefix = $@"Software\Classes\{progId}";
 
-        // Determine icon: use cached icon file if available, otherwise app exe, otherwise launcher
         var iconPath = ResolveIconPath(app, launcherPath);
 
-        using (var rootKey = _hku.CreateSubKey(classesPrefix))
+        using (var rootKey = _hklm.CreateSubKey(classesPrefix))
             rootKey.SetValue(null, progId);
 
-        using (var iconKey = _hku.CreateSubKey($@"{classesPrefix}\DefaultIcon"))
+        using (var iconKey = _hklm.CreateSubKey($@"{classesPrefix}\DefaultIcon"))
             iconKey.SetValue(null, $"\"{iconPath}\",0");
 
         // Shell command uses unquoted %1 — Launcher extracts it via CommandLineHelper.SkipArgs
-        using (var commandKey = _hku.CreateSubKey($@"{classesPrefix}\shell\open\command"))
+        using (var commandKey = _hklm.CreateSubKey($@"{classesPrefix}\shell\open\command"))
             commandKey.SetValue(null, $"\"{launcherPath}\" --resolve \"{association}\" %1");
     }
 
-    private void EnsureParentCapabilities(string sid, string launcherPath)
+    private void EnsureCapabilities()
     {
-        var parentPrefix = $@"{sid}\Software\Classes\{Constants.HandlerParentKey}";
-
-        using (var rootKey = _hku.CreateSubKey(parentPrefix))
-            rootKey.SetValue(null, Constants.HandlerRegisteredAppName);
-
-        using (var iconKey = _hku.CreateSubKey($@"{parentPrefix}\DefaultIcon"))
-            iconKey.SetValue(null, $"\"{launcherPath}\",0");
-
-        using (var capsKey = _hku.CreateSubKey($@"{parentPrefix}\Capabilities"))
+        // Standard location outside Software\Classes — prevents Windows from double-discovering
+        // RunFence via both RegisteredApplications and a Capabilities subkey on a ProgId.
+        using (var capsKey = _hklm.CreateSubKey(Constants.HandlerCapabilitiesRegistryPath))
         {
             capsKey.SetValue("ApplicationName", Constants.HandlerRegisteredAppName);
             capsKey.SetValue("ApplicationDescription", "Launches files and URLs through RunFence-managed applications");
         }
 
-        using var regAppsKey = _hku.CreateSubKey($@"{sid}\Software\RegisteredApplications");
-        regAppsKey.SetValue(Constants.HandlerRegisteredAppName,
-            $@"Software\Classes\{Constants.HandlerParentKey}\Capabilities");
+        using var regAppsKey = _hklm.CreateSubKey(@"Software\RegisteredApplications");
+        regAppsKey.SetValue(Constants.HandlerRegisteredAppName, Constants.HandlerCapabilitiesRegistryPath);
     }
 
-    private void RebuildCapabilities(string sid, Dictionary<string, string> validMappings)
+    private void RebuildCapabilities(Dictionary<string, string> validMappings)
     {
-        var capsPrefix = $@"{sid}\Software\Classes\{Constants.HandlerParentKey}\Capabilities";
+        var capsPrefix = Constants.HandlerCapabilitiesRegistryPath;
 
         // Clear existing URLAssociations and FileAssociations subkeys before rebuilding
         try
         {
-            _hku.DeleteSubKeyTree($@"{capsPrefix}\URLAssociations", throwOnMissingSubKey: false);
+            _hklm.DeleteSubKeyTree($@"{capsPrefix}\URLAssociations", throwOnMissingSubKey: false);
         }
         catch
         {
@@ -222,7 +193,7 @@ public class AppHandlerRegistrationService : IAppHandlerRegistrationService
 
         try
         {
-            _hku.DeleteSubKeyTree($@"{capsPrefix}\FileAssociations", throwOnMissingSubKey: false);
+            _hklm.DeleteSubKeyTree($@"{capsPrefix}\FileAssociations", throwOnMissingSubKey: false);
         }
         catch
         {
@@ -239,28 +210,27 @@ public class AppHandlerRegistrationService : IAppHandlerRegistrationService
 
         if (urlAssociations.Count > 0)
         {
-            using var urlKey = _hku.CreateSubKey($@"{capsPrefix}\URLAssociations");
+            using var urlKey = _hklm.CreateSubKey($@"{capsPrefix}\URLAssociations");
             foreach (var kvp in urlAssociations)
                 urlKey.SetValue(kvp.Key, kvp.Value);
         }
 
         if (fileAssociations.Count > 0)
         {
-            using var fileKey = _hku.CreateSubKey($@"{capsPrefix}\FileAssociations");
+            using var fileKey = _hklm.CreateSubKey($@"{capsPrefix}\FileAssociations");
             foreach (var kvp in fileAssociations)
                 fileKey.SetValue(kvp.Key, kvp.Value);
         }
     }
 
-    private void RemoveStaleProgIds(string sid, Dictionary<string, string> validMappings)
+    private void RemoveStaleProgIds(Dictionary<string, string> validMappings)
     {
+        // RunFence_Handler is no longer created; if present from an older installation it will be removed here.
         var desiredProgIds = new HashSet<string>(
             validMappings.Keys.Select(k => Constants.HandlerProgIdPrefix + k),
-            StringComparer.OrdinalIgnoreCase) {
-            // Also keep the parent key
-            Constants.HandlerParentKey };
+            StringComparer.OrdinalIgnoreCase);
 
-        using var classesKey = _hku.OpenSubKey($@"{sid}\Software\Classes", writable: true);
+        using var classesKey = _hklm.OpenSubKey(@"Software\Classes", writable: true);
         if (classesKey == null)
             return;
 
@@ -277,7 +247,7 @@ public class AppHandlerRegistrationService : IAppHandlerRegistrationService
             }
             catch (Exception ex)
             {
-                _log.Warn($"Failed to remove stale ProgId '{name}': {ex.Message}");
+                log.Warn($"Failed to remove stale ProgId '{name}': {ex.Message}");
             }
         }
     }
@@ -291,16 +261,16 @@ public class AppHandlerRegistrationService : IAppHandlerRegistrationService
         return launcherPath;
     }
 
-    private Dictionary<string, string> FilterForLicense(Dictionary<string, string> mappings)
+    private Dictionary<string, HandlerMappingEntry> FilterForLicense(Dictionary<string, HandlerMappingEntry> mappings)
     {
-        if (_licenseService.IsLicensed)
+        if (licenseService.IsLicensed)
             return mappings;
 
         // Evaluation mode: only browser associations allowed
-        var filtered = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var filtered = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var kvp in mappings)
         {
-            if (BrowserAssociations.Contains(kvp.Key))
+            if (Constants.BrowserAssociations.Contains(kvp.Key))
                 filtered[kvp.Key] = kvp.Value;
         }
 

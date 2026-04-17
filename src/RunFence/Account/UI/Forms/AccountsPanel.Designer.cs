@@ -204,13 +204,11 @@ partial class AccountsPanel
         _openCmdButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _openCmdButton.ToolTipText = "CMD";
         _openCmdButton.Enabled = false;
-        _openCmdButton.Click += OnOpenCmdClick;
 
         // _openFolderBrowserButton
         _openFolderBrowserButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _openFolderBrowserButton.ToolTipText = "Folder Browser";
         _openFolderBrowserButton.Enabled = false;
-        _openFolderBrowserButton.Click += OnOpenFolderBrowserClick;
 
         // _aclManagerButton
         _aclManagerButton.DisplayStyle = ToolStripItemDisplayStyle.Image;

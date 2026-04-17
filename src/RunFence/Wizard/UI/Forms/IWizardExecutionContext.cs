@@ -51,6 +51,9 @@ public interface IWizardExecutionContext
     /// <summary>Sets Back button enabled state.</summary>
     void SetBackEnabled(bool enabled);
 
+    /// <summary>Sets the title label text in the wizard header.</summary>
+    void SetTitleText(string text);
+
     /// <summary>Sets Next button text.</summary>
     void SetNextText(string text);
 

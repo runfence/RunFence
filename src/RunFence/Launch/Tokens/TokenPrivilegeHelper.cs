@@ -9,6 +9,11 @@ public static class TokenPrivilegeHelper
     public const string SeBackupPrivilege = "SeBackupPrivilege";
     public const string SeTakeOwnershipPrivilege = "SeTakeOwnershipPrivilege";
     public const string SeRestorePrivilege = "SeRestorePrivilege";
+    public const string SeImpersonatePrivilege = "SeImpersonatePrivilege";
+    public const string SeIncreaseQuotaPrivilege = "SeIncreaseQuotaPrivilege";
+    public const string SeAssignPrimaryTokenPrivilege = "SeAssignPrimaryTokenPrivilege";
+    public const string SeDebugPrivilege = "SeDebugPrivilege";
+    public const string SeTcbPrivilege = "SeTcbPrivilege";
 
     public static void EnablePrivileges(IEnumerable<string> privilegeNames)
     {
@@ -22,7 +27,7 @@ public static class TokenPrivilegeHelper
 
     private static void SetPrivileges(IEnumerable<string> privilegeNames, uint attributes)
     {
-        if (!NativeMethods.OpenProcessToken(NativeMethods.GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out var tokenHandle))
+        if (!ProcessNative.OpenProcessToken(ProcessNative.GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out var tokenHandle))
             throw new Win32Exception(Marshal.GetLastWin32Error());
 
         // When enabling, track successful enables so we can roll back on partial failure.
@@ -32,17 +37,17 @@ public static class TokenPrivilegeHelper
         {
             foreach (var name in privilegeNames)
             {
-                if (!LookupPrivilegeValue(null, name, out var luid))
+                if (!TokenPrivilegeNative.LookupPrivilegeValue(null, name, out var luid))
                     throw new Win32Exception(Marshal.GetLastWin32Error());
 
-                var tp = new TOKEN_PRIVILEGES
+                var tp = new TokenPrivilegeNative.TOKEN_PRIVILEGES
                 {
                     PrivilegeCount = 1,
                     Luid = luid,
                     Attributes = attributes
                 };
 
-                if (!AdjustTokenPrivileges(tokenHandle, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero))
+                if (!TokenPrivilegeNative.AdjustTokenPrivileges(tokenHandle, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero))
                     throw new Win32Exception(Marshal.GetLastWin32Error());
 
                 // AdjustTokenPrivileges can succeed even if the privilege wasn't assigned
@@ -73,8 +78,24 @@ public static class TokenPrivilegeHelper
         }
         finally
         {
-            NativeMethods.CloseHandle(tokenHandle);
+            ProcessNative.CloseHandle(tokenHandle);
         }
+    }
+
+    /// <summary>
+    /// Enables a privilege on <paramref name="hToken"/>. Throws <see cref="Win32Exception"/> if the
+    /// privilege is not held by the token (ERROR_NOT_ALL_ASSIGNED).
+    /// </summary>
+    public static void EnablePrivilegeOnToken(IntPtr hToken, string privilegeName)
+    {
+        if (!TokenPrivilegeNative.LookupPrivilegeValue(null, privilegeName, out var luid))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+
+        var tp = new TokenPrivilegeNative.TOKEN_PRIVILEGES { PrivilegeCount = 1, Luid = luid, Attributes = SE_PRIVILEGE_ENABLED };
+        if (!TokenPrivilegeNative.AdjustTokenPrivileges(hToken, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (Marshal.GetLastWin32Error() == ERROR_NOT_ALL_ASSIGNED)
+            throw new Win32Exception(ERROR_NOT_ALL_ASSIGNED, $"Privilege '{privilegeName}' not held by the token.");
     }
 
     /// <summary>
@@ -87,10 +108,10 @@ public static class TokenPrivilegeHelper
     {
         foreach (var name in privilegeNames)
         {
-            if (!LookupPrivilegeValue(null, name, out var luid))
+            if (!TokenPrivilegeNative.LookupPrivilegeValue(null, name, out var luid))
                 continue;
-            var tp = new TOKEN_PRIVILEGES { PrivilegeCount = 1, Luid = luid, Attributes = 0 };
-            AdjustTokenPrivileges(hToken, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+            var tp = new TokenPrivilegeNative.TOKEN_PRIVILEGES { PrivilegeCount = 1, Luid = luid, Attributes = 0 };
+            TokenPrivilegeNative.AdjustTokenPrivileges(hToken, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
         }
     }
 
@@ -98,28 +119,4 @@ public static class TokenPrivilegeHelper
     private const uint TOKEN_QUERY = 0x0008;
     private const uint SE_PRIVILEGE_ENABLED = 0x00000002;
     private const int ERROR_NOT_ALL_ASSIGNED = 1300;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LUID
-    {
-        public uint LowPart;
-        public int HighPart;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TOKEN_PRIVILEGES
-    {
-        public uint PrivilegeCount;
-        public LUID Luid;
-        public uint Attributes;
-    }
-
-    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool LookupPrivilegeValue(string? systemName, string name, out LUID luid);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool AdjustTokenPrivileges(IntPtr tokenHandle, bool disableAllPrivileges,
-        ref TOKEN_PRIVILEGES newState, uint bufferLength, IntPtr previousState, IntPtr returnLength);
 }
