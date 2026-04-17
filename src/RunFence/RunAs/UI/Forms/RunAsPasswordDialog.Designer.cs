@@ -73,6 +73,8 @@ partial class RunAsPasswordDialog
         _cancelButton.Click += OnCancelClick;
 
         // RunAsPasswordDialog
+        AutoScaleDimensions = new SizeF(7F, 15F);
+        AutoScaleMode = AutoScaleMode.Font;
         Text = "Enter Password - RunFence";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;

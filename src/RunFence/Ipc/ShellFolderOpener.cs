@@ -14,7 +14,7 @@ public class ShellFolderOpener : IShellFolderOpener
 {
     public bool TryOpen(string canonicalPath, out string? errorMessage)
     {
-        var hr = NativeMethods.SHParseDisplayName(canonicalPath, IntPtr.Zero, out var pidl, 0, out _);
+        var hr = ShellNative.SHParseDisplayName(canonicalPath, IntPtr.Zero, out var pidl, 0, out _);
         if (hr != 0 || pidl == IntPtr.Zero)
         {
             errorMessage = $"SHParseDisplayName failed (hr={hr:X8})";
@@ -23,15 +23,15 @@ public class ShellFolderOpener : IShellFolderOpener
 
         try
         {
-            var sei = new NativeMethods.ShellExecuteExInfo
+            var sei = new ShellNative.ShellExecuteExInfo
             {
-                cbSize = Marshal.SizeOf<NativeMethods.ShellExecuteExInfo>(),
-                fMask = NativeMethods.SeeMaskIdList | NativeMethods.SeeMaskFlagNoUi,
+                cbSize = Marshal.SizeOf<ShellNative.ShellExecuteExInfo>(),
+                fMask = ShellNative.SeeMaskIdList | ShellNative.SeeMaskFlagNoUi,
                 lpVerb = "explore",
                 lpIDList = pidl,
-                nShow = NativeMethods.SwShownormal,
+                nShow = ShellNative.SwShownormal,
             };
-            if (!NativeMethods.ShellExecuteEx(ref sei))
+            if (!ShellNative.ShellExecuteEx(ref sei))
             {
                 var err = Marshal.GetLastWin32Error();
                 errorMessage = $"ShellExecuteEx failed (err={err})";
@@ -43,7 +43,7 @@ public class ShellFolderOpener : IShellFolderOpener
         }
         finally
         {
-            NativeMethods.CoTaskMemFree(pidl);
+            ShellNative.CoTaskMemFree(pidl);
         }
     }
 }

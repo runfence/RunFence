@@ -1,65 +1,54 @@
 using System.ComponentModel;
 using RunFence.Account;
 using RunFence.Core;
+using RunFence.Groups.UI;
 using RunFence.Infrastructure;
-using RunFence.SidMigration;
-using RunFence.SidMigration.UI.Forms;
 using RunFence.UI;
 using RunFence.UI.Forms;
-using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Groups.UI.Forms;
 
 public partial class GroupsPanel : DataPanel
 {
-    private readonly IWindowsAccountService _windowsAccountService;
-    private readonly ILocalUserProvider _localUserProvider;
+    private readonly ISystemDialogLauncher _systemDialogLauncher;
     private readonly ILoggingService _log;
-    private readonly ISidMigrationService _sidMigrationService;
-    private readonly Func<InAppMigrationHandler> _createMigrationHandler;
-    private readonly ISidResolver _sidResolver;
-    private readonly ISidNameCacheService _sidNameCache;
+    private readonly GroupSidMigrationLauncher _sidMigrationLauncher;
     private readonly GroupGridPopulator _gridPopulator;
     private readonly GroupActionOrchestrator _contextMenuHandler;
     private readonly GroupMembershipOrchestrator _membershipHandler;
+    private readonly ILocalGroupMembershipService _groupMembership;
+    private readonly GroupRefreshController _refreshController;
+    private readonly GroupDescriptionEditor _descriptionEditor;
     private readonly GridSortHelper _membersSortHelper = new();
-    private Timer? _refreshTimer;
     private bool _splitterInitialized;
     private Form? _parentForm;
     private FormWindowState _lastFormWindowState;
-
-    private string? _descriptionGroupSid;
-    private string? _originalDescription;
     private bool _isMembersLoading;
-
-    private readonly ILocalGroupMembershipService _groupMembership;
 
     public event Action? GroupsChanged;
 
     public GroupsPanel(
+        IModalCoordinator modalCoordinator,
         GroupGridPopulator gridPopulator,
         GroupMembershipOrchestrator membershipOrchestrator,
         GroupActionOrchestrator contextMenuHandler,
         ILocalGroupMembershipService groupMembership,
-        IWindowsAccountService windowsAccountService,
-        ILocalUserProvider localUserProvider,
+        ISystemDialogLauncher systemDialogLauncher,
         ILoggingService log,
-        ISidResolver sidResolver,
-        ISidNameCacheService sidNameCache,
-        ISidMigrationService sidMigrationService,
-        Func<InAppMigrationHandler> createMigrationHandler)
+        GroupSidMigrationLauncher sidMigrationLauncher,
+        GroupRefreshController refreshController,
+        GroupDescriptionEditor descriptionEditor)
+        : base(modalCoordinator)
     {
         _gridPopulator = gridPopulator;
         _membershipHandler = membershipOrchestrator;
         _contextMenuHandler = contextMenuHandler;
         _groupMembership = groupMembership;
-        _windowsAccountService = windowsAccountService;
-        _localUserProvider = localUserProvider;
+        _systemDialogLauncher = systemDialogLauncher;
         _log = log;
-        _sidResolver = sidResolver;
-        _sidNameCache = sidNameCache;
-        _sidMigrationService = sidMigrationService;
-        _createMigrationHandler = createMigrationHandler;
+        _sidMigrationLauncher = sidMigrationLauncher;
+        _refreshController = refreshController;
+        _descriptionEditor = descriptionEditor;
 
         InitializeComponent();
 
@@ -82,6 +71,8 @@ public partial class GroupsPanel : DataPanel
 
     private void BuildDynamicContent()
     {
+        _descriptionEditor.Initialize(_descriptionTextBox);
+
         _gridPopulator.Initialize(_groupsGrid, _membersGrid, _membersHeaderLabel);
         _scanAclsButton.Visible = _contextMenuHandler.IsBulkScanAvailable;
 
@@ -89,6 +80,23 @@ public partial class GroupsPanel : DataPanel
         {
             GroupsChanged?.Invoke();
             RefreshGridAndDescription();
+        };
+
+        // Wire refresh controller callbacks
+        _refreshController.Initialize(GetSelectedGroupSid, () => IsRefreshing);
+        _refreshController.IsRefreshingChanged += isRefreshing => IsRefreshing = isRefreshing;
+        _refreshController.IsMembersLoadingChanged += isMembersLoading =>
+        {
+            _isMembersLoading = isMembersLoading;
+            UpdateButtonState();
+        };
+        _refreshController.RefreshCompleted += async currentSid =>
+        {
+            // If selection changed during refresh, reload members for the new selection
+            var sidBeforeDescription = GetSelectedGroupSid();
+            if (currentSid != sidBeforeDescription)
+                RefreshMembersGrid();
+            await LoadDescriptionAsync(GetSelectedGroupSid());
         };
 
         EnableThreeStateSorting(_groupsGrid, RefreshGridAndDescription);
@@ -104,7 +112,7 @@ public partial class GroupsPanel : DataPanel
                 _contextMenuHandler.OpenAclManager(sid, FindForm());
         };
         _scanAclsButton.Click += async (_, _) => await _contextMenuHandler.ScanAcls(FindForm()!, b => _scanAclsButton.Enabled = b, t => _statusLabel.Text = t);
-        _accountsButton.Click += (_, _) => _windowsAccountService.OpenUserAccountsDialog();
+        _accountsButton.Click += (_, _) => _systemDialogLauncher.OpenUserAccountsDialog();
         _migrateSidsButton.Click += OnMigrateSidsClick;
 
         // Context menu events
@@ -129,7 +137,7 @@ public partial class GroupsPanel : DataPanel
         _groupsGrid.CellMouseDown += OnGroupsGridCellMouseDown;
         _groupsGrid.CellDoubleClick += OnGroupsGridCellDoubleClick;
         _groupsGrid.KeyDown += OnGroupsGridKeyDown;
-        _membersGrid.SelectionChanged += (_, _) => _removeMemberButton.Enabled = _membersGrid.SelectedRows.Count > 0;
+        _membersGrid.SelectionChanged += (_, _) => _removeMemberButton.Enabled = _membersGrid.SelectedRows.Count > 0 && !_isMembersLoading;
 
         // Description events
         _descriptionTextBox.Leave += OnDescriptionLeave;
@@ -147,26 +155,19 @@ public partial class GroupsPanel : DataPanel
         {
             _lastFormWindowState = _parentForm.WindowState;
             _parentForm.SizeChanged += OnParentFormSizeChanged;
-            _parentForm.FormClosing += (_, _) => CommitDescription();
+            _parentForm.FormClosing += (_, _) => _descriptionEditor.CommitDescription();
         }
     }
 
     protected override void OnDataSet()
     {
-        RefreshGroupsOnly();
-        if (_refreshTimer == null)
-        {
-            _log.Info("GroupsPanel: starting group refresh timer.");
-            _refreshTimer = new Timer { Interval = 5000 };
-            _refreshTimer.Tick += OnRefreshTimerTick;
-            if (Visible && IsParentFormVisible())
-                _refreshTimer.Start();
-        }
+        RefreshGridAndDescription();
+        _refreshController.StartRefreshTimer();
     }
 
     public override void RefreshOnActivation()
     {
-        if (IsRefreshing || _refreshTimer == null)
+        if (IsRefreshing)
             return;
         RefreshGridAndDescription();
     }
@@ -182,11 +183,11 @@ public partial class GroupsPanel : DataPanel
                 _splitterInitialized = true;
             }
 
-            _refreshTimer?.Start();
+            _refreshController.ResumeTimer();
             RefreshOnActivation();
         }
         else
-            _refreshTimer?.Stop();
+            _refreshController.StopTimer();
     }
 
     private void OnParentFormSizeChanged(object? sender, EventArgs e)
@@ -200,68 +201,15 @@ public partial class GroupsPanel : DataPanel
             RefreshMembersGrid();
     }
 
-    private void OnRefreshTimerTick(object? sender, EventArgs e)
+    private void RefreshGridAndDescription()
     {
-        if (!Visible || IsRefreshing)
-            return;
-        RefreshGroupsOnly();
-    }
-
-    private async void RefreshGroupsOnly()
-    {
-        if (IsRefreshing) return;
-        IsRefreshing = true;
-        var sidBeforeRefresh = GetSelectedGroupSid();
-        try
-        {
-            await _gridPopulator.PopulateGroups();
-        }
-        finally
-        {
-            IsRefreshing = false;
-        }
-
-        UpdateButtonState();
-        LoadDescription(GetSelectedGroupSid());
-        // If user changed selection during the background refresh, the loaded members are stale — reload
-        if (GetSelectedGroupSid() != sidBeforeRefresh)
-            RefreshMembersGrid();
+        _ = _refreshController.RefreshNow();
     }
 
     private bool IsParentFormVisible()
     {
         var form = FindForm();
         return form is { Visible: true } && form.WindowState != FormWindowState.Minimized;
-    }
-
-    private async void RefreshGridAndDescription()
-    {
-        await RefreshGridCore();
-        LoadDescription(GetSelectedGroupSid());
-    }
-
-    private async Task RefreshGridCore()
-    {
-        if (IsRefreshing) return;
-        IsRefreshing = true;
-        var sidBeforeRefresh = GetSelectedGroupSid();
-        try
-        {
-            var groupsTask = _gridPopulator.PopulateGroups();
-            var membersTask = sidBeforeRefresh != null
-                ? _gridPopulator.PopulateMembers(sidBeforeRefresh)
-                : Task.CompletedTask;
-            await Task.WhenAll(groupsTask, membersTask);
-        }
-        finally
-        {
-            IsRefreshing = false;
-        }
-
-        UpdateButtonState();
-        // If user changed selection during the background refresh, the loaded members are stale — reload
-        if (GetSelectedGroupSid() != sidBeforeRefresh)
-            RefreshMembersGrid();
     }
 
     protected override void UpdateButtonState()
@@ -272,6 +220,8 @@ public partial class GroupsPanel : DataPanel
         _ctxDeleteGroup.Enabled = hasSelection;
         _ctxCopySid.Enabled = hasSelection;
         _addMemberButton.Enabled = hasSelection && !_isMembersLoading;
+        _removeMemberButton.Enabled = _membersGrid.SelectedRows.Count > 0 && !_isMembersLoading;
+        _membersGrid.Enabled = !_isMembersLoading;
     }
 
     private async void RefreshMembersGrid()
@@ -317,14 +267,9 @@ public partial class GroupsPanel : DataPanel
 
         var sid = GetSelectedGroupSid();
 
-        // Save pending description for the previous group before switching
-        CommitDescription();
-
-        // Immediately clear description and members to show clean loading state
-        _descriptionGroupSid = sid;
-        _originalDescription = null;
-        _descriptionTextBox.Text = "";
-        _descriptionTextBox.Enabled = false;
+        // Save pending description for the previous group before switching, then
+        // immediately clear and disable the text box while the new description loads.
+        _descriptionEditor.BeginLoad(sid);
         _isMembersLoading = sid != null;
         UpdateButtonState();
 
@@ -352,9 +297,7 @@ public partial class GroupsPanel : DataPanel
         // Only update UI if this group is still selected
         if (sid == GetSelectedGroupSid())
         {
-            _originalDescription = descFailed ? null : (desc ?? "").Trim();
-            _descriptionTextBox.Text = descFailed ? "" : (desc ?? "");
-            _descriptionTextBox.Enabled = !descFailed;
+            _descriptionEditor.CompleteLoad(sid, desc, descFailed);
             _isMembersLoading = false;
             UpdateButtonState();
         }
@@ -401,6 +344,7 @@ public partial class GroupsPanel : DataPanel
     {
         if (e.KeyCode != Keys.Delete || _groupsGrid.SelectedRows.Count == 0)
             return;
+        _groupsGrid.EndEdit();
         var (sid, name) = GetSelectedGroupInfo();
         if (sid != null)
             _contextMenuHandler.DeleteGroup(sid, name!);
@@ -445,77 +389,40 @@ public partial class GroupsPanel : DataPanel
             RefreshMembersGrid();
     }
 
-    private void LoadDescription(string? groupSid)
+    private async Task LoadDescriptionAsync(string? groupSid)
     {
         // If the user is actively editing the description for this same group, do not
         // overwrite their in-progress text — the Leave handler will save it when focus moves.
-        bool sameGroup = string.Equals(groupSid, _descriptionGroupSid, StringComparison.OrdinalIgnoreCase);
-        if (sameGroup && _descriptionTextBox.Focused)
+        if (_descriptionEditor.IsEditingGroup(groupSid))
             return;
 
-        SaveDescriptionIfChanged();
-
-        _descriptionGroupSid = groupSid;
+        _descriptionEditor.BeginLoad(groupSid);
         if (groupSid == null)
-        {
-            _descriptionTextBox.Text = "";
-            _descriptionTextBox.Enabled = false;
-            _originalDescription = null;
             return;
-        }
 
+        string? desc = null;
+        bool failed = false;
         try
         {
-            var desc = _groupMembership.GetGroupDescription(groupSid) ?? "";
-            _originalDescription = desc.Trim();
-            _descriptionTextBox.Text = desc;
-            _descriptionTextBox.Enabled = true;
+            desc = await Task.Run(() => _groupMembership.GetGroupDescription(groupSid));
         }
         catch (Exception ex)
         {
             _log.Error($"Failed to load description for group {groupSid}", ex);
-            _descriptionTextBox.Text = "";
-            _descriptionTextBox.Enabled = false;
-            _originalDescription = null;
+            failed = true;
         }
-    }
 
-    private void SaveDescriptionIfChanged()
-    {
-        if (_descriptionTextBox.Focused)
-            return;
-        CommitDescription();
-    }
-
-    private void CommitDescription()
-    {
-        if (_descriptionGroupSid == null || _originalDescription == null)
-            return;
-        var current = _descriptionTextBox.Text.Trim();
-        if (current == _originalDescription)
-            return;
-
-        try
-        {
-            _groupMembership.UpdateGroupDescription(_descriptionGroupSid, current);
-            _originalDescription = current;
-        }
-        catch (Exception ex)
-        {
-            _log.Error($"Failed to save description for group {_descriptionGroupSid}", ex);
-        }
+        _descriptionEditor.CompleteLoad(groupSid, desc, failed);
     }
 
     private void OnDescriptionLeave(object? sender, EventArgs e)
     {
-        SaveDescriptionIfChanged();
+        _descriptionEditor.SaveDescriptionIfChanged();
     }
 
     private void OnMigrateSidsClick(object? sender, EventArgs e)
     {
-        using var dlg = new SidMigrationDialog(Session, _sidMigrationService, _createMigrationHandler(), _localUserProvider, _log, _sidResolver, _sidNameCache);
-        ShowModal(dlg, FindForm());
-        if (dlg.InAppMigrationApplied)
+        if (_sidMigrationLauncher.Launch(Session, FindForm()))
         {
             GroupsChanged?.Invoke();
             RefreshGridAndDescription();

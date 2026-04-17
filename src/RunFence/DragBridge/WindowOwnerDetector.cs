@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using InfraWindowNative = RunFence.Infrastructure.WindowNative;
 
 namespace RunFence.DragBridge;
 
@@ -14,10 +15,10 @@ public class WindowOwnerDetector : IWindowOwnerDetector
 {
     public WindowOwnerInfo? GetForegroundWindowOwnerInfo()
     {
-        var hwnd = NativeInterop.GetForegroundWindow();
+        var hwnd = InfraWindowNative.GetForegroundWindow();
         if (hwnd == IntPtr.Zero)
             return null;
-        NativeInterop.GetWindowThreadProcessId(hwnd, out var pid);
+        InfraWindowNative.GetWindowThreadProcessId(hwnd, out var pid);
         if (pid == 0)
             return null;
         return TryGetOwnerInfo(pid);
@@ -25,19 +26,19 @@ public class WindowOwnerDetector : IWindowOwnerDetector
 
     public WindowOwnerInfo? GetDragSourceOrForegroundOwnerInfo()
     {
-        var hwnd = NativeInterop.GetForegroundWindow();
+        var hwnd = InfraWindowNative.GetForegroundWindow();
         if (hwnd == IntPtr.Zero)
             return TryGetWindowAtCursorInfo();
 
-        var threadId = NativeInterop.GetWindowThreadProcessId(hwnd, out var fgPid);
+        var threadId = InfraWindowNative.GetWindowThreadProcessId(hwnd, out var fgPid);
 
-        var info = new NativeInterop.GUITHREADINFO { cbSize = Marshal.SizeOf<NativeInterop.GUITHREADINFO>() };
-        if (NativeInterop.GetGUIThreadInfo(threadId, ref info)
+        var info = new InfraWindowNative.GUITHREADINFO { cbSize = Marshal.SizeOf<InfraWindowNative.GUITHREADINFO>() };
+        if (InfraWindowNative.GetGUIThreadInfo(threadId, ref info)
             && info.hwndCapture != IntPtr.Zero
             && info.hwndCapture != hwnd)
         {
             // Another window holds mouse capture — heuristic: likely the drag source
-            NativeInterop.GetWindowThreadProcessId(info.hwndCapture, out var capturePid);
+            InfraWindowNative.GetWindowThreadProcessId(info.hwndCapture, out var capturePid);
             if (capturePid != 0)
             {
                 var captureInfo = TryGetOwnerInfo(capturePid);
@@ -69,12 +70,12 @@ public class WindowOwnerDetector : IWindowOwnerDetector
 
     private static WindowOwnerInfo? TryGetWindowAtCursorInfo()
     {
-        if (!NativeInterop.GetCursorPos(out var pt))
+        if (!InfraWindowNative.GetCursorPos(out var pt))
             return null;
-        var hwndAtCursor = NativeInterop.WindowFromPoint(pt);
+        var hwndAtCursor = InfraWindowNative.WindowFromPoint(pt);
         if (hwndAtCursor == IntPtr.Zero)
             return null;
-        NativeInterop.GetWindowThreadProcessId(hwndAtCursor, out var pid);
+        InfraWindowNative.GetWindowThreadProcessId(hwndAtCursor, out var pid);
         if (pid == 0)
             return null;
         return TryGetOwnerInfo(pid);

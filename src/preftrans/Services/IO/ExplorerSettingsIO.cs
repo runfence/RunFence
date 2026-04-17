@@ -1,15 +1,16 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class ExplorerSettingsIO
+public class ExplorerSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static ExplorerSettings Read()
+    public ExplorerSettings Read()
     {
         var explorer = new ExplorerSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegExplorerAdvanced);
             if (key == null)
@@ -32,12 +33,12 @@ public static class ExplorerSettingsIO
             explorer.EnableSnapAssistFlyout = key.GetValue("EnableSnapAssistFlyout") as int?;
             explorer.TaskbarEndTask = key.GetValue("TaskbarEndTask") as int?;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegClipboard);
             explorer.EnableClipboardHistory = key?.GetValue("EnableClipboardHistory") as int?;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegExplorerSerialize);
             explorer.SerializeStartupDelay = key?.GetValue("StartupDelayInMSec") as int?;
@@ -45,10 +46,10 @@ public static class ExplorerSettingsIO
         return explorer;
     }
 
-    public static void Write(ExplorerSettings explorer)
+    public void Write(ExplorerSettings explorer)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegExplorerAdvanced);
 
@@ -79,7 +80,7 @@ public static class ExplorerSettingsIO
             Set("EnableSnapAssistFlyout", explorer.EnableSnapAssistFlyout);
             Set("TaskbarEndTask", explorer.TaskbarEndTask);
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (explorer.EnableClipboardHistory.HasValue)
             {
@@ -88,7 +89,7 @@ public static class ExplorerSettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (explorer.SerializeStartupDelay.HasValue)
             {
@@ -98,6 +99,10 @@ public static class ExplorerSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Explorer = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Explorer != null) Write(s.Explorer); }
 }

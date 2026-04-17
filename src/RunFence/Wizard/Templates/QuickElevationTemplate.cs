@@ -1,4 +1,3 @@
-using Microsoft.Win32;
 using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Core.Models;
@@ -19,7 +18,7 @@ public class QuickElevationTemplate(
     EditAccountDialogCreateHandler createHandler,
     ILocalUserProvider localUserProvider,
     ILocalGroupMembershipService groupMembershipService,
-    IAccountRestrictionService accountRestriction,
+    IAccountLoginRestrictionService accountRestriction,
     IWizardSessionSaver sessionSaver,
     SessionContext session,
     ILicenseService licenseService,
@@ -36,6 +35,13 @@ public class QuickElevationTemplate(
     public void Cleanup()
     {
     }
+
+    /// <summary>
+    /// Pre-warms the Administrators group membership cache so <see cref="IsAvailable"/> returns
+    /// instantly when the wizard dialog evaluates it on the UI thread.
+    /// </summary>
+    public Task WarmCacheAsync() =>
+        Task.Run(() => groupMembershipService.GetMembersOfGroup(GroupFilterHelper.AdministratorsSid));
 
     /// <summary>
     /// Hidden when a 1-character administrator account already exists with no password
@@ -70,17 +76,21 @@ public class QuickElevationTemplate(
         }
     }
 
-    public IReadOnlyList<WizardStepPage> CreateSteps() =>
-    [
-        new AccountNameStep(
-            (name, _) => _data.Username = name,
-            showPassword: false,
-            maxNameLength: 1,
-            description: "This creates a dedicated administrator account with a single-character name. " +
-                         "At UAC prompts, type just this one character and press Enter — much faster than a full password.",
-            accountExists: name => localUserProvider.GetLocalUserAccounts()
-                .Any(u => string.Equals(u.Username, name, StringComparison.OrdinalIgnoreCase)))
-    ];
+    public IReadOnlyList<WizardStepPage> CreateSteps()
+    {
+        _data.Username = string.Empty;
+        return
+        [
+            new AccountNameStep(
+                (name, _) => _data.Username = name,
+                showPassword: false,
+                maxNameLength: 1,
+                description: "This creates a dedicated administrator account with a single-character name. " +
+                             "At UAC prompts, type just this one character and press Enter — much faster than a full password.",
+                accountExists: name => localUserProvider.GetLocalUserAccounts()
+                    .Any(u => string.Equals(u.Username, name, StringComparison.OrdinalIgnoreCase)))
+        ];
+    }
 
     public async Task ExecuteAsync(IWizardProgressReporter progress)
     {
@@ -144,7 +154,7 @@ public class QuickElevationTemplate(
             // Store the original value only on the first wizard run so we can restore it later.
             if (session.Database.Settings.OriginalUacAdminEnumeration == null)
             {
-                session.Database.Settings.OriginalUacAdminEnumeration = ReadCurrentUacAdminEnumeration();
+                session.Database.Settings.OriginalUacAdminEnumeration = accountRestriction.GetCurrentUacAdminEnumeration();
                 session.Database.Settings.UacAdminEnumerationSid = result.Sid;
             }
 
@@ -156,7 +166,7 @@ public class QuickElevationTemplate(
         }
 
         // Update SidNames
-        sidNameCache.UpdateName(result.Sid, result.Username);
+        sidNameCache.ResolveAndCache(result.Sid, result.Username);
 
         progress.ReportStatus($"Account '{result.Username}' created.");
         sessionSaver.SaveAndRefresh();
@@ -165,28 +175,6 @@ public class QuickElevationTemplate(
     private int CountHiddenAccounts() =>
         session.CredentialStore.Credentials
             .Count(c => accountRestriction.IsLoginBlockedBySid(c.Sid));
-
-    /// <summary>
-    /// Reads the current <c>EnumerateAdministrators</c> registry value.
-    /// Returns the current DWORD value, or <c>-1</c> if the key/value is absent (Windows default = enumerate).
-    /// The sentinel <c>-1</c> is recognized by <see cref="AccountLifecycleManager"/> as
-    /// "restore by deleting the value" rather than writing a DWORD back.
-    /// </summary>
-    private static int ReadCurrentUacAdminEnumeration()
-    {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\CredUI");
-            if (key?.GetValue("EnumerateAdministrators") is int v)
-                return v;
-        }
-        catch
-        {
-        }
-
-        return -1; // absent — sentinel meaning "delete value on restore"
-    }
 
     private sealed class CommitData
     {

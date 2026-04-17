@@ -1,15 +1,16 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class NotificationsSettingsIO
+public class NotificationsSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static NotificationSettings Read()
+    public NotificationSettings Read()
     {
         var notifications = new NotificationSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegNotificationSettings);
             if (key == null)
@@ -17,7 +18,7 @@ public static class NotificationsSettingsIO
             if (key.GetValue("NOC_GLOBAL_SETTING_TOASTS_ENABLED") is int v)
                 notifications.GlobalToastsEnabled = v;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegNotificationSettings);
             if (key == null)
@@ -38,10 +39,10 @@ public static class NotificationsSettingsIO
         return notifications;
     }
 
-    public static void Write(NotificationSettings notifications)
+    public void Write(NotificationSettings notifications)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (notifications.GlobalToastsEnabled.HasValue)
             {
@@ -50,7 +51,7 @@ public static class NotificationsSettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (notifications.PerAppSuppression != null)
             {
@@ -58,7 +59,7 @@ public static class NotificationsSettingsIO
                 {
                     if (appId.Contains('\\') || appId.Contains('/'))
                         continue;
-                    SafeExecutor.Try(() =>
+                    safe.Try(() =>
                     {
                         using var key = Registry.CurrentUser.CreateSubKey(Constants.RegNotificationSettings + @"\" + appId);
                         key.SetValue("Enabled", enabled ? 1 : 0, RegistryValueKind.DWord);
@@ -68,6 +69,10 @@ public static class NotificationsSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Notifications = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Notifications != null) Write(s.Notifications); }
 }

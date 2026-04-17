@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace RunFence.Infrastructure;
 
 /// <summary>
@@ -6,9 +8,9 @@ namespace RunFence.Infrastructure;
 /// </summary>
 public class OperationGuard
 {
-    private volatile bool _inProgress;
+    private int _count;
 
-    public bool IsInProgress => _inProgress;
+    public bool IsInProgress => _count > 0;
 
     /// <summary>
     /// Marks the operation as started, hooks FormClosing to prevent close,
@@ -16,7 +18,7 @@ public class OperationGuard
     /// </summary>
     public void Begin(Control owner)
     {
-        _inProgress = true;
+        Interlocked.Increment(ref _count);
         owner.Enabled = false;
         var form = owner.FindForm();
         if (form != null)
@@ -30,7 +32,7 @@ public class OperationGuard
     /// </summary>
     public void Begin()
     {
-        _inProgress = true;
+        Interlocked.Increment(ref _count);
     }
 
     /// <summary>
@@ -39,7 +41,12 @@ public class OperationGuard
     /// </summary>
     public void End(Control owner)
     {
-        _inProgress = false;
+        if (_count <= 0)
+        {
+            Debug.WriteLine("OperationGuard.End called without matching Begin — ignoring.");
+            return;
+        }
+        Interlocked.Decrement(ref _count);
         if (!owner.IsDisposed)
             owner.Enabled = true;
         var form = owner.FindForm();
@@ -52,7 +59,12 @@ public class OperationGuard
     /// </summary>
     public void End()
     {
-        _inProgress = false;
+        if (_count <= 0)
+        {
+            Debug.WriteLine("OperationGuard.End called without matching Begin — ignoring.");
+            return;
+        }
+        Interlocked.Decrement(ref _count);
     }
 
     private void PreventCloseWhileBusy(object? sender, FormClosingEventArgs e)
@@ -66,6 +78,6 @@ public class OperationGuard
 
     public bool ShouldPreventClose(FormClosingEventArgs e)
     {
-        return _inProgress && e.CloseReason == CloseReason.UserClosing;
+        return _count > 0 && e.CloseReason == CloseReason.UserClosing;
     }
 }

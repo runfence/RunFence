@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using Org.BouncyCastle.Crypto.Generators;
@@ -39,12 +40,6 @@ public class PinService(
             Array.Clear(pinBytes, 0, pinBytes.Length);
             pinHandle.Free();
         }
-    }
-
-    public CredentialStore CreateNewStore(string pin)
-    {
-        var (store, _) = CreateNewStoreWithKey(pin);
-        return store;
     }
 
     private (CredentialStore store, byte[] pinDerivedKey) CreateNewStoreWithKey(string pin)
@@ -123,16 +118,22 @@ public class PinService(
                     continue;
                 }
 
-                var password = encryptionService.Decrypt(cred.EncryptedPassword, oldPinDerivedKey);
-                var newEncrypted = encryptionService.Encrypt(password, newPinDerivedKey);
-                password.Dispose();
-
-                newStore.Credentials.Add(new CredentialEntry
+                SecureString? password = null;
+                try
                 {
-                    Id = cred.Id,
-                    Sid = cred.Sid,
-                    EncryptedPassword = newEncrypted
-                });
+                    password = encryptionService.Decrypt(cred.EncryptedPassword, oldPinDerivedKey);
+                    var newEncrypted = encryptionService.Encrypt(password, newPinDerivedKey);
+                    newStore.Credentials.Add(new CredentialEntry
+                    {
+                        Id = cred.Id,
+                        Sid = cred.Sid,
+                        EncryptedPassword = newEncrypted
+                    });
+                }
+                finally
+                {
+                    password?.Dispose();
+                }
             }
 
             return (newStore, newPinDerivedKey);

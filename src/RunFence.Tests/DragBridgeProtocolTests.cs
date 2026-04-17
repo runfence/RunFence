@@ -139,6 +139,39 @@ public class DragBridgeProtocolTests
         Assert.Empty(result.FilePaths);
     }
 
+    [Fact]
+    public async Task RoundTrip_FilesResolved_True_Preserved()
+    {
+        // FilesResolved=true must survive serialization so the window starts pre-resolved.
+        var data = new DragBridgeData { FilePaths = [@"C:\file.txt"], FilesResolved = true };
+
+        var ms = new MemoryStream();
+        await DragBridgeProtocol.WriteAsync(ms, data);
+        ms.Position = 0;
+        var result = await DragBridgeProtocol.ReadAsync(ms);
+
+        Assert.NotNull(result);
+        Assert.True(result.FilesResolved);
+    }
+
+    [Fact]
+    public async Task Deserialize_MissingFilesResolvedField_DefaultsFalse()
+    {
+        // Older DragBridgeWindow.exe without FilesResolved in its JSON must still work —
+        // absence of the field must deserialize to false (not throw).
+        var json = """{"FilePaths":["C:\\file.txt"]}""";
+        var payload = Encoding.UTF8.GetBytes(json);
+        var ms = new MemoryStream();
+        ms.Write(BitConverter.GetBytes(payload.Length));
+        ms.Write(payload);
+        ms.Position = 0;
+
+        var result = await DragBridgeProtocol.ReadAsync(ms);
+
+        Assert.NotNull(result);
+        Assert.False(result.FilesResolved);
+    }
+
     // --- Round-trip via actual named pipe ---
 
     [Fact]

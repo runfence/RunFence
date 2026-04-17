@@ -31,6 +31,9 @@ public class RunAsLaunchErrorHandler(ILoggingService log) : IRunAsLaunchErrorHan
             MessageBox.Show("Stored credentials are incorrect. Please update the password.",
                 "RunFence", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+        catch (OperationCanceledException)
+        {
+        }
         catch (Exception ex)
         {
             log.Error("RunAs launch failed", ex);

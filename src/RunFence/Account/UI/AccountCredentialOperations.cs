@@ -5,7 +5,6 @@ using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Licensing;
-using RunFence.UI.Forms;
 
 namespace RunFence.Account.UI;
 
@@ -13,18 +12,20 @@ namespace RunFence.Account.UI;
 /// Handles credential CRUD operations for the accounts grid: add, edit, remove credential,
 /// and the full edit-account flow (password change, desktop settings import, ephemeral toggle).
 /// </summary>
+/// <remarks>Deps above threshold: Add/Edit/Remove credential + EditAccount share <c>_credentialManager</c>, <c>_sessionProvider</c>, <c>_localUserProvider</c>, <c>_sidNameCache</c>, <c>_licenseService</c> (5 deps). Any split (e.g., credential CRUD vs account edit) duplicates these 5, creating two 8-dep classes instead of one 11-dep class — no improvement. Reviewed 2026-04-08.</remarks>
 public class AccountCredentialOperations(
+    IModalCoordinator modalCoordinator,
     IAccountCredentialManager credentialManager,
     ILocalUserProvider localUserProvider,
-    IAccountRestrictionService accountRestriction,
+    IAccountLoginRestrictionService accountRestriction,
     AccountEditHelper editHelper,
     ISessionProvider sessionProvider,
     ISidResolver sidResolver,
     ISidNameCacheService sidNameCache,
     Func<EditAccountDialog> editAccountDialogFactory,
     Func<CredentialEditDialog> credentialEditDialogFactory,
-    ILicenseService licenseService,
-    AccountLauncher launcher)
+    IEvaluationLimitHelper evaluationLimitHelper,
+    PackageInstallService packageInstallService)
 {
     private Control _ownerControl = null!;
 
@@ -55,7 +56,7 @@ public class AccountCredentialOperations(
     public void AddCredential(AccountRow? selectedRow)
     {
         var session = sessionProvider.GetSession();
-        if (!EvaluationLimitHelper.CheckCredentialLimit(licenseService, session.CredentialStore.Credentials,
+        if (!evaluationLimitHelper.CheckCredentialLimit(session.CredentialStore.Credentials,
                 extraMessage: "Right-click any credential in the list to remove it."))
             return;
 
@@ -100,7 +101,7 @@ public class AccountCredentialOperations(
         bool openCreateUser = false;
         string? capturedPasswordText = null;
 
-        DataPanel.RunOnSecureDesktop(() =>
+        modalCoordinator.RunOnSecureDesktop(() =>
         {
             using var dlg = credentialEditDialogFactory();
             dlg.Initialize(localUsers: availableLocalUsers, defaultUsername: defaultUsername,
@@ -116,6 +117,7 @@ public class AccountCredentialOperations(
         if (result == DialogResult.Retry && openCreateUser)
         {
             CreateUserDialogRequested?.Invoke(username, capturedPasswordText);
+            capturedPasswordText = null;
             return;
         }
 
@@ -151,16 +153,15 @@ public class AccountCredentialOperations(
         if (accountRow.Credential != null)
         {
             var credEntry = accountRow.Credential;
-            var hasStoredPassword = credEntry.EncryptedPassword.Length > 0;
             var localUsers = localUserProvider.GetLocalUserAccounts();
 
             DialogResult result = DialogResult.None;
             SecureString? password = null;
 
-            DataPanel.RunOnSecureDesktop(() =>
+            modalCoordinator.RunOnSecureDesktop(() =>
             {
                 using var dlg = credentialEditDialogFactory();
-                dlg.Initialize(credEntry, hasStoredPassword, localUsers,
+                dlg.Initialize(credEntry, localUsers,
                     sidNames: sessionProvider.GetSession().Database.SidNames);
                 result = dlg.ShowDialog();
                 password = dlg.Password;
@@ -193,7 +194,7 @@ public class AccountCredentialOperations(
             string username = "";
             SecureString? password = null;
 
-            DataPanel.RunOnSecureDesktop(() =>
+            modalCoordinator.RunOnSecureDesktop(() =>
             {
                 using var dlg = credentialEditDialogFactory();
                 dlg.Initialize(localUsers: localUsers, defaultUsername: accountRow.Username,
@@ -221,7 +222,7 @@ public class AccountCredentialOperations(
     private void AddNewCredential(string sid, string username, SecureString? password)
     {
         var session = sessionProvider.GetSession();
-        if (!EvaluationLimitHelper.CheckCredentialLimit(licenseService, session.CredentialStore.Credentials,
+        if (!evaluationLimitHelper.CheckCredentialLimit(session.CredentialStore.Credentials,
                 extraMessage: "Right-click any credential in the list to remove it."))
             return;
 
@@ -290,8 +291,7 @@ public class AccountCredentialOperations(
         var session = sessionProvider.GetSession();
         var isCurrentAccount = accountRow.Credential?.IsCurrentAccount == true;
         var acctEntry = session.Database.GetAccount(accountRow.Sid);
-        var isSplitTokenDefault = acctEntry?.SplitTokenOptOut != true;
-        var isLowIntegrityDefault = acctEntry?.LowIntegrityDefault == true;
+        var privilegeLevel = acctEntry?.PrivilegeLevel ?? PrivilegeLevel.Basic;
 
         var hiddenCount = session.CredentialStore.Credentials
             .Count(c => accountRestriction.IsLoginBlockedBySid(c.Sid));
@@ -301,15 +301,14 @@ public class AccountCredentialOperations(
         dlg.InitializeForEdit(
             accountRow.Sid, accountRow.Username, accountRow.IsEphemeral,
             isCurrentAccount: isCurrentAccount,
-            isSplitTokenDefault: isSplitTokenDefault,
-            isLowIntegrityDefault: isLowIntegrityDefault,
+            privilegeLevel: privilegeLevel,
             currentHiddenCount: hiddenCount,
             firewallSettings: currentFirewallSettings,
-            launcher: launcher,
+            packageInstallService: packageInstallService,
             canInstall: canInstall);
         using (dlg)
         {
-            var dialogResult = DataPanel.ShowModal(dlg, _ownerControl.FindForm());
+            var dialogResult = modalCoordinator.ShowModal(dlg, _ownerControl.FindForm());
             if (dlg.DeleteRequested)
             {
                 DeleteUserRequested?.Invoke(accountRow, selectedIndex);
@@ -328,17 +327,28 @@ public class AccountCredentialOperations(
                 sidNameCache.UpdateName(accountRow.Sid, $"{Environment.MachineName}\\{dlg.NewUsername}");
 
             // Password change (after dialog confirmation so the new text is available)
+            Guid? newCredentialId = null;
             var passwordApplied = editHelper.ApplyPasswordChange(accountRow, dlg, isCurrentAccount);
             if (dlg.NewPasswordText != null)
             {
-                if (passwordApplied && accountRow.Credential != null && dlg.NewPassword != null)
-                    credentialManager.UpdateCredentialPassword(accountRow.Credential, dlg.NewPassword, session.PinDerivedKey);
+                if (passwordApplied && dlg.NewPassword != null)
+                {
+                    if (accountRow.Credential is { IsCurrentAccount: false })
+                        credentialManager.UpdateCredentialPassword(accountRow.Credential, dlg.NewPassword, session.PinDerivedKey);
+                    else if (accountRow.Credential == null
+                             && evaluationLimitHelper.CheckCredentialLimit(session.CredentialStore.Credentials,
+                                 extraMessage: "Right-click any credential in the list to remove it."))
+                    {
+                        var (_, credId, _) = credentialManager.AddNewCredential(
+                            accountRow.Sid, dlg.NewPassword, session.CredentialStore, session.PinDerivedKey);
+                        newCredentialId = credId;
+                    }
+                }
                 dlg.NewPassword?.Dispose();
             }
 
             // Desktop settings import (after password change so the new password is valid)
-            var effectiveUsername = dlg.NewUsername ?? accountRow.Username;
-            await editHelper.ImportDesktopSettingsAsync(accountRow, dlg, effectiveUsername, passwordApplied, isCurrentAccount, _ownerControl);
+            await editHelper.ImportDesktopSettingsAsync(accountRow, dlg, _ownerControl);
 
             // Update ephemeral state (only when changed)
             if (dlg.IsEphemeral != accountRow.IsEphemeral)
@@ -349,26 +359,24 @@ public class AccountCredentialOperations(
                     session.Database.RemoveAccountIfEmpty(accountRow.Sid);
             }
 
-            // Sync split token default (admin accounts only)
-            if (dlg.IsSplitTokenApplicable)
-                session.Database.GetOrCreateAccount(accountRow.Sid).SplitTokenOptOut = !dlg.UseSplitTokenDefault;
-
-            // Sync low integrity default
-            session.Database.GetOrCreateAccount(accountRow.Sid).LowIntegrityDefault = dlg.UseLowIntegrityDefault;
+            session.Database.GetOrCreateAccount(accountRow.Sid).PrivilegeLevel = dlg.SelectedPrivilegeLevel;
             session.Database.RemoveAccountIfEmpty(accountRow.Sid);
 
             localUserProvider.InvalidateCache();
 
             // Update firewall settings in database if changed
             FirewallAccountSettings? newFirewallSettings = null;
+            FirewallAccountSettings? previousFirewallSettings = null;
             if (dlg.FirewallSettingsChanged)
             {
+                previousFirewallSettings = (session.Database.GetAccount(accountRow.Sid)?.Firewall ?? new FirewallAccountSettings()).Clone();
                 newFirewallSettings = new FirewallAccountSettings
                 {
                     AllowInternet = dlg.AllowInternet,
                     AllowLocalhost = dlg.AllowLocalhost,
                     AllowLan = dlg.AllowLan,
-                    Allowlist = currentFirewallSettings?.Allowlist ?? new List<FirewallAllowlistEntry>()
+                    Allowlist = currentFirewallSettings?.Allowlist ?? new List<FirewallAllowlistEntry>(),
+                    LocalhostPortExemptions = currentFirewallSettings?.LocalhostPortExemptions.ToList() ?? ["53", "49152-65535"]
                 };
                 FirewallAccountSettings.UpdateOrRemove(session.Database, accountRow.Sid, newFirewallSettings);
             }
@@ -382,12 +390,14 @@ public class AccountCredentialOperations(
 
             if (accountRow.Credential != null)
                 SaveAndRefreshRequested?.Invoke(accountRow.Credential.Id, -1);
+            else if (newCredentialId != null)
+                SaveAndRefreshRequested?.Invoke(newCredentialId, -1);
             else
                 SaveAndRefreshRequested?.Invoke(null, selectedIndex);
 
             // Apply firewall OS rules AFTER DB is persisted to disk, so OS state never diverges
             // from persisted state. ApplyFirewallRules catches and logs errors internally.
-            editHelper.ApplyFirewallRules(accountRow, newFirewallSettings);
+            editHelper.ApplyFirewallRules(accountRow, previousFirewallSettings, newFirewallSettings);
 
             if (dlg.SelectedInstallPackages.Count > 0)
                 InstallPackagesRequested?.Invoke(dlg.SelectedInstallPackages, accountRow);

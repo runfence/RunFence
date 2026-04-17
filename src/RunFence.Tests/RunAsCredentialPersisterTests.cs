@@ -138,6 +138,21 @@ public class RunAsCredentialPersisterTests : IDisposable
         _databaseService.Verify(d => d.SaveConfig(_database, It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Once);
     }
 
+    [Fact]
+    public void SetLastUsedContainer_SameValueAsAlreadyStored_DoesNotSave()
+    {
+        // Arrange: database already has this container, account SID is null
+        _database.Settings.LastUsedRunAsContainerName = ContainerName;
+        _database.Settings.LastUsedRunAsAccountSid = null;
+        var persister = CreatePersister();
+
+        // Act
+        persister.SetLastUsedContainer(ContainerName);
+
+        // Assert: no redundant save since nothing changed
+        _databaseService.Verify(d => d.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+    }
+
     // ── TrySaveRememberedPassword ─────────────────────────────────────────
 
     [Fact]
@@ -212,6 +227,31 @@ public class RunAsCredentialPersisterTests : IDisposable
     }
 
     [Fact]
+    public void TrySaveRememberedPassword_DuplicateSid_UpdatesExistingInsteadOfAdding()
+    {
+        // Arrange: an existing credential for the same SID is already in the store
+        var existingCred = new CredentialEntry { Id = Guid.NewGuid(), Sid = AccountSid, EncryptedPassword = new byte[] { 9, 9, 9 } };
+        _credentialStore.Credentials.Add(existingCred);
+        var newEncryptedBytes = new byte[] { 1, 2, 3 };
+        _encryptionService.Setup(e => e.Encrypt(It.IsAny<SecureString>(), It.IsAny<byte[]>()))
+            .Returns(newEncryptedBytes);
+        var credential = new CredentialEntry { Sid = AccountSid };
+        using var pw = new SecureString();
+        pw.AppendChar('P');
+        using var result = MakeResult(credential, rememberPassword: true, adHocPassword: pw);
+        var persister = CreatePersister();
+
+        // Act
+        persister.TrySaveRememberedPassword(result);
+
+        // Assert: no duplicate added, existing entry updated with new encrypted password
+        Assert.Single(_credentialStore.Credentials);
+        Assert.Same(existingCred, _credentialStore.Credentials[0]);
+        Assert.Equal(newEncryptedBytes, _credentialStore.Credentials[0].EncryptedPassword);
+        _databaseService.Verify(d => d.SaveCredentialStore(_credentialStore), Times.Once);
+    }
+
+    [Fact]
     public void TrySaveRememberedPassword_EncryptionThrows_LogsWarningAndDoesNotThrow()
     {
         // Arrange
@@ -242,8 +282,7 @@ public class RunAsCredentialPersisterTests : IDisposable
             SelectedContainer: null,
             PermissionGrant: null,
             CreateAppEntryOnly: false,
-            LaunchAsLowIntegrity: false,
-            LaunchAsSplitToken: false,
+            PrivilegeLevel: PrivilegeLevel.Basic,
             UpdateOriginalShortcut: false,
             RevertShortcutRequested: false,
             EditExistingApp: null,

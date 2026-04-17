@@ -1,5 +1,6 @@
 using Moq;
 using RunFence.Acl;
+using RunFence.Account;
 using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
@@ -17,15 +18,19 @@ public class AppEntryEnforcementHelperTests
 {
     private readonly Mock<IAclService> _aclService = new();
     private readonly Mock<IShortcutService> _shortcutService = new();
+    private readonly Mock<IBesideTargetShortcutService> _besideTargetShortcutService = new();
     private readonly Mock<IIconService> _iconService = new();
-    private readonly Mock<ISidResolver> _sidResolver = new();
+    private readonly Mock<ISidNameCacheService> _sidNameCache = new();
     private readonly AppEntryEnforcementHelper _helper;
 
     public AppEntryEnforcementHelperTests()
     {
-        _helper = new AppEntryEnforcementHelper(_aclService.Object, _shortcutService.Object, _iconService.Object, _sidResolver.Object,
-            new Mock<IInteractiveUserDesktopProvider>().Object);
+        _helper = new AppEntryEnforcementHelper(_aclService.Object, _shortcutService.Object,
+            _besideTargetShortcutService.Object, _iconService.Object, _sidNameCache.Object,
+            new Mock<IInteractiveUserDesktopProvider>().Object, new Mock<ILoggingService>().Object);
     }
+
+    private static ShortcutTraversalCache Cache() => new([]);
 
     // --- T1: Container delete ordering invariant ---
 
@@ -48,7 +53,7 @@ public class AppEntryEnforcementHelperTests
             .Callback<AppEntry, IReadOnlyList<AppEntry>>((_, apps) => capturedAllApps = apps);
 
         // Act — RevertChanges called while app is in allApps (before database cleanup)
-        _helper.RevertChanges(app, allApps);
+        _helper.RevertChanges(app, allApps, Cache());
 
         // Assert: RevertAcl received allApps containing the target app
         Assert.NotNull(capturedAllApps);
@@ -62,7 +67,7 @@ public class AppEntryEnforcementHelperTests
     public void RevertChanges_NoRestrictAcl_SkipsAclRevert()
     {
         var app = new AppEntry { Name = "App", RestrictAcl = false, ManageShortcuts = false };
-        _helper.RevertChanges(app, new List<AppEntry> { app });
+        _helper.RevertChanges(app, new List<AppEntry> { app }, Cache());
         _aclService.Verify(a => a.RevertAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
     }
 
@@ -70,25 +75,26 @@ public class AppEntryEnforcementHelperTests
     public void RevertChanges_UrlSchemeApp_SkipsAclRevertAndShortcuts()
     {
         var app = new AppEntry { Name = "UrlApp", IsUrlScheme = true, RestrictAcl = true, ManageShortcuts = true };
-        _helper.RevertChanges(app, new List<AppEntry> { app });
+        _helper.RevertChanges(app, new List<AppEntry> { app }, Cache());
         _aclService.Verify(a => a.RevertAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
-        _shortcutService.Verify(s => s.RemoveBesideTargetShortcut(It.IsAny<AppEntry>()), Times.Never);
+        _besideTargetShortcutService.Verify(s => s.RemoveBesideTargetShortcut(It.IsAny<AppEntry>()), Times.Never);
     }
 
     [Fact]
     public void RevertChanges_ManageShortcutsTrue_RevokesShortcuts()
     {
         var app = new AppEntry { Name = "ShortcutApp", RestrictAcl = false, ManageShortcuts = true };
-        _helper.RevertChanges(app, new List<AppEntry>());
-        _shortcutService.Verify(s => s.RevertShortcuts(app), Times.Once);
+        var cache = Cache();
+        _helper.RevertChanges(app, new List<AppEntry>(), cache);
+        _shortcutService.Verify(s => s.RevertShortcuts(app, cache), Times.Once);
     }
 
     [Fact]
     public void RevertChanges_NonUrlApp_RemovesBesideTargetShortcut()
     {
         var app = new AppEntry { Name = "App", IsUrlScheme = false, RestrictAcl = false, ManageShortcuts = false };
-        _helper.RevertChanges(app, new List<AppEntry>());
-        _shortcutService.Verify(s => s.RemoveBesideTargetShortcut(app), Times.Once);
+        _helper.RevertChanges(app, new List<AppEntry>(), Cache());
+        _besideTargetShortcutService.Verify(s => s.RemoveBesideTargetShortcut(app), Times.Once);
     }
 
     // --- ApplyChanges behavior ---
@@ -100,7 +106,7 @@ public class AppEntryEnforcementHelperTests
         var allApps = new List<AppEntry> { app };
         _iconService.Setup(i => i.CreateBadgedIcon(app, null)).Returns(string.Empty);
 
-        _helper.ApplyChanges(app, allApps, new Dictionary<string, string>());
+        _helper.ApplyChanges(app, allApps, Cache());
 
         _aclService.Verify(a => a.ApplyAcl(app, allApps), Times.Once);
     }
@@ -111,7 +117,7 @@ public class AppEntryEnforcementHelperTests
         var app = new AppEntry { Name = "App", RestrictAcl = false, ExePath = @"C:\app.exe" };
         _iconService.Setup(i => i.CreateBadgedIcon(app, null)).Returns(string.Empty);
 
-        _helper.ApplyChanges(app, new List<AppEntry> { app }, new Dictionary<string, string>());
+        _helper.ApplyChanges(app, new List<AppEntry> { app }, Cache());
 
         _aclService.Verify(a => a.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
     }
@@ -122,7 +128,7 @@ public class AppEntryEnforcementHelperTests
         // URL scheme apps skip ACL even when RestrictAcl = true
         var app = new AppEntry { Name = "UrlApp", IsUrlScheme = true, RestrictAcl = true, ManageShortcuts = false };
 
-        _helper.ApplyChanges(app, new List<AppEntry> { app }, new Dictionary<string, string>());
+        _helper.ApplyChanges(app, new List<AppEntry> { app }, Cache());
 
         _aclService.Verify(a => a.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
         // Icon not created (ManageShortcuts = false and IsUrlScheme = true → condition is false)
@@ -135,7 +141,7 @@ public class AppEntryEnforcementHelperTests
         var app = new AppEntry { Name = "App", ManageShortcuts = true, ExePath = @"C:\app.exe" };
         _iconService.Setup(i => i.CreateBadgedIcon(app, null)).Returns(@"C:\icon.ico");
 
-        _helper.ApplyChanges(app, new List<AppEntry> { app }, new Dictionary<string, string>());
+        _helper.ApplyChanges(app, new List<AppEntry> { app }, Cache());
 
         // ReplaceShortcuts is only called when the launcher exe exists on disk; in tests it
         // does not exist, so the call is skipped — but the icon IS created.
@@ -148,9 +154,13 @@ public class AppEntryEnforcementHelperTests
         var app = new AppEntry { Name = "App", ManageShortcuts = false, ExePath = @"C:\app.exe" };
         _iconService.Setup(i => i.CreateBadgedIcon(app, null)).Returns(string.Empty);
 
-        _helper.ApplyChanges(app, new List<AppEntry> { app }, new Dictionary<string, string>());
+        _helper.ApplyChanges(app, new List<AppEntry> { app }, Cache());
 
-        _shortcutService.Verify(s => s.ReplaceShortcuts(It.IsAny<AppEntry>(), It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+        _shortcutService.Verify(s => s.ReplaceShortcuts(
+            It.IsAny<AppEntry>(),
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            It.IsAny<ShortcutTraversalCache>()), Times.Never);
     }
 
     [Fact]
@@ -166,7 +176,7 @@ public class AppEntryEnforcementHelperTests
         };
         _iconService.Setup(i => i.CreateBadgedIcon(app, null)).Returns(string.Empty);
 
-        _helper.ApplyChanges(app, new List<AppEntry> { app }, new Dictionary<string, string>());
+        _helper.ApplyChanges(app, new List<AppEntry> { app }, Cache());
 
         Assert.Null(app.LastKnownExeTimestamp);
     }

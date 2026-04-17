@@ -1,6 +1,7 @@
 using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Launch;
+using RunFence.Persistence;
 using RunFence.UI.Forms;
 
 namespace RunFence.Startup;
@@ -24,9 +25,11 @@ public class DeferredStartupRunner(
     public void Run(MainForm mainForm)
     {
         // Pre-work on the UI thread before any background tasks:
-        // Fix AppEntry property inconsistencies on the live database, then snapshot.
-        // FixAppEntryDefaults must run before CreateSnapshot because CreateSnapshot does
-        // a shallow copy — fixes must be visible to both the snapshot and the live database.
+        // Refresh container SIDs when the interactive user has changed, fix AppEntry property
+        // inconsistencies on the live database, then snapshot.
+        // Both methods must run before CreateSnapshot because CreateSnapshot does a shallow copy
+        // — their changes must be visible to both the snapshot and the live database.
+        enforcementRunner.RefreshContainerSidsIfUserChanged();
         enforcementRunner.FixAppEntryDefaults();
         var snapshot = sessionProvider.GetSession().Database.CreateSnapshot();
 
@@ -49,12 +52,12 @@ public class DeferredStartupRunner(
         {
             try
             {
-                featureActivator.ActivateContextMenus();
-                featureActivator.SyncHandlerRegistrations();
+                featureActivator.ActivateContextMenus(snapshot);
+                featureActivator.SyncHandlerRegistrations(snapshot);
             }
             catch (Exception ex)
             {
-                log.Warn($"Background startup registration failed: {ex.Message}");
+                log.Error("Background startup registration failed", ex);
             }
         });
 
@@ -87,5 +90,6 @@ public class DeferredStartupRunner(
                     "RunFence — Enforcement Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning));
             }
         });
+
     }
 }

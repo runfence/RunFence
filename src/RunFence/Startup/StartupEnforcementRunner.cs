@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Security.AccessControl;
 using RunFence.Account.Lifecycle;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
 using RunFence.Core;
@@ -14,16 +16,54 @@ namespace RunFence.Startup;
 /// cleans up expired ephemeral accounts and containers, and grants the interactive
 /// desktop user access to the unlock directory.
 /// </summary>
+/// <remarks>Deps above threshold: 6 sequential startup steps with <c>_sessionProvider</c>+<c>_sessionSaver</c>+<c>_log</c> shared across all. Extracting individual steps into classes would create 6 classes each needing the 3 shared deps plus their own 1-2, increasing total wiring and file count with no decoupling (steps must still run in sequence from one orchestrator). Reviewed 2026-04-08.</remarks>
 public class StartupEnforcementRunner(
     IStartupEnforcementService startupEnforcementService,
     ISessionProvider sessionProvider,
     ISessionSaver sessionSaver,
-    IPermissionGrantService permissionGrantService,
+    IPathGrantService pathGrantService,
     EphemeralAccountService ephemeralAccountService,
     EphemeralContainerService ephemeralContainerService,
     GrantReconciliationService reconciliationService,
-    IAppContainerService appContainerService)
+    IAppContainerService appContainerService,
+    IInteractiveUserResolver interactiveUserResolver,
+    ILoggingService log,
+    EnforcementResultApplier enforcementResultApplier)
 {
+    /// <summary>
+    /// Re-derives container SIDs when the interactive user has changed since last startup.
+    /// Container SIDs vary per interactive user; cached SIDs from JSON remain valid when the user
+    /// is the same. Must run on the UI thread before snapshotting.
+    /// </summary>
+    public void RefreshContainerSidsIfUserChanged()
+    {
+        var currentIuSid = interactiveUserResolver.GetInteractiveUserSid();
+        if (string.IsNullOrEmpty(currentIuSid))
+            return;
+
+        var db = sessionProvider.GetSession().Database;
+        if (string.Equals(currentIuSid, db.Settings.LastInteractiveUserSid, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        // Derive SIDs in parallel (P/Invoke calls are the slow part),
+        // then write to DB entries sequentially (DB is not thread-safe).
+        var results = new ConcurrentBag<(AppContainerEntry Container, string Sid)>();
+        Parallel.ForEach(db.AppContainers, container =>
+        {
+            try
+            {
+                var sid = appContainerService.GetSid(container.Name);
+                results.Add((container, sid));
+            }
+            catch (Exception ex) { log.Warn($"Container SID resolution failed for '{container.Name}': {ex.Message}"); }
+        });
+        foreach (var (container, sid) in results)
+            container.Sid = sid;
+
+        db.Settings.LastInteractiveUserSid = currentIuSid;
+        sessionSaver.SaveConfig();
+    }
+
     /// <summary>
     /// Fixes AppEntry property inconsistencies on the live database. Must run on the UI thread
     /// before snapshotting, so that the fixes are visible in both the snapshot and the live database.
@@ -48,37 +88,23 @@ public class StartupEnforcementRunner(
 
     /// <summary>
     /// Applies enforcement results to the live database. Must run on the UI thread.
-    /// Re-tracks traverse grants, runs group reconciliation, and saves config if needed.
+    /// Updates timestamps, re-tracks traverse grants, runs group reconciliation, and saves config if needed.
     /// </summary>
     public async Task ApplyEnforcementResult(EnforcementResult result)
     {
         var database = sessionProvider.GetSession().Database;
 
-        foreach (var (appId, timestamp) in result.TimestampUpdates)
-        {
-            var app = database.Apps.FirstOrDefault(a => a.Id == appId);
-            if (app != null)
-                app.LastKnownExeTimestamp = timestamp;
-        }
-
-        // Re-track traverse grants on the live database. NTFS ACLs were already applied by
-        // Enforce() on the snapshot. We write DB entries directly because calling
-        // EnsureTraverseAccess again would skip DB tracking (anyAceAdded = false when ACEs exist).
-        // AppliedPaths from Enforce() are used so AllAppliedPaths is set correctly for precise reverts.
-        bool traverseRetracked = false;
-        foreach (var (container, traverseDir, appliedPaths) in result.TraverseGrants)
-        {
-            var containerSid = appContainerService.GetSid(container.Name);
-            var traversePaths = TraversePathsHelper.GetOrCreateTraversePaths(database, containerSid);
-            traverseRetracked |= TraversePathsHelper.TrackPath(traversePaths, traverseDir, appliedPaths);
-        }
+        // Apply timestamp updates and re-track traverse grants on the live database.
+        // NTFS ACLs were already applied by Enforce() on the snapshot; DB entries are written
+        // directly because EnsureTraverseAccess would skip tracking when ACEs already exist.
+        var (timestampsChanged, traverseRetracked) = enforcementResultApplier.ApplyToDatabase(result, database);
 
         // Reconcile group membership changes on the live database. Auto-saves if changed.
         bool reconciled = await reconciliationService.ReconcileIfGroupsChanged();
 
         // Save config if timestamps changed or traverse was re-tracked, but only if reconciliation
         // didn't already save (ReconcileIfGroupsChanged auto-saves when it returns true).
-        if ((result.TimestampUpdates.Count > 0 || traverseRetracked) && !reconciled)
+        if ((timestampsChanged || traverseRetracked) && !reconciled)
             sessionSaver.SaveConfig();
     }
 
@@ -95,12 +121,10 @@ public class StartupEnforcementRunner(
         if (string.IsNullOrEmpty(unlockDir))
             return;
 
-        permissionGrantService.EnsureAccess(unlockDir, interactiveSid,
+        var result = pathGrantService.EnsureAccess(interactiveSid, unlockDir,
             FileSystemRights.ReadAndExecute, confirm: null);
-        // Save to persist the grant and traverse tracking. This is idempotent —
-        // on subsequent starts AddGrant and EnsureTraverseAccess are no-ops so
-        // the save writes the same data as the last startup (no net change).
-        sessionSaver.SaveConfig();
+        if (result.DatabaseModified)
+            sessionSaver.SaveConfig();
     }
 
     /// <summary>

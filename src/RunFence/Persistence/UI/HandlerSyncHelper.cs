@@ -9,12 +9,23 @@ namespace RunFence.Persistence.UI;
 public class HandlerSyncHelper(
     ISessionProvider sessionProvider,
     IAppHandlerRegistrationService handlerRegistrationService,
-    IHandlerMappingService handlerMappingService)
+    IHandlerMappingService handlerMappingService,
+    IAssociationAutoSetService autoSetService)
 {
-    public void Sync()
+    public void Sync() => Sync(removedAssociationKeys: null);
+
+    public void Sync(IReadOnlyCollection<string>? removedAssociationKeys)
     {
         var database = sessionProvider.GetSession().Database;
-        var effectiveMappings = handlerMappingService.GetEffectiveHandlerMappings(database);
-        handlerRegistrationService.Sync(effectiveMappings, database.Apps);
+        var newMappings = handlerMappingService.GetEffectiveHandlerMappings(database);
+
+        if (removedAssociationKeys != null)
+        {
+            foreach (var key in removedAssociationKeys)
+                autoSetService.RestoreKeyForAllUsers(key);
+        }
+
+        handlerRegistrationService.Sync(newMappings, database.Apps);
+        autoSetService.AutoSetForAllUsers();
     }
 }

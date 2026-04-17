@@ -34,9 +34,6 @@ public class SecureDesktopHelper : ISecureDesktopRunner
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool EnumDesktopWindows(IntPtr hDesktop, EnumDesktopWindowsProc lpfn, IntPtr lParam);
 
-    [DllImport("user32.dll")]
-    private static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
         string sddl, uint revision, out IntPtr sd, out uint size);
@@ -52,6 +49,7 @@ public class SecureDesktopHelper : ISecureDesktopRunner
     }
 
     private static int _active;
+    [ThreadStatic] private static bool _inDoEvents;
 
     void ISecureDesktopRunner.Run(Action action) => RunSecureDesktop(action);
 
@@ -114,9 +112,16 @@ public class SecureDesktopHelper : ISecureDesktopRunner
             // Pump messages while waiting so IPC InvokeOnUIThread doesn't deadlock.
             // If the input desktop switches away (e.g. Ctrl+Alt+Del → lock/switch user),
             // post WM_CLOSE to all windows on the secure desktop so ShowDialog() returns.
+            // _inDoEvents guards against re-entrant DoEvents calls from event handlers
+            // triggered during message pumping (e.g. a nested dialog open).
             while (thread.IsAlive)
             {
-                Application.DoEvents();
+                if (!_inDoEvents)
+                {
+                    _inDoEvents = true;
+                    try { Application.DoEvents(); }
+                    finally { _inDoEvents = false; }
+                }
                 thread.Join(50);
 
                 IntPtr inputDesk = OpenInputDesktop(0, false, DESKTOP_ALL);
@@ -151,7 +156,7 @@ public class SecureDesktopHelper : ISecureDesktopRunner
     {
         EnumDesktopWindows(hDesktop, (hwnd, _) =>
         {
-            PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+            WindowNative.PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
             return true;
         }, IntPtr.Zero);
     }
@@ -183,7 +188,7 @@ public class SecureDesktopHelper : ISecureDesktopRunner
         {
             if (saPtr != IntPtr.Zero)
                 Marshal.FreeHGlobal(saPtr);
-            NativeMethods.LocalFree(sd);
+            ProcessNative.LocalFree(sd);
         }
     }
 }

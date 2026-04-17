@@ -11,7 +11,7 @@ namespace RunFence.SidMigration;
 /// scans for files/directories with ACEs referencing given SIDs, and applies SID replacements.
 /// Extracted from <see cref="SidMigrationService"/> to separate the ACL traversal concern.
 /// </summary>
-public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IFileSystemAclTraverser traverser)
+public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IFileSystemAclTraverser traverser) : ISidAclScanService
 {
     public async Task<List<OrphanedSid>> DiscoverOrphanedSidsAsync(
         IReadOnlyList<string> rootPaths,
@@ -96,10 +96,16 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                 }
                 else
                 {
+                    // Note: resolveCts timeout (3s) passed to Task.Run is ineffective because TryResolveName
+                    // does not accept a CancellationToken — it ignores cancellation internally.
+                    // The actual timeout is enforced by Wait(3000, ct) below.
+                    // Consequence: if TryResolveName blocks (e.g. unreachable DC), the background task continues
+                    // running after Wait returns false — orphaned tasks may accumulate for unreachable domains.
+                    // The failedDomainPrefixes cache prevents repeated waits for the same domain prefix.
                     using var resolveCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
                     var resolveTask = Task.Run(() => sidResolver.TryResolveName(sidStr), resolveCts.Token);
                     var completed = resolveTask.Wait(3000, ct);
-                    if (!completed || resolveTask.IsFaulted || resolveTask.Result == null)
+                    if (!completed || !resolveTask.IsCompletedSuccessfully || resolveTask.Result == null)
                     {
                         isOrphaned = true;
                         if (!completed)
@@ -119,6 +125,11 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
         }, ct);
     }
 
+    // Note: DiscoverOrphanedSidsAsync and ScanAsync share a similar structural pattern
+    // (traverse ACLs, accumulate per-SID counts/matches, report progress). Extraction into
+    // a shared helper is not practical because the accumulators differ in type and semantics:
+    // DiscoverOrphanedSids builds OrphanedSid objects with sample paths + resolution; ScanAsync
+    // builds SidMigrationMatch objects with per-SID ACE counts and owner SIDs.
     public async Task<List<SidMigrationMatch>> ScanAsync(
         IReadOnlyList<string> rootPaths,
         IReadOnlyList<SidMigrationMapping> mappings,

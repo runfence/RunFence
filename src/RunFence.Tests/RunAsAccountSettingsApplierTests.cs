@@ -2,6 +2,7 @@ using Moq;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Firewall;
+using RunFence.Firewall.UI;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.PrefTrans;
@@ -18,7 +19,7 @@ public class RunAsAccountSettingsApplierTests
     private readonly Mock<IDatabaseService> _databaseService = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<ISettingsTransferService> _settingsTransferService = new();
-    private readonly Mock<IFirewallService> _firewallService = new();
+    private readonly Mock<IAccountFirewallSettingsApplier> _firewallSettingsApplier = new();
     private readonly AppDatabase _database = new();
 
     public RunAsAccountSettingsApplierTests()
@@ -28,43 +29,20 @@ public class RunAsAccountSettingsApplierTests
 
     private RunAsAccountSettingsApplier CreateApplier()
         => new(_appState.Object, new SessionContext(), _databaseService.Object, _log.Object,
-            _settingsTransferService.Object, _firewallService.Object);
+            _settingsTransferService.Object,
+            new FirewallApplyHelper(_firewallSettingsApplier.Object, _log.Object));
 
     // ── ApplyLaunchDefaults ─────────────────────────────────────────────────
 
-    [Fact]
-    public void ApplyLaunchDefaults_SplitTokenDefault_True_SplitTokenOptOut_False()
+    [Theory]
+    [InlineData(PrivilegeLevel.Basic)]
+    [InlineData(PrivilegeLevel.HighestAllowed)]
+    [InlineData(PrivilegeLevel.LowIntegrity)]
+    public void ApplyLaunchDefaults_SetsPrivilegeLevelOnAccount(PrivilegeLevel privilegeLevel)
     {
-        // useSplitTokenDefault=true → entry.SplitTokenOptOut = false (opted in)
-        CreateApplier().ApplyLaunchDefaults(TestSid, useSplitTokenDefault: true, useLowIntegrityDefault: false);
+        CreateApplier().ApplyLaunchDefaults(TestSid, privilegeLevel);
 
-        Assert.False(_database.GetAccount(TestSid)?.SplitTokenOptOut);
-    }
-
-    [Fact]
-    public void ApplyLaunchDefaults_SplitTokenDefault_False_SplitTokenOptOut_True()
-    {
-        // useSplitTokenDefault=false → entry.SplitTokenOptOut = true (opted out)
-        CreateApplier().ApplyLaunchDefaults(TestSid, useSplitTokenDefault: false, useLowIntegrityDefault: false);
-
-        Assert.True(_database.GetAccount(TestSid)?.SplitTokenOptOut);
-    }
-
-    [Fact]
-    public void ApplyLaunchDefaults_LowIntegrityDefault_True_SetsLowIntegrityDefault()
-    {
-        CreateApplier().ApplyLaunchDefaults(TestSid, useSplitTokenDefault: true, useLowIntegrityDefault: true);
-
-        Assert.True(_database.GetAccount(TestSid)?.LowIntegrityDefault);
-    }
-
-    [Fact]
-    public void ApplyLaunchDefaults_LowIntegrityDefault_False_DoesNotSetLowIntegrityDefault()
-    {
-        CreateApplier().ApplyLaunchDefaults(TestSid, useSplitTokenDefault: true, useLowIntegrityDefault: false);
-
-        // Entry may not exist at all, or LowIntegrityDefault is false
-        Assert.False(_database.GetAccount(TestSid)?.LowIntegrityDefault ?? false);
+        Assert.Equal(privilegeLevel, _database.GetAccount(TestSid)?.PrivilegeLevel);
     }
 
     // ── ApplyFirewallDbSettings ─────────────────────────────────────────────
@@ -90,5 +68,51 @@ public class RunAsAccountSettingsApplierTests
 
         // The account entry should not exist (removed because all-default and otherwise empty)
         Assert.Null(_database.GetAccount(TestSid));
+    }
+
+    [Theory]
+    [InlineData(true, false, false)]   // internet allowed, localhost and LAN blocked
+    [InlineData(false, true, false)]   // localhost allowed, others blocked
+    [InlineData(false, false, true)]   // LAN allowed, others blocked
+    [InlineData(false, false, false)]  // all blocked
+    public void ApplyFirewallDbSettings_VariousValues_StoredCorrectly(
+        bool allowInternet, bool allowLocalhost, bool allowLan)
+    {
+        CreateApplier().ApplyFirewallDbSettings(TestSid, allowInternet, allowLocalhost, allowLan);
+
+        var entry = _database.GetAccount(TestSid);
+        Assert.NotNull(entry);
+        Assert.Equal(allowInternet, entry.Firewall.AllowInternet);
+        Assert.Equal(allowLocalhost, entry.Firewall.AllowLocalhost);
+        Assert.Equal(allowLan, entry.Firewall.AllowLan);
+    }
+
+    [Fact]
+    public void ApplyFirewallDbSettings_PreexistingAccount_UpdatesFirewallSettingsOnly()
+    {
+        // A pre-existing account entry (e.g. with PrivilegeLevel set) should retain non-firewall fields
+        var account = _database.GetOrCreateAccount(TestSid);
+        account.PrivilegeLevel = PrivilegeLevel.HighestAllowed;
+
+        CreateApplier().ApplyFirewallDbSettings(TestSid, allowInternet: false, allowLocalhost: true, allowLan: false);
+
+        var entry = _database.GetAccount(TestSid);
+        Assert.NotNull(entry);
+        Assert.Equal(PrivilegeLevel.HighestAllowed, entry.PrivilegeLevel);
+        Assert.False(entry.Firewall.AllowInternet);
+        Assert.True(entry.Firewall.AllowLocalhost);
+    }
+
+    [Fact]
+    public void ApplyLaunchDefaults_DoesNotCreateAccountEntryWhenAlreadyExists()
+    {
+        // GetOrCreateAccount is idempotent — calling again must not lose data
+        var account = _database.GetOrCreateAccount(TestSid);
+        account.TrayDiscovery = true;
+
+        CreateApplier().ApplyLaunchDefaults(TestSid, PrivilegeLevel.LowIntegrity);
+
+        Assert.True(_database.GetAccount(TestSid)!.TrayDiscovery);
+        Assert.Equal(PrivilegeLevel.LowIntegrity, _database.GetAccount(TestSid)!.PrivilegeLevel);
     }
 }

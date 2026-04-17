@@ -4,7 +4,7 @@ using System.ComponentModel;
 
 namespace RunFence.Persistence.UI.Forms;
 
-internal partial class ConfigManagerSection
+public partial class ConfigManagerSection
 {
     private IContainer components = null;
 
@@ -64,7 +64,7 @@ internal partial class ConfigManagerSection
         _configsGroup.Controls.Add(_configDesc);
 
         // _configDesc
-        _configDesc.Text = "Main config and loaded additional configs. Loaded configs are not persisted across restarts. Exported config contains app entries without credentials.";
+        _configDesc.Text = "Main config and loaded additional configs. Loaded configs are not persisted across restarts. Exported config contains app entries without credentials. The main config export also includes account SID-to-name mappings (account usernames).";
         _configDesc.Dock = DockStyle.Top;
         _configDesc.AutoSize = false;
         _configDesc.Resize += OnConfigDescResize;

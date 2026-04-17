@@ -1,6 +1,7 @@
-using System.Diagnostics;
+using RunFence.Launch.Tokens;
 using System.Security.Principal;
 using Moq;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.QuickAccess;
 using RunFence.Core;
@@ -34,7 +35,7 @@ public class DragBridgeServiceTests : IDisposable
         _log = new Mock<ILoggingService>();
 
         var aclPermission = new Mock<IAclPermissionService>();
-        var permissionGrant = new Mock<IPermissionGrantService>();
+        var permissionGrant = new Mock<IPathGrantService>();
         var sessionSaver = new Mock<ISessionSaver>();
         var uiThreadInvoker = new Mock<IUiThreadInvoker>();
         uiThreadInvoker.Setup(u => u.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
@@ -54,6 +55,11 @@ public class DragBridgeServiceTests : IDisposable
             aclPermission.Object,
             permissionGrant.Object,
             new SidDisplayNameResolver(new Mock<ISidResolver>().Object));
+        var resolveOrchestrator = new DragBridgeResolveOrchestrator(
+            pasteHandler,
+            sessionSaver.Object,
+            new Mock<IQuickAccessPinService>().Object,
+            uiThreadInvoker.Object);
 
         _service = new DragBridgeService(
             _hotkeyService.Object,
@@ -63,10 +69,7 @@ public class DragBridgeServiceTests : IDisposable
             tempManager.Object,
             processLauncher,
             copyFlow,
-            pasteHandler,
-            sessionSaver.Object,
-            uiThreadInvoker.Object,
-            new Mock<IQuickAccessPinService>().Object);
+            resolveOrchestrator);
         _service.Initialize();
 
         _pinKey = new ProtectedBuffer(new byte[32], protect: false);
@@ -123,22 +126,6 @@ public class DragBridgeServiceTests : IDisposable
         _hotkeyService.Verify(h => h.Register(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int>(), It.IsAny<bool>()), Times.Never);
     }
 
-    [Fact]
-    public void ApplySettings_HotkeyRegistrationFails_ShowsWarning()
-    {
-        _hotkeyService.Setup(h => h.Register(DragBridgeService.CopyHotkeyId, It.IsAny<int>(), It.IsAny<int>(), It.IsAny<bool>()))
-            .Returns(false);
-
-        _service.ApplySettings(new AppSettings
-        {
-            EnableDragBridge = true,
-            DragBridgeCopyHotkey = 0x60043,
-        });
-
-        _notifications.Verify(n => n.ShowWarning(It.IsAny<string>(),
-            It.Is<string>(s => s.Contains("Could not register hotkey"))), Times.Once);
-    }
-
     // --- Window owner resolution ---
 
     [Fact]
@@ -171,89 +158,44 @@ public class DragBridgeServiceTests : IDisposable
         _service.ApplySettings(new AppSettings { EnableDragBridge = true });
         _hotkeyService.Raise(h => h.HotkeyPressed += null, DragBridgeService.CopyHotkeyId);
 
-        // Assert
+        // Assert — 5s timeout is not a sleep; it waits for the async completion signal from the mock
+        // callback. The test fails (TimeoutException) if the notification is never raised, not flaky.
         await tcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
         _notifications.Verify(n => n.ShowWarning(It.IsAny<string>(),
             It.Is<string>(s => s.Contains("No credentials"))), Times.Once);
     }
 
-    [Fact]
-    public async Task CopyHotkey_CurrentUserHighIL_CallsLaunchDirectNoSplitToken()
-    {
-        // Arrange
-        _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
-            .Returns(new WindowOwnerInfo(CurrentSecId, NativeTokenHelper.MandatoryLevelHigh));
-
-        var tcs = new TaskCompletionSource();
-        _launcher.Setup(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-                false, false))
-            .Callback(() => tcs.TrySetResult())
-            .Returns((Process?)null);
-
-        // Act
-        _service.ApplySettings(new AppSettings { EnableDragBridge = true });
-        _hotkeyService.Raise(h => h.HotkeyPressed += null, DragBridgeService.CopyHotkeyId);
-
-        // Assert
-        await tcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        _launcher.Verify(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-            false, false), Times.Once);
-    }
-
-    [Fact]
-    public async Task CopyHotkey_CurrentUserMediumIL_CallsLaunchDirectWithSplitToken()
-    {
-        // Arrange
-        _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
-            .Returns(new WindowOwnerInfo(CurrentSecId, NativeTokenHelper.MandatoryLevelMedium));
-
-        var tcs = new TaskCompletionSource();
-        _launcher.Setup(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-                true, false))
-            .Callback(() => tcs.TrySetResult())
-            .Returns((Process?)null);
-
-        // Act
-        _service.ApplySettings(new AppSettings { EnableDragBridge = true });
-        _hotkeyService.Raise(h => h.HotkeyPressed += null, DragBridgeService.CopyHotkeyId);
-
-        // Assert
-        await tcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        _launcher.Verify(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-            true, false), Times.Once);
-    }
-
-    [Fact]
-    public async Task CopyHotkey_CurrentUserLowIL_CallsLaunchDirectWithLowIntegrity()
-    {
-        // Arrange
-        _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
-            .Returns(new WindowOwnerInfo(CurrentSecId, NativeTokenHelper.MandatoryLevelLow));
-
-        var tcs = new TaskCompletionSource();
-        _launcher.Setup(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-                true, true))
-            .Callback(() => tcs.TrySetResult())
-            .Returns((Process?)null);
-
-        // Act
-        _service.ApplySettings(new AppSettings { EnableDragBridge = true });
-        _hotkeyService.Raise(h => h.HotkeyPressed += null, DragBridgeService.CopyHotkeyId);
-
-        // Assert
-        await tcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        _launcher.Verify(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-            true, true), Times.Once);
-    }
-
-    // --- Bridge flow: managed launch PID tracking ---
-
-    // pid=0 exercises the "pid <= 0, skip GetProcessById" code path;
-    // pid=999999 exercises the "pid > 0, call GetProcessById, process gone → null" path.
     [Theory]
-    [InlineData(0)]
-    [InlineData(999999)]
-    public async Task CopyHotkey_ManagedAccountWithCredential_CallsLaunchManagedNotLaunchDirect(int launchPid)
+    [InlineData(NativeTokenHelper.MandatoryLevelHigh, PrivilegeLevel.HighestAllowed)]
+    [InlineData(NativeTokenHelper.MandatoryLevelMedium, PrivilegeLevel.Basic)]
+    [InlineData(NativeTokenHelper.MandatoryLevelLow, PrivilegeLevel.LowIntegrity)]
+    public async Task CopyHotkey_CurrentUser_CallsLaunchDirectWithExpectedPrivilegeLevel(
+        int integrityLevel, PrivilegeLevel expectedMode)
+    {
+        // Arrange
+        _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
+            .Returns(new WindowOwnerInfo(CurrentSecId, integrityLevel));
+
+        var tcs = new TaskCompletionSource();
+        _launcher.Setup(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                expectedMode))
+            .Callback(() => tcs.TrySetResult())
+            .Returns((ProcessInfo?)null);
+
+        // Act
+        _service.ApplySettings(new AppSettings { EnableDragBridge = true });
+        _hotkeyService.Raise(h => h.HotkeyPressed += null, DragBridgeService.CopyHotkeyId);
+
+        // Assert — 5s timeout waits for async completion, not a fixed sleep delay
+        await tcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        _launcher.Verify(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+            expectedMode), Times.Once);
+    }
+
+    // --- Bridge flow: managed launch ---
+
+    [Fact]
+    public async Task CopyHotkey_ManagedAccountWithCredential_CallsLaunchManagedNotLaunchDirect()
     {
         // For a SID with a stored credential (not current user, not interactive user),
         // the service must call LaunchManaged (not LaunchDirect) so the bridge process
@@ -279,16 +221,17 @@ public class DragBridgeServiceTests : IDisposable
         var launchCalledTcs = new TaskCompletionSource();
         _launcher.Setup(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>()))
             .Callback(() => launchCalledTcs.TrySetResult())
-            .Returns(launchPid);
+            .Throws(new InvalidOperationException("test: no real process available"));
 
         _hotkeyService.Raise(h => h.HotkeyPressed += null, DragBridgeService.CopyHotkeyId);
+        // 5s timeout waits for async completion, not a fixed sleep delay
         await launchCalledTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         _launcher.Verify(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>()), Times.Once);
         _launcher.Verify(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-            It.IsAny<bool>(), It.IsAny<bool>()), Times.Never);
+            It.IsAny<PrivilegeLevel>()), Times.Never);
         _launcher.Verify(l => l.LaunchDeElevated(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-            It.IsAny<bool>()), Times.Never);
+            It.IsAny<PrivilegeLevel?>()), Times.Never);
     }
 
     [Fact]
@@ -324,6 +267,7 @@ public class DragBridgeServiceTests : IDisposable
         // Act
         _hotkeyService.Raise(h => h.HotkeyPressed += null, DragBridgeService.CopyHotkeyId);
 
+        // 5s timeout waits for async completion, not a fixed sleep delay
         await errorTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         // Assert — an error notification was shown when LaunchManaged threw

@@ -1,77 +1,16 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Security;
-using RunFence.Core;
 using RunFence.Infrastructure;
-using RunFence.Launch.Tokens;
 
 namespace RunFence.Launch;
 
 /// <summary>
-/// Static helpers for acquiring and modifying Windows tokens used by the launchers.
-/// Covers logon token acquisition, token duplication, and integrity-level adjustment.
+/// Static thin P/Invoke wrappers for modifying Windows tokens used by the launchers.
+/// Covers token duplication and integrity-level adjustment.
+/// Logon token acquisition is handled by <see cref="Tokens.LogonTokenProvider"/>.
 /// </summary>
 public static class NativeTokenAcquisition
 {
-    /// <summary>
-    /// Acquires a logon token for the given credentials, or opens the current process token
-    /// when <paramref name="password"/> is null (current-account launch).
-    /// Handles ERROR_LOGON_TYPE_NOT_GRANTED by temporarily granting SeInteractiveLogonRight
-    /// via <see cref="IInteractiveLogonHelper.RunWithLogonRetry{T}"/>.
-    /// </summary>
-    public static IntPtr AcquireLogonToken(SecureString? password, string? domain,
-        string? username, ILoggingService log, IInteractiveLogonHelper logonHelper,
-        LaunchTokenSource tokenSource = LaunchTokenSource.Credentials)
-    {
-        switch (tokenSource)
-        {
-            case LaunchTokenSource.CurrentProcess:
-                if (!NativeMethods.OpenProcessToken(NativeMethods.GetCurrentProcess(),
-                        ProcessLaunchNative.TOKEN_DUPLICATE | ProcessLaunchNative.TOKEN_QUERY,
-                        out var hProcessToken))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
-                return hProcessToken;
-
-            case LaunchTokenSource.InteractiveUser:
-                try
-                {
-                    return ExplorerTokenHelper.GetExplorerToken(log);
-                }
-                catch when (password != null)
-                {
-                    // Explorer token failed but stored credentials are available — fall back to LogonUser
-                    log.Warn("AcquireLogonToken: Explorer token unavailable, falling back to stored credentials.");
-                    var fallbackPtr = Marshal.SecureStringToGlobalAllocUnicode(password);
-                    try
-                    {
-                        return logonHelper.RunWithLogonRetry(domain, username,
-                            () => LogonUserOrThrow(username!, domain, fallbackPtr));
-                    }
-                    finally
-                    {
-                        Marshal.ZeroFreeGlobalAllocUnicode(fallbackPtr);
-                    }
-                }
-
-            default:
-            {
-                if (password == null)
-                    throw new ArgumentException("Password is required for Credentials token source.", nameof(password));
-
-                var passwordPtr = Marshal.SecureStringToGlobalAllocUnicode(password);
-                try
-                {
-                    return logonHelper.RunWithLogonRetry(domain, username,
-                        () => LogonUserOrThrow(username!, domain, passwordPtr));
-                }
-                finally
-                {
-                    Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
-                }
-            }
-        }
-    }
-
     /// <summary>Duplicates <paramref name="hToken"/> as a primary token (full access).</summary>
     public static IntPtr DuplicateToken(IntPtr hToken)
     {
@@ -98,12 +37,48 @@ public static class NativeTokenAcquisition
     public static void SetMediumIntegrityOnToken(IntPtr hToken, out IntPtr pSid, out IntPtr tmlBuffer)
         => SetIntegrityOnToken(hToken, ProcessLaunchNative.MediumIntegritySid, out pSid, out tmlBuffer);
 
+    /// <summary>
+    /// Replaces the DefaultDacl on <paramref name="hToken"/> with a minimal DACL granting
+    /// GENERIC_ALL only to SYSTEM, <paramref name="accountSid"/>, and any
+    /// <paramref name="additionalSids"/>. This propagates to every process and kernel object
+    /// created by the launched process tree.
+    /// </summary>
+    public static void SetRestrictiveDefaultDacl(IntPtr hToken, string accountSid, params string[] additionalSids)
+    {
+        var sddl = $"D:(A;;GA;;;SY)(A;;GA;;;{accountSid})";
+        foreach (var sid in additionalSids)
+            sddl += $"(A;;GA;;;{sid})";
+        if (!ProcessLaunchNative.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out var pSd, out _))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            if (!FileSecurityNative.GetSecurityDescriptorDacl(pSd, out _, out var pDacl, out _))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+
+            var buffer = Marshal.AllocHGlobal(IntPtr.Size);
+            try
+            {
+                Marshal.WriteIntPtr(buffer, pDacl);
+                if (!ProcessLaunchNative.SetTokenInformation(hToken, ProcessLaunchNative.TOKEN_DEFAULT_DACL, buffer, (uint)IntPtr.Size))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        finally
+        {
+            ProcessNative.LocalFree(pSd);
+        }
+    }
+
     private static void SetIntegrityOnToken(IntPtr hToken, string integritySid, out IntPtr pSid, out IntPtr tmlBuffer)
     {
         pSid = IntPtr.Zero;
         tmlBuffer = IntPtr.Zero;
 
-        if (!NativeMethods.ConvertStringSidToSid(integritySid, out pSid))
+        if (!ProcessNative.ConvertStringSidToSid(integritySid, out pSid))
             throw new Win32Exception(Marshal.GetLastWin32Error());
 
         var sidLen = ProcessLaunchNative.GetLengthSid(pSid);
@@ -127,24 +102,4 @@ public static class NativeTokenAcquisition
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
 
-    private static IntPtr LogonUserOrThrow(string username, string? domain, IntPtr passwordPtr)
-    {
-        if (TryLogonUser(username, domain, passwordPtr, out var hToken, out var error))
-            return hToken;
-        throw new Win32Exception(error);
-    }
-
-    private static bool TryLogonUser(string username, string? domain, IntPtr passwordPtr,
-        out IntPtr hToken, out int error)
-    {
-        if (ProcessLaunchNative.LogonUser(username, domain, passwordPtr,
-                ProcessLaunchNative.LOGON32_LOGON_INTERACTIVE, ProcessLaunchNative.LOGON32_PROVIDER_DEFAULT, out hToken))
-        {
-            error = 0;
-            return true;
-        }
-
-        error = Marshal.GetLastWin32Error();
-        return false;
-    }
 }

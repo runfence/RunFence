@@ -9,15 +9,8 @@ namespace RunFence.Account.OrphanedProfiles;
 /// removes orphaned deny ACEs, and transfers orphaned allow ACEs to Administrators.
 /// Extracted from OrphanedProfileService to separate profile lifecycle from ACL cleanup.
 /// </summary>
-public class OrphanedAclCleanupService : IOrphanedAclCleanupService
+public class OrphanedAclCleanupService(ILoggingService log) : IOrphanedAclCleanupService
 {
-    private readonly ILoggingService _log;
-
-    public OrphanedAclCleanupService(ILoggingService log)
-    {
-        _log = log;
-    }
-
     public async Task<List<(string Path, string Action, string? Error)>> CleanupAclReferencesAsync(
         List<string> sids, IProgress<AclCleanupProgress>? progress, CancellationToken ct)
     {
@@ -214,7 +207,7 @@ public class OrphanedAclCleanupService : IOrphanedAclCleanupService
         catch (Exception ex)
         {
             report.Add((path, "Failed", ex.Message));
-            _log.Warn($"ACL cleanup failed for '{path}': {ex.Message}");
+            log.Warn($"ACL cleanup failed for '{path}': {ex.Message}");
         }
     }
 

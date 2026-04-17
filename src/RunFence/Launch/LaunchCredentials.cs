@@ -10,6 +10,9 @@ public readonly record struct LaunchCredentials(
     string? Username,
     LaunchTokenSource TokenSource = LaunchTokenSource.Credentials)
 {
+    public static LaunchCredentials CurrentAccount => new LaunchCredentials(null, null, null, LaunchTokenSource.CurrentProcess);
+    public static LaunchCredentials InteractiveUser => new LaunchCredentials(null, null, null, LaunchTokenSource.InteractiveUser);
+
     public static LaunchCredentials FromCredentialEntry(
         SecureString? password, CredentialEntry credEntry,
         ISidResolver sidResolver, IReadOnlyDictionary<string, string>? sidNames)

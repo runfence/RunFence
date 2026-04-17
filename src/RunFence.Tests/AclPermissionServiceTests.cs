@@ -1,6 +1,7 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
 using Moq;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Infrastructure;
@@ -28,7 +29,8 @@ public class AclPermissionServiceTests
     private readonly AclPermissionService _service = new(
         new NTTranslateApi(new Mock<ILoggingService>().Object),
         new GroupMembershipApi(new Mock<ILoggingService>().Object),
-        new Mock<ILocalGroupMembershipService>().Object);
+        new Mock<ILocalGroupMembershipService>().Object,
+        new AclAccessor());
 
     // --- ResolveAccountGroupSids tests ---
 
@@ -36,14 +38,15 @@ public class AclPermissionServiceTests
     public void ResolveAccountGroupSids_ReturnsWellKnownGroupsWithoutAccountSid()
     {
         // accountSid is NOT included — callers pass it separately to HasEffectiveRights.
-        // BuiltinUsers (S-1-5-32-545) is NOT hardcoded — it comes from NetUserGetLocalGroups only
-        // if the account is actually a member. The fake SID is not a real account, so it won't appear.
+        // BuiltinUsers (S-1-5-32-545) is hardcoded: every authenticated user's token always
+        // includes it (LSA injects Authenticated Users unconditionally, and Authenticated Users
+        // is always a member of BUILTIN\Users via SamrGetAliasMembership).
         var result = _service.ResolveAccountGroupSids(UserSid);
 
         Assert.DoesNotContain(UserSid, result);
         Assert.Contains(EveryoneSid, result);
         Assert.Contains(AuthenticatedUsersSid, result);
-        Assert.DoesNotContain(BuiltinUsersSid, result);
+        Assert.Contains(BuiltinUsersSid, result);
     }
 
     [Fact]
@@ -381,6 +384,26 @@ public class AclPermissionServiceTests
     }
 
     [Fact]
+    public void NeedsPermissionGrant_Unelevated_AdminsGroupExcludedFromCheck()
+    {
+        // When unelevated=true, the Administrators group SID must be excluded from the effective-rights
+        // check. This is tested through HasEffectiveRights: verifying that access granted to Admins
+        // is NOT seen when Admins is removed from groupSids (simulating unelevated token filtering).
+        var fs = new FileSecurity();
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(AdministratorsSid),
+            FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+
+        // With Admins in groupSids → access is granted
+        var groupSidsWithAdmins = new List<string> { EveryoneSid, AuthenticatedUsersSid, AdministratorsSid };
+        Assert.True(_service.HasEffectiveRights(fs, UserSid, groupSidsWithAdmins, FileSystemRights.ReadAndExecute));
+
+        // Without Admins in groupSids → no access (simulates what unelevated=true does)
+        var groupSidsWithoutAdmins = new List<string> { EveryoneSid, AuthenticatedUsersSid };
+        Assert.False(_service.HasEffectiveRights(fs, UserSid, groupSidsWithoutAdmins, FileSystemRights.ReadAndExecute));
+    }
+
+    [Fact]
     public void HasEffectiveRights_DenyOnGroupSid_DoesNotOverrideAllowOnAccountSid()
     {
         // Documents intentional simplification: per-SID deny does not cross SID boundaries.
@@ -447,161 +470,6 @@ public class AclPermissionServiceTests
         Assert.True(result.ContainsKey(UserSid));
     }
 
-    // --- EnsureRights tests ---
-
-    /// <summary>
-    /// Creates <c>outerDir/innerDir/</c>. The inner directory has inheritance broken;
-    /// only Administrators and the current test-runner user retain FullControl, so the fake
-    /// <see cref="UserSid"/> is never present and <c>NeedsPermissionGrant</c> reliably
-    /// returns <c>true</c> for it.
-    /// </summary>
-    private static (string outerDir, string innerDir, Mock<ILoggingService> log)
-        CreateProtectedTempDirectory()
-    {
-        var log = new Mock<ILoggingService>();
-        var outerDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        var innerDir = Path.Combine(outerDir, "inner");
-        Directory.CreateDirectory(innerDir);
-
-        var dirInfo = new DirectoryInfo(innerDir);
-        var dirSecurity = dirInfo.GetAccessControl();
-        dirSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        dirSecurity.AddAccessRule(new FileSystemAccessRule(
-            AclComputeHelper.AdministratorsSid, FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None, AccessControlType.Allow));
-        // Retain current-user access so the test runner can verify ACLs and clean up.
-        dirSecurity.AddAccessRule(new FileSystemAccessRule(
-            WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None, AccessControlType.Allow));
-        dirInfo.SetAccessControl(dirSecurity);
-
-        return (outerDir, innerDir, log);
-    }
-
-    private static bool HasReadAndExecuteAce(string dirPath, string sid)
-    {
-        var rules = new DirectoryInfo(dirPath)
-            .GetAccessControl()
-            .GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
-        foreach (FileSystemAccessRule rule in rules)
-        {
-            if (rule.IdentityReference is SecurityIdentifier s && s.Value == sid &&
-                rule.AccessControlType == AccessControlType.Allow &&
-                rule.FileSystemRights.HasFlag(FileSystemRights.ReadAndExecute))
-                return true;
-        }
-
-        return false;
-    }
-
-    [Fact]
-    public void EnsureRights_ConfirmTrue_GrantsReadExecuteOnDirectory()
-    {
-        var (outerDir, innerDir, log) = CreateProtectedTempDirectory();
-        try
-        {
-            int confirmCount = 0;
-            bool result = _service.EnsureRights(innerDir, UserSid, FileSystemRights.ReadAndExecute, log.Object,
-                _ =>
-                {
-                    confirmCount++;
-                    return true;
-                });
-
-            Assert.True(result);
-            Assert.Equal(1, confirmCount);
-            Assert.True(HasReadAndExecuteAce(innerDir, UserSid),
-                "UserSid should have ReadAndExecute ACE on the directory");
-        }
-        finally
-        {
-            Directory.Delete(outerDir, true);
-        }
-    }
-
-    [Fact]
-    public void EnsureRights_DirectoryPath_GrantsOnDirectoryItself()
-    {
-        var (outerDir, innerDir, log) = CreateProtectedTempDirectory();
-        try
-        {
-            bool result = _service.EnsureRights(innerDir, UserSid, FileSystemRights.ReadAndExecute, log.Object, _ => true);
-
-            Assert.True(result);
-            Assert.True(HasReadAndExecuteAce(innerDir, UserSid),
-                "UserSid should have ReadAndExecute ACE when a directory path is passed directly");
-        }
-        finally
-        {
-            Directory.Delete(outerDir, true);
-        }
-    }
-
-    [Fact]
-    public void EnsureRights_ConfirmFalse_NoAceAdded()
-    {
-        var (outerDir, innerDir, log) = CreateProtectedTempDirectory();
-        try
-        {
-            bool result = _service.EnsureRights(innerDir, UserSid, FileSystemRights.ReadAndExecute, log.Object, _ => false);
-
-            Assert.False(result);
-            Assert.False(HasReadAndExecuteAce(innerDir, UserSid),
-                "UserSid should not have an ACE when confirm returns false");
-        }
-        finally
-        {
-            Directory.Delete(outerDir, true);
-        }
-    }
-
-    [Fact]
-    public void EnsureRights_ConfirmThrowsOce_PropagatesAndNoAceAdded()
-    {
-        var (outerDir, innerDir, log) = CreateProtectedTempDirectory();
-        try
-        {
-            Assert.Throws<OperationCanceledException>(() =>
-                _service.EnsureRights(innerDir, UserSid, FileSystemRights.ReadAndExecute, log.Object,
-                    _ => throw new OperationCanceledException()));
-
-            Assert.False(HasReadAndExecuteAce(innerDir, UserSid),
-                "UserSid should not have an ACE when confirm throws OCE");
-        }
-        finally
-        {
-            Directory.Delete(outerDir, true);
-        }
-    }
-
-    [Fact]
-    public void EnsureRights_AlreadyHasPermission_ReturnsFalseNoConfirmNeeded()
-    {
-        var (outerDir, innerDir, log) = CreateProtectedTempDirectory();
-        try
-        {
-            // Pre-grant ReadAndExecute on innerDir
-            _service.GrantRights(innerDir, UserSid);
-
-            bool confirmCalled = false;
-            bool result = _service.EnsureRights(innerDir, UserSid, FileSystemRights.ReadAndExecute, log.Object,
-                _ =>
-                {
-                    confirmCalled = true;
-                    return true;
-                });
-
-            Assert.False(result, "Should return false when access is already sufficient");
-            Assert.False(confirmCalled, "No confirm should be needed when account already has ReadAndExecute");
-        }
-        finally
-        {
-            Directory.Delete(outerDir, true);
-        }
-    }
-
     // --- GetGrantableAncestors tests ---
 
     [Fact]
@@ -643,20 +511,12 @@ public class AclPermissionServiceTests
     [Fact]
     public void GetGrantableAncestors_DirectoryPath_StartsWithDirectoryItself()
     {
-        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(tempDir);
-        try
-        {
-            var ancestors = _service.GetGrantableAncestors(tempDir);
+        using var tempDir = new TempDirectory("RunFence_AclPermTest");
+        var ancestors = _service.GetGrantableAncestors(tempDir.Path);
 
-            Assert.NotEmpty(ancestors);
-            // When path is a directory, first element is the directory itself
-            Assert.Equal(tempDir, ancestors[0]);
-        }
-        finally
-        {
-            Directory.Delete(tempDir);
-        }
+        Assert.NotEmpty(ancestors);
+        // When path is a directory, first element is the directory itself
+        Assert.Equal(tempDir.Path, ancestors[0]);
     }
 
     [Fact]

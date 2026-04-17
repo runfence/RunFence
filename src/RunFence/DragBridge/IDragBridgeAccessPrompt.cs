@@ -3,8 +3,8 @@ namespace RunFence.DragBridge;
 public enum DragBridgeAccessAction
 {
     GrantAccess,
-    CopyToTemp,
-    CopyToTempWholeFolder
+    GrantFolderAccess,
+    CopyToTemp
 }
 
 /// <summary>

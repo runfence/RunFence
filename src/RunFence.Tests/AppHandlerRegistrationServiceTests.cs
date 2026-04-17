@@ -12,8 +12,8 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 {
     private readonly Mock<ILoggingService> _log;
     private readonly Mock<ILicenseService> _licenseService;
-    private readonly string _testSid;
-    private readonly RegistryKey _hkuRoot;
+    private readonly string _testSubKey;
+    private readonly RegistryKey _hklmRoot;
     private readonly TempDirectory _tempDir;
     private readonly string _launcherPath;
 
@@ -22,8 +22,8 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         _log = new Mock<ILoggingService>();
         _licenseService = new Mock<ILicenseService>();
         _licenseService.Setup(l => l.IsLicensed).Returns(true);
-        _testSid = $"RunFenceTest_{Guid.NewGuid():N}";
-        _hkuRoot = Registry.CurrentUser;
+        _testSubKey = $@"Software\RunFenceTests\HandlerReg_{Guid.NewGuid():N}";
+        _hklmRoot = Registry.CurrentUser.CreateSubKey(_testSubKey)!;
         _tempDir = new TempDirectory("RunFenceHandlerTests");
         _launcherPath = Path.Combine(_tempDir.Path, "RunFence.Launcher.exe");
         File.WriteAllText(_launcherPath, "stub");
@@ -31,9 +31,10 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
     public void Dispose()
     {
+        _hklmRoot.Dispose();
         try
         {
-            _hkuRoot.DeleteSubKeyTree(_testSid, throwOnMissingSubKey: false);
+            Registry.CurrentUser.DeleteSubKeyTree(_testSubKey, throwOnMissingSubKey: false);
         }
         catch
         {
@@ -43,26 +44,25 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     }
 
     private AppHandlerRegistrationService CreateService(ILicenseService? licenseService = null)
-        => new(_log.Object, licenseService ?? _licenseService.Object, _hkuRoot, _testSid, _launcherPath);
+        => new(_log.Object, licenseService ?? _licenseService.Object, _hklmRoot, _launcherPath);
 
     private static AppEntry MakeApp(string id, string? exePath = null)
         => new() { Id = id, Name = id, ExePath = exePath ?? "" };
 
     private string? ReadValue(string subKey, string? valueName = null)
     {
-        using var key = _hkuRoot.OpenSubKey($@"{_testSid}\{subKey}");
+        using var key = _hklmRoot.OpenSubKey(subKey);
         return key?.GetValue(valueName) as string;
     }
 
     private RegistryKey? OpenKey(string subKey)
-        => _hkuRoot.OpenSubKey($@"{_testSid}\{subKey}");
+        => _hklmRoot.OpenSubKey(subKey);
 
     private List<string> GetProgIds()
     {
-        using var classesKey = _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes");
+        using var classesKey = _hklmRoot.OpenSubKey(@"Software\Classes");
         return classesKey?.GetSubKeyNames()
-            .Where(n => n.StartsWith(Constants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase)
-                        && !n.Equals(Constants.HandlerParentKey, StringComparison.OrdinalIgnoreCase))
+            .Where(n => n.StartsWith(Constants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase))
             .ToList() ?? [];
     }
 
@@ -72,7 +72,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     public void Sync_MixedExtensionsAndProtocols_CreatesCorrectPerAssociationProgIds()
     {
         var app = MakeApp("app1");
-        var mappings = new Dictionary<string, string> { ["http"] = "app1", [".pdf"] = "app1" };
+        var mappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app1") };
 
         CreateService().Sync(mappings, [app]);
 
@@ -85,7 +85,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     {
         var app = MakeApp("app1");
 
-        CreateService().Sync(new Dictionary<string, string> { ["http"] = "app1" }, [app]);
+        CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
 
         var cmd = ReadValue(@"Software\Classes\RunFence_http\shell\open\command");
         Assert.NotNull(cmd);
@@ -101,11 +101,25 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         var app = MakeApp("app1");
         var svc = CreateService();
 
-        svc.Sync(new Dictionary<string, string> { ["http"] = "app1" }, [app]);
-        svc.Sync(new Dictionary<string, string> { ["http"] = "app1", ["https"] = "app1" }, [app]);
+        svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
+        svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), ["https"] = new HandlerMappingEntry("app1") }, [app]);
 
         Assert.NotNull(OpenKey(@"Software\Classes\RunFence_http"));
         Assert.NotNull(OpenKey(@"Software\Classes\RunFence_https"));
+    }
+
+    [Fact]
+    public void Sync_RegisteredApplicationsPointsToCapabilitiesOutsideClasses()
+    {
+        var app = MakeApp("app1");
+
+        CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
+
+        // RegisteredApplications must point to the standard location outside Software\Classes
+        // to prevent Windows from double-discovering RunFence in Default Apps.
+        var regAppsValue = ReadValue(@"Software\RegisteredApplications", Constants.HandlerRegisteredAppName);
+        Assert.Equal(Constants.HandlerCapabilitiesRegistryPath, regAppsValue);
+        Assert.DoesNotContain(@"Software\Classes", regAppsValue!);
     }
 
     [Fact]
@@ -114,13 +128,13 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         var app = MakeApp("app1");
         var svc = CreateService();
 
-        svc.Sync(new Dictionary<string, string> { ["http"] = "app1", ["https"] = "app1" }, [app]);
-        svc.Sync(new Dictionary<string, string> { ["http"] = "app1" }, [app]);
+        svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), ["https"] = new HandlerMappingEntry("app1") }, [app]);
+        svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
 
         Assert.NotNull(OpenKey(@"Software\Classes\RunFence_http"));
         Assert.Null(OpenKey(@"Software\Classes\RunFence_https"));
 
-        using var urlKey = OpenKey(@"Software\Classes\RunFence_Handler\Capabilities\URLAssociations");
+        using var urlKey = OpenKey(@"Software\RunFence\Capabilities\URLAssociations");
         Assert.NotNull(urlKey?.GetValue("http"));
         Assert.Null(urlKey.GetValue("https"));
     }
@@ -130,10 +144,10 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     {
         var app = MakeApp("app1");
 
-        CreateService().Sync(new Dictionary<string, string> { ["http"] = "app1", [".pdf"] = "app1" }, [app]);
+        CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app1") }, [app]);
 
-        using var urlKey = OpenKey(@"Software\Classes\RunFence_Handler\Capabilities\URLAssociations");
-        using var fileKey = OpenKey(@"Software\Classes\RunFence_Handler\Capabilities\FileAssociations");
+        using var urlKey = OpenKey(@"Software\RunFence\Capabilities\URLAssociations");
+        using var fileKey = OpenKey(@"Software\RunFence\Capabilities\FileAssociations");
 
         Assert.Equal("RunFence_http", urlKey?.GetValue("http") as string);
         Assert.Equal("RunFence_.pdf", fileKey?.GetValue(".pdf") as string);
@@ -146,7 +160,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     public void Sync_Idempotent_CalledTwiceProducesSameState()
     {
         var app = MakeApp("app1");
-        var mappings = new Dictionary<string, string> { ["http"] = "app1", [".pdf"] = "app1" };
+        var mappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app1") };
         var svc = CreateService();
 
         svc.Sync(mappings, [app]);
@@ -159,7 +173,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         Assert.Equal(2, progIds.Count);
 
         // URLAssociations has exactly one value
-        using var urlKey = OpenKey(@"Software\Classes\RunFence_Handler\Capabilities\URLAssociations");
+        using var urlKey = OpenKey(@"Software\RunFence\Capabilities\URLAssociations");
         var urlValues = urlKey?.GetValueNames() ?? [];
         Assert.Single(urlValues);
         Assert.Equal("http", urlValues[0]);
@@ -171,8 +185,8 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         var app = MakeApp("app1");
         var svc = CreateService();
 
-        svc.Sync(new Dictionary<string, string> { ["http"] = "app1" }, [app]);
-        svc.Sync(new Dictionary<string, string>(), [app]);
+        svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
+        svc.Sync(new Dictionary<string, HandlerMappingEntry>(), [app]);
 
         Assert.Null(OpenKey(@"Software\Classes\RunFence_http"));
     }
@@ -180,7 +194,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     [Fact]
     public void Sync_SkipsMissingAppEntries_LogsWarning()
     {
-        var mappings = new Dictionary<string, string> { ["http"] = "nonexistent_app" };
+        var mappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("nonexistent_app") };
 
         CreateService().Sync(mappings, []);
 
@@ -193,11 +207,11 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     {
         var app = MakeApp("app1");
         // Keys with backslash, space, percent — all invalid
-        var mappings = new Dictionary<string, string>
+        var mappings = new Dictionary<string, HandlerMappingEntry>
         {
-            [@"http\evil"] = "app1",
-            ["has space"] = "app1",
-            ["has%percent"] = "app1"
+            [@"http\evil"] = new HandlerMappingEntry("app1"),
+            ["has space"] = new HandlerMappingEntry("app1"),
+            ["has%percent"] = new HandlerMappingEntry("app1")
         };
 
         CreateService().Sync(mappings, [app]);
@@ -213,7 +227,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         var app1 = MakeApp("app1");
         var app2 = MakeApp("app2");
 
-        CreateService().Sync(new Dictionary<string, string> { ["http"] = "app1", [".pdf"] = "app2" }, [app1, app2]);
+        CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app2") }, [app1, app2]);
 
         var icon1 = ReadValue(@"Software\Classes\RunFence_http\DefaultIcon");
         var icon2 = ReadValue(@"Software\Classes\RunFence_.pdf\DefaultIcon");
@@ -221,6 +235,23 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         Assert.NotNull(icon2);
         Assert.Contains(_launcherPath, icon1);
         Assert.Contains(_launcherPath, icon2);
+    }
+
+    [Fact]
+    public void Sync_LegacyRunFenceHandlerKeyInClasses_IsRemovedToPreventDuplicate()
+    {
+        // Pre-create legacy RunFence_Handler key as it existed in older installations
+        // (Capabilities were inside Software\Classes\RunFence_Handler instead of Software\RunFence\Capabilities)
+        _hklmRoot.CreateSubKey(@"Software\Classes\RunFence_Handler\Capabilities")!.Dispose();
+
+        var app = MakeApp("app1");
+        CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
+
+        // Legacy key must be removed — its presence inside Software\Classes caused Windows
+        // to show RunFence twice in Default Apps.
+        Assert.Null(OpenKey(@"Software\Classes\RunFence_Handler"));
+        // New Capabilities must be at the standard location
+        Assert.NotNull(OpenKey(@"Software\RunFence\Capabilities"));
     }
 
     // --- UnregisterAll ---
@@ -231,12 +262,12 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         var app = MakeApp("app1");
         var svc = CreateService();
 
-        svc.Sync(new Dictionary<string, string> { ["http"] = "app1", [".pdf"] = "app1" }, [app]);
+        svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app1") }, [app]);
         svc.UnregisterAll();
 
         Assert.Null(OpenKey(@"Software\Classes\RunFence_http"));
         Assert.Null(OpenKey(@"Software\Classes\RunFence_.pdf"));
-        Assert.Null(OpenKey($@"Software\Classes\{Constants.HandlerParentKey}"));
+        Assert.Null(OpenKey(@"Software\RunFence\Capabilities"));
 
         using var regApps = OpenKey(@"Software\RegisteredApplications");
         Assert.Null(regApps?.GetValue(Constants.HandlerRegisteredAppName));
@@ -250,10 +281,11 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         var license = new Mock<ILicenseService>();
         license.Setup(l => l.IsLicensed).Returns(false);
         var app = MakeApp("app1");
-        var mappings = new Dictionary<string, string>
+        var mappings = new Dictionary<string, HandlerMappingEntry>
         {
-            ["http"] = "app1", ["https"] = "app1", [".htm"] = "app1", [".html"] = "app1",
-            [".pdf"] = "app1", ["mailto"] = "app1"
+            ["http"] = new HandlerMappingEntry("app1"), ["https"] = new HandlerMappingEntry("app1"),
+            [".htm"] = new HandlerMappingEntry("app1"), [".html"] = new HandlerMappingEntry("app1"),
+            [".pdf"] = new HandlerMappingEntry("app1"), ["mailto"] = new HandlerMappingEntry("app1")
         };
 
         CreateService(license.Object).Sync(mappings, [app]);
@@ -272,9 +304,10 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         var license = new Mock<ILicenseService>();
         license.Setup(l => l.IsLicensed).Returns(false);
         var app = MakeApp("app1");
-        var mappings = new Dictionary<string, string>
+        var mappings = new Dictionary<string, HandlerMappingEntry>
         {
-            ["http"] = "app1", ["https"] = "app1", [".htm"] = "app1", [".html"] = "app1"
+            ["http"] = new HandlerMappingEntry("app1"), ["https"] = new HandlerMappingEntry("app1"),
+            [".htm"] = new HandlerMappingEntry("app1"), [".html"] = new HandlerMappingEntry("app1")
         };
 
         CreateService(license.Object).Sync(mappings, [app]);
@@ -298,7 +331,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         var extraApp = MakeApp("extraApp");
 
         // Effective: "http" → extraApp won (extra config overrides main)
-        var effectiveMappings = new Dictionary<string, string> { ["http"] = "extraApp" };
+        var effectiveMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("extraApp") };
 
         CreateService().Sync(effectiveMappings, [mainApp, extraApp]);
 

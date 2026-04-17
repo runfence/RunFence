@@ -1,4 +1,7 @@
 using System.ComponentModel;
+using RunFence.Account;
+using RunFence.Acl.UI;
+using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -17,7 +20,8 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
     public record struct ConfigGroupHeaderTag(string? ConfigPath);
 
     private readonly IAppConfigService _appConfigService;
-    private readonly IAppLaunchOrchestrator _launchOrchestrator;
+    private readonly AppEntryLauncher _entryLauncher;
+    private readonly ISidNameCacheService _sidNameCache;
     private readonly ILoggingService _log;
     private readonly ApplicationsCrudOrchestrator _crudHandler;
     private readonly ApplicationsGridPopulator _gridPopulator;
@@ -35,7 +39,6 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         => LaunchApp(app, launcherArguments);
 
     // IApplicationsPanelState explicit implementations
-    SessionContext IApplicationsPanelState.Session => Session;
     AppDatabase IApplicationsPanelState.Database => Database;
     CredentialStore IApplicationsPanelState.CredentialStore => CredentialStore;
     bool IApplicationsPanelState.IsSortActive => IsSortActive;
@@ -65,20 +68,24 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
     }
 
     public ApplicationsPanel(
+        IModalCoordinator modalCoordinator,
         ApplicationsCrudOrchestrator crudOrchestrator,
         ApplicationsGridPopulator gridPopulator,
         AppGridDragDropHandler dragDropHandler,
         IAppConfigService appConfigService,
-        IAppLaunchOrchestrator launchOrchestrator,
+        AppEntryLauncher entryLauncher,
+        ISidNameCacheService sidNameCache,
         ILoggingService log,
         AppContextMenuOrchestrator contextMenuOrchestrator,
         ApplicationsHandlerSyncHelper? handlerSyncHelper = null)
+        : base(modalCoordinator)
     {
         _crudHandler = crudOrchestrator;
         _gridPopulator = gridPopulator;
         _dragDropHandler = dragDropHandler;
         _appConfigService = appConfigService;
-        _launchOrchestrator = launchOrchestrator;
+        _entryLauncher = entryLauncher;
+        _sidNameCache = sidNameCache;
         _log = log;
         _handlerSyncHelper = handlerSyncHelper;
         InitializeComponent();
@@ -111,7 +118,6 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
 
     protected override void OnDataSet()
     {
-        _launchOrchestrator.SetData(Session);
         RefreshGrid();
     }
 
@@ -228,7 +234,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
 
     private void OnAssociationsClick(object? sender, EventArgs e)
     {
-        _handlerSyncHelper?.OpenAssociationsDialog(this, () => Database, () => SaveAndRefresh());
+        _handlerSyncHelper?.OpenAssociationsDialog(this, () => SaveAndRefresh());
     }
 
     private void OnReapplyClick(object? sender, EventArgs e)
@@ -286,12 +292,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         if (_handlerSyncHelper != null && app is { IsFolder: false, IsUrlScheme: false })
         {
             _ctxSetDefaultBrowser.Visible = true;
-            var effectiveMappings = _handlerSyncHelper.GetEffectiveMappings();
-            var isCurrentDefault = effectiveMappings.TryGetValue("http", out var httpAppId)
-                                   && string.Equals(httpAppId, app.Id, StringComparison.Ordinal)
-                                   && effectiveMappings.TryGetValue("https", out var httpsAppId)
-                                   && string.Equals(httpsAppId, app.Id, StringComparison.Ordinal);
-            _ctxSetDefaultBrowser.Text = isCurrentDefault ? "Unset Default Browser" : "Set as Default Browser";
+            _ctxSetDefaultBrowser.Checked = AppEntryHelper.IsDefaultBrowser(app.Id, _handlerSyncHelper.GetAllMappings());
         }
         else
             _ctxSetDefaultBrowser.Visible = false;
@@ -340,7 +341,8 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
     {
         try
         {
-            _launchOrchestrator.Launch(app, launcherArguments);
+            _entryLauncher.Launch(app, launcherArguments,
+                permissionPrompt: AclPermissionDialogHelper.CreateLaunchPermissionPrompt(_sidNameCache, FindForm()));
         }
         catch (CredentialNotFoundException ex)
         {
@@ -354,6 +356,9 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         {
             MessageBox.Show("Stored credentials are incorrect. Please update the password in RunFence.",
                 "Launch Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch (OperationCanceledException)
+        {
         }
         catch (Exception ex)
         {

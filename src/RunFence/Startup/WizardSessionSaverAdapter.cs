@@ -8,14 +8,14 @@ namespace RunFence.Startup;
 /// Implements <see cref="IWizardSessionSaver"/> — saves session state and notifies that data changed.
 /// </summary>
 public class WizardSessionSaverAdapter(
-    IAccountCredentialManager credentialManager,
+    SessionPersistenceHelper persistenceHelper,
     ISessionProvider sessionProvider,
     IDataChangeNotifier dataChangeNotifier) : IWizardSessionSaver
 {
     public void SaveAndRefresh()
     {
         var session = sessionProvider.GetSession();
-        credentialManager.SaveCredentialStoreAndConfig(
+        persistenceHelper.SaveCredentialStoreAndConfig(
             session.CredentialStore, session.Database, session.PinDerivedKey);
         dataChangeNotifier.NotifyDataChanged();
     }

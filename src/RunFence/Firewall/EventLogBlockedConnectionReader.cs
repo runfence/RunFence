@@ -49,6 +49,8 @@ public class EventLogBlockedConnectionReader(ILoggingService log) : IBlockedConn
 
                     if (!int.TryParse(props[PropDestPort].Value?.ToString(), out var destPort))
                         continue;
+                    // Protocol parsing serves as a validation gate — events with non-integer
+                    // protocol values are malformed and intentionally skipped, not dead code.
                     if (!int.TryParse(props[PropProtocol].Value?.ToString(), out var protocol))
                         continue;
 

@@ -1,207 +1,144 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using RunFence.Core;
-using RunFence.Infrastructure;
 using RunFence.Launch;
+using RunFence.Launch.Tokens;
 
 namespace RunFence.PrefTrans;
 
-public class PrefTransLauncher(IAppLaunchOrchestrator launchOrchestrator, ILoggingService log) : IPrefTransLauncher
+public class PrefTransLauncher(ILaunchFacade facade, ILoggingService log) : IPrefTransLauncher
 {
     public SettingsTransferResult RunAndWait(string prefTransPath, string command, string filePath,
-        LaunchCredentials credentials, int timeoutMs, Action? pollCallback)
+        string accountSid, int timeoutMs, Action? pollCallback)
     {
-        if (credentials.TokenSource is LaunchTokenSource.CurrentProcess or LaunchTokenSource.InteractiveUser)
-            return RunDeElevated(prefTransPath, command, filePath, credentials.TokenSource, timeoutMs, pollCallback);
-
-        return RunWithCredentials(prefTransPath, command, filePath, credentials, timeoutMs, pollCallback);
-    }
-
-    private SettingsTransferResult RunDeElevated(string prefTransPath, string command, string filePath,
-        LaunchTokenSource tokenSource, int timeoutMs, Action? pollCallback)
-    {
-        var targetSid = tokenSource == LaunchTokenSource.CurrentProcess
-            ? SidResolutionHelper.GetCurrentUserSid()
-            : SidResolutionHelper.GetInteractiveUserSid();
-
-        if (targetSid == null)
-        {
-            const string msg = "No user session found for de-elevated operation.";
-            log.Error(msg);
-            return new SettingsTransferResult(false, msg);
-        }
-
-        var sharedTempDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            Constants.AppName, "temp");
-        Directory.CreateDirectory(sharedTempDir);
-        var logFilePath = Path.Combine(sharedTempDir, $"rfn_preftrans_{Guid.NewGuid():N}.log");
-
+        var logFilePath = MakeLogFilePath(accountSid);
         try
         {
-            int pid;
+            ProcessInfo process;
             try
             {
-                pid = launchOrchestrator.LaunchExeReturnPid(prefTransPath, targetSid,
-                    [command, filePath, "--logfile", logFilePath], hideWindow: true);
+                var identity = new AccountLaunchIdentity(accountSid);
+                var target = new ProcessLaunchTarget(prefTransPath,
+                    [command, filePath, "--logfile", logFilePath], HideWindow: true);
+                process = facade.LaunchFile(target, identity)!;
+            }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
+            {
+                log.Error($"Settings operation credential failure for {accountSid}", ex);
+                return new SettingsTransferResult(false, "Stored credentials are incorrect.");
             }
             catch (Exception ex)
             {
-                log.Error("De-elevated operation failed to launch", ex);
+                log.Error("Operation failed to launch", ex);
                 return new SettingsTransferResult(false, $"Operation failed: {ex.Message}");
             }
 
-            if (pid <= 0)
-            {
-                log.Error("De-elevated operation: failed to obtain process ID");
-                return new SettingsTransferResult(false, "Failed to start de-elevated process.");
-            }
-
-            var hProcess = ProcessLaunchNative.OpenProcess(
-                ProcessLaunchNative.SYNCHRONIZE | ProcessLaunchNative.PROCESS_QUERY_INFORMATION,
-                false, (uint)pid);
-
-            if (hProcess == IntPtr.Zero)
-            {
-                // Process already exited before we could open a handle — check log for errors
-                var earlyLog = ReadLogFile(logFilePath);
-                if (!string.IsNullOrEmpty(earlyLog))
-                    return new SettingsTransferResult(false, $"Operation failed: {earlyLog}");
-                log.Info("De-elevated operation completed before handle obtained");
-                return new SettingsTransferResult(true, "Operation completed successfully.");
-            }
-
-            try
-            {
-                var sw = Stopwatch.StartNew();
-                while (ProcessLaunchNative.WaitForSingleObject(hProcess, 500) != ProcessLaunchNative.WAIT_OBJECT_0)
-                {
-                    if (sw.ElapsedMilliseconds > timeoutMs)
-                    {
-                        ProcessLaunchNative.TerminateProcess(hProcess, 1);
-                        ProcessLaunchNative.WaitForSingleObject(hProcess, 2000);
-                        log.Error("De-elevated operation timed out");
-                        return new SettingsTransferResult(false, "Operation timed out waiting for completion.");
-                    }
-                    pollCallback?.Invoke();
-                }
-
-                ProcessLaunchNative.GetExitCodeProcess(hProcess, out var exitCode);
-
-                if (exitCode == 0)
-                {
-                    log.Info("De-elevated operation succeeded");
-                    return new SettingsTransferResult(true, "Operation completed successfully.");
-                }
-
-                log.Error($"De-elevated operation failed: exit code {exitCode}");
-                var logContent = ReadLogFile(logFilePath);
-                if (!string.IsNullOrEmpty(logContent))
-                    return new SettingsTransferResult(false, $"Operation failed: {logContent}");
-                return new SettingsTransferResult(false, $"Operation failed with exit code {exitCode}.");
-            }
-            finally
-            {
-                NativeMethods.CloseHandle(hProcess);
-            }
+            return HandleProcess(process, timeoutMs, logFilePath, pollCallback);
         }
         finally
         {
-            try { File.Delete(logFilePath); } catch { }
+            try
+            {
+                File.Delete(logFilePath);
+            }
+            catch
+            {
+            }
         }
     }
 
-    private SettingsTransferResult RunWithCredentials(string prefTransPath, string command, string filePath,
-        LaunchCredentials credentials, int timeoutMs, Action? pollCallback)
+    private SettingsTransferResult HandleProcess(ProcessInfo process, int timeoutMs, string logFilePath, Action? pollCallback)
     {
-        var displayName = string.IsNullOrEmpty(credentials.Domain)
-            ? credentials.Username
-            : $"{credentials.Domain}\\{credentials.Username}";
-
-        var psi = new ProcessStartInfo
+        using (process)
         {
-            FileName = prefTransPath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardError = true
-        };
-        ProcessStartInfoHelper.SetCredentials(psi, credentials.Username, credentials.Domain, credentials.Password!);
-        psi.ArgumentList.Add(command);
-        psi.ArgumentList.Add(filePath);
-
-        try
-        {
-            using var process = Process.Start(psi);
-            if (process == null)
-            {
-                const string startFailMsg = "Failed to start preftrans process.";
-                log.Error(startFailMsg);
-                return new SettingsTransferResult(false, startFailMsg);
-            }
-
-            // Start async stderr read before entering the polling loop to avoid deadlock:
-            // if the process fills its stderr buffer while we are blocking in Thread.Sleep,
-            // the process hangs waiting for stderr to be drained, and we never exit the loop.
-            var stderrTask = Task.Run(() => process.StandardError.ReadToEnd());
-
             var sw = Stopwatch.StartNew();
-            while (!process.HasExited)
+            while (!process.WaitForExit(500))
             {
                 if (sw.ElapsedMilliseconds > timeoutMs)
                 {
-                    try
-                    {
-                        process.Kill();
-                    }
-                    catch
-                    {
-                    } // best-effort kill
-
-                    try
-                    {
-                        process.WaitForExit(2000);
-                    }
-                    catch
-                    {
-                    } // best-effort wait
-
-                    log.Error($"Settings import timed out for {displayName}");
-                    return new SettingsTransferResult(false, "Import timed out.");
+                    process.Kill(1);
+                    process.WaitForExit(2000);
+                    log.Error("Operation timed out");
+                    return new(false, "Operation timed out");
                 }
 
                 pollCallback?.Invoke();
-                Thread.Sleep(500);
             }
-
-            var stderr = stderrTask.GetAwaiter().GetResult();
 
             if (process.ExitCode == 0)
             {
-                log.Info($"Settings imported for {displayName}");
-                return new SettingsTransferResult(true, "Settings imported successfully.");
+                log.Info("Operation succeeded");
+                return new(true, "");
             }
 
-            var failMsg = string.IsNullOrWhiteSpace(stderr)
-                ? $"Import failed with exit code {process.ExitCode}."
-                : $"Import failed: {stderr.Trim()}";
-            log.Error($"Settings import failed for {displayName}: exit code {process.ExitCode}, stderr: {stderr}");
-            return new SettingsTransferResult(false, failMsg);
+            log.Error($"Operation failed: exit code {process.ExitCode}");
+            var logContent = ReadLogFile(logFilePath);
+            if (!string.IsNullOrEmpty(logContent))
+                return new(false, logContent);
+            return new(false, "Error code: " + process.ExitCode);
         }
-        catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
+    }
+
+    private string MakeLogFilePath(string accountSid)
+    {
+        var sharedTempDir = SettingsTransferService.GetSharedTempDir();
+        Directory.CreateDirectory(sharedTempDir);
+        var logFilePath = Path.Combine(sharedTempDir, $"rfn_preftrans_{Guid.NewGuid():N}.log");
+        CreateRestrictedLogFile(logFilePath, accountSid);
+        return logFilePath;
+    }
+
+    /// <summary>
+    /// Creates the log file with a restrictive ACL: Administrators full control,
+    /// the target account write access only, inheritance disabled.
+    /// Prevents unrelated users from reading potentially sensitive transfer data
+    /// while allowing the preftrans process (running as <paramref name="accountSid"/>)
+    /// to write its output, and preserving admin read access for troubleshooting.
+    /// Falls back to an unprotected file on ACL failure — the operation continues.
+    /// </summary>
+    private void CreateRestrictedLogFile(string path, string accountSid)
+    {
+        File.WriteAllBytes(path, []);
+
+        try
         {
-            log.Error($"Settings import credential failure for {displayName}", ex);
-            return new SettingsTransferResult(false, "Stored credentials are incorrect.");
+            var security = new FileSecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+            var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            security.AddAccessRule(new FileSystemAccessRule(
+                admins,
+                FileSystemRights.FullControl,
+                AccessControlType.Allow));
+
+            // Grant the target account write-only access so preftrans can write its log output.
+            // ReadAttributes and Synchronize are required for basic file open/close operations.
+            var targetAccount = new SecurityIdentifier(accountSid);
+            security.AddAccessRule(new FileSystemAccessRule(
+                targetAccount,
+                FileSystemRights.WriteData | FileSystemRights.AppendData
+                    | FileSystemRights.ReadAttributes | FileSystemRights.Synchronize,
+                AccessControlType.Allow));
+
+            new FileInfo(path).SetAccessControl(security);
         }
         catch (Exception ex)
         {
-            log.Error($"Settings import failed for {displayName}", ex);
-            return new SettingsTransferResult(false, $"Import failed: {ex.Message}");
+            log.Warn($"PrefTransLauncher: Failed to set restrictive ACL on log file: {ex.Message}");
         }
     }
 
     private string ReadLogFile(string path)
     {
-        try { return File.Exists(path) ? File.ReadAllText(path).Trim() : string.Empty; }
-        catch { return string.Empty; }
+        try
+        {
+            return File.Exists(path) ? File.ReadAllText(path).Trim() : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 }

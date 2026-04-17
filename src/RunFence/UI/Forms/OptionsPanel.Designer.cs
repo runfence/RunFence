@@ -44,9 +44,13 @@ partial class OptionsPanel
     private Label _settingsPathLabel;
     private TableLayoutPanel _startupPinContainer;
     private TableLayoutPanel _autoLockDragBridgeContainer;
+    private TableLayoutPanel _dragBridgeFirewallContainer;
     private TableLayoutPanel _idleCtxContainer;
     private TableLayoutPanel _folderSettingsContainer;
     private TableLayoutPanel _mainFillPanel;
+    private GroupBox _firewallGroup;
+    private CheckBox _blockIcmpCheckBox;
+    private ToolTip _blockIcmpCheckBoxTooltip;
     private Panel _spacer1;
     private Panel _spacer2;
     private Panel _spacer3;
@@ -59,6 +63,7 @@ partial class OptionsPanel
         {
             _settingsHandler?.FlushPendingSave(SaveSettings);
             _tooltip?.Dispose();
+            _blockIcmpCheckBoxTooltip?.Dispose();
             components?.Dispose();
         }
         base.Dispose(disposing);
@@ -102,9 +107,12 @@ partial class OptionsPanel
         _settingsPathLabel = new Label();
         _startupPinContainer = new TableLayoutPanel();
         _autoLockDragBridgeContainer = new TableLayoutPanel();
+        _dragBridgeFirewallContainer = new TableLayoutPanel();
         _idleCtxContainer = new TableLayoutPanel();
         _folderSettingsContainer = new TableLayoutPanel();
         _mainFillPanel = new TableLayoutPanel();
+        _firewallGroup = new GroupBox();
+        _blockIcmpCheckBox = new CheckBox();
         _spacer1 = new Panel();
         _spacer2 = new Panel();
         _spacer3 = new Panel();
@@ -208,8 +216,30 @@ partial class OptionsPanel
         _unlockModeComboBox.SelectedIndex = 0;
         _autoLockGroup.Controls.Add(_unlockModeComboBox);
 
-        // --- Drag Bridge placeholder (section added in code) ---
+        // --- Firewall group ---
+        _firewallGroup.Text = "Firewall";
+        _firewallGroup.Dock = DockStyle.Fill;
+
+        _blockIcmpCheckBox.Text = "Block ICMP when Internet is blocked";
+        _blockIcmpCheckBox.Location = new Point(15, 24);
+        _blockIcmpCheckBox.AutoSize = true;
+        _firewallGroup.Controls.Add(_blockIcmpCheckBox);
+        
+        _blockIcmpCheckBoxTooltip = new  ToolTip();
+        _blockIcmpCheckBoxTooltip.SetToolTip(_blockIcmpCheckBox, "ICMP tunneling can be potentially used to escape Internet restrictions");
+
+        // --- Drag Bridge placeholder (section added in code) + Firewall split ---
         _dragBridgePlaceholder.Dock = DockStyle.Fill;
+
+        _dragBridgeFirewallContainer.Dock = DockStyle.Fill;
+        _dragBridgeFirewallContainer.ColumnCount = 2;
+        _dragBridgeFirewallContainer.RowCount = 1;
+        _dragBridgeFirewallContainer.Margin = Padding.Empty;
+        _dragBridgeFirewallContainer.Padding = Padding.Empty;
+        _dragBridgeFirewallContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _dragBridgeFirewallContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _dragBridgeFirewallContainer.Controls.Add(_dragBridgePlaceholder, 0, 0);
+        _dragBridgeFirewallContainer.Controls.Add(_firewallGroup, 1, 0);
 
         _autoLockDragBridgeContainer.Dock = DockStyle.Top;
         _autoLockDragBridgeContainer.Height = 55;
@@ -220,7 +250,7 @@ partial class OptionsPanel
         _autoLockDragBridgeContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         _autoLockDragBridgeContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         _autoLockDragBridgeContainer.Controls.Add(_autoLockGroup, 0, 0);
-        _autoLockDragBridgeContainer.Controls.Add(_dragBridgePlaceholder, 1, 0);
+        _autoLockDragBridgeContainer.Controls.Add(_dragBridgeFirewallContainer, 1, 0);
 
         // --- Idle Timeout group ---
         _idleTimeoutGroup.Text = "Idle Timeout";
@@ -368,6 +398,8 @@ partial class OptionsPanel
         Controls.Add(_startupPinContainer);
 
         // OptionsPanel
+        AutoScaleDimensions = new SizeF(7F, 15F);
+        AutoScaleMode = AutoScaleMode.Font;
         AutoScroll = true;
         Dock = DockStyle.Fill;
 

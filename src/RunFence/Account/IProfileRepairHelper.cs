@@ -1,3 +1,5 @@
+using RunFence.Core;
+
 namespace RunFence.Account;
 
 public interface IProfileRepairHelper
@@ -10,5 +12,12 @@ public interface IProfileRepairHelper
     /// If no corruption is detected or <paramref name="accountSid"/> is null,
     /// the original exception is rethrown for normal handling.
     /// </summary>
-    void ExecuteWithProfileRepair(Action launchAction, string? accountSid);
+    void ExecuteWithProfileRepair(Action launchAction, string? accountSid)
+        => ExecuteWithProfileRepair<VoidStruct>(() =>
+        {
+            launchAction();
+            return default;
+        }, accountSid);
+
+    T ExecuteWithProfileRepair<T>(Func<T> launchAction, string? accountSid);
 }

@@ -46,7 +46,7 @@ public class SidResolver : ISidResolver
     {
         uint sidSize = 0;
         uint domainSize = 0;
-        SidResolverNative.LookupAccountNameW(Environment.MachineName, accountName, IntPtr.Zero, ref sidSize, null, ref domainSize, out _);
+        LookupAccountNameW(Environment.MachineName, accountName, IntPtr.Zero, ref sidSize, null, ref domainSize, out _);
         if (sidSize == 0)
             return null;
 
@@ -54,10 +54,10 @@ public class SidResolver : ISidResolver
         try
         {
             var domain = new StringBuilder((int)domainSize);
-            if (!SidResolverNative.LookupAccountNameW(Environment.MachineName, accountName, sidBuffer, ref sidSize, domain, ref domainSize, out _))
+            if (!LookupAccountNameW(Environment.MachineName, accountName, sidBuffer, ref sidSize, domain, ref domainSize, out _))
                 return null;
 
-            if (!SidResolverNative.ConvertSidToStringSidW(sidBuffer, out var stringSidPtr))
+            if (!ConvertSidToStringSidW(sidBuffer, out var stringSidPtr))
                 return null;
             try
             {
@@ -65,7 +65,7 @@ public class SidResolver : ISidResolver
             }
             finally
             {
-                SidResolverNative.LocalFree(stringSidPtr);
+                LocalFree(stringSidPtr);
             }
         }
         finally
@@ -101,19 +101,19 @@ public class SidResolver : ISidResolver
 
     private string? TryResolveNameLocal(string sidString)
     {
-        if (!SidResolverNative.ConvertStringSidToSidW(sidString, out var sidPtr))
+        if (!ConvertStringSidToSidW(sidString, out var sidPtr))
             return null;
         try
         {
             uint nameSize = 0;
             uint domainSize = 0;
-            SidResolverNative.LookupAccountSidW(Environment.MachineName, sidPtr, null, ref nameSize, null, ref domainSize, out _);
+            LookupAccountSidW(Environment.MachineName, sidPtr, null, ref nameSize, null, ref domainSize, out _);
             if (nameSize == 0)
                 return null;
 
             var name = new StringBuilder((int)nameSize);
             var domain = new StringBuilder((int)domainSize);
-            if (!SidResolverNative.LookupAccountSidW(Environment.MachineName, sidPtr, name, ref nameSize, domain, ref domainSize, out _))
+            if (!LookupAccountSidW(Environment.MachineName, sidPtr, name, ref nameSize, domain, ref domainSize, out _))
                 return null;
 
             var domainStr = domain.ToString();
@@ -122,7 +122,7 @@ public class SidResolver : ISidResolver
         }
         finally
         {
-            SidResolverNative.LocalFree(sidPtr);
+            LocalFree(sidPtr);
         }
     }
 
@@ -132,31 +132,31 @@ public class SidResolver : ISidResolver
         var buf = IntPtr.Zero;
         try
         {
-            var attrs = new SidResolverNative.LSA_OBJECT_ATTRIBUTES();
-            var status = SidResolverNative.LsaOpenPolicy(
-                IntPtr.Zero, ref attrs, SidResolverNative.PolicyViewLocalInformation, out handle);
+            var attrs = new LSA_OBJECT_ATTRIBUTES();
+            var status = LsaOpenPolicy(
+                IntPtr.Zero, ref attrs, PolicyViewLocalInformation, out handle);
             if (status != 0)
             {
                 _log.Error($"LsaOpenPolicy failed with status 0x{status:X8}");
                 return null;
             }
 
-            status = SidResolverNative.LsaQueryInformationPolicy(
-                handle, SidResolverNative.PolicyAccountDomainInformation, out buf);
+            status = LsaQueryInformationPolicy(
+                handle, PolicyAccountDomainInformation, out buf);
             if (status != 0 || buf == IntPtr.Zero)
             {
                 _log.Error($"LsaQueryInformationPolicy failed with status 0x{status:X8}");
                 return null;
             }
 
-            var info = Marshal.PtrToStructure<SidResolverNative.POLICY_ACCOUNT_DOMAIN_INFO>(buf);
+            var info = Marshal.PtrToStructure<POLICY_ACCOUNT_DOMAIN_INFO>(buf);
             if (info.DomainSid == IntPtr.Zero)
             {
                 _log.Error("LsaQueryInformationPolicy returned null DomainSid");
                 return null;
             }
 
-            if (!SidResolverNative.ConvertSidToStringSidW(info.DomainSid, out var strPtr))
+            if (!ConvertSidToStringSidW(info.DomainSid, out var strPtr))
             {
                 _log.Error("ConvertSidToStringSidW failed for local machine SID");
                 return null;
@@ -169,7 +169,7 @@ public class SidResolver : ISidResolver
             }
             finally
             {
-                SidResolverNative.LocalFree(strPtr);
+                LocalFree(strPtr);
             }
 
             if (string.IsNullOrEmpty(sidStr))
@@ -190,9 +190,9 @@ public class SidResolver : ISidResolver
         finally
         {
             if (buf != IntPtr.Zero)
-                SidResolverNative.LsaFreeMemory(buf);
+                LsaFreeMemory(buf);
             if (handle != IntPtr.Zero)
-                SidResolverNative.LsaClose(handle);
+                LsaClose(handle);
         }
     }
 
@@ -257,10 +257,106 @@ public class SidResolver : ISidResolver
         return Path.Combine(profilePath, @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs");
     }
 
+    public string? TryGetTaskBarPath(string sid, bool isCurrentAccount)
+    {
+        if (isCurrentAccount)
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                @"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
+        }
+
+        var profilePath = TryGetProfilePath(sid);
+        if (profilePath == null)
+            return null;
+        return Path.Combine(profilePath,
+            @"AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
+    }
+
     public string? ResolveSidFromName(string accountName, List<LocalUserAccount>? localUsers)
     {
         var match = localUsers?.FirstOrDefault(u =>
             string.Equals(u.Username, accountName, StringComparison.OrdinalIgnoreCase));
         return match != null ? match.Sid : TryResolveSid(accountName);
     }
+
+    // P/Invoke declarations and their direct wrapper methods below are tightly coupled native interop —
+    // they directly call OS APIs and manage unmanaged memory. Not business logic to be extracted.
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LookupAccountNameW(
+        string? systemName,
+        string accountName,
+        IntPtr sid,
+        ref uint cbSid,
+        StringBuilder? referencedDomainName,
+        ref uint cchReferencedDomainName,
+        out uint peUse);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertSidToStringSidW(IntPtr pSid, out IntPtr stringSid);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool ConvertStringSidToSidW(string stringSid, out IntPtr sid);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LookupAccountSidW(
+        string? systemName,
+        IntPtr sid,
+        StringBuilder? name,
+        ref uint cbName,
+        StringBuilder? referencedDomainName,
+        ref uint cbReferencedDomainName,
+        out uint peUse);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr hMem);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_UNICODE_STRING
+    {
+        public ushort Length;
+        public ushort MaximumLength;
+        public IntPtr Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LSA_OBJECT_ATTRIBUTES
+    {
+        public uint Length;
+        public IntPtr RootDirectory;
+        public IntPtr ObjectName;
+        public uint Attributes;
+        public IntPtr SecurityDescriptor;
+        public IntPtr SecurityQualityOfService;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POLICY_ACCOUNT_DOMAIN_INFO
+    {
+        public LSA_UNICODE_STRING DomainName;
+        public IntPtr DomainSid;
+    }
+
+    private const uint PolicyViewLocalInformation = 0x00000001;
+    private const int PolicyAccountDomainInformation = 5;
+
+    [DllImport("advapi32.dll", PreserveSig = true)]
+    private static extern uint LsaOpenPolicy(
+        IntPtr systemName,
+        ref LSA_OBJECT_ATTRIBUTES objectAttributes,
+        uint desiredAccess,
+        out IntPtr handle);
+
+    [DllImport("advapi32.dll", PreserveSig = true)]
+    private static extern uint LsaQueryInformationPolicy(
+        IntPtr policyHandle,
+        int infoClass,
+        out IntPtr buffer);
+
+    [DllImport("advapi32.dll", PreserveSig = true)]
+    private static extern uint LsaFreeMemory(IntPtr buffer);
+
+    [DllImport("advapi32.dll", PreserveSig = true)]
+    private static extern uint LsaClose(IntPtr handle);
 }

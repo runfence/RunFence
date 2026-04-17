@@ -61,4 +61,12 @@ public interface IWizardTemplate
     /// Templates without sensitive resources should implement this as a no-op.
     /// </summary>
     void Cleanup();
+
+    /// <summary>
+    /// Optionally pre-warms caches or performs async IO needed by <see cref="IsAvailable"/> or
+    /// <see cref="CreateSteps"/>. Called concurrently for all templates before the wizard dialog
+    /// is constructed so that availability checks never block the UI thread.
+    /// Default: no-op.
+    /// </summary>
+    Task WarmCacheAsync() => Task.CompletedTask;
 }

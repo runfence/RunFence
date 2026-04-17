@@ -6,7 +6,7 @@ using RunFence.UI.Forms;
 
 namespace RunFence.Account.UI;
 
-public class AccountImportUIHandler(AccountImportHandler importHandler)
+public class AccountImportUIHandler(IAccountImportHandler importHandler)
 {
     private DataGridView _grid = null!;
     private ToolStripButton _importButton = null!;
@@ -83,7 +83,7 @@ public class AccountImportUIHandler(AccountImportHandler importHandler)
         try
         {
             var importAccounts = accounts
-                .Select(a => new AccountImportHandler.ImportAccount(
+                .Select(a => new ImportAccount(
                     a.Credential ?? new CredentialEntry { Sid = a.Sid }, a.Username))
                 .ToList();
 
@@ -108,7 +108,6 @@ public class AccountImportUIHandler(AccountImportHandler importHandler)
                     if (!owner.IsDisposed)
                         setStatus(text);
                 },
-                db.SidNames,
                 db);
 
             if (settingsPath != null && !owner.IsDisposed)

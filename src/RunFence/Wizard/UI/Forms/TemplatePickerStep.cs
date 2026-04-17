@@ -105,6 +105,8 @@ public class TemplatePickerStep : WizardStepPage
             card.Width = cardWidth;
     }
 
+    public override bool CanProceed => _selectedCard != null;
+
     private void OnCardSelected(TemplateCard card)
     {
         if (_selectedCard == card)
@@ -112,6 +114,7 @@ public class TemplatePickerStep : WizardStepPage
         _selectedCard?.Deselect();
         _selectedCard = card;
         _selectedCard.Select();
+        NotifyCanProceedChanged();
     }
 
     private void OnCardDoubleClicked(TemplateCard card)

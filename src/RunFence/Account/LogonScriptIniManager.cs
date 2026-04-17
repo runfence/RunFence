@@ -196,6 +196,8 @@ public partial class LogonScriptIniManager
         // Increment user version (upper 16 bits, +65536) per [MS-GPOL]: upper 16 bits = user
         // version, lower 16 bits = machine version. Per-user MLGPOs contain only user settings.
         // MMC confirms: writes 65536, 131072, 196608, ... (user version +1 per edit, machine = 0).
+        // Overflow is harmless: the value wraps around and Windows still detects a change
+        // (any difference from the cached version triggers re-processing).
         version = (int)((uint)version + 65536u);
 
         var lines = new[]

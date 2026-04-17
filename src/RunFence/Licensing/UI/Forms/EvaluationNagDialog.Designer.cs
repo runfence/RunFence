@@ -156,12 +156,15 @@ partial class EvaluationNagDialog
         _continueButton.Click += OnContinueClick;
 
         // Form
+        AutoScaleDimensions = new SizeF(7F, 15F);
+        AutoScaleMode = AutoScaleMode.Font;
         Text = "RunFence — Evaluation";
         ClientSize = new Size(900, 542);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
+        AcceptButton = _continueButton;
         Controls.Add(_headerPanel);
         Controls.Add(_sectionLabel);
         Controls.Add(_featuresLabel);

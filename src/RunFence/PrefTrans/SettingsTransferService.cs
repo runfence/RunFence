@@ -1,23 +1,34 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
-using RunFence.Acl.Permissions;
+using RunFence.Acl;
 using RunFence.Core;
-using RunFence.Launch;
 
 namespace RunFence.PrefTrans;
 
 public class SettingsTransferService(
     ILoggingService log,
     IPrefTransLauncher launcher,
-    IPermissionGrantService permissionGrantService,
-    string? baseDirectory = null)
+    IPathGrantService pathGrantService)
     : ISettingsTransferService
 {
-    private readonly string _baseDirectory = baseDirectory ?? AppContext.BaseDirectory;
+    /// <summary>
+    /// Base directory used to locate <c>preftrans.exe</c>.
+    /// Defaults to <see cref="AppContext.BaseDirectory"/>; settable by tests.
+    /// </summary>
+    internal string BaseDirectory { get; set; } = AppContext.BaseDirectory;
+
+    /// <summary>
+    /// Returns the shared ProgramData temp directory path used for preftrans log files and settings copies.
+    /// The directory is not created by this method — callers call <see cref="Directory.CreateDirectory"/> as needed.
+    /// </summary>
+    public static string GetSharedTempDir() =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            Constants.AppName, "temp");
 
     public bool ValidatePrefTransExists(out string expectedPath)
     {
-        expectedPath = Path.Combine(_baseDirectory, Constants.PrefTransExeName);
+        expectedPath = Path.Combine(BaseDirectory, Constants.PrefTransExeName);
         return File.Exists(expectedPath);
     }
 
@@ -31,10 +42,11 @@ public class SettingsTransferService(
         }
 
         return launcher.RunAndWait(prefTransPath, "store", outputFilePath,
-            new LaunchCredentials(null, null, null, LaunchTokenSource.InteractiveUser), timeoutMs, pollCallback);
+            SidResolutionHelper.GetInteractiveUserSid() ?? SidResolutionHelper.GetCurrentUserSid()!,
+            timeoutMs, pollCallback);
     }
 
-    public SettingsTransferResult Import(string settingsFilePath, LaunchCredentials credentials, string accountSid,
+    public SettingsTransferResult Import(string settingsFilePath, string accountSid,
         int timeoutMs = 60_000, Action? pollCallback = null)
     {
         if (!ValidatePrefTransExists(out var prefTransPath))
@@ -47,8 +59,10 @@ public class SettingsTransferService(
         bool dbModified = false;
         try
         {
-            dbModified = permissionGrantService.EnsureExeDirectoryAccess(prefTransPath, accountSid).DatabaseModified;
-            dbModified |= permissionGrantService.EnsureAccess(settingsFilePath, accountSid,
+            var exeDir = Path.GetDirectoryName(prefTransPath)!;
+            dbModified = pathGrantService.EnsureAccess(accountSid, exeDir,
+                FileSystemRights.ReadAndExecute, confirm: null).DatabaseModified;
+            dbModified |= pathGrantService.EnsureAccess(accountSid, settingsFilePath,
                 FileSystemRights.Read | FileSystemRights.Synchronize, confirm: null).DatabaseModified;
         }
         catch (OperationCanceledException)
@@ -60,20 +74,18 @@ public class SettingsTransferService(
             log.Warn($"Permission check failed, proceeding anyway: {ex.Message}");
         }
 
-        if (credentials.TokenSource is LaunchTokenSource.CurrentProcess or LaunchTokenSource.InteractiveUser)
+        if (string.Equals(accountSid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase)
+            || string.Equals(accountSid, SidResolutionHelper.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
         {
-            // De-elevated launch: the process runs as the interactive user who already has access to
-            // settingsFilePath (granted above for InteractiveUser, or pre-existing for CurrentProcess).
-            // No temp copy is needed — pass the file directly.
-            var launcherResult = launcher.RunAndWait(prefTransPath, "load", settingsFilePath, credentials, timeoutMs, pollCallback);
+            // De-elevated launch: the process runs as the current or interactive user who already has
+            // access to settingsFilePath. No temp copy is needed — pass the file directly.
+            var launcherResult = launcher.RunAndWait(prefTransPath, "load", settingsFilePath, accountSid, timeoutMs, pollCallback);
             return launcherResult with { DatabaseModified = dbModified };
         }
 
         // Credentials path: copy to a shared ProgramData location and restrict access to the target
         // user so the process launched with their credentials can read the settings file.
-        var sharedTempDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            Constants.AppName, "temp");
+        var sharedTempDir = GetSharedTempDir();
         var tempSettingsPath = Path.Combine(sharedTempDir, $"rfn_import_{Guid.NewGuid():N}.json");
 
         try
@@ -85,7 +97,7 @@ public class SettingsTransferService(
             using (var dst = new FileStream(tempSettingsPath, FileMode.Truncate, FileAccess.Write))
                 src.CopyTo(dst);
 
-            var launcherResult = launcher.RunAndWait(prefTransPath, "load", tempSettingsPath, credentials, timeoutMs, pollCallback);
+            var launcherResult = launcher.RunAndWait(prefTransPath, "load", tempSettingsPath, accountSid, timeoutMs, pollCallback);
             return launcherResult with { DatabaseModified = dbModified };
         }
         catch (Exception ex)
@@ -114,6 +126,10 @@ public class SettingsTransferService(
             var security = fileInfo.GetAccessControl();
 
             security.SetAccessRuleProtection(true, false);
+
+            var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+            security.AddAccessRule(new FileSystemAccessRule(
+                admins, FileSystemRights.FullControl, AccessControlType.Allow));
 
             var currentUser = WindowsIdentity.GetCurrent().User;
             if (currentUser != null)

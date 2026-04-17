@@ -10,7 +10,8 @@ namespace RunFence.Startup;
 
 public class StartupCredentialLoader(
     IStartupUI ui,
-    IDatabaseService databaseService)
+    IDatabaseService databaseService,
+    IConfigPaths configPaths)
 {
     /// <summary>Result of the LoadAndVerifyCredentials step.</summary>
     public record CredentialLoadResult(
@@ -65,7 +66,7 @@ public class StartupCredentialLoader(
 
                     try
                     {
-                        File.Delete(Path.Combine(Constants.LocalAppDataDir, "credentials.dat"));
+                        File.Delete(configPaths.CredentialsFilePath);
                     }
                     catch
                     {

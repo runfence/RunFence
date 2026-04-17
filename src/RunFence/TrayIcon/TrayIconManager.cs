@@ -1,5 +1,4 @@
 using System.Drawing.Drawing2D;
-using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -11,8 +10,9 @@ public class TrayIconManager(
     NotifyIcon notifyIcon,
     SidDisplayNameResolver displayNameResolver,
     IIconService iconService,
-    ILoggingService log,
-    IDatabaseProvider databaseProvider)
+    IAppIconProvider appIconProvider,
+    IDatabaseProvider databaseProvider,
+    TrayMenuDiscoveryBuilder trayMenuDiscoveryBuilder)
     : IDisposable
 {
     private ITrayOwner _trayOwner = null!;
@@ -29,7 +29,7 @@ public class TrayIconManager(
     {
         _trayOwner = trayOwner;
 
-        notifyIcon.Icon = AppIcons.GetAppIcon();
+        notifyIcon.Icon = appIconProvider.GetAppIcon();
         notifyIcon.Visible = true;
         notifyIcon.MouseClick += OnTrayClick;
         RebuildContextMenu();
@@ -64,11 +64,21 @@ public class TrayIconManager(
     private void RebuildContextMenu()
     {
         var database = databaseProvider.GetDatabase();
+
+        // Dispose the old menu (including all item bitmaps) before building the new one
+        // to avoid accumulating GDI resources across rapid tray menu rebuilds.
         var oldMenu = notifyIcon.ContextMenuStrip;
+        if (oldMenu != null)
+        {
+            notifyIcon.ContextMenuStrip = null;
+            DisposeMenuItemImages(oldMenu.Items);
+            oldMenu.Dispose();
+        }
+
         var menu = new ContextMenuStrip { ShowItemToolTips = true };
 
-        var showItem = new ToolStripMenuItem("Show", AppIcons.GetAppIcon().ToBitmap());
-        showItem.Click += (_, _) => _trayOwner.TryShowWindow();
+        var showItem = new ToolStripMenuItem("Show", appIconProvider.GetAppIcon().ToBitmap());
+        showItem.Click += async (_, _) => await _trayOwner.TryShowWindowAsync();
         menu.Items.Add(showItem);
 
         if (database.Apps.Count > 0)
@@ -111,13 +121,12 @@ public class TrayIconManager(
             menu.Items.Add(new ToolStripSeparator());
             // By design: discovered entries are always launchable from the tray regardless of lock state.
             // The user explicitly opted in per account — lock protects the GUI, not launching.
-            var discoveredItems = TrayMenuDiscoveryBuilder.BuildMenuItems(
+            var discoveredItems = trayMenuDiscoveryBuilder.BuildMenuItems(
                 _discoveredEntries,
                 database.SidNames,
                 _discoveredIconCache,
                 (exePath, sid) => DiscoveredAppLaunchRequested?.Invoke(exePath, sid),
-                displayNameResolver,
-                log);
+                displayNameResolver);
             foreach (var item in discoveredItems)
                 menu.Items.Add(item);
         }
@@ -134,11 +143,6 @@ public class TrayIconManager(
         menu.Items.Add(exitItem);
 
         notifyIcon.ContextMenuStrip = menu;
-        if (oldMenu != null)
-        {
-            DisposeMenuItemImages(oldMenu.Items);
-            oldMenu.Dispose();
-        }
     }
 
     private void BuildAccountMenuItems(ContextMenuStrip menu, AppDatabase database, List<string> traySids,
@@ -237,11 +241,11 @@ public class TrayIconManager(
         return bmp;
     }
 
-    private void OnTrayClick(object? sender, MouseEventArgs e)
+    private async void OnTrayClick(object? sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Left)
         {
-            _trayOwner.TryShowWindow();
+            await _trayOwner.TryShowWindowAsync();
         }
     }
 

@@ -42,7 +42,8 @@ $body = $bodyLines -join "`n"
 # 2. Clean + Publish
 # BuildSerial = days since 2024-01-01; used for WI-compatible ProductVersion (components <= 65535).
 # DateStr drives InformationalVersion (shown as "Product version" in file Properties).
-# Both are computed here and passed explicitly so the build doesn't depend on Directory.Build.props.
+# Passed explicitly on the command line so they take precedence over Directory.Build.props defaults
+# and so the installer output files are stamped with the exact build date.
 $buildSerial    = ([datetime]::UtcNow - [datetime]::new(2024, 1, 1)).Days
 $dateStr        = [datetime]::UtcNow.ToString('yyyyMMdd')
 $displayVersion = "1.0.$dateStr"

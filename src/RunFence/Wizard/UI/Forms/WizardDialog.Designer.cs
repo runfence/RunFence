@@ -26,7 +26,19 @@ public partial class WizardDialog
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
+            // Dispose steps that are not currently hosted in _contentPanel.Controls.
+            // The currently hosted step is disposed by base.Dispose() via the control tree.
+            if (_steps != null && _contentPanel != null)
+            {
+                foreach (var step in _steps)
+                {
+                    if (!_contentPanel.Controls.Contains(step))
+                        step.Dispose();
+                }
+            }
             components?.Dispose();
+        }
         base.Dispose(disposing);
     }
 

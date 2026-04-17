@@ -18,14 +18,20 @@ public class AccountEntry
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool TrayTerminal { get; set; }
 
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public bool LowIntegrityDefault { get; set; }
+    [JsonIgnore]
+    public bool ManageAssociations { get; set; } = true;
 
-    /// <summary>
-    /// false = default (opted in to split token if admin); true = opted out.
-    /// </summary>
+    [JsonPropertyName("manageAssociations")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? ManageAssociationsSerialized
+    {
+        get => ManageAssociations ? null : false;
+        set => ManageAssociations = value ?? true;
+    }
+
+    [JsonConverter(typeof(JsonStringEnumConverter))]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public bool SplitTokenOptOut { get; set; }
+    public PrivilegeLevel PrivilegeLevel { get; set; } = PrivilegeLevel.Basic;
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DateTime? DeleteAfterUtc { get; set; }
@@ -45,7 +51,8 @@ public class AccountEntry
 
     [JsonIgnore]
     public bool IsEmpty => !IsIpcCaller && !TrayFolderBrowser && !TrayDiscovery && !TrayTerminal
-                           && !LowIntegrityDefault && !SplitTokenOptOut && DeleteAfterUtc == null
+                           && ManageAssociations
+                           && PrivilegeLevel == PrivilegeLevel.Basic && DeleteAfterUtc == null
                            && Firewall.IsDefault && Grants.Count == 0;
 
     public AccountEntry Clone() => new()
@@ -55,10 +62,10 @@ public class AccountEntry
         TrayFolderBrowser = TrayFolderBrowser,
         TrayDiscovery = TrayDiscovery,
         TrayTerminal = TrayTerminal,
-        LowIntegrityDefault = LowIntegrityDefault,
-        SplitTokenOptOut = SplitTokenOptOut,
+        ManageAssociations = ManageAssociations,
+        PrivilegeLevel = PrivilegeLevel,
         DeleteAfterUtc = DeleteAfterUtc,
         Firewall = Firewall.Clone(),
-        Grants = Grants.ToList()
+        Grants = Grants.Select(g => g.Clone()).ToList()
     };
 }

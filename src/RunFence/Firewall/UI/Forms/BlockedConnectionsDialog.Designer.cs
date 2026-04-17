@@ -164,6 +164,7 @@ partial class BlockedConnectionsDialog
         _bottomPanel.Controls.Add(_refreshButton);
 
         // BlockedConnectionsDialog
+        Text = "Blocked Connections (all accounts)";
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = false;
         MinimizeBox = false;

@@ -4,7 +4,7 @@ using RunFence.Core;
 namespace RunFence.Account;
 
 public class AccountLoginRestrictionService(
-    GroupPolicyScriptHelper gpHelper,
+    IGroupPolicyScriptHelper gpHelper,
     ILoggingService log,
     IAccountValidationService accountValidation) : IAccountLoginRestrictionService
 {
@@ -113,6 +113,22 @@ public class AccountLoginRestrictionService(
             using var key = Registry.LocalMachine.CreateSubKey(keyPath);
             key.SetValue("EnumerateAdministrators", 0, RegistryValueKind.DWord);
         }
+    }
+
+    public int GetCurrentUacAdminEnumeration()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\CredUI");
+            if (key?.GetValue("EnumerateAdministrators") is int v)
+                return v;
+        }
+        catch
+        {
+        }
+
+        return -1; // absent — sentinel meaning "delete value on restore"
     }
 
     public SetLoginBlockedResult SetLoginBlockedBySid(string sid, string username, bool blocked)

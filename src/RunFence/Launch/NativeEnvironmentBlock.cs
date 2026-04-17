@@ -11,16 +11,31 @@ namespace RunFence.Launch;
 /// Otherwise it was created by <c>CreateEnvironmentBlock</c> (userenv.dll) and must be freed
 /// with <see cref="ProcessLaunchNative.DestroyEnvironmentBlock"/>.
 /// </summary>
-public struct NativeEnvironmentBlock(IntPtr pointer, bool isOverridden) : IDisposable
+/// <remarks>
+/// Implemented as a class (not a struct) because it holds an unmanaged native resource:
+/// value-type semantics would allow silent copies that share the same pointer, risking double-free
+/// or premature release. Reference semantics ensure single ownership and safe transfer across
+/// method boundaries (e.g. <c>PrepareEnvironmentBlock</c> return).
+/// </remarks>
+public class NativeEnvironmentBlock : IDisposable
 {
-    public IntPtr Pointer { get; private set; } = pointer;
+    public IntPtr Pointer { get; private set; }
 
     /// <summary>
     /// True when the block was allocated via <see cref="Marshal.AllocHGlobal"/> (e.g. after
     /// merging extra environment variables or overriding the profile environment).
     /// False when it was created by <c>CreateEnvironmentBlock</c>.
     /// </summary>
-    private bool IsOverridden { get; set; } = isOverridden;
+    private bool IsOverridden { get; set; }
+
+    /// <summary>Initializes an empty (zero-pointer) wrapper that owns no resource.</summary>
+    public NativeEnvironmentBlock() { }
+
+    public NativeEnvironmentBlock(IntPtr pointer, bool isOverridden)
+    {
+        Pointer = pointer;
+        IsOverridden = isOverridden;
+    }
 
     public void Dispose()
     {

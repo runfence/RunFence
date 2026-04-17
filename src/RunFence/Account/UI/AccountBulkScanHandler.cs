@@ -17,7 +17,7 @@ public class AccountBulkScanHandler(
     IAclService aclService,
     ILoggingService log,
     ISidNameCacheService sidNameCache,
-    IDatabaseProvider databaseProvider)
+    IDatabaseProvider databaseProvider) : IAccountBulkScanHandler
 {
     public async Task ScanAcls(
         IAccountsPanelContext context,
@@ -92,7 +92,7 @@ public class AccountBulkScanHandler(
     /// App-entry managed ACLs are owned by the ACL enforcement system and should not be
     /// imported into AccountGrants via the bulk scan.
     /// </summary>
-    public static Dictionary<string, AccountScanResult> FilterManagedPaths(
+    public Dictionary<string, AccountScanResult> FilterManagedPaths(
         Dictionary<string, AccountScanResult> results,
         IReadOnlyList<AppEntry> apps,
         IAclService aclService)
@@ -130,9 +130,9 @@ public class AccountBulkScanHandler(
 
             foreach (var grant in result.Grants)
             {
-                var normalizedPath = grant.Path.TrimEnd('\\');
+                var normalizedPath = AclHelper.NormalizePath(grant.Path);
                 bool alreadyExists = grants.Any(e =>
-                    string.Equals(e.Path.TrimEnd('\\'), normalizedPath, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(AclHelper.NormalizePath(e.Path), normalizedPath, StringComparison.OrdinalIgnoreCase) &&
                     e.IsDeny == grant.IsDeny &&
                     !e.IsTraverseOnly);
 
@@ -157,9 +157,9 @@ public class AccountBulkScanHandler(
 
             foreach (var traversePath in result.TraversePaths)
             {
-                var normalizedPath = traversePath.TrimEnd('\\');
+                var normalizedPath = AclHelper.NormalizePath(traversePath);
                 bool alreadyExists = grants.Any(e =>
-                    string.Equals(e.Path.TrimEnd('\\'), normalizedPath, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(AclHelper.NormalizePath(e.Path), normalizedPath, StringComparison.OrdinalIgnoreCase) &&
                     e.IsTraverseOnly);
 
                 if (alreadyExists)

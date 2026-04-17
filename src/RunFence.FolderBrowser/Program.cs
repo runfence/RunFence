@@ -12,6 +12,10 @@ static class Program
         string rawPath;
         if (args.Length > 0)
         {
+            // Reconstruct the original path from shell-split arguments: the shell splits on spaces,
+            // so a path like "C:\My Folder" arrives as ["C:\\My", "Folder"]. Joining with a space
+            // restores the original. Multiple unrelated arguments would produce an invalid path,
+            // which falls back gracefully to empty string via the Directory.Exists check below.
             rawPath = string.Join(" ", args);
             if (rawPath is ['"', _, ..] && rawPath[^1] == '"')
                 rawPath = rawPath[1..^1];
@@ -145,9 +149,10 @@ static class Program
                 WorkingDirectory = Path.GetDirectoryName(filePath) ?? ""
             });
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort — silently ignore launch failures
+            MessageBox.Show($"Failed to open file:\n{Path.GetFileName(filePath)}\n\n{ex.Message}",
+                Environment.UserName, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

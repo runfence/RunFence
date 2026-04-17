@@ -1,64 +1,146 @@
+using Moq;
 using RunFence.Acl;
+using RunFence.Core;
 using Xunit;
 
 namespace RunFence.Tests;
 
 /// <summary>
-/// Tests for <see cref="AclManagerScanService"/> result types and the grant/traverse classification logic.
-///
-/// Note: <see cref="AclManagerScanService.ScanAsync"/> requires <c>SeBackupPrivilege</c> (elevated process),
-/// so the actual scan operation cannot be integration-tested without elevation.
-/// These tests cover the result record types and the ScanResult invariant enforced during post-processing.
+/// Tests for <see cref="AclManagerScanService"/> thin-enumerator behavior.
+/// <para>
+/// The actual file enumeration and ACE application requires an elevated process,
+/// so these tests verify the contract: UpdateFromPath is called per discovered path,
+/// progress is reported, and cancellation is honored.
+/// </para>
 /// </summary>
 public class AclManagerScanServiceTests
 {
-    [Fact]
-    public void ScanResult_GrantPathsAndTraversePaths_AreDisjointByConstruction()
-    {
-        // The ScanResult is constructed from post-processed data where grant paths are excluded
-        // from the traverse list. Verify the contract holds when built manually.
-        var grantPath = @"C:\Foo\Bar";
-        var traverseOnlyPath = @"C:\Foo";
-        var grantPaths = new List<(string Path, bool IsDeny)> { (grantPath, false) };
-        var traversePaths = new List<string> { traverseOnlyPath }; // parent of grant, not the grant itself
-        var result = new ScanResult(grantPaths, traversePaths, []);
+    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<ILoggingService> _log = new();
 
-        var grantSet = new HashSet<string>(result.GrantPaths.Select(g => g.Path), StringComparer.OrdinalIgnoreCase);
-        foreach (var tp in result.TraversePaths)
-            Assert.DoesNotContain(tp, grantSet);
+    private AclManagerScanService CreateService() =>
+        new(_pathGrantService.Object, _log.Object);
+
+    [Fact]
+    public async Task ScanAsync_EmptyFolder_CallsUpdateFromPathForRootAndAncestors()
+    {
+        using var tempDir = new TempDirectory("rftest_scan");
+        var service = CreateService();
+        var progress = new Progress<long>();
+
+        await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
+
+        // Root should be processed, plus ancestors up to drive root.
+        _pathGrantService.Verify(
+            s => s.UpdateFromPath(tempDir.Path, "S-1-5-21-0-0-0-1000"),
+            Times.Once);
     }
 
-    // --- DiscoveredRights dictionary is case-insensitive ---
-
     [Fact]
-    public void ScanResult_DiscoveredRights_CaseInsensitiveLookup()
+    public async Task ScanAsync_FolderWithFiles_CallsUpdateFromPathForEachEntry()
     {
-        var rights = new Dictionary<string, DiscoveredGrantRights>(StringComparer.OrdinalIgnoreCase)
-        {
-            [@"C:\Foo\Bar"] = new(false, false, false, false, false, false, false)
-        };
-        var result = new ScanResult([], [], rights);
+        using var tempDir = new TempDirectory("rftest_scan");
+        var fileA = Path.Combine(tempDir.Path, "a.txt");
+        var fileB = Path.Combine(tempDir.Path, "b.txt");
+        File.WriteAllText(fileA, "");
+        File.WriteAllText(fileB, "");
 
-        // Case-insensitive key lookup
-        Assert.True(result.DiscoveredRights.ContainsKey(@"C:\FOO\BAR"));
-        Assert.True(result.DiscoveredRights.ContainsKey(@"c:\foo\bar"));
+        var service = CreateService();
+        var progress = new Progress<long>();
+
+        await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
+
+        _pathGrantService.Verify(
+            s => s.UpdateFromPath(fileA, "S-1-5-21-0-0-0-1000"),
+            Times.Once);
+        _pathGrantService.Verify(
+            s => s.UpdateFromPath(fileB, "S-1-5-21-0-0-0-1000"),
+            Times.Once);
     }
 
-    // --- GrantPaths distinguishes allow from deny mode ---
+    [Fact]
+    public async Task ScanAsync_FolderWithSubdir_CallsUpdateFromPathForSubdir()
+    {
+        using var tempDir = new TempDirectory("rftest_scan");
+        var subDir = Directory.CreateDirectory(Path.Combine(tempDir.Path, "sub")).FullName;
+
+        var service = CreateService();
+        var progress = new Progress<long>();
+
+        await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
+
+        _pathGrantService.Verify(
+            s => s.UpdateFromPath(subDir, "S-1-5-21-0-0-0-1000"),
+            Times.Once);
+    }
 
     [Fact]
-    public void ScanResult_GrantPaths_AllowAndDenyAreDistinctEntries()
+    public async Task ScanAsync_UpdateFromPathReturnsTrue_CountsAsUpdated()
     {
-        // Same path can appear twice: once for allow ACE, once for deny ACE
-        var grantPaths = new List<(string Path, bool IsDeny)>
-        {
-            (@"C:\Target", false), // allow
-            (@"C:\Target", true) // deny
-        };
-        var result = new ScanResult(grantPaths, [], []);
+        using var tempDir = new TempDirectory("rftest_scan");
+        _pathGrantService.Setup(s => s.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()))
+            .Returns(true);
 
-        Assert.Equal(2, result.GrantPaths.Count);
-        Assert.Contains((@"C:\Target", false), result.GrantPaths);
-        Assert.Contains((@"C:\Target", true), result.GrantPaths);
+        var service = CreateService();
+        var progress = new Progress<long>();
+
+        var updated = await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
+
+        Assert.True(updated > 0);
+    }
+
+    [Fact]
+    public async Task ScanAsync_CancellationRequested_StopsEarly()
+    {
+        using var tempDir = new TempDirectory("rftest_scan");
+        // Create many files so cancellation has a chance to trigger mid-scan.
+        for (int i = 0; i < 20; i++)
+            File.WriteAllText(Path.Combine(tempDir.Path, $"file{i}.txt"), "");
+
+        var cts = new CancellationTokenSource();
+        cts.Cancel(); // cancel immediately
+
+        var service = CreateService();
+        var progress = new Progress<long>();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, cts.Token));
+    }
+
+    [Fact]
+    public async Task ScanAsync_WalksAncestors_UpdateFromPathCalledForParentDirectories()
+    {
+        using var tempDir = new TempDirectory("rftest_scan");
+        var subDir = Directory.CreateDirectory(Path.Combine(tempDir.Path, "level1", "level2")).FullName;
+
+        var service = CreateService();
+        var progress = new Progress<long>();
+
+        await service.ScanAsync(subDir, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
+
+        // tempDir is an ancestor of subDir and should be visited.
+        _pathGrantService.Verify(
+            s => s.UpdateFromPath(tempDir.Path, "S-1-5-21-0-0-0-1000"),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ProgressReported_AtLeastOnce()
+    {
+        using var tempDir = new TempDirectory("rftest_scan");
+        File.WriteAllText(Path.Combine(tempDir.Path, "file.txt"), "");
+
+        var reported = new List<long>();
+        var progress = new SynchronousProgress<long>(n => reported.Add(n));
+
+        var service = CreateService();
+        await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
+
+        Assert.NotEmpty(reported);
+    }
+
+    private sealed class SynchronousProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
     }
 }

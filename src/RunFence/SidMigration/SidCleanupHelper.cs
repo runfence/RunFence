@@ -18,7 +18,7 @@ public class SidCleanupHelper(IDatabaseProvider databaseProvider) : ISidCleanupH
                 string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase))
             : 0;
 
-        // Remove the AccountEntry for this SID (covers IsIpcCaller, tray flags, split token, etc.)
+        // Remove the AccountEntry for this SID (covers IsIpcCaller, tray flags, privilege level, etc.)
         var entry = database.GetAccount(sid);
         int removedCallers = 0;
         if (entry != null)

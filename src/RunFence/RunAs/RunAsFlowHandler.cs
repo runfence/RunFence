@@ -9,49 +9,28 @@ namespace RunFence.RunAs;
 /// Handles the entire Run As flow: dialog display, account creation, permission grants,
 /// app entry persistence, and launch. Extracted from IpcMessageHandler to keep it focused on dispatch.
 /// </summary>
-public class RunAsFlowHandler : IRunAsFlowHandler
+public class RunAsFlowHandler(
+    IAppStateProvider appState,
+    IAppLockControl appLock,
+    IUiThreadInvoker uiThreadInvoker,
+    ILoggingService log,
+    RunAsDialogPresenter dialogPresenter,
+    RunAsResultProcessor resultProcessor,
+    RunAsDosProtection dosProtection,
+    IIpcCallerAuthorizer authorizer,
+    IIdleMonitorService idleMonitor,
+    RunAsShortcutHelper shortcutHelper)
+    : IRunAsFlowHandler
 {
     private static readonly char[] PathSeparators = ['\\', '/'];
-
-    private readonly IAppStateProvider _appState;
-    private readonly IAppLockControl _appLock;
-    private readonly IUiThreadInvoker _uiThreadInvoker;
-    private readonly ILoggingService _log;
-    private readonly IIdleMonitorService _idleMonitor;
-    private readonly IIpcCallerAuthorizer _authorizer;
-    private readonly RunAsDialogPresenter _dialogPresenter;
-    private readonly RunAsResultProcessor _resultProcessor;
-    private readonly RunAsDosProtection _dosProtection;
 
     // Prevents concurrent RunAs operations (0=free, 1=in-progress; set atomically on pipe thread)
     private volatile int _runAsInProgress;
 
-    public RunAsFlowHandler(
-        IAppStateProvider appState,
-        IAppLockControl appLock,
-        IUiThreadInvoker uiThreadInvoker,
-        ILoggingService log,
-        RunAsDialogPresenter dialogPresenter,
-        RunAsResultProcessor resultProcessor,
-        RunAsDosProtection dosProtection,
-        IIpcCallerAuthorizer authorizer,
-        IIdleMonitorService idleMonitor)
-    {
-        _appState = appState;
-        _appLock = appLock;
-        _uiThreadInvoker = uiThreadInvoker;
-        _log = log;
-        _dialogPresenter = dialogPresenter;
-        _resultProcessor = resultProcessor;
-        _dosProtection = dosProtection;
-        _authorizer = authorizer;
-        _idleMonitor = idleMonitor;
-    }
-
     /// <summary>Returns true if the AppId looks like a file path (contains path separators).</summary>
     public static bool IsRunAsRequest(string appId) => appId.IndexOfAny(PathSeparators) >= 0;
 
-    public IpcResponse HandleRunAs(IpcMessage message, string? callerIdentity, string? callerSid, bool isAdmin)
+    public IpcResponse HandleRunAs(IpcMessage message, IpcCallerContext context)
     {
         // Path validation and canonicalization
         string filePath;
@@ -68,7 +47,7 @@ public class RunAsFlowHandler : IRunAsFlowHandler
             return new IpcResponse { Success = false, ErrorMessage = "UNC paths are not supported." };
 
         // Global caller authorization
-        if (!_authorizer.IsCallerAuthorizedGlobal(callerIdentity, callerSid, _appState.Database))
+        if (!authorizer.IsCallerAuthorizedGlobal(context.CallerIdentity, context.CallerSid, appState.Database, context.IdentityFromImpersonation))
             return new IpcResponse { Success = false, ErrorMessage = "Access denied." };
 
         // Per-app AllowedIpcCallers is intentionally NOT checked here (global check above still applies).
@@ -78,26 +57,30 @@ public class RunAsFlowHandler : IRunAsFlowHandler
         // add no meaningful security on this path.
 
         // Fast rejection checks
-        if (_appState.IsShuttingDown)
+        if (appState.IsShuttingDown)
             return new IpcResponse { Success = false, ErrorMessage = "Shutting down." };
-        if (_appLock.IsUnlockPolling || _appState.IsModalOpen || _appState.IsOperationInProgress)
+        if (appLock.IsUnlockPolling || appState.IsModalOpen || appState.IsOperationInProgress)
             return new IpcResponse { Success = false, ErrorMessage = "Busy." };
 
         // Atomic claim: prevents TOCTOU race between pipe thread check and UI thread execution
         if (Interlocked.CompareExchange(ref _runAsInProgress, 1, 0) != 0)
             return new IpcResponse { Success = false, ErrorMessage = "Run As already in progress." };
 
-        if (_dosProtection.IsBlocked())
+        if (dosProtection.IsBlocked())
         {
             Interlocked.Exchange(ref _runAsInProgress, 0);
             return new IpcResponse { Success = false, ErrorMessage = "Too many requests." };
         }
 
+        // IO check on pipe thread (before BeginInvoke) to avoid blocking UI thread with filesystem calls.
+        bool isFolder = Directory.Exists(filePath);
+        bool fileExists = isFolder || File.Exists(filePath);
+
         // DEFERRED: post to UI thread, return immediately
         try
         {
-            _uiThreadInvoker.BeginInvoke(() =>
-                HandleRunAsOnUIThread(filePath, message.Arguments, message.WorkingDirectory, isAdmin));
+            uiThreadInvoker.BeginInvoke(() =>
+                _ = HandleRunAsOnUIThreadAsync(filePath, message.Arguments, message.WorkingDirectory, context.IsAdmin, isFolder, fileExists));
         }
         catch
         {
@@ -108,24 +91,33 @@ public class RunAsFlowHandler : IRunAsFlowHandler
         return new IpcResponse { Success = true };
     }
 
-    private void HandleRunAsOnUIThread(string filePath, string? arguments, string? launcherWorkingDirectory, bool isAdmin)
+    private async Task HandleRunAsOnUIThreadAsync(string filePath, string? arguments, string? launcherWorkingDirectory,
+        bool isAdmin, bool isFolder, bool fileExists)
     {
         bool unlockedForRunAs = false;
         try
         {
-            if (!RunAsShortcutHelper.TryHandleLnkPath(ref filePath, ref arguments,
-                    out var originalLnkPath, out var shortcutContext, _appState.Database.Apps))
+            var originalPath = filePath;
+            if (!shortcutHelper.TryHandleLnkPath(ref filePath, ref arguments,
+                    out var originalLnkPath, out var shortcutContext, appState.Database.Apps))
                 return;
 
-            bool isFolder = Directory.Exists(filePath);
-            if (!isFolder && !File.Exists(filePath))
+            // If TryHandleLnkPath resolved a .lnk to a different target, recheck existence on the resolved path.
+            if (!string.Equals(filePath, originalPath, StringComparison.OrdinalIgnoreCase))
+            {
+                isFolder = Directory.Exists(filePath);
+                fileExists = isFolder || File.Exists(filePath);
+            }
+
+            if (!fileExists)
             {
                 MessageBox.Show($"Path not found:\n{filePath}", "RunFence",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
-            using var result = _dialogPresenter.ShowRunAsDialog(filePath, arguments, shortcutContext, isAdmin, out unlockedForRunAs);
+            using var result = await dialogPresenter.ShowRunAsDialogAsync(filePath, arguments, shortcutContext, isAdmin,
+                unlocked => unlockedForRunAs = unlocked);
 
             if (result == null)
                 return;
@@ -134,17 +126,20 @@ public class RunAsFlowHandler : IRunAsFlowHandler
             // Restore it so any subsequent MessageBox.Show dialogs appear in front.
             var mainForm = Application.OpenForms.Count > 0 ? Application.OpenForms[0] : null;
             if (mainForm != null)
-                NativeInterop.ForceToForeground(mainForm);
+            {
+                WindowForegroundHelper.ForceToForeground(mainForm.Handle);
+                mainForm.BringToFront();
+            }
 
             if (result.RevertShortcutRequested && shortcutContext is { ManagedApp: not null })
             {
                 try
                 {
-                    _resultProcessor.ProcessShortcutRevert(originalLnkPath!, shortcutContext.ManagedApp);
+                    resultProcessor.ProcessShortcutRevert(originalLnkPath!, shortcutContext.ManagedApp);
                 }
                 catch (Exception ex)
                 {
-                    _log.Error("Failed to revert shortcut", ex);
+                    log.Error("Failed to revert shortcut", ex);
                     MessageBox.Show($"Failed to revert shortcut: {ex.Message}", "RunFence",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
@@ -154,25 +149,25 @@ public class RunAsFlowHandler : IRunAsFlowHandler
 
             if (result.SelectedContainer != null)
             {
-                _resultProcessor.ProcessContainerResult(result, filePath, arguments, launcherWorkingDirectory, isFolder, originalLnkPath);
+                resultProcessor.ProcessContainerResult(result, filePath, arguments, launcherWorkingDirectory, isFolder, originalLnkPath);
                 return;
             }
 
             if (result.Credential != null)
-                _resultProcessor.ProcessCredentialResult(result, filePath, arguments, launcherWorkingDirectory, isFolder, originalLnkPath);
+                resultProcessor.ProcessCredentialResult(result, filePath, arguments, launcherWorkingDirectory, isFolder, originalLnkPath);
         }
         catch (Exception ex)
         {
             MessageBox.Show($"An error occurred: {ex.Message}", "RunFence",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
-            _log.Error("HandleRunAsOnUIThread failed", ex);
+            log.Error("HandleRunAsOnUIThreadAsync failed", ex);
         }
         finally
         {
             Interlocked.Exchange(ref _runAsInProgress, 0);
-            _idleMonitor.ResetIdleTimer();
+            idleMonitor.ResetIdleTimer();
             if (unlockedForRunAs)
-                _appLock.Lock();
+                appLock.Lock();
         }
     }
 }

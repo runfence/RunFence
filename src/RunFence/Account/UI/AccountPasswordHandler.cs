@@ -1,22 +1,20 @@
 using System.ComponentModel;
-using System.Runtime.InteropServices;
 using System.Security;
-using System.Security.Cryptography;
-using System.Text;
 using RunFence.Account.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
+using RunFence.Licensing;
 using RunFence.Persistence;
 using RunFence.Security;
 using RunFence.Startup.UI.Forms;
-using RunFence.UI.Forms;
-using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Account.UI;
 
+/// <remarks>Deps above threshold: CopyPassword, TypePassword, RotatePassword, SetEmptyPassword all share <c>_credentialManager</c>+<c>_pinService</c>+<c>_secureDesktop</c>+<c>_windowsHello</c>+<c>_log</c> (5 deps). Splitting by operation type duplicates PIN verification infrastructure across classes. Reviewed 2026-04-08.</remarks>
 public class AccountPasswordHandler(
+    IModalCoordinator modalCoordinator,
     IAccountCredentialManager credentialManager,
     IAccountPasswordService accountPassword,
     IPinService pinService,
@@ -25,7 +23,9 @@ public class AccountPasswordHandler(
     IPasswordAutoTyper autoTyper,
     ISecureDesktopRunner secureDesktop,
     IWindowsHelloService windowsHello,
-    IDatabaseProvider databaseProvider)
+    IDatabaseProvider databaseProvider,
+    IEvaluationLimitHelper evaluationLimitHelper,
+    SecureClipboardService secureClipboard)
     : IDisposable
 {
     private enum NoStoredPasswordChoice
@@ -35,28 +35,25 @@ public class AccountPasswordHandler(
         EnterCurrentPassword
     }
 
-    private Timer? _clipboardClearTimer;
-    private byte[]? _clipboardExpectedHash;
-
-    public void CopyPassword(AccountRow accountRow, SessionContext session,
+    public async Task CopyPasswordAsync(AccountRow accountRow, SessionContext session,
         CredentialStore store, OperationGuard guard, Control parent, Action<string> setStatus)
     {
         guard.Begin(parent);
         SecureString? password = null;
         try
         {
-            if (!EnsurePinVerified(session, store))
+            if (!await EnsurePinVerifiedAsync(session, store))
                 return;
 
             var status = credentialManager.DecryptCredential(accountRow.Sid, store, session.PinDerivedKey, out password);
             if (status != CredentialLookupStatus.Success || password == null)
             {
-                MessageBox.Show("No stored password found.", "Copy Password", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                setStatus("No stored password found.");
                 return;
             }
 
-            CopySecureStringToClipboard(password);
-            ScheduleClipboardClear();
+            secureClipboard.CopySecureStringToClipboard(password);
+            secureClipboard.ScheduleClipboardClear();
             setStatus("Password copied to clipboard.");
         }
         catch (Exception ex)
@@ -71,7 +68,7 @@ public class AccountPasswordHandler(
         }
     }
 
-    public void TypePassword(AccountRow accountRow, SessionContext session,
+    public async Task TypePasswordAsync(AccountRow accountRow, SessionContext session,
         CredentialStore store, OperationGuard guard, Control parent, IntPtr previousHwnd,
         Action<string> setStatus)
     {
@@ -86,14 +83,13 @@ public class AccountPasswordHandler(
                 return;
             }
 
-            if (!EnsurePinVerified(session, store))
+            if (!await EnsurePinVerifiedAsync(session, store))
                 return;
 
             var status = credentialManager.DecryptCredential(accountRow.Sid, store, session.PinDerivedKey, out password);
             if (status != CredentialLookupStatus.Success || password == null)
             {
-                MessageBox.Show("No stored password found.", "Type Password",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                setStatus("No stored password found.");
                 return;
             }
 
@@ -128,6 +124,11 @@ public class AccountPasswordHandler(
         CredentialStore store, OperationGuard guard, Control parent,
         Action<string> setStatus, Action<Guid?> save)
     {
+        if (accountRow.Credential == null
+            && !evaluationLimitHelper.CheckCredentialLimit(store.Credentials, parent,
+                extraMessage: "Right-click any credential in the list to remove it."))
+            return;
+
         guard.Begin(parent);
         SecureString? oldPassword = null;
         var newPasswordChars = Array.Empty<char>();
@@ -145,18 +146,20 @@ public class AccountPasswordHandler(
             if (!changed)
                 return;
 
+            using var newPassword = new SecureString();
+            foreach (var c in newPasswordChars)
+                newPassword.AppendChar(c);
+            newPassword.MakeReadOnly();
+
             if (accountRow.Credential != null)
             {
-                using var newPassword = new SecureString();
-                foreach (var c in newPasswordChars)
-                    newPassword.AppendChar(c);
-                newPassword.MakeReadOnly();
                 credentialManager.UpdateCredentialPassword(accountRow.Credential, newPassword, session.PinDerivedKey);
                 save(accountRow.Credential.Id);
             }
             else
             {
-                save(null);
+                var (_, credId, _) = credentialManager.AddNewCredential(accountRow.Sid, newPassword, store, session.PinDerivedKey);
+                save(credId);
             }
 
             setStatus("Password rotated successfully.");
@@ -202,18 +205,16 @@ public class AccountPasswordHandler(
             if (!changed)
                 return;
 
+            Guid? credIdToSelect = null;
             if (accountRow.Credential != null)
             {
-                using var emptyPassword = new SecureString();
-                emptyPassword.MakeReadOnly();
-                credentialManager.UpdateCredentialPassword(accountRow.Credential, emptyPassword, session.PinDerivedKey);
-                save(accountRow.Credential.Id);
-            }
-            else
-            {
-                save(null);
+                if (accountRow.Credential.IsCurrentAccount)
+                    credIdToSelect = accountRow.Credential.Id;
+                else
+                    credentialManager.RemoveCredential(accountRow.Credential.Id, store);
             }
 
+            save(credIdToSelect);
             setStatus("Password set to empty.");
         }
         catch (Exception ex)
@@ -319,12 +320,12 @@ public class AccountPasswordHandler(
         return NoStoredPasswordChoice.Cancel;
     }
 
-    private static SecureString? PromptCurrentPassword(string username)
+    private SecureString? PromptCurrentPassword(string username)
     {
         DialogResult result = DialogResult.None;
         SecureString? password = null;
 
-        DataPanel.RunOnSecureDesktop(() =>
+        modalCoordinator.RunOnSecureDesktop(() =>
         {
             using var dlg = new PasswordInputDialog(username);
             result = dlg.ShowDialog();
@@ -334,7 +335,7 @@ public class AccountPasswordHandler(
         return result == DialogResult.OK ? password : null;
     }
 
-    private bool EnsurePinVerified(SessionContext session, CredentialStore store)
+    private async Task<bool> EnsurePinVerifiedAsync(SessionContext session, CredentialStore store)
     {
         if (session.LastPinVerifiedAt.HasValue
             && (DateTime.UtcNow - session.LastPinVerifiedAt.Value).TotalMinutes < 2)
@@ -342,7 +343,7 @@ public class AccountPasswordHandler(
 
         if (session.Database.Settings.UnlockMode == UnlockMode.WindowsHello)
         {
-            var result = windowsHello.VerifySync("Verify your identity to access credentials");
+            var result = await windowsHello.VerifyAsync("Verify your identity to access credentials");
             switch (result)
             {
                 case HelloVerificationResult.Verified:
@@ -376,49 +377,8 @@ public class AccountPasswordHandler(
         return verified;
     }
 
-    private static void CopySecureStringToClipboard(SecureString password)
-    {
-        var ptr = Marshal.SecureStringToGlobalAllocUnicode(password);
-        try
-        {
-            var text = Marshal.PtrToStringUni(ptr)!;
-            var dataObject = new DataObject(DataFormats.UnicodeText, text);
-            dataObject.SetData("ExcludeClipboardContentFromMonitorProcessing", new MemoryStream(new byte[4]));
-            Clipboard.SetDataObject(dataObject, copy: true);
-        }
-        finally
-        {
-            Marshal.ZeroFreeGlobalAllocUnicode(ptr);
-        }
-    }
-
-    private void ScheduleClipboardClear()
-    {
-        _clipboardClearTimer?.Dispose();
-        _clipboardClearTimer = null;
-
-        _clipboardExpectedHash = SHA256.HashData(Encoding.Unicode.GetBytes(Clipboard.GetText()));
-
-        _clipboardClearTimer = new Timer { Interval = 60_000 };
-        _clipboardClearTimer.Tick += OnClipboardClearTimerTick;
-        _clipboardClearTimer.Start();
-    }
-
-    private void OnClipboardClearTimerTick(object? sender, EventArgs e)
-    {
-        if (Clipboard.ContainsText() && _clipboardExpectedHash != null &&
-            SHA256.HashData(Encoding.Unicode.GetBytes(Clipboard.GetText()))
-                .AsSpan().SequenceEqual(_clipboardExpectedHash))
-            Clipboard.Clear();
-
-        _clipboardExpectedHash = null;
-        _clipboardClearTimer?.Dispose();
-        _clipboardClearTimer = null;
-    }
-
     public void Dispose()
     {
-        _clipboardClearTimer?.Dispose();
-        _clipboardClearTimer = null;
+        secureClipboard.Dispose();
     }
 }

@@ -1,9 +1,11 @@
 using System.Security;
 using RunFence.Account;
+using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
+using RunFence.Launch.Container;
 
 namespace RunFence.RunAs;
 
@@ -13,11 +15,9 @@ namespace RunFence.RunAs;
 /// </summary>
 public class RunAsDirectLauncher(
     IAppStateProvider appState,
-    IAppLaunchOrchestrator launchOrchestrator,
-    IProcessLaunchService processLaunchService,
+    ILaunchFacade facade,
+    ISidNameCacheService sidNameCache,
     ISidResolver sidResolver,
-    IFolderHandlerService folderHandlerService,
-    IProfileRepairHelper profileRepair,
     IRunAsLaunchErrorHandler launchErrorHandler)
 {
     /// <summary>
@@ -25,69 +25,18 @@ public class RunAsDirectLauncher(
     /// When <paramref name="adHocPassword"/> is provided, uses it directly without credential lookup.
     /// </summary>
     public void LaunchWithoutAppEntry(string filePath, string? arguments, CredentialEntry credential,
-        bool isFolder = false, bool launchAsLowIntegrity = false, bool launchAsSplitToken = false,
+        bool isFolder = false, PrivilegeLevel privilegeLevel = PrivilegeLevel.Basic,
         SecureString? adHocPassword = null)
     {
+        LaunchCredentials? launchCreds = null;
         if (adHocPassword != null)
         {
             var (domain, username) = SidNameResolver.ResolveDomainAndUsername(
                 credential.Sid, isCurrentAccount: false, sidResolver, appState.Database.SidNames);
-            var launchCreds = new LaunchCredentials(adHocPassword, domain, username);
-            var launchFlags = new LaunchFlags(UseSplitToken: launchAsSplitToken, UseLowIntegrity: launchAsLowIntegrity);
-
-            if (isFolder)
-            {
-                RunWithLaunchErrorHandling(
-                    () => profileRepair.ExecuteWithProfileRepair(
-                        () =>
-                        {
-                            processLaunchService.LaunchFolder(filePath,
-                                appState.Database.Settings.FolderBrowserExePath,
-                                appState.Database.Settings.FolderBrowserArguments,
-                                launchCreds, launchFlags);
-                            folderHandlerService.Register(credential.Sid);
-                        },
-                        credential.Sid),
-                    filePath);
-            }
-            else
-            {
-                var workingDir = Path.GetDirectoryName(filePath) ?? "";
-                RunWithLaunchErrorHandling(
-                    () => profileRepair.ExecuteWithProfileRepair(
-                        () =>
-                        {
-                            processLaunchService.LaunchExe(new ProcessLaunchTarget(filePath, arguments, workingDir), launchCreds, launchFlags);
-                            folderHandlerService.Register(credential.Sid);
-                        },
-                        credential.Sid),
-                    filePath);
-            }
-
-            return;
+            launchCreds = new LaunchCredentials(adHocPassword, domain, username);
         }
 
-        if (isFolder)
-        {
-            RunWithLaunchErrorHandling(
-                () => launchOrchestrator.LaunchFolderBrowser(credential.Sid, filePath, launchAsLowIntegrity, launchAsSplitToken),
-                filePath);
-            return;
-        }
-
-        var tempApp = new AppEntry
-        {
-            Id = AppEntry.GenerateId(),
-            Name = Path.GetFileNameWithoutExtension(filePath),
-            ExePath = filePath,
-            AccountSid = credential.Sid,
-            LaunchAsLowIntegrity = launchAsLowIntegrity,
-            RunAsSplitToken = launchAsSplitToken,
-            WorkingDirectory = Path.GetDirectoryName(filePath),
-        };
-        RunWithLaunchErrorHandling(
-            () => launchOrchestrator.Launch(tempApp, arguments),
-            filePath);
+        LaunchDirect(filePath, arguments, credential.Sid, isFolder, privilegeLevel, launchCreds);
     }
 
     /// <summary>
@@ -103,18 +52,39 @@ public class RunAsDirectLauncher(
             return;
         }
 
-        // Build a temporary AppEntry backed by the selected container
-        var tempApp = new AppEntry
+        var permissionPrompt = AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache);
+        var workingDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath));
+        RunWithLaunchErrorHandling(
+            () => facade.LaunchFile(new ProcessLaunchTarget(filePath, arguments, workingDirectory),
+                new AppContainerLaunchIdentity(container),
+                permissionPrompt: permissionPrompt),
+            filePath);
+    }
+
+    private void LaunchDirect(string filePath, string? arguments, string sid, bool isFolder,
+        PrivilegeLevel privilegeLevel, LaunchCredentials? credentials)
+    {
+        var permissionPrompt = AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache);
+        var identity = new AccountLaunchIdentity(sid)
         {
-            Id = AppEntry.GenerateId(),
-            Name = Path.GetFileNameWithoutExtension(filePath),
-            ExePath = filePath,
-            AccountSid = "",
-            AppContainerName = container.Name,
-            LaunchAsLowIntegrity = true,
+            PrivilegeLevel = privilegeLevel,
+            Credentials = credentials,
         };
 
-        RunWithLaunchErrorHandling(() => launchOrchestrator.Launch(tempApp, arguments), filePath);
+        if (isFolder)
+        {
+            RunWithLaunchErrorHandling(
+                () => facade.LaunchFolderBrowser(identity, filePath, folderPermissionPrompt: permissionPrompt),
+                filePath);
+        }
+        else
+        {
+            var workingDir = Path.GetDirectoryName(filePath);
+            RunWithLaunchErrorHandling(
+                () => facade.LaunchFile(new ProcessLaunchTarget(filePath, arguments, workingDir), identity,
+                    permissionPrompt: permissionPrompt),
+                filePath);
+        }
     }
 
     private void RunWithLaunchErrorHandling(Action launchAction, string filePath)

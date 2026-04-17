@@ -6,17 +6,11 @@ using RunFence.Core;
 namespace RunFence.Account;
 
 /// <summary>
-/// Result of <see cref="GroupPolicyScriptHelper.SetLoginBlocked"/> when blocked=true.
-/// Contains the script path and any traverse-only ancestor directories that were granted.
-/// </summary>
-public record SetLoginBlockedResult(string? ScriptPath, List<string>? TraversePaths);
-
-/// <summary>
 /// Manages per-user MLGPO (Multiple Local Group Policy Objects) logon scripts
 /// under System32\GroupPolicyUsers\{SID}\User\Scripts\scripts.ini.
 /// Blocks login by registering logoff.exe as a logon script for the target user.
 /// </summary>
-public class GroupPolicyScriptHelper
+public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
 {
     private const string LogoffCmdLine = "logoff.exe";
     private const string ScriptFileName = "block_login.cmd";
@@ -136,7 +130,14 @@ public class GroupPolicyScriptHelper
         {
         }
 
-        _traverseGranter?.RevokeTraverseAccess(sid, _scriptsDir);
+        try
+        {
+            _traverseGranter?.RevokeTraverseAccess(sid, _scriptsDir);
+        }
+        catch (Exception ex)
+        {
+            _log.Warn($"GroupPolicyScriptHelper: failed to revoke traverse access for '{sid}' on '{_scriptsDir}': {ex.Message}");
+        }
 
         // Return the script path so callers with a database can remove the corresponding
         // AccountGrants entries (both the script grant and the scripts-dir traverse entry).

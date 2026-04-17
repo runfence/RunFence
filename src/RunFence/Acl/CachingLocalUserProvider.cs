@@ -89,7 +89,7 @@ public class CachingLocalUserProvider(ILoggingService log) : ILocalUserProvider
             }
             finally
             {
-                CachingLocalUserProviderNative.NetApiBufferFree(bufPtr);
+                GroupMembershipNative.NetApiBufferFree(bufPtr);
             }
         } while (result == CachingLocalUserProviderNative.ErrorMoreData);
 
@@ -100,11 +100,11 @@ public class CachingLocalUserProvider(ILoggingService log) : ILocalUserProvider
     {
         sidString = string.Empty;
 
-        var status = CachingLocalUserProviderNative.NetUserGetInfo(null, name, 23, out var bufPtr);
+        var status = GroupMembershipNative.NetUserGetInfo(null, name, 23, out var bufPtr);
         if (status != CachingLocalUserProviderNative.NerrSuccess || bufPtr == IntPtr.Zero)
         {
             if (bufPtr != IntPtr.Zero)
-                CachingLocalUserProviderNative.NetApiBufferFree(bufPtr);
+                GroupMembershipNative.NetApiBufferFree(bufPtr);
 
             log.Warn($"NetUserGetInfo(level 23) failed for user '{name}': error {status}");
             return false;
@@ -114,7 +114,7 @@ public class CachingLocalUserProvider(ILoggingService log) : ILocalUserProvider
         {
             var info = Marshal.PtrToStructure<CachingLocalUserProviderNative.USER_INFO_23>(bufPtr);
 
-            if ((info.usri23_flags & CachingLocalUserProviderNative.UFAccountDisable) != 0)
+            if ((info.usri23_flags & GroupMembershipNative.UF_ACCOUNTDISABLE) != 0)
                 return false;
 
             if (info.usri23_user_sid == IntPtr.Zero)
@@ -136,12 +136,12 @@ public class CachingLocalUserProvider(ILoggingService log) : ILocalUserProvider
             }
             finally
             {
-                CachingLocalUserProviderNative.LocalFree(stringSidPtr);
+                ProcessNative.LocalFree(stringSidPtr);
             }
         }
         finally
         {
-            CachingLocalUserProviderNative.NetApiBufferFree(bufPtr);
+            GroupMembershipNative.NetApiBufferFree(bufPtr);
         }
     }
 }

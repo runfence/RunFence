@@ -24,6 +24,14 @@ public class AccountModule : Module
             .As<IWindowsAccountService>()
             .SingleInstance();
 
+        builder.RegisterType<SystemDialogLauncher>()
+            .As<ISystemDialogLauncher>()
+            .SingleInstance();
+
+        builder.RegisterType<CredentialFilterHelper>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<AccountLoginRestrictionService>()
             .As<IAccountLoginRestrictionService>()
             .AsSelf()
@@ -34,8 +42,11 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<AccountRestrictionHelper>()
-            .As<IAccountRestrictionService>()
+        builder.RegisterType<LogonScriptIniManager>().AsSelf().SingleInstance();
+
+        builder.RegisterType<GroupPolicyScriptHelper>()
+            .As<IGroupPolicyScriptHelper>()
+            .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<AccountValidationService>()
@@ -44,6 +55,10 @@ public class AccountModule : Module
 
         builder.RegisterType<AccountCredentialManager>()
             .As<IAccountCredentialManager>()
+            .SingleInstance();
+
+        builder.RegisterType<SessionPersistenceHelper>()
+            .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<SessionSaver>()
@@ -77,6 +92,7 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<AccountImportHandler>()
+            .As<IAccountImportHandler>()
             .AsSelf()
             .SingleInstance();
 
@@ -98,6 +114,10 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<AccountGridPopulator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ReconciliationGuard>()
             .AsSelf()
             .SingleInstance();
 
@@ -137,7 +157,19 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<AccountsPanelLaunchService>()
+        builder.RegisterType<AccountToolResolver>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<PackageInstallService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ToolLauncher>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountTrayToggleService>()
             .AsSelf()
             .SingleInstance();
 
@@ -165,7 +197,15 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<AccountCreationCommitService>()
+            .As<IAccountCreationCommitService>()
+            .SingleInstance();
+
         builder.RegisterType<AccountCreationOrchestrator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountDeletionOrchestrator>()
             .AsSelf()
             .SingleInstance();
 
@@ -201,15 +241,15 @@ public class AccountModule : Module
             .As<IPasswordAutoTyper>()
             .SingleInstance();
 
+        builder.RegisterType<SecureClipboardService>()
+            .AsSelf()
+            .InstancePerDependency();
+
         builder.RegisterType<AccountPasswordHandler>()
             .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<AppContainerEditService>()
-            .AsSelf()
-            .SingleInstance();
-
-        builder.RegisterType<AccountContainerLauncher>()
             .AsSelf()
             .SingleInstance();
 

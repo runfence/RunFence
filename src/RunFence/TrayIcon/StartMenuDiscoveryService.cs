@@ -6,7 +6,7 @@ namespace RunFence.TrayIcon;
 
 public record StartMenuEntry(string Name, string ExePath, string AccountSid, string? Subfolder);
 
-public class StartMenuDiscoveryService(ISidResolver sidResolver)
+public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHelper shortcutHelper)
 {
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
         { ".exe", ".com", ".bat", ".cmd", ".ps1" };
@@ -31,10 +31,6 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver)
 
             var profilePath = credential.IsCurrentAccount ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : sidResolver.TryGetProfilePath(credential.Sid);
 
-            var profilePrefix = profilePath != null
-                ? profilePath.TrimEnd('\\', '/') + Path.DirectorySeparatorChar
-                : null;
-
             var programsPath = sidResolver.TryGetStartMenuProgramsPath(credential.Sid, credential.IsCurrentAccount);
             var desktopPath = sidResolver.TryGetDesktopPath(credential.Sid, credential.IsCurrentAccount);
 
@@ -47,85 +43,111 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver)
 
             foreach (var (dir, subfolderRoot) in scanDirs)
             {
-                List<string> lnkFiles;
-                try
-                {
-                    lnkFiles = Directory.EnumerateFiles(dir, "*.lnk", SearchOption.AllDirectories).ToList();
-                }
-                catch
-                {
-                    continue;
-                }
-
-                foreach (var lnkPath in lnkFiles)
-                {
-                    string? target;
-                    try
-                    {
-                        (target, _) = ShortcutComHelper.GetShortcutTargetAndArgs(lnkPath);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    if (string.IsNullOrEmpty(target))
-                        continue;
-
-                    // WScript.Shell expands env vars (%LOCALAPPDATA%, %APPDATA%, etc.) using the
-                    // current process environment (admin account). Re-root to the target user's
-                    // actual profile so paths resolve correctly for icon loading and launching.
-                    if (!credential.IsCurrentAccount && profilePath != null)
-                    {
-                        var targetProfile = profilePath.TrimEnd('\\', '/');
-                        if (!string.Equals(currentUserProfile, targetProfile, StringComparison.OrdinalIgnoreCase) &&
-                            target.StartsWith(currentUserProfile + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                            target = targetProfile + target[currentUserProfile.Length..];
-                    }
-
-                    if (!SupportedExtensions.Contains(Path.GetExtension(target)))
-                        continue;
-                    if (ShortcutComHelper.IsUninstallShortcut(lnkPath, target))
-                        continue;
-                    if (ShortcutComHelper.IsSystemExecutable(target))
-                        continue;
-                    if (existingApps.Contains((target, credential.Sid)))
-                        continue;
-                    if (!File.Exists(target))
-                        continue;
-
-                    var isInProfileFolder = profilePrefix != null &&
-                                            target.StartsWith(profilePrefix, StringComparison.OrdinalIgnoreCase);
-
-                    var isCoveredByPublic = publicTargets.Contains(target);
-                    var isCoveredByInteractiveUser = !credential.IsInteractiveUser && interactiveTargets.Contains(target);
-                    var isCovered = isCoveredByPublic || isCoveredByInteractiveUser;
-
-                    if (!isInProfileFolder && isCovered)
-                        continue;
-
-                    var key = (credential.Sid, target);
-                    if (!seen.Add(key))
-                        continue;
-
-                    var name = Path.GetFileNameWithoutExtension(lnkPath);
-                    string? subfolder = null;
-                    if (subfolderRoot != null)
-                    {
-                        var parentDir = Path.GetDirectoryName(lnkPath);
-                        if (parentDir != null &&
-                            !string.Equals(parentDir, subfolderRoot, StringComparison.OrdinalIgnoreCase))
-                        {
-                            subfolder = Path.GetRelativePath(subfolderRoot, parentDir);
-                        }
-                    }
-
-                    results.Add(new StartMenuEntry(name, target, credential.Sid, subfolder));
-                }
+                ProcessShortcutsInDirectory(dir, subfolderRoot, credential, currentUserProfile,
+                    profilePath, publicTargets, interactiveTargets, seen, existingApps, results);
             }
         }
 
         return results;
+    }
+
+    private void ProcessShortcutsInDirectory(
+        string dir,
+        string? subfolderRoot,
+        CredentialEntry credential,
+        string currentUserProfile,
+        string? profilePath,
+        HashSet<string> publicTargets,
+        HashSet<string> interactiveTargets,
+        HashSet<(string sid, string exePath)> seen,
+        IReadOnlySet<(string ExePath, string AccountSid)> existingApps,
+        List<StartMenuEntry> results)
+    {
+        var profilePrefix = profilePath != null
+            ? profilePath.TrimEnd('\\', '/') + Path.DirectorySeparatorChar
+            : null;
+        List<string> lnkFiles;
+        try
+        {
+            lnkFiles = Directory.EnumerateFiles(dir, "*.lnk", SearchOption.AllDirectories).ToList();
+        }
+        catch
+        {
+            return;
+        }
+
+        foreach (var lnkPath in lnkFiles)
+        {
+            string? target;
+            try
+            {
+                (target, _) = shortcutHelper.GetShortcutTargetAndArgs(lnkPath);
+            }
+            catch
+            {
+                continue;
+            }
+
+            if (string.IsNullOrEmpty(target))
+                continue;
+
+            // WScript.Shell expands env vars (%LOCALAPPDATA%, %APPDATA%, etc.) using the
+            // current process environment (admin account). Re-root to the target user's
+            // actual profile so paths resolve correctly for icon loading and launching.
+            target = RerootToUserProfile(target, credential.IsCurrentAccount, currentUserProfile, profilePath);
+
+            if (!SupportedExtensions.Contains(Path.GetExtension(target)))
+                continue;
+            if (ShortcutClassificationHelper.IsUninstallShortcut(lnkPath, target))
+                continue;
+            if (ShortcutClassificationHelper.IsSystemExecutable(target))
+                continue;
+            if (existingApps.Contains((target, credential.Sid)))
+                continue;
+            if (!File.Exists(target))
+                continue;
+
+            var isInProfileFolder = profilePrefix != null &&
+                                    target.StartsWith(profilePrefix, StringComparison.OrdinalIgnoreCase);
+
+            var isCoveredByPublic = publicTargets.Contains(target);
+            var isCoveredByInteractiveUser = !credential.IsInteractiveUser && interactiveTargets.Contains(target);
+            var isCovered = isCoveredByPublic || isCoveredByInteractiveUser;
+
+            if (!isInProfileFolder && isCovered)
+                continue;
+
+            var key = (credential.Sid, target);
+            if (!seen.Add(key))
+                continue;
+
+            var name = Path.GetFileNameWithoutExtension(lnkPath);
+            string? subfolder = null;
+            if (subfolderRoot != null)
+            {
+                var parentDir = Path.GetDirectoryName(lnkPath);
+                if (parentDir != null &&
+                    !string.Equals(parentDir, subfolderRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    subfolder = Path.GetRelativePath(subfolderRoot, parentDir);
+                }
+            }
+
+            results.Add(new StartMenuEntry(name, target, credential.Sid, subfolder));
+        }
+    }
+
+    private static string RerootToUserProfile(string target, bool isCurrentAccount, string currentUserProfile, string? profilePath)
+    {
+        if (isCurrentAccount || profilePath == null)
+            return target;
+
+        var targetProfile = profilePath.TrimEnd('\\', '/');
+        if (!string.Equals(currentUserProfile, targetProfile, StringComparison.OrdinalIgnoreCase) &&
+            target.StartsWith(currentUserProfile + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            return targetProfile + target[currentUserProfile.Length..];
+
+        return target;
     }
 
     private HashSet<string> CollectPublicTargets()
@@ -152,26 +174,22 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver)
         return targets;
     }
 
-    private static void CollectTargets(string? dir, HashSet<string> targets,
+    private void CollectTargets(string? dir, HashSet<string> targets,
         string? currentUserProfile = null, string? targetProfilePath = null)
     {
         if (dir == null || !Directory.Exists(dir))
             return;
-        var normalizedTarget = targetProfilePath?.TrimEnd('\\', '/');
-        var shouldReroute = currentUserProfile != null && normalizedTarget != null &&
-                            !string.Equals(currentUserProfile, normalizedTarget, StringComparison.OrdinalIgnoreCase);
         try
         {
             foreach (var lnkPath in Directory.EnumerateFiles(dir, "*.lnk", SearchOption.AllDirectories))
             {
                 try
                 {
-                    var (target, _) = ShortcutComHelper.GetShortcutTargetAndArgs(lnkPath);
+                    var (target, _) = shortcutHelper.GetShortcutTargetAndArgs(lnkPath);
                     if (string.IsNullOrEmpty(target))
                         continue;
-                    if (shouldReroute && target.StartsWith(currentUserProfile! + Path.DirectorySeparatorChar,
-                            StringComparison.OrdinalIgnoreCase))
-                        target = normalizedTarget! + target[currentUserProfile!.Length..];
+                    if (currentUserProfile != null)
+                        target = RerootToUserProfile(target, isCurrentAccount: false, currentUserProfile, targetProfilePath);
                     targets.Add(target);
                 }
                 catch

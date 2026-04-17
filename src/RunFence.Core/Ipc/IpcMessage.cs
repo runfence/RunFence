@@ -15,4 +15,11 @@ public class IpcMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Association { get; set; }
+
+    /// <summary>
+    /// Optional: the caller's username, included as a fallback for name-based authorization
+    /// when pipe impersonation fails on the server side and SID resolution is unavailable.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CallerName { get; set; }
 }

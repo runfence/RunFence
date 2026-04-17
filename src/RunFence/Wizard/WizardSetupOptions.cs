@@ -11,8 +11,7 @@ namespace RunFence.Wizard;
 public record WizardSetupOptions(
     bool StoreCredential,
     bool IsEphemeral,
-    bool SplitTokenOptOut,
-    bool LowIntegrityDefault,
+    PrivilegeLevel PrivilegeLevel,
     FirewallAccountSettings? FirewallSettings,
     string? DesktopSettingsPath,
     List<InstallablePackage>? InstallPackages,

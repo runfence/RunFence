@@ -4,6 +4,9 @@ using System.Security.Principal;
 
 namespace RunFence.Core;
 
+// P/Invoke duplication with higher-level native helpers is architecturally justified:
+// RunFence.Core is a foundation-level project that cannot reference RunFence or
+// RunFence.Infrastructure, so token/process P/Invokes required here must be declared locally.
 public static class NativeTokenHelper
 {
     public const int MandatoryLevelLow = 0x1000;
@@ -14,19 +17,6 @@ public static class NativeTokenHelper
     private const int TOKEN_USER = 1;
     private const int TOKEN_INTEGRITY_LEVEL = 25;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern bool OpenProcessToken(IntPtr processHandle, int desiredAccess, out IntPtr tokenHandle);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern bool GetTokenInformation(IntPtr tokenHandle, int tokenInformationClass,
-        IntPtr tokenInformation, int tokenInformationLength, out int returnLength);
 
     /// <summary>
     /// Returns the SID of the interactive user in the current session by inspecting
@@ -179,4 +169,17 @@ public static class NativeTokenHelper
 
         return null;
     }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr processHandle, int desiredAccess, out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(IntPtr tokenHandle, int tokenInformationClass,
+        IntPtr tokenInformation, int tokenInformationLength, out int returnLength);
 }

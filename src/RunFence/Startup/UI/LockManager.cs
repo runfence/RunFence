@@ -1,8 +1,7 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Persistence;
+using RunFence.Infrastructure;
 using RunFence.Security;
 using RunFence.Startup.UI.Forms;
 
@@ -11,24 +10,22 @@ namespace RunFence.Startup.UI;
 public class LockManager(
     SessionContext session,
     IPinService pinService,
-    IDatabaseService databaseService,
     ILoggingService log,
     ISecureDesktopRunner secureDesktop,
-    IAppInitializationHelper appInit,
-    IWindowsHelloService windowsHello)
-    : IDisposable
+    IWindowsHelloService windowsHello,
+    IAutoLockTimerService autoLockTimerService)
+    : ILockManager
 {
-    private readonly AutoLockTimerService _autoLockTimerService = new();
-
     private volatile bool _isLocked;
     private volatile bool _unlockPolling;
     private int _unlockInProgress;
 
     public event Action? ShowWindowRequested;
     public event Action? ShowWindowUnlockedRequested;
+    /// <remarks>Single subscriber expected. If multiple subscribers are needed, change to an event with aggregated result.</remarks>
     public event Func<bool>? WindowsHelloUnavailableConfirmRequested;
+    /// <remarks>Single subscriber expected. If multiple subscribers are needed, change to an event with aggregated result.</remarks>
     public event Func<bool>? WindowsHelloFailedConfirmRequested;
-    public event Action<ProtectedBuffer, ProtectedBuffer>? PinResetCompleted;
 
     public bool IsLocked => _isLocked;
     public bool IsUnlockPolling => _unlockPolling;
@@ -40,7 +37,7 @@ public class LockManager(
         log.Info("Window locked");
     }
 
-    public void TryShowWindow()
+    public async Task TryShowWindowAsync()
     {
         if (!_isLocked)
         {
@@ -56,28 +53,10 @@ public class LockManager(
                 LaunchUnlockProcess();
                 break;
             case UnlockMode.Pin:
-                _unlockPolling = true;
-                try
-                {
-                    PromptPinForUnlock();
-                }
-                finally
-                {
-                    _unlockPolling = false;
-                }
-
+                await TryUnlockWith(UnlockMode.Pin);
                 break;
             case UnlockMode.WindowsHello:
-                _unlockPolling = true;
-                try
-                {
-                    PromptWindowsHelloForUnlock();
-                }
-                finally
-                {
-                    _unlockPolling = false;
-                }
-
+                await TryUnlockWith(UnlockMode.WindowsHello);
                 break;
         }
     }
@@ -113,7 +92,7 @@ public class LockManager(
         log.Info("Window unlocked via IPC");
     }
 
-    public bool TryUnlock(bool isAdmin)
+    public async Task<bool> TryUnlockAsync(bool isAdmin)
     {
         if (!_isLocked)
             return true;
@@ -121,7 +100,7 @@ public class LockManager(
             return false;
         try
         {
-            return TryUnlockCore(isAdmin);
+            return await TryUnlockCoreAsync(isAdmin);
         }
         finally
         {
@@ -129,7 +108,7 @@ public class LockManager(
         }
     }
 
-    private bool TryUnlockCore(bool isAdmin)
+    private async Task<bool> TryUnlockCoreAsync(bool isAdmin)
     {
         if (!_isLocked)
             return true;
@@ -142,28 +121,10 @@ public class LockManager(
                 Unlock();
                 break;
             case UnlockMode.Pin:
-                _unlockPolling = true;
-                try
-                {
-                    PromptPinForUnlock();
-                }
-                finally
-                {
-                    _unlockPolling = false;
-                }
-
+                await TryUnlockWith(UnlockMode.Pin);
                 break;
             case UnlockMode.WindowsHello:
-                _unlockPolling = true;
-                try
-                {
-                    PromptWindowsHelloForUnlock();
-                }
-                finally
-                {
-                    _unlockPolling = false;
-                }
-
+                await TryUnlockWith(UnlockMode.WindowsHello);
                 break;
             case UnlockMode.Admin when !isAdmin:
                 LaunchUnlockProcess();
@@ -171,17 +132,9 @@ public class LockManager(
                 try
                 {
                     var sw = Stopwatch.StartNew();
-                    // REENTRANCY WARNING: Application.DoEvents() re-enters the message loop, which means
-                    // other UI events (tray clicks, IPC handlers, timer ticks) can execute synchronously
-                    // inside this while loop. IsUnlockPolling=true guards IPC handlers from processing
-                    // unlock-sensitive operations concurrently, but callers of TryUnlock must be aware
-                    // that the call stack can be re-entered before TryUnlock returns.
-                    // A full async rewrite (e.g. async/await with TaskCompletionSource) would eliminate
-                    // this risk but is out of scope for the current iteration.
                     while (_isLocked && sw.ElapsedMilliseconds < 30_000)
                     {
-                        Application.DoEvents();
-                        Thread.Sleep(100);
+                        await Task.Delay(100);
                     }
                 }
                 finally
@@ -206,15 +159,31 @@ public class LockManager(
         var timeoutSeconds = clampedMinutes * 60;
         if (timeoutSeconds <= 0)
         {
-            _autoLockTimerService.Stop();
+            autoLockTimerService.Stop();
             LockWindow();
             return;
         }
 
-        _autoLockTimerService.Start(timeoutSeconds, LockWindow);
+        autoLockTimerService.Start(timeoutSeconds, LockWindow);
     }
 
-    public void StopAutoLockTimer() => _autoLockTimerService.Stop();
+    public void StopAutoLockTimer() => autoLockTimerService.Stop();
+
+    private async Task TryUnlockWith(UnlockMode mode)
+    {
+        _unlockPolling = true;
+        try
+        {
+            if (mode == UnlockMode.Pin)
+                PromptPinForUnlock();
+            else
+                await PromptWindowsHelloForUnlockAsync();
+        }
+        finally
+        {
+            _unlockPolling = false;
+        }
+    }
 
     private void LaunchUnlockProcess()
     {
@@ -233,9 +202,9 @@ public class LockManager(
         }
     }
 
-    private void PromptWindowsHelloForUnlock()
+    private async Task PromptWindowsHelloForUnlockAsync()
     {
-        var result = windowsHello.VerifySync("Verify your identity to unlock RunFence");
+        var result = await windowsHello.VerifyAsync("Verify your identity to unlock RunFence");
 
         switch (result)
         {
@@ -263,27 +232,14 @@ public class LockManager(
     private void PromptPinForUnlock()
     {
         bool verified = false;
-        (CredentialStore Store, byte[] Key)? resetResult = null;
         var store = session.CredentialStore;
 
         secureDesktop.Run(() =>
         {
-            using var dlg = new PinDialog(PinDialogMode.Verify);
+            using var dlg = new PinDialog(PinDialogMode.Verify, allowReset: false);
             dlg.VerifyCallback = pin => pinService.VerifyPin(pin, store, out _);
-            var result = dlg.ShowDialog();
-
-            if (result == DialogResult.OK)
-            {
+            if (dlg.ShowDialog() == DialogResult.OK)
                 verified = true;
-                return;
-            }
-
-            if (!dlg.ResetRequested)
-                return;
-
-            resetResult = PinResetFlowRunner.RunResetFlow(
-                pinService, databaseService, appInit,
-                extraStoreInit: store => { appInit.EnsureCurrentAccountCredential(store); });
         });
 
         if (verified)
@@ -291,26 +247,6 @@ public class LockManager(
             session.LastPinVerifiedAt = DateTime.UtcNow;
             Unlock();
         }
-        else if (resetResult is { } r)
-        {
-            log.Info("PIN reset from unlock dialog");
-
-            var oldBuffer = session.PinDerivedKey;
-            var resetDb = new AppDatabase();
-            appInit.PopulateDefaultIpcCallers(resetDb);
-            session.Database = resetDb;
-            session.CredentialStore = r.Store;
-            session.PinDerivedKey = new ProtectedBuffer(r.Key);
-            CryptographicOperations.ZeroMemory(r.Key);
-            session.LastPinVerifiedAt = DateTime.UtcNow;
-
-            PinResetCompleted?.Invoke(oldBuffer, session.PinDerivedKey);
-            Unlock();
-        }
     }
 
-    public void Dispose()
-    {
-        _autoLockTimerService.Dispose();
-    }
 }

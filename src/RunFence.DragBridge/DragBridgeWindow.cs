@@ -76,8 +76,8 @@ public class DragBridgeWindow : Form
         _autoCloseTimer.Start();
 
         _topmostTimer = new Timer { Interval = 200 };
-        _topmostTimer.Tick += (_, _) => NativeInterop.SetWindowPos(Handle, NativeInterop.HWND_TOPMOST, 0, 0, 0, 0,
-            NativeInterop.SWP_NOMOVE | NativeInterop.SWP_NOSIZE | NativeInterop.SWP_NOACTIVATE);
+        _topmostTimer.Tick += (_, _) => WindowNative.SetWindowPos(Handle, WindowNative.HWND_TOPMOST, 0, 0, 0, 0,
+            WindowNative.SWP_NOMOVE | WindowNative.SWP_NOSIZE | WindowNative.SWP_NOACTIVATE);
 
         _toolTip = new ToolTip { AutoPopDelay = 10_000, InitialDelay = 400 };
         UpdateTooltip();
@@ -97,8 +97,8 @@ public class DragBridgeWindow : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        NativeInterop.SetWindowPos(Handle, NativeInterop.HWND_TOPMOST, 0, 0, 0, 0,
-            NativeInterop.SWP_NOMOVE | NativeInterop.SWP_NOSIZE);
+        WindowNative.SetWindowPos(Handle, WindowNative.HWND_TOPMOST, 0, 0, 0, 0,
+            WindowNative.SWP_NOMOVE | WindowNative.SWP_NOSIZE);
         WindowForegroundHelper.ForceToForeground(Handle);
         _topmostTimer.Start();
     }
@@ -114,7 +114,9 @@ public class DragBridgeWindow : Form
                 BeginInvoke(() =>
                 {
                     _filePaths = initialFiles;
-                    _filesResolved = initialFiles.Count == 0; // cross-user files start unresolved
+                    // Empty = drop mode (no files yet), pre-resolved = main app confirmed access.
+                    // Otherwise start unresolved so the first drag triggers a resolve request.
+                    _filesResolved = initialFiles.Count == 0 || (initial?.FilesResolved ?? false);
                     UpdateBackColor();
                     UpdateTooltip();
                     ResetAutoCloseTimer();
@@ -136,13 +138,16 @@ public class DragBridgeWindow : Form
                             // Resolution succeeded — update files, now safe to drag
                             _filePaths = response.FilePaths;
                             _filesResolved = true;
+                            UpdateBackColor();
+                            UpdateTooltip();
+                            ResetAutoCloseTimer();
+                            Invalidate();
                         }
-
-                        // else: cancelled — keep current files, _filesResolved stays false
-                        UpdateBackColor();
-                        UpdateTooltip();
-                        ResetAutoCloseTimer();
-                        Invalidate();
+                        else
+                        {
+                            // User cancelled the dialog — close the window
+                            Close();
+                        }
                     });
             }
         }
@@ -253,6 +258,7 @@ public class DragBridgeWindow : Form
             if (!_resolvePending)
             {
                 _resolvePending = true;
+                ResetAutoCloseTimer();
                 _ = SendResolveRequestAsync();
             }
 
@@ -310,6 +316,9 @@ public class DragBridgeWindow : Form
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var r = ClientRectangle;
+        // cx/cy are the center of the DPI-scaled window (ClientSize is set to 64*scale in OnLoad).
+        // Icon shape offsets (e.g. cx+4, cy-12) are fixed pixel values, not DPI-scaled —
+        // icons appear smaller relative to the window circle at higher DPI but remain centered.
         int cx = r.Width / 2, cy = r.Height / 2;
 
         if (_filePaths is { Count: > 0 })
@@ -393,7 +402,8 @@ public class DragBridgeWindow : Form
             (false, _, false) => IconKind.SingleFile,
             (false, _, true) => IconKind.MultiFile,
             (true, true, false) => IconKind.SingleFolder,
-            _ => paths.Count > 1 && allFolders ? IconKind.MultiFolder : IconKind.MultiFile,
+            (true, true, true) => IconKind.MultiFolder,
+            _ => IconKind.MultiFile,  // mixed: some folders, some non-folders
         };
     }
 
@@ -401,7 +411,7 @@ public class DragBridgeWindow : Form
     {
         if (_runFencePid == 0 || hwnd == 0)
             return false;
-        NativeInterop.GetWindowThreadProcessId(hwnd, out var pid);
+        WindowNative.GetWindowThreadProcessId(hwnd, out var pid);
         return pid == (uint)_runFencePid;
     }
 
@@ -422,7 +432,7 @@ public class DragBridgeWindow : Form
         var hwndToRestore = _previousForegroundWindow != 0 ? _previousForegroundWindow
             : !BelongsToRunFence(_restoreHwnd) ? _restoreHwnd : 0;
         if (_hasActiveFocus && hwndToRestore != 0)
-            NativeInterop.SetForegroundWindow(hwndToRestore);
+            WindowNative.SetForegroundWindow(hwndToRestore);
     }
 
     protected override void WndProc(ref Message m)

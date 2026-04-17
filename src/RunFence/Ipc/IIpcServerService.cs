@@ -4,6 +4,6 @@ namespace RunFence.Ipc;
 
 public interface IIpcServerService : IDisposable
 {
-    void Start(Func<IpcMessage, string?, string?, bool, IpcResponse> handler);
+    void Start(Func<IpcMessage, IpcCallerContext, IpcResponse> handler);
     void Stop();
 }

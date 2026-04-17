@@ -8,7 +8,7 @@ namespace RunFence.RunAs;
 /// Handles shortcut (.lnk) resolution for the RunAs flow, including target path extraction
 /// and managed-app lookup.
 /// </summary>
-public static class RunAsShortcutHelper
+public class RunAsShortcutHelper(IShortcutComHelper shortcutHelper)
 {
     public record struct ResolvedShortcut(string ResolvedPath, string? ShortcutArgs, ShortcutContext Context);
 
@@ -16,9 +16,9 @@ public static class RunAsShortcutHelper
     /// Tries to resolve a .lnk shortcut to its target path, arguments, and shortcut context.
     /// Returns null if the shortcut is broken or references a removed managed app entry.
     /// </summary>
-    public static ResolvedShortcut? TryResolveShortcut(string lnkPath, IReadOnlyList<AppEntry> apps)
+    public ResolvedShortcut? TryResolveShortcut(string lnkPath, IReadOnlyList<AppEntry> apps)
     {
-        var (target, args) = ShortcutComHelper.GetShortcutTargetAndArgs(lnkPath);
+        var (target, args) = shortcutHelper.GetShortcutTargetAndArgs(lnkPath);
         if (string.IsNullOrEmpty(target))
             return null;
 
@@ -51,7 +51,7 @@ public static class RunAsShortcutHelper
     /// <paramref name="arguments"/>, and <paramref name="shortcutContext"/> in-place.
     /// Returns false and shows an error dialog if resolution fails; returns true otherwise.
     /// </summary>
-    public static bool TryHandleLnkPath(
+    public bool TryHandleLnkPath(
         ref string filePath,
         ref string? arguments,
         out string? originalLnkPath,

@@ -9,6 +9,18 @@ namespace RunFence.Acl;
 /// </summary>
 public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAccountAclBulkScanService
 {
+    /// <summary>
+    /// Accumulated NTFS rights for a single path during a bulk ACL scan.
+    /// OR-merged across multiple ACEs for the same SID+path.
+    /// </summary>
+    private record struct PathAclAccumulator(
+        bool HasAllow,
+        bool HasDeny,
+        FileSystemRights AllowRights,
+        FileSystemRights DenyRights,
+        bool IsAccountOwner,
+        bool IsAdminOwner);
+
     public Task<Dictionary<string, AccountScanResult>> ScanAllAccountsAsync(
         string rootPath,
         IReadOnlySet<string> knownSids,
@@ -53,7 +65,7 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
                     continue;
 
                 bool isDeny = rule.AccessControlType == AccessControlType.Deny;
-                bool isTraverseOnly = !isDeny && (rule.FileSystemRights & ~AclScanConstants.TraverseOnlyMask) == 0;
+                bool isTraverseOnly = !isDeny && GrantRightsMapper.IsTraverseOnly(rule.FileSystemRights);
 
                 if (isTraverseOnly)
                 {
@@ -84,15 +96,18 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
 
             foreach (var (path, acc) in perSidGrants)
             {
+                bool isDirectory = Directory.Exists(path);
+                var specialMask = isDirectory ? GrantRightsMapper.SpecialFolderMask : GrantRightsMapper.SpecialFileMask;
+
                 if (acc.HasAllow)
                 {
                     grants.Add(new DiscoveredGrant(
                         Path: path,
                         IsDeny: false,
-                        Execute: (acc.AllowRights & GrantedPathAclService.ExecuteRightsMask) != 0,
-                        Write: (acc.AllowRights & GrantedPathAclService.WriteRightsMask) != 0,
-                        Read: (acc.AllowRights & GrantedPathAclService.ReadRightsMask) != 0,
-                        Special: (acc.AllowRights & GrantedPathAclService.SpecialRightsMask) != 0,
+                        Execute: (acc.AllowRights & GrantRightsMapper.ExecuteMask) != 0,
+                        Write: (acc.AllowRights & (GrantRightsMapper.WriteFolderMask | GrantRightsMapper.WriteFileMask)) != 0,
+                        Read: (acc.AllowRights & GrantRightsMapper.ReadMask) != 0,
+                        Special: (acc.AllowRights & specialMask) != 0,
                         IsOwner: acc.IsAccountOwner));
                 }
 
@@ -101,10 +116,10 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
                     grants.Add(new DiscoveredGrant(
                         Path: path,
                         IsDeny: true,
-                        Execute: (acc.DenyRights & GrantedPathAclService.ExecuteRightsMask) != 0,
-                        Write: (acc.DenyRights & GrantedPathAclService.WriteRightsMask) != 0,
-                        Read: (acc.DenyRights & GrantedPathAclService.ReadRightsMask) != 0,
-                        Special: (acc.DenyRights & GrantedPathAclService.SpecialRightsMask) != 0,
+                        Execute: (acc.DenyRights & GrantRightsMapper.ExecuteMask) != 0,
+                        Write: (acc.DenyRights & (GrantRightsMapper.WriteFolderMask | GrantRightsMapper.WriteFileMask)) != 0,
+                        Read: (acc.DenyRights & GrantRightsMapper.ReadMask) != 0,
+                        Special: (acc.DenyRights & specialMask) != 0,
                         IsOwner: acc.IsAccountOwner));
                 }
             }

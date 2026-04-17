@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -6,14 +7,31 @@ namespace RunFence.Core.Ipc;
 
 public static class IpcClient
 {
+    private const int MaxResponseSize = 10 * 1024 * 1024;
+
     public static IpcResponse? SendMessage(IpcMessage message, int connectTimeoutMs = Constants.PipeConnectTimeoutMs)
     {
+        message.CallerName ??= Environment.UserName;
         var pipeName = Constants.PipeName;
 
         try
         {
             using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
-            client.Connect(connectTimeoutMs);
+            try
+            {
+                client.Connect(connectTimeoutMs);
+            }
+            catch (TimeoutException)
+            {
+                Trace.TraceInformation($"IpcClient: RunFence not running (pipe '{pipeName}' connect timed out).");
+                return null;
+            }
+            catch (IOException ex)
+            {
+                Trace.TraceInformation($"IpcClient: RunFence not running (pipe '{pipeName}' connection failed: {ex.Message}).");
+                return null;
+            }
+
             client.ReadMode = PipeTransmissionMode.Message;
 
             var json = JsonSerializer.Serialize(message, JsonDefaults.Options);
@@ -35,6 +53,8 @@ public static class IpcClient
                     if (chunk == 0)
                         break;
                     ms.Write(buffer, 0, chunk);
+                    if (ms.Length > MaxResponseSize)
+                        throw new InvalidOperationException($"IPC response exceeded maximum size of {MaxResponseSize} bytes.");
                 }
 
                 var assembled = ms.ToArray();
@@ -50,8 +70,9 @@ public static class IpcClient
 
             return null;
         }
-        catch
+        catch (Exception ex)
         {
+            Trace.TraceWarning($"IpcClient: Protocol error communicating with RunFence: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }

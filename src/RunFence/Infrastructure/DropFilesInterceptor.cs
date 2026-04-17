@@ -9,7 +9,7 @@ namespace RunFence.Infrastructure;
 /// data across IL boundaries).</item>
 /// <item><see cref="WindowSecurityService"/> applies <c>ChangeWindowMessageFilterEx</c> for
 /// WM_DROPFILES on every HWND in the process, allowing the message from lower-IL senders.</item>
-/// <item><see cref="NativeMethods.DragAcceptFiles"/> sets WS_EX_ACCEPTFILES so the shell
+/// <item><see cref="ShellNative.DragAcceptFiles"/> sets WS_EX_ACCEPTFILES so the shell
 /// knows this window accepts file drops.</item>
 /// </list>
 /// </summary>
@@ -20,7 +20,7 @@ public sealed class DropFilesInterceptor : NativeWindow, IDisposable
     public DropFilesInterceptor(IntPtr hwnd, Action<string[]> onDrop)
     {
         _onDrop = onDrop;
-        NativeMethods.DragAcceptFiles(hwnd, true);
+        ShellNative.DragAcceptFiles(hwnd, true);
         AssignHandle(hwnd);
     }
 
@@ -28,10 +28,10 @@ public sealed class DropFilesInterceptor : NativeWindow, IDisposable
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == NativeMethods.WM_DROPFILES)
+        if (m.Msg == WindowNative.WM_DROPFILES)
         {
-            var paths = NativeMethods.ExtractDropPaths(m.WParam);
-            NativeMethods.DragFinish(m.WParam);
+            var paths = ShellNative.ExtractDropPaths(m.WParam);
+            ShellNative.DragFinish(m.WParam);
             if (paths.Length > 0)
                 _onDrop(paths);
             return;

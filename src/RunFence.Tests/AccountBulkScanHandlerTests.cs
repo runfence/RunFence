@@ -1,7 +1,10 @@
 using Moq;
+using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Acl;
+using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -13,6 +16,13 @@ public class AccountBulkScanHandlerTests
 {
     private const string Sid1 = "S-1-5-21-1234567890-1234567890-1234567890-1001";
     private const string Sid2 = "S-1-5-21-1234567890-1234567890-1234567890-1002";
+
+    private static AccountBulkScanHandler CreateHandler() => new(
+        new Mock<IAccountAclBulkScanService>().Object,
+        new Mock<IAclService>().Object,
+        new Mock<ILoggingService>().Object,
+        new Mock<ISidNameCacheService>().Object,
+        new Mock<IDatabaseProvider>().Object);
 
     private static DiscoveredGrant MakeGrant(string path, bool isDeny = false) =>
         new(Path: path, IsDeny: isDeny, Execute: false, Write: false, Read: true, Special: false, IsOwner: false);
@@ -34,7 +44,7 @@ public class AccountBulkScanHandlerTests
             [Sid1] = new([grant], [])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [], new Mock<IAclService>().Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [], new Mock<IAclService>().Object);
 
         Assert.Single(filtered[Sid1].Grants);
     }
@@ -50,7 +60,7 @@ public class AccountBulkScanHandlerTests
             [Sid1] = new([grant], [])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.Empty(filtered);
     }
@@ -66,7 +76,7 @@ public class AccountBulkScanHandlerTests
             [Sid1] = new([grant], [])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.Empty(filtered);
     }
@@ -82,7 +92,7 @@ public class AccountBulkScanHandlerTests
             [Sid1] = new([grant], [])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.Single(filtered[Sid1].Grants);
     }
@@ -97,7 +107,7 @@ public class AccountBulkScanHandlerTests
             [Sid1] = new([], [@"C:\apps\myapp"])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.Empty(filtered);
     }
@@ -113,7 +123,7 @@ public class AccountBulkScanHandlerTests
             [Sid2] = new([MakeGrant(@"C:\other\file.txt")], [])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.False(filtered.ContainsKey(Sid1));
         Assert.True(filtered.ContainsKey(Sid2));
@@ -130,7 +140,7 @@ public class AccountBulkScanHandlerTests
             [Sid1] = new([grant], [])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.Single(filtered[Sid1].Grants);
         aclMock.Verify(a => a.ResolveAclTargetPath(It.IsAny<AppEntry>()), Times.Never);
@@ -147,7 +157,7 @@ public class AccountBulkScanHandlerTests
             [Sid1] = new([grant], [])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.Single(filtered[Sid1].Grants);
         aclMock.Verify(a => a.ResolveAclTargetPath(It.IsAny<AppEntry>()), Times.Never);
@@ -164,7 +174,7 @@ public class AccountBulkScanHandlerTests
             [Sid1] = new([grant], [])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.Empty(filtered);
     }
@@ -181,7 +191,7 @@ public class AccountBulkScanHandlerTests
                 [@"C:\apps\myapp", @"C:\other\traverse"])
         };
 
-        var filtered = AccountBulkScanHandler.FilterManagedPaths(results, [app], aclMock.Object);
+        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
 
         Assert.Single(filtered[Sid1].Grants);
         Assert.Equal(@"C:\data\shared", filtered[Sid1].Grants[0].Path);

@@ -17,6 +17,17 @@ public class ProtectedBufferTests
         Assert.Throws<ArgumentException>(() => new ProtectedBuffer(data, protect: false));
     }
 
+    [Theory]
+    [InlineData(16)]
+    [InlineData(32)]
+    [InlineData(48)]
+    public void Constructor_ValidMultipleOf16_Succeeds(int length)
+    {
+        var data = new byte[length];
+        var buffer = new ProtectedBuffer(data, protect: false);
+        buffer.Dispose();
+    }
+
     [Fact]
     public void Unprotect_ReturnsData()
     {

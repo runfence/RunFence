@@ -6,11 +6,14 @@ namespace RunFence.Account.UI.OrphanedProfiles;
 
 public partial class OrphanedProfilesDialog : Form
 {
+    private enum DialogState { Loading, Results, Error }
+
     private readonly IOrphanedProfileService _service;
     private readonly OperationGuard _operationGuard = new();
 
     private OrphanedProfilesSelectionPanel? _selectionPanel;
     private OrphanedProfilesReportPanel? _reportPanel;
+    private DialogState _dialogState;
 
     public OrphanedProfilesDialog(IOrphanedProfileService orphanedProfileService)
     {
@@ -36,13 +39,22 @@ public partial class OrphanedProfilesDialog : Form
         _contentPanel.Controls.Add(panel);
     }
 
-    private void OnRescanClick(object? sender, EventArgs e) => LoadProfilesAsync();
+    private void OnDeleteButtonClick(object? sender, EventArgs e)
+    {
+        switch (_dialogState)
+        {
+            case DialogState.Results:
+                DeleteSelectedAsync();
+                break;
+            case DialogState.Error:
+                LoadProfilesAsync();
+                break;
+        }
+    }
 
     private async void LoadProfilesAsync()
     {
-        _deleteButton.Click -= OnRescanClick;
-        _deleteButton.Click -= OnDeleteSelectedClick;
-        _deleteButton.Click += OnDeleteSelectedClick;
+        _dialogState = DialogState.Loading;
         _deleteButton.Text = "Delete Selected";
         _deleteButton.Enabled = false;
         _deleteButton.Visible = true;
@@ -68,6 +80,7 @@ public partial class OrphanedProfilesDialog : Form
             if (IsDisposed)
                 return;
             UseWaitCursor = false;
+            _dialogState = DialogState.Error;
             ClearContentPanel();
             _contentPanel.Controls.Add(new Label
             {
@@ -77,9 +90,6 @@ public partial class OrphanedProfilesDialog : Form
                 Text = "Failed to scan for orphaned profiles."
             });
             _deleteButton.Text = "Rescan";
-            _deleteButton.Click -= OnDeleteSelectedClick;
-            _deleteButton.Click -= OnRescanClick;
-            _deleteButton.Click += OnRescanClick;
             _deleteButton.Enabled = true;
             return;
         }
@@ -92,13 +102,14 @@ public partial class OrphanedProfilesDialog : Form
 
     private void ShowSelectionPhase(List<OrphanedProfile> profiles)
     {
+        _dialogState = DialogState.Results;
         _selectionPanel ??= new OrphanedProfilesSelectionPanel();
         _selectionPanel.Populate(profiles);
         ShowPanel(_selectionPanel);
         _deleteButton.Enabled = profiles.Count > 0;
     }
 
-    private async void OnDeleteSelectedClick(object? sender, EventArgs e)
+    private async void DeleteSelectedAsync()
     {
         if (_selectionPanel == null)
             return;
@@ -138,9 +149,8 @@ public partial class OrphanedProfilesDialog : Form
     {
         if (failed.Count > 0)
         {
+            _dialogState = DialogState.Error;
             _deleteButton.Text = "Rescan";
-            _deleteButton.Click -= OnDeleteSelectedClick;
-            _deleteButton.Click += OnRescanClick;
             _deleteButton.Enabled = true;
         }
         else

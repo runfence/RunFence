@@ -75,6 +75,10 @@ public class WizardModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<WizardCredentialCollector>()
+            .AsSelf()
+            .InstancePerDependency();
+
         builder.RegisterType<WizardExecutionHandler>()
             .AsSelf()
             .InstancePerDependency();

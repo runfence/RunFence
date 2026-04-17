@@ -1,7 +1,10 @@
 using System.Security.AccessControl;
 using Moq;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
+using RunFence.Account;
+using RunFence.Account.Lifecycle;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -42,22 +45,51 @@ public class StartupEnforcementRunnerTests
         var sessionProvider = new LambdaSessionProvider(() => new SessionContext { Database = _database });
         var reconciliationService = new GrantReconciliationService(
             _aclPermission.Object, new Mock<ILocalGroupMembershipService>().Object, _log.Object, _sessionSaver.Object,
-            new LambdaDatabaseProvider(() => _database));
+            new LambdaDatabaseProvider(() => _database),
+            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object),
+            new Mock<IInteractiveUserResolver>().Object);
+        var enforcementResultApplier = new EnforcementResultApplier(_appContainerService.Object);
+        var stubPersistenceHelper = new SessionPersistenceHelper(
+            new Mock<ICredentialRepository>().Object, new Mock<IConfigRepository>().Object,
+            new Mock<ISidNameCacheService>().Object, new Mock<ILoggingService>().Object);
+        var ephemeralAccountService = new EphemeralAccountService(
+            new Mock<IAccountLifecycleManager>().Object,
+            new Mock<IAccountDeletionService>().Object,
+            stubPersistenceHelper,
+            new Mock<ILocalUserProvider>().Object,
+            _log.Object,
+            new Mock<IAccountValidationService>().Object,
+            sessionProvider,
+            new Mock<IUiThreadInvoker>().Object,
+            new Mock<ISidResolver>().Object,
+            new Mock<IPathGrantService>().Object);
+
+        var ephemeralContainerService = new EphemeralContainerService(
+            new Mock<IContainerDeletionService>().Object,
+            new Mock<IDatabaseService>().Object,
+            _log.Object,
+            sessionProvider,
+            new Mock<IUiThreadInvoker>().Object,
+            new Mock<IProcessListService>().Object);
+
         return new StartupEnforcementRunner(
             _enforcementService.Object,
             sessionProvider,
             _sessionSaver.Object,
-            null!, // permissionGrantService — unused in tested methods
-            null!, // ephemeralAccountService — unused in tested methods
-            null!, // ephemeralContainerService — unused in tested methods
+            new Mock<IPathGrantService>().Object,
+            ephemeralAccountService,
+            ephemeralContainerService,
             reconciliationService,
-            _appContainerService.Object);
+            _appContainerService.Object,
+            new Mock<IInteractiveUserResolver>().Object,
+            _log.Object,
+            enforcementResultApplier);
     }
 
     // --- ApplyEnforcementResult tests ---
 
     [Fact]
-    public void ApplyEnforcementResult_TimestampUpdates_AppliedToMatchingApps()
+    public async Task ApplyEnforcementResult_TimestampUpdates_AppliedToMatchingApps()
     {
         // Arrange
         var app1 = new AppEntry { Id = "app-1", Name = "App1" };
@@ -72,7 +104,7 @@ public class StartupEnforcementRunnerTests
         var runner = BuildRunner();
 
         // Act
-        runner.ApplyEnforcementResult(result);
+        await runner.ApplyEnforcementResult(result);
 
         // Assert
         Assert.Equal(now, app1.LastKnownExeTimestamp);
@@ -80,7 +112,7 @@ public class StartupEnforcementRunnerTests
     }
 
     [Fact]
-    public void ApplyEnforcementResult_TimestampUpdatesNonEmpty_ReconciliationReturnedFalse_CallsSaveConfig()
+    public async Task ApplyEnforcementResult_TimestampUpdatesNonEmpty_ReconciliationReturnedFalse_CallsSaveConfig()
     {
         var app = new AppEntry { Id = "app-ts", Name = "TimestampApp" };
         _database.Apps = [app];
@@ -92,16 +124,16 @@ public class StartupEnforcementRunnerTests
 
         var runner = BuildRunner();
 
-        runner.ApplyEnforcementResult(result);
+        await runner.ApplyEnforcementResult(result);
 
         _sessionSaver.Verify(s => s.SaveConfig(), Times.Once);
     }
 
     [Fact]
-    public void ApplyEnforcementResult_TraverseGrantsNonEmpty_ReconciliationReturnedFalse_CallsSaveConfig()
+    public async Task ApplyEnforcementResult_TraverseGrantsNonEmpty_ReconciliationReturnedFalse_CallsSaveConfig()
     {
         // Arrange
-        var container = new AppContainerEntry { Name = ContainerName };
+        var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
         var traverseDir = @"C:\SomeDir";
 
         _database = new AppDatabase();
@@ -113,14 +145,14 @@ public class StartupEnforcementRunnerTests
         var runner = BuildRunner();
 
         // Act
-        runner.ApplyEnforcementResult(result);
+        await runner.ApplyEnforcementResult(result);
 
         // Assert: traverse was re-tracked → SaveConfig called
         _sessionSaver.Verify(s => s.SaveConfig(), Times.Once);
     }
 
     [Fact]
-    public void ApplyEnforcementResult_EmptyUpdatesAndGrants_ReconciliationReturnedFalse_DoesNotCallSaveConfig()
+    public async Task ApplyEnforcementResult_EmptyUpdatesAndGrants_ReconciliationReturnedFalse_DoesNotCallSaveConfig()
     {
         var result = new EnforcementResult(
             TimestampUpdates: new Dictionary<string, DateTime>(),
@@ -128,13 +160,13 @@ public class StartupEnforcementRunnerTests
 
         var runner = BuildRunner();
 
-        runner.ApplyEnforcementResult(result);
+        await runner.ApplyEnforcementResult(result);
 
         _sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
     }
 
     [Fact]
-    public void ApplyEnforcementResult_UnknownAppId_DoesNotThrow()
+    public async Task ApplyEnforcementResult_UnknownAppId_DoesNotThrow()
     {
         _database.Apps = [new AppEntry { Id = "known-app", Name = "KnownApp" }];
 
@@ -145,14 +177,14 @@ public class StartupEnforcementRunnerTests
         var runner = BuildRunner();
 
         // Should not throw — unknown IDs are silently ignored
-        runner.ApplyEnforcementResult(result);
+        await runner.ApplyEnforcementResult(result);
     }
 
     [Fact]
-    public void ApplyEnforcementResult_TraverseGrantsNonEmpty_ReTracksOnLiveDatabase()
+    public async Task ApplyEnforcementResult_TraverseGrantsNonEmpty_ReTracksOnLiveDatabase()
     {
         // Arrange
-        var container = new AppContainerEntry { Name = ContainerName };
+        var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
         var traverseDir = @"C:\TraverseTarget";
         var appliedPaths = new List<string> { traverseDir, @"C:\" };
 
@@ -164,7 +196,7 @@ public class StartupEnforcementRunnerTests
         var runner = BuildRunner();
 
         // Act
-        runner.ApplyEnforcementResult(result);
+        await runner.ApplyEnforcementResult(result);
 
         // Assert: the traverse path is now tracked on the live database for the container SID
         var account = _database.GetAccount(ContainerSid);
@@ -176,7 +208,7 @@ public class StartupEnforcementRunnerTests
     }
 
     [Fact]
-    public void ApplyEnforcementResult_ReconciliationReturnedTrue_SkipsOwnSaveConfig()
+    public async Task ApplyEnforcementResult_ReconciliationReturnedTrue_SkipsOwnSaveConfig()
     {
         // Arrange: set up a SID with a snapshot that differs from current groups,
         // so ReconcileIfGroupsChanged detects a change and returns true (auto-saves internally).
@@ -197,11 +229,36 @@ public class StartupEnforcementRunnerTests
         var runner = BuildRunner();
 
         // Act
-        runner.ApplyEnforcementResult(result);
+        await runner.ApplyEnforcementResult(result);
 
         // Assert: SaveConfig was called exactly once — from reconciliation's auto-save,
         // not an additional call from ApplyEnforcementResult itself.
         _sessionSaver.Verify(s => s.SaveConfig(), Times.Once);
+    }
+
+    [Fact]
+    public async Task ApplyEnforcementResult_ContainerWithEmptySid_FallsBackToGetSid()
+    {
+        // Arrange: container has no cached Sid — applier must call GetSid(Name) to resolve it
+        var container = new AppContainerEntry { Name = ContainerName, Sid = "" };
+        var traverseDir = @"C:\FallbackDir";
+        var appliedPaths = new List<string> { traverseDir };
+
+        _database = new AppDatabase();
+        var result = new EnforcementResult(
+            TimestampUpdates: new Dictionary<string, DateTime>(),
+            TraverseGrants: [new ContainerTraverseGrant(container, traverseDir, appliedPaths)]);
+
+        var runner = BuildRunner();
+
+        // Act
+        await runner.ApplyEnforcementResult(result);
+
+        // Assert: GetSid was called and the traverse path was tracked under the resolved SID
+        _appContainerService.Verify(s => s.GetSid(ContainerName), Times.Once);
+        var account = _database.GetAccount(ContainerSid);
+        Assert.NotNull(account);
+        Assert.Single(account.Grants, g => g.IsTraverseOnly);
     }
 
     // --- FixAppEntryDefaults tests ---

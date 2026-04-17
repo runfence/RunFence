@@ -1,6 +1,7 @@
 #nullable disable
 
 using System.ComponentModel;
+using RunFence.UI.Controls;
 
 namespace RunFence.Apps.UI.Forms;
 
@@ -11,7 +12,9 @@ partial class HandlerAssociationsSection
     private ToolStrip _toolStrip;
     private ToolStripButton _addButton;
     private ToolStripButton _removeButton;
-    private ListBox _listBox;
+    private StyledDataGridView _dataGrid;
+    private DataGridViewTextBoxColumn _keyColumn;
+    private DataGridViewTextBoxColumn _argsTemplateColumn;
     private ContextMenuStrip _contextMenu;
     private ToolStripMenuItem _ctxAdd;
     private ToolStripMenuItem _ctxRemove;
@@ -28,12 +31,15 @@ partial class HandlerAssociationsSection
         _toolStrip = new ToolStrip();
         _addButton = new ToolStripButton();
         _removeButton = new ToolStripButton();
-        _listBox = new ListBox();
+        _dataGrid = new StyledDataGridView();
+        _keyColumn = new DataGridViewTextBoxColumn();
+        _argsTemplateColumn = new DataGridViewTextBoxColumn();
         _contextMenu = new ContextMenuStrip();
         _ctxAdd = new ToolStripMenuItem();
         _ctxRemove = new ToolStripMenuItem();
 
         _toolStrip.SuspendLayout();
+        ((ISupportInitialize)_dataGrid).BeginInit();
         _contextMenu.SuspendLayout();
         SuspendLayout();
 
@@ -55,13 +61,29 @@ partial class HandlerAssociationsSection
         _removeButton.Enabled = false;
         _removeButton.Click += OnRemoveClick;
 
-        // _listBox
-        _listBox.Dock = DockStyle.Fill;
-        _listBox.IntegralHeight = false;
-        _listBox.ContextMenuStrip = _contextMenu;
-        _listBox.SelectedIndexChanged += OnSelectionChanged;
-        _listBox.KeyDown += OnKeyDown;
-        _listBox.MouseDown += OnMouseDown;
+        // _dataGrid
+        _dataGrid.Dock = DockStyle.Fill;
+        _dataGrid.AllowUserToAddRows = false;
+        _dataGrid.AllowUserToDeleteRows = false;
+        _dataGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+        _dataGrid.MultiSelect = false;
+        _dataGrid.ContextMenuStrip = _contextMenu;
+        _dataGrid.Columns.AddRange(new DataGridViewColumn[] { _keyColumn, _argsTemplateColumn });
+        _dataGrid.SelectionChanged += OnSelectionChanged;
+        _dataGrid.KeyDown += OnKeyDown;
+        _dataGrid.MouseDown += OnMouseDown;
+
+        // _keyColumn
+        _keyColumn.HeaderText = "Association";
+        _keyColumn.Name = "colKey";
+        _keyColumn.ReadOnly = true;
+        _keyColumn.Width = 130;
+        _keyColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+
+        // _argsTemplateColumn
+        _argsTemplateColumn.HeaderText = "Args Template";
+        _argsTemplateColumn.Name = "colArgsTemplate";
+        _argsTemplateColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
         // _contextMenu
         _contextMenu.Items.AddRange(new ToolStripItem[] { _ctxAdd, _ctxRemove });
@@ -79,11 +101,12 @@ partial class HandlerAssociationsSection
         AutoScaleMode = AutoScaleMode.Inherit;
         Dock = DockStyle.Fill;
         Margin = Padding.Empty;
-        Controls.Add(_listBox);
+        Controls.Add(_dataGrid);
         Controls.Add(_toolStrip);
 
         _toolStrip.ResumeLayout(false);
         _toolStrip.PerformLayout();
+        ((ISupportInitialize)_dataGrid).EndInit();
         _contextMenu.ResumeLayout(false);
         ResumeLayout(false);
         PerformLayout();

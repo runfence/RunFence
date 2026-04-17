@@ -6,6 +6,7 @@ using System.Text;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Launch.Tokens;
 
 namespace RunFence.DragBridge;
 
@@ -13,34 +14,24 @@ namespace RunFence.DragBridge;
 /// Manages process launch, pipe server creation, and active operation lifecycle
 /// for the DragBridge cross-user bridge.
 /// </summary>
-public class DragBridgeProcessLauncher
+public class DragBridgeProcessLauncher(
+    IDragBridgeLauncher launcher,
+    ILoggingService log,
+    IUiThreadInvoker uiThreadInvoker,
+    string dragBridgeExePath = "")
+    : IDragBridgeProcessLauncher
 {
-    private readonly IDragBridgeLauncher _launcher;
-    private readonly ILoggingService _log;
-    private readonly string _dragBridgeExePath;
-    private readonly IUiThreadInvoker _uiThreadInvoker;
+    private readonly string _dragBridgeExePath = dragBridgeExePath.Length > 0
+        ? dragBridgeExePath
+        : Path.Combine(AppContext.BaseDirectory, Constants.DragBridgeExeName);
 
     private string? _currentSid;
     private string? _interactiveSid;
     private CredentialStore? _credentialStore;
 
     // Active operation tracking for concurrent instance guard
-    private volatile Process? _activeProcess;
+    private volatile ProcessInfo? _activeProcess;
     private CancellationTokenSource? _activeCts;
-
-    public DragBridgeProcessLauncher(
-        IDragBridgeLauncher launcher,
-        ILoggingService log,
-        IUiThreadInvoker uiThreadInvoker,
-        string dragBridgeExePath = "")
-    {
-        _launcher = launcher;
-        _log = log;
-        _uiThreadInvoker = uiThreadInvoker;
-        _dragBridgeExePath = dragBridgeExePath.Length > 0
-            ? dragBridgeExePath
-            : Path.Combine(AppContext.BaseDirectory, Constants.DragBridgeExeName);
-    }
 
     public void SetData(SessionContext session)
     {
@@ -52,7 +43,9 @@ public class DragBridgeProcessLauncher
     public CancellationTokenSource BeginOperation()
     {
         var cts = new CancellationTokenSource();
-        _activeCts = cts;
+        var old = Interlocked.Exchange(ref _activeCts, cts);
+        old?.Cancel();
+        old?.Dispose();
         return cts;
     }
 
@@ -61,9 +54,9 @@ public class DragBridgeProcessLauncher
         var cts = Interlocked.Exchange(ref _activeCts, null);
         cts?.Cancel();
         cts?.Dispose();
-        KillProcess(_activeProcess);
-        _activeProcess?.Dispose();
-        _activeProcess = null;
+        var process = Interlocked.Exchange(ref _activeProcess, null);
+        KillProcess(process);
+        process?.Dispose();
     }
 
     public NamedPipeServerStream CreatePipeServer(string pipeName, SecurityIdentifier targetUserSid)
@@ -82,63 +75,50 @@ public class DragBridgeProcessLauncher
             256 * 1024, 256 * 1024, pipeSecurity);
     }
 
-    public Process? LaunchForSid(WindowOwnerInfo ownerInfo, IReadOnlyList<string> args,
+    public ProcessInfo? LaunchForSid(WindowOwnerInfo ownerInfo, IReadOnlyList<string> args,
         INotificationService notifications)
     {
         var sid = ownerInfo.Sid;
-        Process? process = null;
+        ProcessInfo? process = null;
 
         if (_currentSid != null && string.Equals(sid.Value, _currentSid, StringComparison.OrdinalIgnoreCase))
         {
-            var useSplitToken = ownerInfo.IntegrityLevel <= NativeTokenHelper.MandatoryLevelMedium;
-            var useLowIntegrity = ownerInfo.IntegrityLevel <= NativeTokenHelper.MandatoryLevelLow;
-            process = _launcher.LaunchDirect(_dragBridgeExePath, args, useSplitToken, useLowIntegrity);
+            var privilegeLevel = ownerInfo.IntegrityLevel switch
+            {
+                <= NativeTokenHelper.MandatoryLevelLow => PrivilegeLevel.LowIntegrity,
+                <= NativeTokenHelper.MandatoryLevelMedium => PrivilegeLevel.Basic,
+                _ => PrivilegeLevel.HighestAllowed,
+            };
+            process = launcher.LaunchDirect(_dragBridgeExePath, args, privilegeLevel);
+            if (process == null)
+                return null;
         }
         else if (_interactiveSid != null && string.Equals(sid.Value, _interactiveSid, StringComparison.OrdinalIgnoreCase))
         {
-            // Skip split-token restriction when the target window is elevated (High IL or above),
-            // otherwise the restricted bridge process cannot drag to the unrestricted target window.
-            var skipSplitToken = ownerInfo.IntegrityLevel > NativeTokenHelper.MandatoryLevelMedium;
-            var pid = _launcher.LaunchDeElevated(_dragBridgeExePath, args, skipSplitToken);
-            if (pid == 0)
+            // When target window is elevated (High IL or above), pass HighestAllowed so the bridge
+            // process is not restricted below the target window's integrity level.
+            var elevated = ownerInfo.IntegrityLevel > NativeTokenHelper.MandatoryLevelMedium;
+            process = launcher.LaunchDeElevated(_dragBridgeExePath, args, elevated ? PrivilegeLevel.HighestAllowed : (PrivilegeLevel?)null);
+            if (process == null)
                 return null;
-            try
-            {
-                process = Process.GetProcessById(pid);
-            }
-            catch (ArgumentException)
-            {
-                return null;
-            } // process already terminated; pipe timeout handles detection
         }
         else if (_credentialStore != null && _credentialStore.Credentials.Any(c =>
                      string.Equals(c.Sid, sid.Value, StringComparison.OrdinalIgnoreCase)))
         {
             try
             {
-                var pid = _launcher.LaunchManaged(_dragBridgeExePath, sid.Value, args);
-                if (pid > 0)
-                {
-                    try
-                    {
-                        process = Process.GetProcessById(pid);
-                    }
-                    catch
-                    {
-                        return null;
-                    }
-                }
+                process = launcher.LaunchManaged(_dragBridgeExePath, sid.Value, args);
             }
             catch (Exception ex)
             {
-                _log.Error("DragBridgeService: managed launch failed", ex);
-                _uiThreadInvoker.Invoke(() => notifications.ShowError("Drag Bridge", "Failed to launch drag bridge process."));
+                log.Error("DragBridgeService: managed launch failed", ex);
+                uiThreadInvoker.Invoke(() => notifications.ShowError("Drag Bridge", "Failed to launch drag bridge process."));
                 return null;
             }
         }
         else
         {
-            _uiThreadInvoker.Invoke(() => notifications.ShowWarning("Drag Bridge",
+            uiThreadInvoker.Invoke(() => notifications.ShowWarning("Drag Bridge",
                 "No credentials for this account — cannot launch drag bridge."));
             return null;
         }
@@ -156,24 +136,24 @@ public class DragBridgeProcessLauncher
         pipe.Flush();
     }
 
-    public bool VerifyClientProcess(NamedPipeServerStream pipe, Process? expectedProcess)
+    public bool VerifyClientProcess(NamedPipeServerStream pipe, ProcessInfo? expectedProcess)
     {
         try
         {
-            NativeInterop.GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out var clientPid);
+            ProcessNative.GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out var clientPid);
 
             if (expectedProcess != null)
                 return clientPid == (uint)expectedProcess.Id;
 
             // For de-elevated/managed launches (no process handle), verify exe path instead.
             // A non-admin user cannot replace the binary at the install directory.
-            using var handle = NativeInterop.OpenProcess(NativeMethods.ProcessQueryLimitedInformation, false, clientPid);
+            using var handle = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, clientPid);
             if (handle.IsInvalid)
                 return false;
 
             var sb = new StringBuilder(1024);
             uint size = (uint)sb.Capacity;
-            if (!NativeInterop.QueryFullProcessImageName(handle, 0, sb, ref size))
+            if (!ProcessNative.QueryFullProcessImageName(handle, 0, sb, ref size))
                 return false;
 
             return string.Equals(sb.ToString(), _dragBridgeExePath, StringComparison.OrdinalIgnoreCase);
@@ -184,9 +164,9 @@ public class DragBridgeProcessLauncher
         }
     }
 
-    public void SetActiveProcess(Process? process) => _activeProcess = process;
+    public void SetActiveProcess(ProcessInfo? process) => _activeProcess = process;
 
-    public void KillProcess(Process? process)
+    public void KillProcess(ProcessInfo? process)
     {
         if (process == null)
             return;

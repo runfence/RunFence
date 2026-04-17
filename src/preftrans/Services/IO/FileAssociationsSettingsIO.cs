@@ -1,20 +1,21 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class FileAssociationsSettingsIO
+public class FileAssociationsSettingsIO(ISafeExecutor safe) : ISettingsIO
 {
-    public static FileAssociationsSettings Read()
+    public FileAssociationsSettings Read()
     {
         var fa = new FileAssociationsSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             var associations = new Dictionary<string, FileAssociation>();
             foreach (var ext in Constants.TrackedFileExtensions)
             {
-                SafeExecutor.Try(() =>
+                safe.Try(() =>
                 {
                     string? progId;
 
@@ -47,7 +48,7 @@ public static class FileAssociationsSettingsIO
         return fa;
     }
 
-    public static void Write(FileAssociationsSettings fa)
+    public void Write(FileAssociationsSettings fa)
     {
         if (fa.Associations == null)
             return;
@@ -64,7 +65,7 @@ public static class FileAssociationsSettingsIO
             NativeMethods.SHChangeNotify(Constants.SHCNE_ASSOCCHANGED, Constants.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
     }
 
-    private static bool WriteExtensionAssociation(string ext, FileAssociation assoc)
+    private bool WriteExtensionAssociation(string ext, FileAssociation assoc)
     {
         // Reject keys containing backslashes or forward slashes — they would escape the intended
         // registry subkey and write to an arbitrary path.
@@ -74,11 +75,11 @@ public static class FileAssociationsSettingsIO
             return false;
 
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             // Check if per-user Classes already points to the correct ProgId
             bool alreadyCorrect = false;
-            SafeExecutor.Try(() =>
+            safe.Try(() =>
             {
                 using var existingKey = Registry.CurrentUser.OpenSubKey(
                     Constants.RegUserClasses + @"\" + ext);
@@ -91,7 +92,7 @@ public static class FileAssociationsSettingsIO
                 return;
 
             // Delete UserChoice subkey to remove hash-protected association
-            SafeExecutor.Try(() =>
+            safe.Try(() =>
             {
                 using var extsKey = Registry.CurrentUser.OpenSubKey(
                     Constants.RegFileExts + @"\" + ext, writable: true);
@@ -104,10 +105,13 @@ public static class FileAssociationsSettingsIO
             clsKey.SetValue("", assoc.ProgId, RegistryValueKind.String);
             changed = true;
 
-            // Write the ProgId class open command if available
+            // Write the ProgId class open command if available.
+            // No command validation is applied here by design: preftrans runs under the target user's
+            // credentials (not elevated), so any written command executes only with that user's
+            // privilege level. Arbitrary command validation would be both incomplete and unnecessary.
             if (assoc.OpenCommand != null)
             {
-                SafeExecutor.Try(() =>
+                safe.Try(() =>
                 {
                     using var cmdKey = Registry.CurrentUser.CreateSubKey(
                         Constants.RegUserClasses + @"\" + assoc.ProgId + @"\shell\open\command");
@@ -134,4 +138,8 @@ public static class FileAssociationsSettingsIO
             return key?.GetValue("") as string;
         }
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.FileAssociations = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.FileAssociations != null) Write(s.FileAssociations); }
 }

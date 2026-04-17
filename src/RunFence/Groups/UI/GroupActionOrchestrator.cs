@@ -3,7 +3,6 @@ using RunFence.Account.UI;
 using RunFence.Core;
 using RunFence.Groups.UI.Forms;
 using RunFence.Infrastructure;
-using RunFence.UI.Forms;
 
 namespace RunFence.Groups.UI;
 
@@ -11,44 +10,31 @@ namespace RunFence.Groups.UI;
 /// Orchestrates group actions: create/delete group, open ACL Manager, scan ACLs.
 /// Does not hold references to grid controls — callers read grid state and pass it as parameters.
 /// </summary>
-public class GroupActionOrchestrator
+/// <remarks>
+/// <paramref name="bulkScanHandler"/> and <paramref name="aclManagerLauncher"/> are nullable
+/// because they are unavailable in the foundation scope (pre-session). Available after BeginSessionScope().
+/// <paramref name="sessionSaver"/> is nullable for the same reason.
+/// </remarks>
+public class GroupActionOrchestrator(
+    IModalCoordinator modalCoordinator,
+    ILocalGroupMembershipService groupMembership,
+    GroupBulkScanOrchestrator? bulkScanHandler,
+    AccountAclManagerLauncher? aclManagerLauncher,
+    ISidNameCacheService sidNameCache,
+    ISessionProvider sessionProvider,
+    ILoggingService log,
+    ISessionSaver? sessionSaver = null)
 {
-    private readonly ILocalGroupMembershipService _groupMembership;
-    private readonly GroupBulkScanOrchestrator? _bulkScanHandler;
-    private readonly AccountAclManagerLauncher? _aclManagerLauncher;
-    private readonly ISidNameCacheService _sidNameCache;
-    private readonly ISessionSaver? _sessionSaver;
-    private readonly ILoggingService _log;
-    private readonly ISessionProvider _sessionProvider;
-
     public event Action? DataChanged;
 
-    public GroupActionOrchestrator(
-        ILocalGroupMembershipService groupMembership,
-        GroupBulkScanOrchestrator? bulkScanHandler,
-        AccountAclManagerLauncher? aclManagerLauncher,
-        ISidNameCacheService sidNameCache,
-        ISessionProvider sessionProvider,
-        ILoggingService log,
-        ISessionSaver? sessionSaver = null)
-    {
-        _groupMembership = groupMembership;
-        _bulkScanHandler = bulkScanHandler;
-        _aclManagerLauncher = aclManagerLauncher;
-        _sidNameCache = sidNameCache;
-        _sessionSaver = sessionSaver;
-        _log = log;
-        _sessionProvider = sessionProvider;
-    }
+    public bool IsAclManagerAvailable => aclManagerLauncher != null;
 
-    public bool IsAclManagerAvailable => _aclManagerLauncher != null;
-
-    public bool IsBulkScanAvailable => _bulkScanHandler != null;
+    public bool IsBulkScanAvailable => bulkScanHandler != null;
 
     public void CreateGroup(IWin32Window? owner)
     {
-        using var dlg = new CreateGroupDialog(_groupMembership);
-        if (DataPanel.ShowModal(dlg, owner) != DialogResult.OK)
+        using var dlg = new CreateGroupDialog(groupMembership);
+        if (modalCoordinator.ShowModal(dlg, owner) != DialogResult.OK)
             return;
         DataChanged?.Invoke();
     }
@@ -63,40 +49,40 @@ public class GroupActionOrchestrator
 
         try
         {
-            _groupMembership.DeleteGroup(sid);
+            groupMembership.DeleteGroup(sid);
         }
         catch (Exception ex)
         {
-            _log.Error($"Failed to delete group {sid}", ex);
+            log.Error($"Failed to delete group {sid}", ex);
             MessageBox.Show($"Failed to delete group: {ex.Message}", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
         // OS deletion succeeded — clean up database entries
-        GroupDatabaseHelper.CleanupDeletedGroupData(sid, _sessionProvider.GetSession().Database);
-        _sessionSaver?.SaveConfig();
+        GroupDatabaseHelper.CleanupDeletedGroupData(sid, sessionProvider.GetSession().Database);
+        sessionSaver?.SaveConfig();
         DataChanged?.Invoke();
     }
 
     public void OpenAclManager(string sid, IWin32Window? owner)
     {
-        if (_aclManagerLauncher == null)
+        if (aclManagerLauncher == null)
             return;
 
-        var displayName = _sidNameCache.GetDisplayName(sid);
-        _aclManagerLauncher.OpenAclManager(sid, displayName, owner);
+        var displayName = sidNameCache.GetDisplayName(sid);
+        aclManagerLauncher.OpenAclManager(sid, displayName, owner);
     }
 
     public async Task ScanAcls(IWin32Window owner, Action<bool> setScanButtonEnabled, Action<string> setStatusText)
     {
-        if (_bulkScanHandler == null)
+        if (bulkScanHandler == null)
             return;
 
-        await _bulkScanHandler.ScanAcls(
+        await bulkScanHandler.ScanAcls(
             owner,
             setScanButtonEnabled,
             setStatusText,
-            () => _sessionSaver?.SaveConfig());
+            () => sessionSaver?.SaveConfig());
     }
 }

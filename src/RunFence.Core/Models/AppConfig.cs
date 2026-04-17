@@ -24,5 +24,5 @@ public class AppConfig
     /// Null when empty (omitted from JSON).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public Dictionary<string, string>? HandlerMappings { get; set; }
+    public Dictionary<string, HandlerMappingEntry>? HandlerMappings { get; set; }
 }

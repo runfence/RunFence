@@ -11,6 +11,7 @@ namespace RunFence.Acl;
 /// Extracted from AclService to keep it focused on dispatch.
 /// </summary>
 public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUserProvider)
+    : IAclAllowModeService
 {
     public bool ApplyAllowAcl(AppEntry app, string targetPath)
     {
@@ -88,7 +89,7 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
         bool changed = false;
         AclHelper.ModifyAclIf(targetPath, isDirectory, security =>
         {
-            var denyCleaned = AclDenyModeService.RemoveManagedDenyAces(security, localUserSids);
+            var denyCleaned = AclHelper.RemoveManagedDenyAces(security, localUserSids);
             var inheritanceBroken = security.AreAccessRulesProtected;
 
             if (!inheritanceBroken)

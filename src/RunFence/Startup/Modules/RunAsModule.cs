@@ -13,7 +13,19 @@ public class RunAsModule : Module
             .As<IRunAsFlowHandler>()
             .SingleInstance();
 
+        builder.RegisterType<RunAsShortcutHelper>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<RunAsDialogPresenter>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<RunAsPermissionApplier>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<RunAsLaunchDispatcher>()
             .AsSelf()
             .SingleInstance();
 
@@ -25,7 +37,11 @@ public class RunAsModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<RunAsAccountCreator>()
+        builder.RegisterType<RunAsUserAccountCreator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<RunAsContainerCreator>()
             .AsSelf()
             .SingleInstance();
 
@@ -33,8 +49,16 @@ public class RunAsModule : Module
             .As<IRunAsLaunchErrorHandler>()
             .SingleInstance();
 
+        builder.RegisterType<RunAsAppShortcutCreator>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<RunAsAppEntryManager>()
             .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AppEditCommitService>()
+            .As<IAppEditCommitService>()
             .SingleInstance();
 
         builder.RegisterType<RunAsAppEditDialogHandler>()
@@ -46,6 +70,10 @@ public class RunAsModule : Module
             .SingleInstance();
 
         builder.RegisterType<RunAsPermissionChecker>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<RunAsPermissionPromptHelper>()
             .AsSelf()
             .SingleInstance();
 

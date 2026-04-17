@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
@@ -15,17 +16,17 @@ namespace PrefTrans.Services.IO;
 /// sequence numbers are reconciled by the OS.
 /// </para>
 /// </summary>
-public static class NightLightSettingsIO
+public class NightLightSettingsIO(ISafeExecutor safe) : ISettingsIO
 {
-    public static NightLightSettings Read()
+    public NightLightSettings Read()
     {
         var nightLight = new NightLightSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegNightLightState);
             nightLight.State = key?.GetValue("Data") as byte[];
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegNightLightSettings);
             nightLight.Settings = key?.GetValue("Data") as byte[];
@@ -33,9 +34,9 @@ public static class NightLightSettingsIO
         return nightLight;
     }
 
-    public static void Write(NightLightSettings nightLight)
+    public void Write(NightLightSettings nightLight)
     {
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (nightLight.State != null)
             {
@@ -43,7 +44,7 @@ public static class NightLightSettingsIO
                 key.SetValue("Data", nightLight.State, RegistryValueKind.Binary);
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (nightLight.Settings != null)
             {
@@ -52,4 +53,8 @@ public static class NightLightSettingsIO
             }
         }, "writing");
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.NightLight = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.NightLight != null) Write(s.NightLight); }
 }

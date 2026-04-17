@@ -1,34 +1,26 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
-using RunFence.Acl.Permissions;
-using RunFence.Acl.Traverse;
+using RunFence.Acl;
 using RunFence.Core;
+using RunFence.Infrastructure;
+using RunFence.Persistence;
 
 namespace RunFence.DragBridge;
 
-public class DragBridgeTempFileManager : IDragBridgeTempFileManager
+public class DragBridgeTempFileManager(
+    ILoggingService log,
+    IPathGrantService pathGrantService,
+    ISessionSaver sessionSaver,
+    IUiThreadInvoker uiThreadInvoker,
+    ITempDirectoryAclHelper aclHelper,
+    string? basePath = null)
+    : IDragBridgeTempFileManager
 {
-    private readonly ILoggingService _log;
-    private readonly IAclPermissionService _aclPermission;
-    private readonly AncestorTraverseGranter _traverseGranter;
-
-    /// <inheritdoc/>
-    public event Action<string, List<string>>? TraverseGranted;
-
-    private string TempRoot => field
-                               ?? Path.Combine(Constants.ProgramDataDir, Constants.DragBridgeTempDir);
-
-    public DragBridgeTempFileManager(
-        ILoggingService log,
-        IAclPermissionService aclPermission,
-        AncestorTraverseGranter traverseGranter,
-        string? basePath = null)
+    private string TempRoot
     {
-        _log = log;
-        _aclPermission = aclPermission;
-        _traverseGranter = traverseGranter;
-        TempRoot = basePath;
-    }
+        get => field
+               ?? Path.Combine(Constants.ProgramDataDir, Constants.DragBridgeTempDir);
+    } = basePath;
 
     public string CreateTempFolder(string targetSid, string? containerSid = null)
     {
@@ -49,13 +41,13 @@ public class DragBridgeTempFileManager : IDragBridgeTempFileManager
         if (containerSid != null)
         {
             var containerIdentity = new SecurityIdentifier(containerSid);
-            TempDirectoryAclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
+            aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
                 (targetIdentity, FileSystemRights.ReadAndExecute),
                 (containerIdentity, FileSystemRights.ReadAndExecute));
         }
         else
         {
-            TempDirectoryAclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
+            aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
                 (targetIdentity, FileSystemRights.ReadAndExecute));
         }
 
@@ -66,15 +58,16 @@ public class DragBridgeTempFileManager : IDragBridgeTempFileManager
     {
         try
         {
-            var identity = new SecurityIdentifier(sid);
-            var groupSids = _aclPermission.ResolveAccountGroupSids(sid);
-            var (appliedPaths, anyAceAdded) = _traverseGranter.GrantOnPathAndAncestors(dirPath, identity, groupSids: groupSids);
-            if (anyAceAdded)
-                TraverseGranted?.Invoke(sid, appliedPaths);
+            var (modified, _) = pathGrantService.AddTraverse(sid, dirPath);
+            if (modified)
+            {
+                // Marshal to UI thread — SaveConfig calls ProtectedBuffer.Unprotect which is not thread-safe.
+                uiThreadInvoker.Invoke(() => sessionSaver.SaveConfig());
+            }
         }
         catch (Exception ex)
         {
-            _log.Warn($"DragBridgeTempFileManager: traverse grant failed for '{sid}' on '{dirPath}': {ex.Message}");
+            log.Warn($"DragBridgeTempFileManager: traverse grant failed for '{sid}' on '{dirPath}': {ex.Message}");
         }
     }
 
@@ -105,12 +98,12 @@ public class DragBridgeTempFileManager : IDragBridgeTempFileManager
                 }
                 else
                 {
-                    _log.Warn($"DragBridgeTempFileManager: source path no longer exists, skipping: '{src}'");
+                    log.Warn($"DragBridgeTempFileManager: source path no longer exists, skipping: '{src}'");
                 }
             }
             catch (Exception ex)
             {
-                _log.Warn($"DragBridgeTempFileManager: failed to copy '{src}': {ex.Message}");
+                log.Warn($"DragBridgeTempFileManager: failed to copy '{src}': {ex.Message}");
             }
         }
 

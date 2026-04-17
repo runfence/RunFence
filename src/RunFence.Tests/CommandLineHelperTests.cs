@@ -40,21 +40,16 @@ public class CommandLineHelperTests
     [InlineData(new[] { "--flag", "C:\\My Path\\file.txt" }, "--flag \"C:\\My Path\\file.txt\"")]
     [InlineData(new[] { "no-space" }, "no-space")]
     [InlineData(new string[0], null)]
+    [InlineData(null, null)]
     // Tab triggers quoting
     [InlineData(new[] { "arg\twith\ttabs" }, "\"arg\twith\ttabs\"")]
     // Embedded quotes are escaped
     [InlineData(new[] { "say \"hello\"" }, "\"say \\\"hello\\\"\"")]
     // Trailing backslash inside quoted arg (path with space forces quoting) is doubled
     [InlineData(new[] { @"C:\my path\" }, "\"C:\\my path\\\\\"")]
-    public void JoinArgs_QuotesArgsWithSpaces(string[] args, string? expected)
+    public void JoinArgs_QuotesArgsWithSpaces(string[]? args, string? expected)
     {
         Assert.Equal(expected, CommandLineHelper.JoinArgs(args));
-    }
-
-    [Fact]
-    public void JoinArgs_NullInput_ReturnsNull()
-    {
-        Assert.Null(CommandLineHelper.JoinArgs(null));
     }
 
     // --- SplitArgs ---

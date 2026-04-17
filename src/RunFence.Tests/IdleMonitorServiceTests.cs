@@ -7,12 +7,7 @@ namespace RunFence.Tests;
 
 public class IdleMonitorServiceTests
 {
-    private readonly Mock<ILoggingService> _log;
-
-    public IdleMonitorServiceTests()
-    {
-        _log = new Mock<ILoggingService>();
-    }
+    private readonly Mock<ILoggingService> _log = new();
 
     private (IdleMonitorService service, Action invokeTimerTick, Action<long> setFakeTick)
         CreateService()

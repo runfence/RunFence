@@ -1,10 +1,11 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Acl;
 using RunFence.Core;
 
 namespace RunFence.Apps.Shortcuts;
 
-public class ShortcutProtectionService(ILoggingService log) : IShortcutProtectionService
+public class ShortcutProtectionService(ILoggingService log, IAclAccessor aclAccessor) : IShortcutProtectionService
 {
     public void ProtectShortcut(string shortcutPath)
     {
@@ -56,22 +57,8 @@ public class ShortcutProtectionService(ILoggingService log) : IShortcutProtectio
 
         try
         {
-            var fileInfo = new FileInfo(shortcutPath);
-            var security = fileInfo.GetAccessControl();
-
-            // Remove all deny rules for Everyone to ensure full write access
             var everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
-            var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
-            foreach (FileSystemAccessRule rule in rules)
-            {
-                if (rule.AccessControlType == AccessControlType.Deny &&
-                    rule.IdentityReference.Equals(everyoneSid))
-                {
-                    security.RemoveAccessRule(rule);
-                }
-            }
-
-            fileInfo.SetAccessControl(security);
+            aclAccessor.RemoveExplicitAces(shortcutPath, everyoneSid.Value, AccessControlType.Deny);
             File.SetAttributes(shortcutPath, File.GetAttributes(shortcutPath) & ~FileAttributes.ReadOnly);
         }
         catch (Exception ex)

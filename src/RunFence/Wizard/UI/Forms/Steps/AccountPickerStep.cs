@@ -8,21 +8,35 @@ using RunFence.UI;
 namespace RunFence.Wizard.UI.Forms.Steps;
 
 /// <summary>
+/// Non-DI data parameters for <see cref="AccountPickerStep"/>.
+/// Groups the per-call configuration data separately from service dependencies and lambdas.
+/// </summary>
+public record AccountPickerStepOptions(
+    List<CredentialEntry> Credentials,
+    IReadOnlyDictionary<string, string> SidNames,
+    string GroupSid,
+    string StepTitle,
+    string InfoText,
+    string? InteractiveUserSid = null,
+    bool ExcludeAdmins = false,
+    bool DefaultToCreateNew = false);
+
+/// <summary>
 /// Wizard step that lists accounts from a specified group with credential status indicators
 /// and an optional "Create new account" entry at the bottom.
 /// Replaces following steps dynamically when the user switches between existing and new account.
-/// When <paramref name="interactiveUserSid"/> is set, selecting that account shows a warning label
+/// When <see cref="AccountPickerStepOptions.InteractiveUserSid"/> is set, selecting that account shows a warning label
 /// explaining that it provides no isolation.
 /// Used by Elevated App (Administrators group) and Gaming Account (Users group, excluding Admins).
 /// </summary>
 public class AccountPickerStep : WizardStepPage
 {
     private readonly Action<string?, bool> _setSelection;
-    private readonly IWindowsAccountService _windowsAccountService;
     private readonly ILocalGroupMembershipService _groupMembership;
     private readonly ILocalUserProvider _localUserProvider;
     private readonly List<CredentialEntry> _credentials;
     private readonly ISidResolver _sidResolver;
+    private readonly CredentialFilterHelper _credentialFilterHelper;
     private readonly IReadOnlyDictionary<string, string> _sidNames;
     private readonly Func<bool, IReadOnlyList<WizardStepPage>>? _followingStepsFactory;
     private readonly Func<IWizardProgressReporter, Task>? _commitAction;
@@ -36,26 +50,17 @@ public class AccountPickerStep : WizardStepPage
     private Label _warningLabel = null!;
     private ListBox _accountListBox = null!;
     private bool? _lastIsCreate; // null = followingStepsFactory not yet invoked
+    private bool _isLoading;
 
     /// <param name="setSelection">Receives (sid, isCreate) on <see cref="Collect"/>. sid is null when "Create new account" is chosen.</param>
-    /// <param name="groupSid">Group SID whose members are listed.</param>
-    /// <param name="stepTitle">Title shown in the wizard header when this step is active.</param>
-    /// <param name="infoText">Descriptive text shown above the account list.</param>
-    /// <param name="interactiveUserSid">
-    /// When set, selecting this SID shows a warning that it provides no isolation.
-    /// Pass null to suppress the warning entirely.
-    /// </param>
-    /// <param name="excludeAdmins">
-    /// When true, members of the Administrators group are excluded from the list.
-    /// Useful when showing Users-group accounts to hide admin accounts that are also in Users.
-    /// </param>
+    /// <param name="groupMembership">Service for querying local group membership.</param>
+    /// <param name="localUserProvider">Service for listing local user accounts.</param>
+    /// <param name="sidResolver">Service for resolving SID display names.</param>
+    /// <param name="options">Non-DI data parameters for this step instance.</param>
     /// <param name="followingStepsFactory">
     /// Called when the user switches between "Create new account" and an existing account.
     /// Receives <c>true</c> when "Create new account" is selected.
     /// If null, no dynamic step replacement occurs.
-    /// </param>
-    /// <param name="defaultToCreateNew">
-    /// When true, "Create new account" is pre-selected on first activation (no prior selection).
     /// </param>
     /// <param name="commitAction">
     /// Optional mid-wizard async action run after <see cref="Collect"/> and before the wizard advances.
@@ -63,47 +68,42 @@ public class AccountPickerStep : WizardStepPage
     /// </param>
     public AccountPickerStep(
         Action<string?, bool> setSelection,
-        IWindowsAccountService windowsAccountService,
         ILocalGroupMembershipService groupMembership,
         ILocalUserProvider localUserProvider,
-        List<CredentialEntry> credentials,
         ISidResolver sidResolver,
-        IReadOnlyDictionary<string, string> sidNames,
-        string groupSid,
-        string stepTitle,
-        string infoText,
-        string? interactiveUserSid = null,
-        bool excludeAdmins = false,
-        bool defaultToCreateNew = false,
+        CredentialFilterHelper credentialFilterHelper,
+        AccountPickerStepOptions options,
         Func<bool, IReadOnlyList<WizardStepPage>>? followingStepsFactory = null,
         Func<IWizardProgressReporter, Task>? commitAction = null)
     {
         _setSelection = setSelection;
-        _windowsAccountService = windowsAccountService;
         _groupMembership = groupMembership;
         _localUserProvider = localUserProvider;
-        _credentials = credentials;
+        _credentials = options.Credentials;
         _sidResolver = sidResolver;
-        _sidNames = sidNames;
-        _groupSid = groupSid;
-        _stepTitle = stepTitle;
-        _excludeAdmins = excludeAdmins;
-        _interactiveUserSid = interactiveUserSid;
-        _defaultToCreateNew = defaultToCreateNew;
+        _credentialFilterHelper = credentialFilterHelper;
+        _sidNames = options.SidNames;
+        _groupSid = options.GroupSid;
+        _stepTitle = options.StepTitle;
+        _excludeAdmins = options.ExcludeAdmins;
+        _interactiveUserSid = options.InteractiveUserSid;
+        _defaultToCreateNew = options.DefaultToCreateNew;
         _followingStepsFactory = followingStepsFactory;
         _commitAction = commitAction;
-        BuildContent(infoText);
+        BuildContent(options.InfoText);
     }
 
     public override Task OnCommitBeforeNextAsync(IWizardProgressReporter progress) =>
         _commitAction != null ? _commitAction(progress) : Task.CompletedTask;
 
     public override string StepTitle => _stepTitle;
+    public override bool CanProceed => !_isLoading;
 
     public override void OnActivated() => _ = PopulateList();
 
     public override string? Validate()
     {
+        if (_isLoading) return "Accounts are still loading, please wait.";
         return _accountListBox.SelectedItem == null ? "Please select an account." : null;
     }
 
@@ -111,6 +111,10 @@ public class AccountPickerStep : WizardStepPage
     {
         var isCreate = _accountListBox.SelectedItem is CreateAccountItem;
         string? sid = isCreate ? null : (_accountListBox.SelectedItem as CredentialDisplayItem)?.Credential.Sid;
+        // Defensive: sid should always be non-null for an existing account selection (CredentialDisplayItem
+        // always has a Sid set), but guard against edge cases such as a transient entry with an empty Sid.
+        if (sid == null && !isCreate)
+            return;
         _setSelection(sid, isCreate);
     }
 
@@ -164,6 +168,13 @@ public class AccountPickerStep : WizardStepPage
         string? selectedSid = (_accountListBox.SelectedItem as CredentialDisplayItem)?.Credential.Sid;
         bool selectedCreate = _accountListBox.SelectedItem is CreateAccountItem;
 
+        if (_accountListBox.Items.Count == 0)
+        {
+            _isLoading = true;
+            NotifyCanProceedChanged();
+            _accountListBox.Items.Add("Loading accounts...");
+        }
+
         var membersTask = Task.Run(() => _groupMembership.GetMembersOfGroup(_groupSid));
         var adminsTask = _excludeAdmins
             ? Task.Run(() => _groupMembership.GetMembersOfGroup(GroupFilterHelper.AdministratorsSid))
@@ -190,17 +201,6 @@ public class AccountPickerStep : WizardStepPage
         {
             memberSids = membersTask.Result
                 .Where(u => localUserSids == null || localUserSids.Contains(u.Sid))
-                .Where(u =>
-                {
-                    try
-                    {
-                        return !_windowsAccountService.IsAccountDisabled(u.Username);
-                    }
-                    catch
-                    {
-                        return true;
-                    }
-                })
                 .Select(u => u.Sid)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
@@ -225,7 +225,7 @@ public class AccountPickerStep : WizardStepPage
 
         var representedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        var resolvable = CredentialFilterHelper.FilterResolvableCredentials(_credentials, _sidNames, _sidResolver);
+        var resolvable = _credentialFilterHelper.FilterResolvableCredentials(_credentials, _sidNames);
         foreach (var cred in resolvable)
         {
             if (string.IsNullOrEmpty(cred.Sid))
@@ -246,6 +246,12 @@ public class AccountPickerStep : WizardStepPage
         }
 
         _accountListBox.Items.Add(new CreateAccountItem());
+
+        if (_isLoading)
+        {
+            _isLoading = false;
+            NotifyCanProceedChanged();
+        }
 
         if (selectedSid != null)
         {
@@ -275,6 +281,8 @@ public class AccountPickerStep : WizardStepPage
 
     private void OnSelectionChanged(object? sender, EventArgs e)
     {
+        if (_isLoading) return;
+
         bool isCreate = _accountListBox.SelectedItem is CreateAccountItem;
 
         if (_interactiveUserSid != null && !isCreate &&
@@ -319,6 +327,10 @@ public class AccountPickerStep : WizardStepPage
             using var dot = new SolidBrush(indicatorColor);
             e.Graphics.FillEllipse(dot, e.Bounds.X + 4, e.Bounds.Y + (e.Bounds.Height - 8) / 2, 8, 8);
             textBounds = e.Bounds with { X = e.Bounds.X + 18, Width = e.Bounds.Width - 18 };
+        }
+        else if (item is string && !isSelected)
+        {
+            textColor = SystemColors.GrayText;
         }
 
         TextRenderer.DrawText(e.Graphics, item.ToString(), listBox.Font, textBounds, textColor, textFlags);

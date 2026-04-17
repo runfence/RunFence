@@ -51,8 +51,7 @@ public partial class WizardDialog : Form, IWizardExecutionContext
         Icon = AppIcons.GetAppIcon();
         WizardStylingHelper.ApplyModernStyling(
             this, _headerPanel, _contentPanel, _footerPanel, _progressPanel,
-            _titleLabel, _statusLabel, _errorLabel,
-            _backButton, _cancelButton, _nextButton);
+            _titleLabel, _statusLabel, _errorLabel);
         _footerPanel.Paint += OnFooterPanelPaint;
 
         _executionHandler = executionHandler;
@@ -125,6 +124,7 @@ public partial class WizardDialog : Form, IWizardExecutionContext
     }
 
     void IWizardExecutionContext.SetBackEnabled(bool enabled) => _backButton.Enabled = enabled;
+    void IWizardExecutionContext.SetTitleText(string text) => _titleLabel.Text = text;
     void IWizardExecutionContext.SetNextText(string text) => _nextButton.Text = text;
     void IWizardExecutionContext.InvalidateStepIndicator() => _stepIndicatorPanel.Invalidate();
     void IWizardExecutionContext.Close() => Close();
@@ -186,6 +186,12 @@ public partial class WizardDialog : Form, IWizardExecutionContext
     private async void OnNextClick(object sender, EventArgs e)
     {
         var step = _steps[_currentStepIndex];
+
+        if (step is Steps.CompletionStep)
+        {
+            Close();
+            return;
+        }
 
         var error = step.Validate();
         if (error != null)
@@ -250,6 +256,7 @@ public partial class WizardDialog : Form, IWizardExecutionContext
     private void SetProgressVisible(bool visible)
     {
         _progressPanel.Visible = visible;
+        _contentPanel.Visible = !visible;
         if (visible)
             _statusLabel.Text = "Please wait...";
     }

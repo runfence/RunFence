@@ -16,9 +16,14 @@ public partial class PinDialog : Form
     private const int MinPinLength = 4;
 
     private readonly PinDialogMode _mode;
+    private readonly bool _allowReset;
     private readonly string? _promptMessage;
     private readonly OperationGuard _guard = new();
 
+    // EnteredPin is a plain string: it persists in managed memory until GC, and cannot be explicitly
+    // zeroed. This is an inherent .NET string limitation — the same trade-off accepted throughout
+    // the codebase (e.g., AccountCreationDefaults). The window is narrow: the string exists only
+    // between the user clicking OK and the dialog closing, at which point the reference is dropped.
     private string EnteredPin { get; set; } = string.Empty;
     public bool ResetRequested { get; private set; }
 
@@ -37,9 +42,10 @@ public partial class PinDialog : Form
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public Func<string, string?, Task<string?>>? ProcessingCallback { get; set; }
 
-    public PinDialog(PinDialogMode mode, string? promptMessage = null)
+    public PinDialog(PinDialogMode mode, string? promptMessage = null, bool allowReset = true)
     {
         _mode = mode;
+        _allowReset = allowReset;
         _promptMessage = promptMessage;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
@@ -96,7 +102,7 @@ public partial class PinDialog : Form
         if (_mode == PinDialogMode.Verify)
         {
             _cancelButton.Text = "Exit";
-            _forgotLink.Visible = true;
+            _forgotLink.Visible = _allowReset;
             _forgotLink.Location = new Point(15, yPos + 5);
             _forgotLink.LinkClicked += (_, _) =>
             {

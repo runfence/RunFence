@@ -6,30 +6,23 @@ namespace RunFence.RunAs;
 /// DOS protection for RunAs requests. Blocks requests if too many declines occur
 /// within a time window (4 declines in 4 min) or if a decline happened recently (&lt;15s).
 /// </summary>
-public class RunAsDosProtection
+public class RunAsDosProtection(IStopwatchProvider stopwatch)
 {
-    private readonly IStopwatchProvider _stopwatch;
-
     private int _declineCount;
     private long _declineWindowStart;
     private long _declineLastTime;
     private readonly object _lock = new();
 
-    public RunAsDosProtection(IStopwatchProvider stopwatch)
-    {
-        _stopwatch = stopwatch;
-    }
-
     public bool IsBlocked()
     {
         lock (_lock)
         {
-            var now = _stopwatch.GetTimestamp();
+            var now = stopwatch.GetTimestamp();
 
             switch (_declineCount)
             {
-                case > 0 when _stopwatch.GetElapsedSeconds(_declineLastTime, now) < 15:
-                case >= 4 when _stopwatch.GetElapsedSeconds(_declineWindowStart, now) < 240:
+                case > 0 when stopwatch.GetElapsedSeconds(_declineLastTime, now) < 15:
+                case >= 4 when stopwatch.GetElapsedSeconds(_declineWindowStart, now) < 240:
                     return true;
                 default:
                     return false;
@@ -41,9 +34,9 @@ public class RunAsDosProtection
     {
         lock (_lock)
         {
-            var now = _stopwatch.GetTimestamp();
+            var now = stopwatch.GetTimestamp();
 
-            if (_declineCount == 0 || _stopwatch.GetElapsedSeconds(_declineWindowStart, now) >= 240)
+            if (_declineCount == 0 || stopwatch.GetElapsedSeconds(_declineWindowStart, now) >= 240)
             {
                 _declineCount = 1;
                 _declineWindowStart = now;

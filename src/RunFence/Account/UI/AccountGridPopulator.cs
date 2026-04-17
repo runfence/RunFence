@@ -40,6 +40,7 @@ public class AccountGridPopulator
     public void Initialize(DataGridView grid)
     {
         _grid = grid;
+        _sorter.Initialize(grid);
     }
 
     public void Build(PopulateData data)
@@ -95,45 +96,15 @@ public class AccountGridPopulator
             ? data.InteractiveUserSid
             : null;
 
-        string? syntheticUsername = null;
-        AccountGridSupplementarySections.AccountState syntheticState = default;
-        bool syntheticIsKnown = false, syntheticCanImport = false;
-        string? syntheticAppsText = null, syntheticProfilePath = null;
+        SyntheticInteractiveUserRow? syntheticRow = syntheticInteractiveSid != null
+            ? BuildSyntheticInteractiveUserRow(data, localAccounts, localSidSet, syntheticInteractiveSid)
+            : null;
 
-        if (syntheticInteractiveSid != null)
-        {
-            var localAccount = localAccounts.FirstOrDefault(u =>
-                string.Equals(u.Sid, syntheticInteractiveSid, StringComparison.OrdinalIgnoreCase));
-            syntheticUsername = localAccount?.Username
-                                ?? SidNameResolver.ExtractUsername(data.Database.SidNames.GetValueOrDefault(syntheticInteractiveSid, syntheticInteractiveSid));
-            syntheticState = _supplementary.LookupAccountState(syntheticInteractiveSid, syntheticUsername, data.InteractiveUserSid);
-            syntheticIsKnown = localSidSet.Contains(syntheticInteractiveSid);
-            syntheticCanImport = SidResolutionHelper.CanLaunchWithoutPassword(syntheticInteractiveSid);
-            syntheticAppsText = GetAccountAppsText(data.Database, syntheticInteractiveSid);
-            syntheticProfilePath = _windowsAccountService.GetProfilePath(syntheticInteractiveSid) ?? "";
-        }
-
-        bool syntheticRendered = syntheticInteractiveSid == null;
+        bool syntheticRendered = syntheticRow == null;
 
         void RenderSyntheticRow()
         {
-            var logonValue = !syntheticIsKnown || syntheticState.NoLogonState == false;
-            var allowInternet = data.Database.GetAccount(syntheticInteractiveSid!)?.Firewall.AllowInternet ?? true;
-            var idx = _grid.Rows.Add(false, lockIcon, syntheticUsername + " (interactive)", logonValue, allowInternet, syntheticAppsText!, syntheticProfilePath!,
-                syntheticInteractiveSid!);
-            var row = _grid.Rows[idx];
-            row.Tag = new AccountRow(null, syntheticUsername!, syntheticInteractiveSid!, false);
-            row.Cells["Credential"].ToolTipText = "No Password";
-            row.Cells["SID"].ToolTipText = syntheticInteractiveSid;
-            row.Cells["Import"].ReadOnly = !syntheticCanImport;
-            row.Cells["Account"].ReadOnly = false;
-            AccountGridSupplementarySections.SetLogonCellState(row, syntheticState);
-            if (!syntheticIsKnown)
-                row.Cells["Logon"].ReadOnly = true;
-            if (!syntheticCanImport)
-                row.Cells["Import"].ToolTipText = "No password stored for this account";
-            row.Cells["Logon"].ToolTipText = "Cannot change Logon for the interactive desktop user";
-            representedSids.Add(syntheticInteractiveSid!);
+            AddSyntheticInteractiveUserRow(syntheticRow!.Value, lockIcon, data.Database, representedSids);
             syntheticRendered = true;
         }
 
@@ -194,6 +165,49 @@ public class AccountGridPopulator
             RenderSyntheticRow();
     }
 
+    private SyntheticInteractiveUserRow BuildSyntheticInteractiveUserRow(
+        PopulateData data,
+        List<LocalUserAccount> localAccounts,
+        HashSet<string> localSidSet,
+        string sid)
+    {
+        var localAccount = localAccounts.FirstOrDefault(u =>
+            string.Equals(u.Sid, sid, StringComparison.OrdinalIgnoreCase));
+        var username = localAccount?.Username
+                       ?? SidNameResolver.ExtractUsername(data.Database.SidNames.GetValueOrDefault(sid, sid));
+        var state = _supplementary.LookupAccountState(sid, username, data.InteractiveUserSid);
+        var isKnown = localSidSet.Contains(sid);
+        var canImport = SidResolutionHelper.CanLaunchWithoutPassword(sid);
+        var appsText = GetAccountAppsText(data.Database, sid);
+        var profilePath = _windowsAccountService.GetProfilePath(sid) ?? "";
+        return new SyntheticInteractiveUserRow(sid, username, state, isKnown, canImport, appsText, profilePath);
+    }
+
+    private void AddSyntheticInteractiveUserRow(
+        SyntheticInteractiveUserRow row,
+        Image lockIcon,
+        AppDatabase database,
+        HashSet<string> representedSids)
+    {
+        var logonValue = !row.IsKnown || row.State.NoLogonState == false;
+        var allowInternet = database.GetAccount(row.Sid)?.Firewall.AllowInternet ?? true;
+        var idx = _grid.Rows.Add(false, lockIcon, row.Username + " (interactive)", logonValue, allowInternet,
+            row.AppsText, row.ProfilePath, row.Sid);
+        var gridRow = _grid.Rows[idx];
+        gridRow.Tag = new AccountRow(null, row.Username, row.Sid, false);
+        gridRow.Cells["Credential"].ToolTipText = "No Password";
+        gridRow.Cells["SID"].ToolTipText = row.Sid;
+        gridRow.Cells["Import"].ReadOnly = !row.CanImport;
+        gridRow.Cells["Account"].ReadOnly = false;
+        AccountGridSupplementarySections.SetLogonCellState(gridRow, row.State);
+        if (!row.IsKnown)
+            gridRow.Cells["Logon"].ReadOnly = true;
+        if (!row.CanImport)
+            gridRow.Cells["Import"].ToolTipText = "No password stored for this account";
+        gridRow.Cells["Logon"].ToolTipText = "Cannot change Logon for the interactive desktop user";
+        representedSids.Add(row.Sid);
+    }
+
     private void AddLocalAccountsSection(
         PopulateData data,
         List<LocalUserAccount> localAccounts,
@@ -214,16 +228,6 @@ public class AccountGridPopulator
                 representedSids.Add(localUser.Sid);
                 ephemeralLocalRows.Add(localUser);
                 continue;
-            }
-
-            try
-            {
-                if (_windowsAccountService.IsAccountDisabled(localUser.Username))
-                    continue;
-            }
-            catch
-            {
-                /* best effort */
             }
 
             localOnlyAccounts.Add(localUser);
@@ -259,4 +263,13 @@ public class AccountGridPopulator
 
     private string GetAccountAppsText(AppDatabase database, string? sid)
         => _supplementary.GetAccountAppsText(database, sid);
+
+    private record struct SyntheticInteractiveUserRow(
+        string Sid,
+        string Username,
+        AccountGridSupplementarySections.AccountState State,
+        bool IsKnown,
+        bool CanImport,
+        string AppsText,
+        string ProfilePath);
 }

@@ -5,68 +5,75 @@ namespace RunFence.Ipc;
 
 public class IpcCallerAuthorizer(ILoggingService log, ISidResolver sidResolver) : IIpcCallerAuthorizer
 {
-    public bool IsCallerAuthorizedGlobal(string? callerIdentity, string? callerSid, AppDatabase database)
+    public bool IsCallerAuthorizedGlobal(string? callerIdentity, string? callerSid, AppDatabase database, bool identityFromImpersonation = true)
     {
-        var globalList = database.Accounts.Where(a => a.IsIpcCaller).Select(a => a.Sid);
+        var callerList = GetEffectiveCallerList(null, database);
 
         // Global empty list = unrestricted
-        if (!globalList.Any())
+        if (callerList.Count == 0)
             return true;
 
-        return AuthorizeAgainstList(callerIdentity, callerSid, globalList, "RunAs", database.SidNames);
+        return AuthorizeAgainstList(callerIdentity, callerSid, callerList, "RunAs", database.SidNames, identityFromImpersonation);
     }
 
-    public bool IsCallerAuthorized(string? callerIdentity, string? callerSid, AppEntry app, AppDatabase database)
+    public bool IsCallerAuthorized(string? callerIdentity, string? callerSid, AppEntry app, AppDatabase database, bool identityFromImpersonation)
     {
-        // Per-app list (non-null) overrides global; null = inherit global
-        var hasPerAppOverride = app.AllowedIpcCallers != null;
-        var effectiveList = (IEnumerable<string>?)app.AllowedIpcCallers
-                            ?? database.Accounts.Where(a => a.IsIpcCaller).Select(a => a.Sid);
+        var callerList = GetEffectiveCallerList(app, database);
 
         // Global empty list = unrestricted; per-app empty list = block all
-        if (!hasPerAppOverride && !effectiveList.Any())
+        if (app.AllowedIpcCallers == null && callerList.Count == 0)
             return true;
 
-        return AuthorizeAgainstList(callerIdentity, callerSid, effectiveList, app.Name, database.SidNames);
+        return AuthorizeAgainstList(callerIdentity, callerSid, callerList, app.Name, database.SidNames, identityFromImpersonation);
     }
 
-    public bool IsCallerAuthorizedForAssociation(string? callerIdentity, string? callerSid, AppEntry app, AppDatabase database)
+    public bool IsCallerAuthorizedForAssociation(string? callerIdentity, string? callerSid, AppEntry app, AppDatabase database, bool identityFromImpersonation)
     {
-        // Standard per-app/global authorization
-        var hasPerAppOverride = app.AllowedIpcCallers != null;
-        var effectiveList = (IEnumerable<string>?)app.AllowedIpcCallers
-                            ?? database.Accounts.Where(a => a.IsIpcCaller).Select(a => a.Sid);
+        var callerList = GetEffectiveCallerList(app, database);
 
         // Global empty list = unrestricted (before interactive user augmentation)
-        if (!hasPerAppOverride && !effectiveList.Any())
+        if (app.AllowedIpcCallers == null && callerList.Count == 0)
             return true;
 
         // Always include interactive user SID for handler associations:
         // The interactive user registered these associations in their own registry hive via Windows Settings,
         // so they must always be able to invoke them. This does not modify the app entry itself.
         var interactiveUserSid = SidResolutionHelper.GetInteractiveUserSid();
-        IEnumerable<string> augmentedList;
-        if (interactiveUserSid != null)
-        {
-            var materialized = effectiveList.ToList();
-            if (!materialized.Contains(interactiveUserSid, StringComparer.OrdinalIgnoreCase))
-                materialized.Add(interactiveUserSid);
-            augmentedList = materialized;
-        }
-        else
-        {
-            augmentedList = effectiveList;
-        }
+        if (interactiveUserSid != null && !callerList.Contains(interactiveUserSid, StringComparer.OrdinalIgnoreCase))
+            callerList.Add(interactiveUserSid);
 
-        return AuthorizeAgainstList(callerIdentity, callerSid, augmentedList, app.Name, database.SidNames);
+        return AuthorizeAgainstList(callerIdentity, callerSid, callerList, app.Name, database.SidNames, identityFromImpersonation);
+    }
+
+    public bool HasExplicitPerAppAuthorization(string? callerSid, AppEntry app, AppDatabase database)
+        => app.AllowedIpcCallers != null
+           && callerSid != null
+           && app.AllowedIpcCallers.Any(s => string.Equals(s, callerSid, StringComparison.OrdinalIgnoreCase));
+
+    private List<string> GetEffectiveCallerList(AppEntry? app, AppDatabase database)
+    {
+        if (app?.AllowedIpcCallers != null)
+            return app.AllowedIpcCallers.ToList();
+        return database.Accounts.Where(a => a.IsIpcCaller).Select(a => a.Sid).ToList();
     }
 
     public bool AuthorizeAgainstList(string? callerIdentity, string? callerSid,
-        IEnumerable<string> allowedList, string logContext, IReadOnlyDictionary<string, string>? sidNames = null)
+        IEnumerable<string> allowedList, string logContext, IReadOnlyDictionary<string, string>? sidNames = null,
+        bool identityFromImpersonation = true)
     {
         if (string.IsNullOrEmpty(callerIdentity) && string.IsNullOrEmpty(callerSid))
         {
             log.Warn($"IPC caller identity unknown, denying access to {logContext}");
+            return false;
+        }
+
+        // CallerName fallback spoofing protection: when caller SID was not obtained via pipe
+        // impersonation (RunAsClient), do not rely on the caller-supplied identity for authorization.
+        // A caller with no verifiable SID could forge their CallerName field in the IPC message
+        // to impersonate another user. Impersonation is the only tamper-evident identity source.
+        if (callerSid == null && !identityFromImpersonation)
+        {
+            log.Warn($"IPC caller SID unavailable and identity not from impersonation, denying access to {logContext}");
             return false;
         }
 

@@ -1,4 +1,7 @@
 using RunFence.Account;
+using RunFence.Apps.Shortcuts;
+using RunFence.Apps.UI.Forms;
+using RunFence.Infrastructure;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
 
@@ -12,27 +15,29 @@ public class AiAgentToolStep : WizardStepPage
 {
     private readonly Action<bool, string?> _setOptions;
     private readonly Func<IWizardProgressReporter, Task>? _commitAction;
+    private readonly IShortcutDiscoveryService _discoveryService;
 
     private RadioButton _claudeCodeRadio = null!;
     private RadioButton _otherToolRadio = null!;
     private Label _appPathLabel = null!;
     private TextBox _appPathTextBox = null!;
     private Button _browseAppButton = null!;
-    private Panel _optionsPanel = null!;
-
-    private const int RadioSectionHeight = 60;
-    private const int AppPathSectionHeight = 58; // label 22 + gap 4 + row 27 + 5
+    private Button _discoverAppButton = null!;
+    private Panel _appPathPanel = null!;
 
     /// <param name="setOptions">Receives (isClaudeCode, appPath) on <see cref="Collect"/>.</param>
+    /// <param name="discoveryService">Used by the Discover button to find installed apps.</param>
     /// <param name="commitAction">
     /// Mid-wizard async action run after <see cref="Collect"/> and before the wizard advances.
     /// Null = no mid-wizard work.
     /// </param>
     public AiAgentToolStep(
         Action<bool, string?> setOptions,
+        IShortcutDiscoveryService discoveryService,
         Func<IWizardProgressReporter, Task>? commitAction = null)
     {
         _setOptions = setOptions;
+        _discoveryService = discoveryService;
         _commitAction = commitAction;
         BuildContent();
     }
@@ -62,7 +67,7 @@ public class AiAgentToolStep : WizardStepPage
             Text = $"Claude Code ({KnownPackages.ClaudeCode.DisplayName})",
             Font = new Font("Segoe UI", 10),
             AutoSize = true,
-            Location = new Point(0, 0),
+            Dock = DockStyle.Top,
             Checked = true
         };
         _claudeCodeRadio.CheckedChanged += (_, _) => UpdateOtherToolVisibility();
@@ -72,72 +77,99 @@ public class AiAgentToolStep : WizardStepPage
             Text = "Other tool (specify executable below)",
             Font = new Font("Segoe UI", 10),
             AutoSize = true,
-            Location = new Point(0, 26)
+            Dock = DockStyle.Top
         };
         _otherToolRadio.CheckedChanged += (_, _) => UpdateOtherToolVisibility();
 
         _appPathLabel = new Label
         {
             Text = "Tool executable (optional — leave empty to use terminal):",
-            AutoSize = false,
+            AutoSize = true,
             Font = new Font("Segoe UI", 9.5f),
-            Location = new Point(0, RadioSectionHeight),
-            Height = 22,
-            Visible = false
+            Dock = DockStyle.Top,
+            Padding = new Padding(0, 8, 0, 4)
         };
 
         _appPathTextBox = new TextBox
         {
             Font = new Font("Segoe UI", 9.5f),
-            Location = new Point(0, RadioSectionHeight + 26),
-            Visible = false
+            Dock = DockStyle.Fill
         };
+
+        int inputHeight = _appPathTextBox.PreferredHeight;
 
         _browseAppButton = new Button
         {
             Text = "Browse…",
             Font = new Font("Segoe UI", 9),
-            Location = new Point(0, RadioSectionHeight + 26),
             Width = 72,
-            Height = 27,
-            FlatStyle = FlatStyle.System,
-            Visible = false
+            Height = inputHeight,
+            Dock = DockStyle.Right,
+            FlatStyle = FlatStyle.System
         };
         _browseAppButton.Click += OnBrowseApp;
 
-        _optionsPanel = new Panel { Dock = DockStyle.Top, Height = RadioSectionHeight };
-        _optionsPanel.Controls.AddRange(_claudeCodeRadio, _otherToolRadio, _appPathLabel, _appPathTextBox, _browseAppButton);
+        _discoverAppButton = new Button
+        {
+            Text = "Discover…",
+            Font = new Font("Segoe UI", 9),
+            Width = 88,
+            Height = inputHeight,
+            Dock = DockStyle.Right,
+            FlatStyle = FlatStyle.System
+        };
+        _discoverAppButton.Click += OnDiscoverApp;
 
-        Controls.Add(_optionsPanel);
+        var appPathRow = new Panel
+        {
+            Dock = DockStyle.Top,
+            Height = inputHeight
+        };
+        // Dock=Right: last added = highest Z-order = rightmost position.
+        // Add Browse first (will be to the left), Discover last (rightmost), then Fill textbox.
+        appPathRow.Controls.Add(_browseAppButton);
+        appPathRow.Controls.Add(_discoverAppButton);
+        appPathRow.Controls.Add(_appPathTextBox);
+
+        int appPathPanelHeight = _appPathLabel.PreferredHeight + _appPathLabel.Padding.Vertical + inputHeight;
+        _appPathPanel = new Panel { Dock = DockStyle.Top, Height = appPathPanelHeight, Visible = false };
+        // Add in reverse order so Dock=Top stacks top-to-bottom inside _appPathPanel
+        _appPathPanel.Controls.Add(appPathRow);
+        _appPathPanel.Controls.Add(_appPathLabel);
+
+        // Add in reverse order so Dock=Top stacks top-to-bottom
+        Controls.Add(_appPathPanel);
+        Controls.Add(_otherToolRadio);
+        Controls.Add(_claudeCodeRadio);
         ResumeLayout(false);
     }
 
     private void UpdateOtherToolVisibility()
     {
-        var showOther = _otherToolRadio.Checked;
-        _appPathLabel.Visible = showOther;
-        _appPathTextBox.Visible = showOther;
-        _browseAppButton.Visible = showOther;
-        _optionsPanel.Height = showOther ? RadioSectionHeight + AppPathSectionHeight : RadioSectionHeight;
-
-        if (showOther && _optionsPanel.Width > 0)
-            PositionBrowseButton();
+        _appPathPanel.Visible = _otherToolRadio.Checked;
     }
 
-    protected override void OnResize(EventArgs e)
+    private async void OnDiscoverApp(object? sender, EventArgs e)
     {
-        base.OnResize(e);
-        PositionBrowseButton();
-    }
+        _discoverAppButton.Enabled = false;
+        Cursor = Cursors.WaitCursor;
+        try
+        {
+            var apps = await Task.Run(() => _discoveryService.DiscoverApps());
+            if (IsDisposed) return;
 
-    private void PositionBrowseButton()
-    {
-        int available = _optionsPanel.ClientSize.Width;
-        if (available <= 0)
-            return;
-        _appPathLabel.Width = available;
-        _appPathTextBox.Width = available - _browseAppButton.Width - 8;
-        _browseAppButton.Location = new Point(_appPathTextBox.Width + 8, _browseAppButton.Top);
+            using var dlg = new AppDiscoveryDialog(apps);
+            if (dlg.ShowDialog(this) == DialogResult.OK)
+                _appPathTextBox.Text = dlg.SelectedPath;
+        }
+        finally
+        {
+            if (!IsDisposed)
+            {
+                Cursor = Cursors.Default;
+                _discoverAppButton.Enabled = true;
+            }
+        }
     }
 
     private void OnBrowseApp(object? sender, EventArgs e)
@@ -146,6 +178,7 @@ public class AiAgentToolStep : WizardStepPage
         dlg.Title = "Select Tool Executable";
         dlg.Filter = "Executable files (*.exe)|*.exe|All files (*.*)|*.*";
         dlg.CheckFileExists = true;
+        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
         if (dlg.ShowDialog(this) == DialogResult.OK)
             _appPathTextBox.Text = dlg.FileName;
     }

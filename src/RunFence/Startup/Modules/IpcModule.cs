@@ -7,8 +7,20 @@ public class IpcModule : Module
 {
     protected override void Load(ContainerBuilder builder)
     {
+        builder.RegisterType<WindowsIpcIdentityExtractor>()
+            .As<IIpcIdentityExtractor>()
+            .InstancePerDependency();
+
+        builder.RegisterType<IpcConnectionProcessor>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<IpcServerService>()
             .As<IIpcServerService>()
+            .SingleInstance();
+
+        builder.RegisterType<IpcUiInvoker>()
+            .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<IpcMessageHandler>()

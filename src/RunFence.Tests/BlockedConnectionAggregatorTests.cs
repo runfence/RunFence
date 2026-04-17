@@ -55,6 +55,23 @@ public class BlockedConnectionAggregatorTests
     }
 
     [Fact]
+    public void AggregateByAddress_NonLoopbackIPv6_IncludedInResults()
+    {
+        var t = DateTime.UtcNow;
+        var connections = new List<BlockedConnection>
+        {
+            Conn("2001:db8::1", 443, t),
+        };
+
+        var rows = _aggregator.AggregateByAddress(connections);
+
+        Assert.Single(rows);
+        Assert.Equal("2001:db8::1", rows[0].IpAddress);
+        Assert.Equal(1, rows[0].HitCount);
+        Assert.Contains(443, rows[0].Ports);
+    }
+
+    [Fact]
     public void AggregateByAddress_LastSeenIsMax()
     {
         var older = new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);

@@ -1,5 +1,6 @@
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using InfraWindowNative = RunFence.Infrastructure.WindowNative;
 
 namespace RunFence.DragBridge.UI.Forms;
 
@@ -32,8 +33,8 @@ public partial class DragBridgeSection : UserControl
 
         e.SuppressKeyPress = true;
 
-        bool winHeld = (NativeInterop.GetAsyncKeyState(0x5B) & 0x8000) != 0
-                       || (NativeInterop.GetAsyncKeyState(0x5C) & 0x8000) != 0;
+        bool winHeld = (InfraWindowNative.GetAsyncKeyState(0x5B) & 0x8000) != 0
+                       || (InfraWindowNative.GetAsyncKeyState(0x5C) & 0x8000) != 0;
         int value = (int)e.KeyData;
         if (winHeld)
             value |= DragBridgeHotkeyHelper.WinModifierBit;

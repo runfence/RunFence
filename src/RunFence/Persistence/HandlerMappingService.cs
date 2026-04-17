@@ -3,48 +3,27 @@ using RunFence.Core.Models;
 namespace RunFence.Persistence;
 
 /// <summary>
-/// Manages handler mappings (extension/protocol → app ID) across the main config and loaded
+/// Manages handler mappings (extension/protocol → app entry) across the main config and loaded
 /// additional configs. Extra config mappings are held in memory; main config mappings live in
 /// <see cref="AppDatabase"/>.
 /// <para>
-/// App-to-config assignments are kept in sync via <see cref="SetAppConfig"/>, which
-/// <see cref="AppConfigService"/> calls on load, unload, and manual assignment. This allows
-/// <see cref="SetHandlerMapping"/> to route mappings to the correct config file without a
-/// dependency on <see cref="IAppConfigService"/>.
+/// App-to-config assignments and loaded-path ordering are owned by <see cref="AppConfigIndex"/>,
+/// which is injected as the authoritative source and updated by <see cref="AppConfigService"/> directly.
 /// </para>
 /// </summary>
-public class HandlerMappingService : IHandlerMappingService
+public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMappingService
 {
     // normalized config path → HandlerMappings for that extra config, in registration order
-    private readonly Dictionary<string, Dictionary<string, string>> _extraHandlerMappings =
+    private readonly Dictionary<string, Dictionary<string, HandlerMappingEntry>> _extraHandlerMappings =
         new(StringComparer.OrdinalIgnoreCase);
 
-    // tracks registration order for GetEffectiveHandlerMappings overlay
-    private readonly List<string> _loadedPaths = [];
-
-    // app ID → normalized config path (absent = main config)
-    private readonly Dictionary<string, string> _appConfigMap =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// Notifies this service that <paramref name="appId"/> has been assigned to
-    /// <paramref name="configPath"/> (null = main config). Called by <see cref="AppConfigService"/>.
-    /// </summary>
-    public void SetAppConfig(string appId, string? configPath)
-    {
-        if (configPath == null)
-            _appConfigMap.Remove(appId);
-        else
-            _appConfigMap[appId] = Path.GetFullPath(configPath);
-    }
-
-    public Dictionary<string, string> GetEffectiveHandlerMappings(AppDatabase database)
+    public Dictionary<string, HandlerMappingEntry> GetEffectiveHandlerMappings(AppDatabase database)
     {
         var result = database.Settings.HandlerMappings != null
-            ? new Dictionary<string, string>(database.Settings.HandlerMappings, StringComparer.OrdinalIgnoreCase)
-            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            ? new Dictionary<string, HandlerMappingEntry>(database.Settings.HandlerMappings, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var path in _loadedPaths)
+        foreach (var path in appConfigIndex.GetLoadedConfigPaths())
         {
             if (_extraHandlerMappings.TryGetValue(path, out var extraMappings))
             {
@@ -56,43 +35,90 @@ public class HandlerMappingService : IHandlerMappingService
         return result;
     }
 
-    public void SetHandlerMapping(string key, string appId, AppDatabase database)
+    public IReadOnlyDictionary<string, IReadOnlyList<HandlerMappingEntry>> GetAllHandlerMappings(AppDatabase database)
     {
-        RemoveHandlerMapping(key, database);
+        var result = new Dictionary<string, List<HandlerMappingEntry>>(StringComparer.OrdinalIgnoreCase);
 
-        _appConfigMap.TryGetValue(appId, out var targetConfigPath);
+        if (database.Settings.HandlerMappings != null)
+        {
+            foreach (var kvp in database.Settings.HandlerMappings)
+            {
+                if (!result.TryGetValue(kvp.Key, out var list))
+                    result[kvp.Key] = list = [];
+                list.Add(kvp.Value);
+            }
+        }
+
+        foreach (var path in appConfigIndex.GetLoadedConfigPaths())
+        {
+            if (_extraHandlerMappings.TryGetValue(path, out var extraMappings))
+            {
+                foreach (var kvp in extraMappings)
+                {
+                    if (!result.TryGetValue(kvp.Key, out var list))
+                        result[kvp.Key] = list = [];
+                    list.Add(kvp.Value);
+                }
+            }
+        }
+
+        return result.ToDictionary(
+            kv => kv.Key,
+            kv => (IReadOnlyList<HandlerMappingEntry>)kv.Value,
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    public void SetHandlerMapping(string key, HandlerMappingEntry entry, AppDatabase database)
+    {
+        // Only remove from the config that owns this appId — preserve other configs' mappings for the same key
+        RemoveHandlerMapping(key, entry.AppId, database);
+
+        var targetConfigPath = appConfigIndex.GetConfigPath(entry.AppId);
 
         if (targetConfigPath == null)
         {
-            database.Settings.HandlerMappings ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            database.Settings.HandlerMappings[key] = appId;
+            database.Settings.HandlerMappings ??= new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase);
+            database.Settings.HandlerMappings[key] = entry;
         }
         else
         {
             if (!_extraHandlerMappings.TryGetValue(targetConfigPath, out var mappings))
             {
-                mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                mappings = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase);
                 _extraHandlerMappings[targetConfigPath] = mappings;
             }
 
-            mappings[key] = appId;
+            mappings[key] = entry;
         }
     }
 
-    public void RemoveHandlerMapping(string key, AppDatabase database)
+    public void RemoveHandlerMapping(string key, string appId, AppDatabase database)
     {
-        if (database.Settings.HandlerMappings != null)
-        {
-            database.Settings.HandlerMappings.Remove(key);
-            if (database.Settings.HandlerMappings.Count == 0)
-                database.Settings.HandlerMappings = null;
-        }
+        var configPath = appConfigIndex.GetConfigPath(appId);
 
-        foreach (var mappings in _extraHandlerMappings.Values)
-            mappings.Remove(key);
+        if (configPath == null)
+        {
+            // App is in main config — only remove if the mapped entry's AppId is actually appId
+            if (database.Settings.HandlerMappings != null &&
+                database.Settings.HandlerMappings.TryGetValue(key, out var existingEntry) &&
+                string.Equals(existingEntry.AppId, appId, StringComparison.OrdinalIgnoreCase))
+            {
+                database.Settings.HandlerMappings.Remove(key);
+                if (database.Settings.HandlerMappings.Count == 0)
+                    database.Settings.HandlerMappings = null;
+            }
+        }
+        else
+        {
+            // App is in an extra config — only remove if the mapped entry's AppId is actually appId
+            if (_extraHandlerMappings.TryGetValue(configPath, out var mappings) &&
+                mappings.TryGetValue(key, out var existingEntry) &&
+                string.Equals(existingEntry.AppId, appId, StringComparison.OrdinalIgnoreCase))
+                mappings.Remove(key);
+        }
     }
 
-    public Dictionary<string, string>? GetHandlerMappingsForConfig(string configPath)
+    public Dictionary<string, HandlerMappingEntry>? GetHandlerMappingsForConfig(string configPath)
     {
         var normalized = Path.GetFullPath(configPath);
         if (_extraHandlerMappings.TryGetValue(normalized, out var mappings) && mappings.Count > 0)
@@ -104,29 +130,48 @@ public class HandlerMappingService : IHandlerMappingService
     /// Registers handler mappings from a loaded extra config.
     /// Called by <see cref="AppConfigService"/> when loading an additional config.
     /// </summary>
-    public void RegisterConfigMappings(string configPath, Dictionary<string, string> mappings)
+    public void RegisterConfigMappings(string configPath, Dictionary<string, HandlerMappingEntry> mappings)
     {
         var normalized = Path.GetFullPath(configPath);
-        _extraHandlerMappings[normalized] = new Dictionary<string, string>(mappings, StringComparer.OrdinalIgnoreCase);
-        if (!_loadedPaths.Contains(normalized, StringComparer.OrdinalIgnoreCase))
-            _loadedPaths.Add(normalized);
+        _extraHandlerMappings[normalized] = new Dictionary<string, HandlerMappingEntry>(mappings, StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
-    /// Removes handler mappings and app-config assignments for an unloaded extra config.
+    /// Removes handler mappings for an unloaded extra config.
     /// Called by <see cref="AppConfigService"/> when unloading an additional config.
     /// </summary>
     public void UnregisterConfigMappings(string configPath)
     {
         var normalized = Path.GetFullPath(configPath);
         _extraHandlerMappings.Remove(normalized);
-        _loadedPaths.RemoveAll(p => string.Equals(p, normalized, StringComparison.OrdinalIgnoreCase));
+    }
 
-        var appsToRemove = _appConfigMap
-            .Where(kv => string.Equals(kv.Value, normalized, StringComparison.OrdinalIgnoreCase))
-            .Select(kv => kv.Key)
-            .ToList();
-        foreach (var appId in appsToRemove)
-            _appConfigMap.Remove(appId);
+    public Dictionary<string, DirectHandlerEntry> GetEffectiveDirectHandlerMappings(AppDatabase database)
+        => database.Settings.DirectHandlerMappings != null
+            ? new Dictionary<string, DirectHandlerEntry>(database.Settings.DirectHandlerMappings, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, DirectHandlerEntry>(StringComparer.OrdinalIgnoreCase);
+
+    public void SetDirectHandlerMapping(string key, DirectHandlerEntry entry, AppDatabase database)
+    {
+        // Remove any conflicting main-config app mapping for the same key
+        if (database.Settings.HandlerMappings != null &&
+            database.Settings.HandlerMappings.TryGetValue(key, out var conflictingEntry))
+        {
+            RemoveHandlerMapping(key, conflictingEntry.AppId, database);
+        }
+
+        database.Settings.DirectHandlerMappings ??= new Dictionary<string, DirectHandlerEntry>(StringComparer.OrdinalIgnoreCase);
+        database.Settings.DirectHandlerMappings[key] = entry;
+    }
+
+    public void RemoveDirectHandlerMapping(string key, AppDatabase database)
+    {
+        if (database.Settings.DirectHandlerMappings == null)
+            return;
+
+        database.Settings.DirectHandlerMappings.Remove(key);
+
+        if (database.Settings.DirectHandlerMappings.Count == 0)
+            database.Settings.DirectHandlerMappings = null;
     }
 }

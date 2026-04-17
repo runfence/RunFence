@@ -1,15 +1,22 @@
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI.Forms;
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
 namespace RunFence.Apps.UI;
 
 /// <summary>
-/// Handles file/folder browse dialogs and path validation for <see cref="AppEditDialog"/>.
+/// Handles file/folder browse dialogs, path validation, and app discovery for <see cref="AppEditDialog"/>.
 /// Returns results without touching dialog controls directly.
 /// </summary>
-public class AppEditBrowseHelper
+public class AppEditBrowseHelper(IShortcutDiscoveryService shortcutDiscoveryService)
 {
+    /// <summary>
+    /// Discovers installed applications by scanning shortcuts.
+    /// </summary>
+    public List<DiscoveredApp> DiscoverApps() => shortcutDiscoveryService.DiscoverApps();
+
     /// <summary>
     /// Shows an open file dialog for selecting an application executable.
     /// Returns the selected path, or null if cancelled.

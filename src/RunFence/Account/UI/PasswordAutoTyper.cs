@@ -27,54 +27,50 @@ public interface IPasswordAutoTyper
 /// Focus is monitored per character; typing stops immediately if the foreground moves to a
 /// different process.
 /// </summary>
-public class PasswordAutoTyper : IPasswordAutoTyper
+public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
 {
-    private readonly ILoggingService _log;
-
-    public PasswordAutoTyper(ILoggingService log) => _log = log;
-
     public AutoTypeResult TypeToWindow(IntPtr targetHwnd, SecureString password)
     {
-        if (!NativeInterop.IsWindow(targetHwnd))
+        if (!WindowNative.IsWindow(targetHwnd))
         {
-            _log.Warn("TypeToWindow: targetHwnd is not a valid window");
+            log.Warn("TypeToWindow: targetHwnd is not a valid window");
             return AutoTypeResult.WindowUnavailable;
         }
 
         var targetTitle = GetWindowTitle(targetHwnd);
         var targetClass = GetWindowClass(targetHwnd);
         var isConsole = IsConsoleLikeWindow(targetHwnd, targetClass);
-        _log.Info($"TypeToWindow: target hwnd=0x{targetHwnd.ToInt64():X} class=\"{targetClass}\" title=\"{targetTitle}\" isConsole={isConsole}");
+        log.Info($"TypeToWindow: target hwnd=0x{targetHwnd.ToInt64():X} class=\"{targetClass}\" title=\"{targetTitle}\" isConsole={isConsole}");
 
         // Restore window if minimized — SetForegroundWindow alone only flashes the taskbar for iconic windows.
-        if (NativeInterop.IsIconic(targetHwnd))
-            NativeInterop.ShowWindow(targetHwnd, NativeInterop.SW_RESTORE);
+        if (WindowNative.IsIconic(targetHwnd))
+            WindowNative.ShowWindow(targetHwnd, WindowNative.SW_RESTORE);
 
         // Attach the current foreground thread to RunFence's UI thread so SetForegroundWindow
         // succeeds even when RunFence lost the foreground lock (e.g. after a PIN or Hello dialog).
-        var foregroundHwnd = NativeInterop.GetForegroundWindow();
-        var foregroundThread = NativeInterop.GetWindowThreadProcessId(foregroundHwnd, IntPtr.Zero);
-        var currentThread = NativeInterop.GetCurrentThreadId();
-        var targetThread = NativeInterop.GetWindowThreadProcessId(targetHwnd, out uint targetPid);
+        var foregroundHwnd = WindowNative.GetForegroundWindow();
+        var foregroundThread = WindowNative.GetWindowThreadProcessId(foregroundHwnd, IntPtr.Zero);
+        var currentThread = WindowNative.GetCurrentThreadId();
+        var targetThread = WindowNative.GetWindowThreadProcessId(targetHwnd, out uint targetPid);
 
         bool attached = foregroundThread != currentThread &&
-                        NativeInterop.AttachThreadInput(foregroundThread, currentThread, true);
+                        WindowNative.AttachThreadInput(foregroundThread, currentThread, true);
         bool focused;
         try
         {
-            NativeInterop.BringWindowToTop(targetHwnd);
-            focused = NativeInterop.SetForegroundWindow(targetHwnd);
+            WindowNative.BringWindowToTop(targetHwnd);
+            focused = WindowNative.SetForegroundWindow(targetHwnd);
         }
         finally
         {
             if (attached)
-                NativeInterop.AttachThreadInput(foregroundThread, currentThread, false);
+                WindowNative.AttachThreadInput(foregroundThread, currentThread, false);
         }
 
         if (!focused)
-            _log.Warn($"TypeToWindow: SetForegroundWindow failed (foreground was 0x{foregroundHwnd.ToInt64():X} thread={foregroundThread}, current thread={currentThread})");
+            log.Warn($"TypeToWindow: SetForegroundWindow failed (foreground was 0x{foregroundHwnd.ToInt64():X} thread={foregroundThread}, current thread={currentThread})");
         else
-            _log.Info("TypeToWindow: SetForegroundWindow succeeded");
+            log.Info("TypeToWindow: SetForegroundWindow succeeded");
 
         if (!focused && isConsole)
             return AutoTypeResult.WindowUnavailable;
@@ -84,17 +80,17 @@ public class PasswordAutoTyper : IPasswordAutoTyper
         IntPtr hwndFocus = targetHwnd;
         if (!isConsole)
         {
-            var gui = new NativeInterop.GUITHREADINFO
+            var gui = new WindowNative.GUITHREADINFO
             {
-                cbSize = Marshal.SizeOf<NativeInterop.GUITHREADINFO>()
+                cbSize = Marshal.SizeOf<WindowNative.GUITHREADINFO>()
             };
-            NativeInterop.GetGUIThreadInfo(targetThread, ref gui);
+            WindowNative.GetGUIThreadInfo(targetThread, ref gui);
             hwndFocus = gui.hwndFocus != IntPtr.Zero ? gui.hwndFocus : targetHwnd;
-            _log.Info($"TypeToWindow: typing to hwnd=0x{hwndFocus.ToInt64():X} class=\"{GetWindowClass(hwndFocus)}\" title=\"{GetWindowTitle(hwndFocus)}\"");
+            log.Info($"TypeToWindow: typing to hwnd=0x{hwndFocus.ToInt64():X} class=\"{GetWindowClass(hwndFocus)}\" title=\"{GetWindowTitle(hwndFocus)}\"");
         }
         else
         {
-            _log.Info($"TypeToWindow: typing via SendInput to console hwnd=0x{hwndFocus.ToInt64():X}");
+            log.Info($"TypeToWindow: typing via SendInput to console hwnd=0x{hwndFocus.ToInt64():X}");
         }
 
         var ptr = Marshal.SecureStringToGlobalAllocUnicode(password);
@@ -104,10 +100,10 @@ public class PasswordAutoTyper : IPasswordAutoTyper
             {
                 if (focused)
                 {
-                    NativeInterop.GetWindowThreadProcessId(NativeInterop.GetForegroundWindow(), out uint fgPid);
+                    WindowNative.GetWindowThreadProcessId(WindowNative.GetForegroundWindow(), out uint fgPid);
                     if (fgPid != targetPid)
                     {
-                        _log.Info($"TypeToWindow: focus changed after {i} chars (foreground pid={fgPid}, target pid={targetPid})");
+                        log.Info($"TypeToWindow: focus changed after {i} chars (foreground pid={fgPid}, target pid={targetPid})");
                         return AutoTypeResult.FocusChanged;
                     }
                 }
@@ -118,31 +114,31 @@ public class PasswordAutoTyper : IPasswordAutoTyper
                 {
                     var inputs = new[]
                     {
-                        new NativeInterop.INPUT
-                            { type = NativeInterop.InputKeyboard, ki = new NativeInterop.KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = NativeInterop.KeyeventfUnicode } },
-                        new NativeInterop.INPUT
+                        new WindowNative.INPUT
+                            { type = WindowNative.InputKeyboard, ki = new WindowNative.KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = WindowNative.KeyeventfUnicode } },
+                        new WindowNative.INPUT
                         {
-                            type = NativeInterop.InputKeyboard,
-                            ki = new NativeInterop.KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = NativeInterop.KeyeventfUnicode | NativeInterop.KeyeventfKeyup }
+                            type = WindowNative.InputKeyboard,
+                            ki = new WindowNative.KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = WindowNative.KeyeventfUnicode | WindowNative.KeyeventfKeyup }
                         }
                     };
-                    if (NativeInterop.SendInput(2, inputs, Marshal.SizeOf<NativeInterop.INPUT>()) == 0)
+                    if (WindowNative.SendInput(2, inputs, Marshal.SizeOf<WindowNative.INPUT>()) == 0)
                     {
-                        _log.Warn($"TypeToWindow: SendInput failed at char {i}");
+                        log.Warn($"TypeToWindow: SendInput failed at char {i}");
                         return AutoTypeResult.WindowUnavailable;
                     }
                 }
                 else
                 {
-                    if (!NativeInterop.PostMessage(hwndFocus, NativeInterop.WmChar, ch, IntPtr.Zero))
+                    if (!WindowNative.PostMessage(hwndFocus, WindowNative.WmChar, ch, IntPtr.Zero))
                     {
-                        _log.Warn($"TypeToWindow: PostMessage(WM_CHAR) failed at char {i}");
+                        log.Warn($"TypeToWindow: PostMessage(WM_CHAR) failed at char {i}");
                         return AutoTypeResult.WindowUnavailable;
                     }
                 }
             }
 
-            _log.Info($"TypeToWindow: typed {password.Length} chars successfully");
+            log.Info("TypeToWindow: typed all chars successfully");
             return AutoTypeResult.Success;
         }
         finally
@@ -154,30 +150,30 @@ public class PasswordAutoTyper : IPasswordAutoTyper
     private static string GetWindowClass(IntPtr hwnd)
     {
         var sb = new StringBuilder(256);
-        NativeInterop.GetClassName(hwnd, sb, sb.Capacity);
+        WindowNative.GetClassName(hwnd, sb, sb.Capacity);
         return sb.ToString();
     }
 
     private static string GetWindowTitle(IntPtr hwnd)
     {
         var sb = new StringBuilder(256);
-        NativeInterop.GetWindowText(hwnd, sb, sb.Capacity);
+        WindowNative.GetWindowText(hwnd, sb, sb.Capacity);
         return sb.ToString();
     }
 
     private static bool IsConsoleLikeWindow(IntPtr hwnd, string className)
     {
-        if (string.Equals(className, NativeInterop.ConsoleWindowClass, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(className, WindowNative.ConsoleWindowClass, StringComparison.OrdinalIgnoreCase))
             return true;
 
-        NativeInterop.GetWindowThreadProcessId(hwnd, out uint pid);
-        using var handle = NativeInterop.OpenProcess(NativeMethods.ProcessQueryLimitedInformation, false, pid);
+        WindowNative.GetWindowThreadProcessId(hwnd, out uint pid);
+        using var handle = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, pid);
         if (handle.IsInvalid)
             return false;
 
         uint size = 512;
         var sb = new StringBuilder((int)size);
-        if (!NativeInterop.QueryFullProcessImageName(handle, 0, sb, ref size))
+        if (!ProcessNative.QueryFullProcessImageName(handle, 0, sb, ref size))
             return false;
 
         var processName = Path.GetFileNameWithoutExtension(sb.ToString());

@@ -20,7 +20,7 @@ public static class UiIconFactory
         using var bmp = (Bitmap)CreateToolbarIcon(symbol, color, size);
         var hIcon = bmp.GetHicon();
         var icon = (Icon)Icon.FromHandle(hIcon).Clone();
-        NativeMethods.DestroyIcon(hIcon);
+        WindowNative.DestroyIcon(hIcon);
         return icon;
     }
 

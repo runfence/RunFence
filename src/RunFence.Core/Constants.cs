@@ -84,7 +84,7 @@ public static class Constants
     public const int Argon2Parallelism = 2;
     public const int Argon2OutputBytes = 32;
     public const int Argon2SaltSize = 32;
-    public static byte[] PinCanaryPlaintext => "RunAsMgr-PIN-OK!"u8.ToArray();
+    public static readonly byte[] PinCanaryPlaintext = "RunAsMgr-PIN-OK!"u8.ToArray();
 
     // Launcher
     public const string LauncherExeName = "RunFence.Launcher.exe";
@@ -132,7 +132,7 @@ public static class Constants
     ];
 
     // Unlock cmd script — static file deployed alongside RunFence.exe in the app directory.
-    // Access is controlled via PermissionGrantService.EnsureAccess on the app directory at startup.
+    // Access is controlled via PathGrantService.EnsureAccess on the app directory at startup.
     public static string UnlockCmdPath =>
         Path.Combine(AppContext.BaseDirectory, "unlock.cmd");
 
@@ -144,11 +144,29 @@ public static class Constants
     /// <summary>Prefix for per-association ProgIds (e.g., "RunFence_http", "RunFence_.pdf").</summary>
     public const string HandlerProgIdPrefix = "RunFence_";
 
-    /// <summary>Shared parent ProgId whose Capabilities subkey registers one "RunFence" app in Windows Settings.</summary>
-    public const string HandlerParentKey = "RunFence_Handler";
+    /// <summary>
+    /// HKLM-relative registry path for the Capabilities subkey shown in Windows Settings > Default Apps.
+    /// Kept outside Software\Classes (standard location) to prevent Windows from double-discovering
+    /// RunFence via both RegisteredApplications and the ProgId namespace.
+    /// </summary>
+    public const string HandlerCapabilitiesRegistryPath = @"Software\RunFence\Capabilities";
 
     /// <summary>Name shown in Windows Settings > Default Apps and RegisteredApplications.</summary>
     public const string HandlerRegisteredAppName = "RunFence";
+
+    /// <summary>Registry value name used to store the original handler before RunFence overrides it.</summary>
+    public const string RunFenceFallbackValueName = "RunFenceFallback";
+
+    /// <summary>
+    /// Associations that require Default Apps (Windows ignores HKCU overrides for these).
+    /// HKCU auto-set skips these; HKLM ProgIds and Capabilities still include them.
+    /// </summary>
+    public static readonly HashSet<string> DefaultAppsOnlyAssociations =
+        new(StringComparer.OrdinalIgnoreCase) { "http", "https", ".htm", ".html", ".pdf", "ftp" };
+
+    /// <summary>Browser-only associations allowed in evaluation mode.</summary>
+    public static readonly HashSet<string> BrowserAssociations =
+        new(StringComparer.OrdinalIgnoreCase) { "http", "https", ".htm", ".html" };
 
     // Context menu
     public static string ExportedIconPath =>

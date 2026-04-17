@@ -33,6 +33,12 @@ public static class AssociationHandler
 
         if (!response.Success)
         {
+            if (response.ErrorCode == IpcErrorCode.AccessDenied)
+                return AssociationFallbackHelper.LaunchFallback(association, rawArguments, ipcAccessDenied: true);
+
+            if (response.ErrorCode == IpcErrorCode.UnknownAssociation)
+                return AssociationFallbackHelper.CleanupAndLaunchFallback(association, rawArguments);
+
             LauncherIpcHelper.ShowError(response.ErrorMessage ?? "Unknown error.");
             return 1;
         }

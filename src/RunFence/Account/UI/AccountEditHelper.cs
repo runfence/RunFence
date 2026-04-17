@@ -2,11 +2,9 @@ using System.Security;
 using RunFence.Account.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Firewall;
+using RunFence.Firewall.UI;
 using RunFence.Infrastructure;
-using RunFence.Launch;
 using RunFence.PrefTrans;
-using RunFence.UI.Forms;
 
 namespace RunFence.Account.UI;
 
@@ -14,31 +12,16 @@ namespace RunFence.Account.UI;
 /// Handles the distinct phases of the EditAccount flow: password change, desktop settings import,
 /// and firewall rules application. Extracted from <see cref="AccountCredentialOperations.EditAccount"/>.
 /// </summary>
-public class AccountEditHelper
+public class AccountEditHelper(
+    IModalCoordinator modalCoordinator,
+    SessionPersistenceHelper persistenceHelper,
+    IAccountCredentialManager credentialManager,
+    IAccountPasswordService accountPassword,
+    ISettingsTransferService settingsTransferService,
+    ISessionProvider sessionProvider,
+    OperationGuard operationGuard,
+    FirewallApplyHelper firewallApplyHelper)
 {
-    private readonly IAccountCredentialManager _credentialManager;
-    private readonly IAccountPasswordService _accountPassword;
-    private readonly ISettingsTransferService _settingsTransferService;
-    private readonly IFirewallService _firewallService;
-    private readonly ISessionProvider _sessionProvider;
-    private readonly OperationGuard _operationGuard;
-
-    public AccountEditHelper(
-        IAccountCredentialManager credentialManager,
-        IAccountPasswordService accountPassword,
-        ISettingsTransferService settingsTransferService,
-        ISessionProvider sessionProvider,
-        OperationGuard operationGuard,
-        IFirewallService firewallService)
-    {
-        _credentialManager = credentialManager;
-        _accountPassword = accountPassword;
-        _settingsTransferService = settingsTransferService;
-        _sessionProvider = sessionProvider;
-        _operationGuard = operationGuard;
-        _firewallService = firewallService;
-    }
-
     /// <summary>
     /// Tries to apply the password change. If the stored credential provides the old password,
     /// uses it directly; otherwise shows the PasswordChangeMethodDialog on the secure desktop.
@@ -49,17 +32,17 @@ public class AccountEditHelper
         if (dlg.NewPasswordText == null)
             return false;
 
-        var session = _sessionProvider.GetSession();
+        var session = sessionProvider.GetSession();
 
         // Try with stored password first
         if (accountRow is { Credential: not null, HasStoredPassword: true })
         {
-            var status = _credentialManager.DecryptCredential(accountRow.Sid, session.CredentialStore, session.PinDerivedKey, out var oldPwd);
+            var status = credentialManager.DecryptCredential(accountRow.Sid, session.CredentialStore, session.PinDerivedKey, out var oldPwd);
             if (status == CredentialLookupStatus.Success && oldPwd != null)
             {
                 try
                 {
-                    _accountPassword.ChangeAccountPassword(accountRow.Sid, oldPwd, dlg.NewPasswordText);
+                    accountPassword.ChangeAccountPassword(accountRow.Sid, oldPwd, dlg.NewPasswordText);
                     return true;
                 }
                 catch
@@ -78,7 +61,7 @@ public class AccountEditHelper
         SecureString? enteredPassword = null;
         DialogResult methodResult = DialogResult.None;
 
-        DataPanel.RunOnSecureDesktop(() =>
+        modalCoordinator.RunOnSecureDesktop(() =>
         {
             using var methodDlg = new PasswordChangeMethodDialog(isCurrentAccount);
             methodResult = methodDlg.ShowDialog();
@@ -93,7 +76,7 @@ public class AccountEditHelper
         {
             try
             {
-                _accountPassword.AdminResetAccountPassword(accountRow.Sid, dlg.NewPasswordText);
+                accountPassword.AdminResetAccountPassword(accountRow.Sid, dlg.NewPasswordText);
                 return true;
             }
             catch (Exception ex)
@@ -108,7 +91,7 @@ public class AccountEditHelper
         {
             try
             {
-                _accountPassword.ChangeAccountPassword(accountRow.Sid, enteredPassword, dlg.NewPasswordText);
+                accountPassword.ChangeAccountPassword(accountRow.Sid, enteredPassword, dlg.NewPasswordText);
                 return true;
             }
             catch (Exception ex)
@@ -127,55 +110,23 @@ public class AccountEditHelper
     }
 
     /// <summary>
-    /// Performs the desktop settings import if requested. For the current account or interactive user,
-    /// runs de-elevated; for other accounts, acquires the password from the new or stored credential,
-    /// then runs the import on a background thread and records any granted paths.
+    /// Performs the desktop settings import if requested and records any granted paths.
     /// </summary>
-    public async Task ImportDesktopSettingsAsync(AccountRow accountRow, EditAccountDialog dlg,
-        string effectiveUsername, bool passwordApplied, bool isCurrentAccount, Control ownerControl)
+    public async Task ImportDesktopSettingsAsync(AccountRow accountRow, EditAccountDialog dlg, Control ownerControl)
     {
         if (dlg.SettingsImportPath == null)
             return;
 
-        var session = _sessionProvider.GetSession();
+        var session = sessionProvider.GetSession();
 
-        var tokenSource = isCurrentAccount ? LaunchTokenSource.CurrentProcess
-            : SidResolutionHelper.IsInteractiveUserSid(accountRow.Sid) ? LaunchTokenSource.InteractiveUser
-            : LaunchTokenSource.Credentials;
-
-        SecureString? importPwd = null;
-        if (tokenSource == LaunchTokenSource.Credentials)
-        {
-            if (dlg.NewPasswordText != null && passwordApplied)
-            {
-                importPwd = new SecureString();
-                foreach (char c in dlg.NewPasswordText)
-                    importPwd.AppendChar(c);
-                importPwd.MakeReadOnly();
-            }
-            else if (accountRow is { Credential: not null, HasStoredPassword: true })
-            {
-                var status = _credentialManager.DecryptCredential(accountRow.Sid, session.CredentialStore, session.PinDerivedKey, out importPwd);
-                if (status != CredentialLookupStatus.Success)
-                    importPwd = null;
-            }
-
-            if (importPwd == null)
-            {
-                dlg.Errors.Add("Settings import skipped: no password available.");
-                return;
-            }
-        }
-
-        _operationGuard.Begin(ownerControl);
+        operationGuard.Begin(ownerControl);
         try
         {
-            var creds = new LaunchCredentials(importPwd, ".", effectiveUsername, tokenSource);
             var (error, hadGrants) = await SettingsImportHelper.ImportAsync(
-                dlg.SettingsImportPath, creds, accountRow.Sid,
-                _settingsTransferService);
+                dlg.SettingsImportPath, accountRow.Sid,
+                settingsTransferService);
             if (hadGrants)
-                _credentialManager.SaveConfig(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
+                persistenceHelper.SaveConfig(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
             if (error != null)
                 dlg.Errors.Add($"Settings import: {error}");
         }
@@ -185,8 +136,7 @@ public class AccountEditHelper
         }
         finally
         {
-            importPwd?.Dispose();
-            _operationGuard.End(ownerControl);
+            operationGuard.End(ownerControl);
         }
     }
 
@@ -194,13 +144,23 @@ public class AccountEditHelper
     /// Applies firewall OS rules after the database has been persisted, so OS state never diverges
     /// from persisted state.
     /// </summary>
-    public void ApplyFirewallRules(AccountRow accountRow, FirewallAccountSettings? newFirewallSettings)
+    public void ApplyFirewallRules(
+        AccountRow accountRow,
+        FirewallAccountSettings? previousFirewallSettings,
+        FirewallAccountSettings? newFirewallSettings)
     {
         if (newFirewallSettings == null)
             return;
 
-        var session = _sessionProvider.GetSession();
+        var session = sessionProvider.GetSession();
         var username = session.Database.SidNames.GetValueOrDefault(accountRow.Sid) ?? accountRow.Username;
-        _firewallService.ApplyFirewallRules(accountRow.Sid, username, newFirewallSettings);
+        firewallApplyHelper.ApplyWithRollback(
+            owner: null,
+            sid: accountRow.Sid,
+            username: username,
+            previous: previousFirewallSettings,
+            final: newFirewallSettings,
+            database: session.Database,
+            saveAction: () => persistenceHelper.SaveConfig(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt));
     }
 }

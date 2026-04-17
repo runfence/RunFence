@@ -8,9 +8,8 @@ namespace RunFence.Ipc;
 /// Handles the IPC OpenFolder command: validates the path and opens the folder in Explorer.
 /// </summary>
 public class IpcOpenFolderHandler(
-    IAppStateProvider appState,
     IAppLockControl appLock,
-    IUiThreadInvoker uiThreadInvoker,
+    IpcUiInvoker ipcUiInvoker,
     IDirectoryValidator? directoryValidator,
     ILoggingService log,
     IShellFolderOpener shellFolderOpener)
@@ -30,8 +29,8 @@ public class IpcOpenFolderHandler(
         if (string.IsNullOrEmpty(callerSid))
             return new IpcResponse { Success = false, ErrorMessage = "Caller identity could not be determined." };
 
-        if (appState.IsShuttingDown)
-            return new IpcResponse { Success = false, ErrorMessage = "Application is shutting down." };
+        if (ipcUiInvoker.IsShuttingDown(out var shuttingDown))
+            return shuttingDown!;
 
         if (appLock.IsUnlockPolling)
             return new IpcResponse { Success = false, ErrorMessage = "Busy." };
@@ -51,35 +50,27 @@ public class IpcOpenFolderHandler(
         // SHParseDisplayName + ShellExecuteEx require STA COM (the UI thread is STA).
         // Invoke synchronously on the UI thread so we can detect failures.
         IpcResponse? shellResult = null;
-        try
+        if (!ipcUiInvoker.TryInvoke(() =>
         {
-            uiThreadInvoker.Invoke(() =>
+            try
             {
-                try
+                if (!shellFolderOpener.TryOpen(validation.CanonicalPath!, out var shellError))
                 {
-                    if (!shellFolderOpener.TryOpen(validation.CanonicalPath!, out var shellError))
-                    {
-                        log.Warn($"OpenFolder: {shellError}");
-                        shellResult = new IpcResponse { Success = false, ErrorMessage = "Could not open folder." };
-                        return;
-                    }
-
-                    shellResult = new IpcResponse { Success = true };
-                }
-                catch (Exception ex)
-                {
-                    log.Error("OpenFolder: shell launch failed", ex);
+                    log.Warn($"OpenFolder: {shellError}");
                     shellResult = new IpcResponse { Success = false, ErrorMessage = "Could not open folder." };
+                    return;
                 }
-            });
-        }
-        catch (ObjectDisposedException)
+
+                shellResult = new IpcResponse { Success = true };
+            }
+            catch (Exception ex)
+            {
+                log.Error("OpenFolder: shell launch failed", ex);
+                shellResult = new IpcResponse { Success = false, ErrorMessage = "Could not open folder." };
+            }
+        }, out _))
         {
-            validation.Dispose();
-            return new IpcResponse { Success = false, ErrorMessage = "Application is shutting down." };
-        }
-        catch (InvalidOperationException)
-        {
+            // Application is shutting down — release validation handle before returning
             validation.Dispose();
             return new IpcResponse { Success = false, ErrorMessage = "Application is shutting down." };
         }

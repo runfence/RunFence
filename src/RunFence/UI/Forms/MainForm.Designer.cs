@@ -65,7 +65,7 @@ partial class MainForm
 
         // MainForm
         Text = "RunFence";
-        Size = new Size(1181, 675);
+        Size = new Size(1240, 675);
         StartPosition = FormStartPosition.CenterScreen;
         Controls.Add(_tabControl);
 

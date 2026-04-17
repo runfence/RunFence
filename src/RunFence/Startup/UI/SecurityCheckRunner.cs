@@ -1,14 +1,14 @@
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Startup;
 using RunFence.Startup.UI.Forms;
-using RunFence.UI.Forms;
 
 namespace RunFence.Startup.UI;
 
 /// <summary>
 /// Runs the startup security check asynchronously and shows the results dialog.
 /// </summary>
-public class SecurityCheckRunner(IStartupSecurityService startupSecurityService, ILoggingService log)
+public class SecurityCheckRunner(IModalCoordinator modalCoordinator, IStartupSecurityService startupSecurityService, ILoggingService log, FindingLocationHelper findingLocationHelper)
 {
     /// <summary>
     /// Launches the security check. <paramref name="ownerControl"/> is the panel or control
@@ -34,8 +34,8 @@ public class SecurityCheckRunner(IStartupSecurityService startupSecurityService,
             }
             else
             {
-                using var dlg = new StartupSecurityDialog(findings);
-                DataPanel.ShowModal(dlg, ownerControl.FindForm());
+                using var dlg = new StartupSecurityDialog(findings, findingLocationHelper);
+                modalCoordinator.ShowModal(dlg, ownerControl.FindForm());
             }
 
             if (isUacUnsafe)

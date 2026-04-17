@@ -5,21 +5,12 @@ namespace RunFence.Account.UI;
 /// changes, value changes, validation, editing-control setup, no-logon toggle, and
 /// allow-internet toggle.
 /// </summary>
-public class AccountGridEditHandler
+public class AccountGridEditHandler(IAccountToggleService accountToggle, AccountPanelActions panelActions)
 {
-    private readonly AccountPanelActions _panelActions;
-    private readonly IAccountToggleService _accountToggle;
-
     private DataGridView _grid = null!;
     private IAccountsPanelContext _context = null!;
     private string? _originalAccountCellValue;
     public bool RenameInProgress { get; set; }
-
-    public AccountGridEditHandler(IAccountToggleService accountToggle, AccountPanelActions panelActions)
-    {
-        _accountToggle = accountToggle;
-        _panelActions = panelActions;
-    }
 
     public void Initialize(DataGridView grid, IAccountsPanelContext context)
     {
@@ -66,7 +57,7 @@ public class AccountGridEditHandler
             return;
         }
 
-        _panelActions.CommitRename(accountRow, row, newName, _originalAccountCellValue);
+        panelActions.CommitRename(accountRow, row, newName, _originalAccountCellValue);
     }
 
     public void HandleDirtyStateChanged()
@@ -115,7 +106,7 @@ public class AccountGridEditHandler
         // Checked = logon allowed, so blocked = NOT checked.
         var setBlocked = !(cell.Value is CheckState cs ? cs == CheckState.Checked : cell.Value is true);
 
-        var result = _accountToggle.SetLogonBlocked(accountRow.Sid, accountRow.Username, setBlocked);
+        var result = accountToggle.SetLogonBlocked(accountRow.Sid, accountRow.Username, setBlocked);
         if (!result.Success)
         {
             var title = result.IsLicenseLimit ? "License Limit" : "Error";
@@ -134,7 +125,7 @@ public class AccountGridEditHandler
         var cell = (DataGridViewCheckBoxCell)row.Cells["colAllowInternet"];
         var allowInternet = cell.Value is true;
 
-        var error = _accountToggle.SetAllowInternet(accountRow.Sid, accountRow.Username, allowInternet);
+        var error = accountToggle.SetAllowInternet(accountRow.Sid, accountRow.Username, allowInternet);
         if (error != null)
             MessageBox.Show(error, "RunFence", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         _context.SaveAndRefresh();

@@ -47,7 +47,7 @@ partial class GroupsPanel
         if (disposing)
         {
             components?.Dispose();
-            _refreshTimer?.Dispose();
+            _refreshController?.Dispose();
             if (_parentForm != null)
             {
                 _parentForm.SizeChanged -= OnParentFormSizeChanged;

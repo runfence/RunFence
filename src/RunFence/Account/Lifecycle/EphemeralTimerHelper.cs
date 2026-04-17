@@ -7,17 +7,9 @@ namespace RunFence.Account.Lifecycle;
 /// Encapsulates the 1-hour recurring timer pattern shared by ephemeral cleanup services.
 /// Dispatches ticks to the UI thread via <see cref="IUiThreadInvoker"/>.
 /// </summary>
-public sealed class EphemeralTimerHelper : IDisposable
+public sealed class EphemeralTimerHelper(IUiThreadInvoker uiThreadInvoker, Action onTick) : IDisposable
 {
     private Timer? _timer;
-    private readonly IUiThreadInvoker _uiThreadInvoker;
-    private readonly Action _onTick;
-
-    public EphemeralTimerHelper(IUiThreadInvoker uiThreadInvoker, Action onTick)
-    {
-        _uiThreadInvoker = uiThreadInvoker;
-        _onTick = onTick;
-    }
 
     public void Start()
     {
@@ -30,7 +22,7 @@ public sealed class EphemeralTimerHelper : IDisposable
     {
         try
         {
-            _uiThreadInvoker.Invoke(_onTick);
+            uiThreadInvoker.Invoke(onTick);
         }
         catch (ObjectDisposedException)
         {

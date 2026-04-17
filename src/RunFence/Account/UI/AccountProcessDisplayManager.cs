@@ -58,9 +58,12 @@ public class AccountProcessDisplayManager(
 
     // --- Refresh coordination methods (for AccountsPanelRefreshOrchestrator) ---
 
-    /// <summary>Reapplies expansion using data pre-fetched before the grid was cleared.</summary>
+    /// <summary>Reapplies expansion using data pre-fetched before the grid was cleared.
+    /// Also clears the process icon cache to release GDI resources accumulated for processes
+    /// that are no longer running.</summary>
     public void ReapplyExpansion(Dictionary<string, IReadOnlyList<ProcessInfo>>? prefetchedData)
     {
+        processRowPainter.ClearIconCache();
         if (prefetchedData != null)
             processExpander.ReapplyExpansion(prefetchedData);
     }

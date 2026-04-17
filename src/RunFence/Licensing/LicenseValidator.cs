@@ -150,29 +150,5 @@ internal class LicenseValidator
         return string.Join(":", hash.Take(16).Select(b => b.ToString("X2")));
     }
 
-    private static byte[] Base32Decode(string base32)
-    {
-        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-        var result = new List<byte>();
-        int buffer = 0;
-        int bitsLeft = 0;
-        foreach (char c in base32.ToUpperInvariant())
-        {
-            if (c == '=')
-                break;
-            var charIndex = alphabet.IndexOf(c);
-            if (charIndex < 0)
-                throw new FormatException($"Invalid base32 character: {c}");
-            buffer <<= 5;
-            buffer |= charIndex & 0x1F;
-            bitsLeft += 5;
-            if (bitsLeft >= 8)
-            {
-                result.Add((byte)(buffer >> (bitsLeft - 8)));
-                bitsLeft -= 8;
-            }
-        }
-
-        return result.ToArray();
-    }
+    private static byte[] Base32Decode(string base32) => Base32.Decode(base32);
 }

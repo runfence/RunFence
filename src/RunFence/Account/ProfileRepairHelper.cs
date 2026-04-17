@@ -1,5 +1,5 @@
 using System.ComponentModel;
-using System.Security.Principal;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using RunFence.Core;
 using RunFence.Launch;
@@ -13,7 +13,7 @@ namespace RunFence.Account;
 /// When this happens, the original registry key is moved to a <c>.bak</c> suffix and a new
 /// key pointing to the temporary profile is created.
 /// </summary>
-public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService log) : IProfileRepairHelper
+public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService log, NTTranslateApi ntTranslate) : IProfileRepairHelper
 {
     private record CorruptedProfile(string Sid, string OriginalPath, string TempPath);
 
@@ -25,11 +25,11 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
     /// If no corruption is detected or <paramref name="accountSid"/> is null,
     /// the original exception is rethrown for normal handling.
     /// </summary>
-    public void ExecuteWithProfileRepair(Action launchAction, string? accountSid)
+    public T ExecuteWithProfileRepair<T>(Func<T> launchAction, string? accountSid)
     {
         try
         {
-            launchAction();
+            return launchAction();
         }
         catch (OperationCanceledException)
         {
@@ -66,10 +66,10 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
 
             if (prompt.ConfirmRetry())
             {
-                launchAction();
+                return launchAction();
             }
 
-            // User declined retry — swallow the original exception since the repair succeeded
+            throw new OperationCanceledException();
         }
     }
 
@@ -212,14 +212,14 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
         if (key == null)
             throw new InvalidOperationException($"Registry key not found: {fullKeyPath}");
 
-        var unicodeName = new ProfileRepairNative.UNICODE_STRING
+        var unicodeName = new UNICODE_STRING
         {
             Buffer = newName,
             Length = (ushort)(newName.Length * 2),
             MaximumLength = (ushort)(newName.Length * 2 + 2)
         };
 
-        var status = ProfileRepairNative.NtRenameKey(key.Handle.DangerousGetHandle(), ref unicodeName);
+        var status = NtRenameKey(key.Handle.DangerousGetHandle(), ref unicodeName);
         if (status != 0)
             throw new InvalidOperationException(
                 $"NtRenameKey failed for '{fullKeyPath}' → '{newName}': NTSTATUS 0x{status:X8}");
@@ -298,14 +298,22 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
     {
         try
         {
-            var secId = new SecurityIdentifier(sid);
-            var ntAccount = (NTAccount)secId.Translate(
-                typeof(NTAccount));
-            return ntAccount.Value;
+            return ntTranslate.TranslateName(sid).Value;
         }
         catch
         {
             return null;
         }
     }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct UNICODE_STRING
+    {
+        public ushort Length;
+        public ushort MaximumLength;
+        public string Buffer;
+    }
+
+    [DllImport("ntdll.dll", CharSet = CharSet.Unicode)]
+    private static extern int NtRenameKey(IntPtr KeyHandle, ref UNICODE_STRING NewName);
 }

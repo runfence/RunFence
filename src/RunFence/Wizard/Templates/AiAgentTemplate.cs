@@ -1,11 +1,10 @@
 using System.Diagnostics;
 using System.Security;
-using System.Security.AccessControl;
 using RunFence.Account;
 using RunFence.Account.UI;
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
-using RunFence.Launch;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -15,20 +14,20 @@ namespace RunFence.Wizard.Templates;
 /// <summary>
 /// Wizard template for setting up an isolated AI coding agent account (Claude Code or custom tool).
 /// Creates an isolated account without Users group membership, grants access to project folders,
-/// installs selected packages, applies restrictive firewall rules (no internet, no LAN, localhost only),
-/// and pins a tray terminal. After the wizard closes, opens the firewall allowlist dialog and blocked
-/// connections dialog so the user can whitelist required domains immediately.
+/// installs selected packages, applies the firewall rules chosen in the wizard (blocked by default),
+/// and pins a tray terminal. After the wizard closes, opens the firewall allowlist dialog with the
+/// blocked-connections dialog auto-opened inside it so the user can whitelist required domains.
 /// </summary>
 public class AiAgentTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
     EditAccountDialogCreateHandler createHandler,
-    AccountLauncher accountLauncher,
     WizardFolderGrantHelper folderGrantHelper,
     AiAgentFirewallOrchestrator firewallOrchestrator,
     IWizardSessionSaver sessionSaver,
     SessionContext session,
-    WizardLicenseChecker licenseChecker)
+    WizardLicenseChecker licenseChecker,
+    IShortcutDiscoveryService discoveryService)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -52,13 +51,24 @@ public class AiAgentTemplate(
         var accountNameStep = setupHelperFactory.CreateAccountNameStep(
             (name, _) => _data.Username = name,
             description: "Choose a name for the new isolated AI agent account. " +
-                         "It will be created without Users group membership and without internet access. " +
-                         "Required packages are installed before internet is blocked.");
+                         "It will be created without Users group membership. " +
+                         "Required packages are installed during wizard setup, before firewall rules take effect.");
 
         var projectPathsStep = new AllowedPathsStep(
             paths => _data.ProjectPaths = paths,
             labelText: "Add project folders this account should be able to access:",
             stepTitle: "Project Folders");
+
+        var firewallOptionsStep = new FirewallOptionsStep(
+            (allowInternet, allowLan, allowLocalhost) =>
+            {
+                _data.AllowInternet = allowInternet;
+                _data.AllowLan = allowLan;
+                _data.AllowLocalhost = allowLocalhost;
+            },
+            defaultInternet: false,
+            defaultLan: false,
+            defaultLocalhost: false);
 
         var aiToolStep = new AiAgentToolStep(
             (isClaudeCode, appPath) =>
@@ -66,14 +76,15 @@ public class AiAgentTemplate(
                 _data.IsClaudeCode = isClaudeCode;
                 _data.AppPath = appPath;
             },
+            discoveryService,
             commitAction: OnCommitAiOptionsAsync);
 
-        return [accountNameStep, projectPathsStep, aiToolStep];
+        return [accountNameStep, projectPathsStep, firewallOptionsStep, aiToolStep];
     }
 
     /// <summary>
     /// Mid-wizard hook: creates the account, grants project folder access, installs packages.
-    /// Called after AiAgentOptionsStep is committed. Firewall is applied in ExecuteAsync.
+    /// Called after AiAgentToolStep is committed. Firewall is applied in ExecuteAsync.
     /// Account creation is done directly here (not via executor) because this hook must complete
     /// synchronously within the wizard step before the user can advance.
     /// </summary>
@@ -125,8 +136,7 @@ public class AiAgentTemplate(
             Password: result.Password,
             StoreCredential: true,
             IsEphemeral: false,
-            SplitTokenOptOut: false,
-            LowIntegrityDefault: false,
+            PrivilegeLevel: PrivilegeLevel.Basic,
             FirewallSettings: null,
             DesktopSettingsPath: defaults.DesktopSettingsPath,
             InstallPackages: null,
@@ -141,28 +151,17 @@ public class AiAgentTemplate(
             ? [KnownPackages.Winget, KnownPackages.WindowsTerminal, KnownPackages.ClaudeCode]
             : [KnownPackages.Winget, KnownPackages.WindowsTerminal];
 
-        var credEntry = session.CredentialStore.Credentials.FirstOrDefault(c => c.Sid == result.Sid);
-        if (credEntry != null)
-        {
-            progress.ReportStatus("Installing packages (internet will be blocked after setup completes)...");
-            await Task.Run(() => accountLauncher.InstallPackages(packages, result.Password, credEntry, session.Database.SidNames));
-            await accountLauncher.WaitForInstallCompletionAsync(result.Sid, TimeSpan.FromMinutes(10));
-        }
+        await setupHelper.InstallPackagesAndWaitAsync(packages, result.Sid, TimeSpan.FromMinutes(10), progress);
 
         // Persist before granting project folder access so grant tracking has a DB entry
         sessionSaver.SaveAndRefresh();
 
         // Grant project folder access — uses WizardFolderGrantHelper to track SavedRightsState
-        const FileSystemRights readWriteRights =
-            FileSystemRights.ReadData |
-            FileSystemRights.WriteData |
-            FileSystemRights.ReadAndExecute |
-            FileSystemRights.Synchronize;
         var readWriteSavedRights = new SavedRightsState(
             Execute: false, Write: true, Read: true, Special: false, Own: false);
 
         await folderGrantHelper.GrantFolderAccessAsync(
-            _data.ProjectPaths, result.Sid, readWriteRights, readWriteSavedRights, session, progress);
+            _data.ProjectPaths, result.Sid, readWriteSavedRights, progress);
     }
 
     public async Task ExecuteAsync(IWizardProgressReporter progress)
@@ -177,13 +176,13 @@ public class AiAgentTemplate(
         var db = session.Database;
         var username = db.SidNames.GetValueOrDefault(sid) ?? _data.Username;
 
-        // Apply restrictive firewall settings now that packages are installed.
-        // Firewall is always restricted after wizard — user can refine via post-wizard allowlist dialog.
+        // Apply firewall settings chosen in the wizard step now that packages are installed.
+        // User can further refine via the post-wizard allowlist dialog.
         var firewallSettings = new FirewallAccountSettings
         {
-            AllowInternet = false,
-            AllowLan = false,
-            AllowLocalhost = true
+            AllowInternet = _data.AllowInternet,
+            AllowLan = _data.AllowLan,
+            AllowLocalhost = _data.AllowLocalhost
         };
 
         if (!firewallSettings.IsDefault)
@@ -211,7 +210,8 @@ public class AiAgentTemplate(
                         restrictAcl: false,
                         aclMode: AclMode.Deny,
                         manageShortcuts: true)
-                ]);
+                ],
+                CreateDesktopShortcut: true);
 
             await executor.ExecuteAsync(flowParams, progress);
         }
@@ -221,10 +221,12 @@ public class AiAgentTemplate(
             sessionSaver.SaveAndRefresh();
         }
 
-        // Set post-wizard action: open firewall allowlist dialog so the user can whitelist required
-        // domains, then open blocked connections dialog with audit logging pre-enabled so they can
-        // see what the AI agent is trying to reach.
-        PostWizardAction = firewallOrchestrator.BuildPostWizardAction(sid, username, session, sessionSaver);
+        // Set post-wizard action: open firewall allowlist dialog (with blocked-connections dialog
+        // auto-opened inside it) so the user can immediately whitelist domains and review traffic.
+        // Guard: only set when account was successfully created (CreatedSid set by OnCommitAiOptionsAsync).
+        // Defensive check in case ExecuteAsync is invoked without a prior successful commit step.
+        if (_data.CreatedSid != null)
+            PostWizardAction = firewallOrchestrator.BuildPostWizardAction(sid, username, session, sessionSaver, _data.AppPath);
     }
 
     private static string ResolveAppName(string exePath)
@@ -250,6 +252,9 @@ public class AiAgentTemplate(
         public string? AppPath { get; set; }
         public string? CreatedSid { get; set; }
         public SecureString? CreatedPassword { get; set; }
+        public bool AllowInternet { get; set; } = false;
+        public bool AllowLan { get; set; } = false;
+        public bool AllowLocalhost { get; set; } = false;
 
         public void Reset()
         {
@@ -260,6 +265,9 @@ public class AiAgentTemplate(
             CreatedSid = null;
             CreatedPassword?.Dispose();
             CreatedPassword = null;
+            AllowInternet = false;
+            AllowLan = false;
+            AllowLocalhost = false;
         }
     }
 }

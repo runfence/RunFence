@@ -1,16 +1,17 @@
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Infrastructure;
 
 namespace RunFence.Acl.Permissions;
 
 /// <summary>
-/// Injectable service for ACL permission checks and write operations: granting rights,
-/// restricting access, ensuring access with user confirmation, and querying effective permissions.
+/// Injectable service for ACL permission checks and write operations: restricting access
+/// and querying effective permissions.
 /// </summary>
-public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi groupMembership, ILocalGroupMembershipService localGroupMembership) : IAclPermissionService
+public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi groupMembership, ILocalGroupMembershipService localGroupMembership, IAclAccessor aclAccessor) : IAclPermissionService
 {
     // Note: HasEffectiveRights has a cross-SID deny limitation. AclComputeHelper.ComputeEffectiveFileRights
     // subtracts Deny rights from Allow rights only within the same SID. As a result, a Deny ACE on
@@ -47,16 +48,20 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
     {
         // AppContainer SIDs (S-1-15-2-*) are not user accounts — they have a fixed, well-known
         // group membership and NetUserGetLocalGroups does not apply to them.
-        if (accountSid.StartsWith("S-1-15-2-", StringComparison.OrdinalIgnoreCase))
+        if (AclHelper.IsContainerSid(accountSid))
             return ["S-1-1-0", "S-1-15-2-1"]; // Everyone + ALL_APPLICATION_PACKAGES
 
         var sids = new List<string>
         {
             "S-1-1-0", // Everyone
             "S-1-5-11", // Authenticated Users
-            // BUILTIN\Users (S-1-5-32-545) is NOT hardcoded here — TryResolveLocalGroupSids
-            // returns it via NetUserGetLocalGroups if the account actually belongs to it,
-            // preventing false positives for restricted or custom accounts.
+            // BUILTIN\Users (S-1-5-32-545) is hardcoded because it is invariably present in every
+            // authenticated user's token: LSA unconditionally injects Authenticated Users (S-1-5-11)
+            // into every token, and Authenticated Users is always a member of BUILTIN\Users, so
+            // SamrGetAliasMembership always resolves it — regardless of explicit SAM group membership.
+            // Removing the account from BUILTIN\Users via NetLocalGroupDelMembers has no effect on
+            // the token. Windows also auto-restores Authenticated Users membership on reboot.
+            "S-1-5-32-545", // BUILTIN\Users
         };
 
         foreach (var groupSid in TryResolveLocalGroupSids(accountSid))
@@ -123,14 +128,15 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
     }
 
     public bool NeedsPermissionGrant(string filePath, string accountSid,
-        FileSystemRights requiredRights = FileSystemRights.ReadAndExecute)
+        FileSystemRights requiredRights = FileSystemRights.ReadAndExecute, bool unelevated = false)
     {
         try
         {
-            FileSystemSecurity fileSecurity = Directory.Exists(filePath)
-                ? new DirectoryInfo(filePath).GetAccessControl()
-                : new FileInfo(filePath).GetAccessControl();
+            FileSystemSecurity fileSecurity = aclAccessor.GetSecurity(filePath);
             var groupSids = ResolveAccountGroupSids(accountSid);
+            if (unelevated)
+                groupSids.RemoveAll(s =>
+                    string.Equals(s, AclComputeHelper.AdministratorsSid.Value, StringComparison.OrdinalIgnoreCase));
             return !HasEffectiveRights(fileSecurity, accountSid, groupSids, requiredRights);
         }
         catch
@@ -183,35 +189,6 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
         return result;
     }
 
-    public bool EnsureRights(string path, string accountSid, FileSystemRights rights,
-        ILoggingService logger, Func<string, bool>? confirm = null)
-    {
-        try
-        {
-            if (!NeedsPermissionGrant(path, accountSid, rights))
-                return false;
-
-            if (confirm != null)
-            {
-                bool proceed = confirm(path); // OCE from callback propagates
-                if (!proceed)
-                    return false;
-            }
-
-            GrantRights(path, accountSid, rights);
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            logger.Error("Failed to apply permission grant", ex);
-            return false;
-        }
-    }
-
     /// <summary>
     /// Disables inheritance on a file and restricts access to SYSTEM (FullControl) and
     /// Administrators (FullControl) only. All other ACEs are removed.
@@ -232,30 +209,5 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
         security.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
         security.AddAccessRule(new FileSystemAccessRule(adminsSid, FileSystemRights.FullControl, AccessControlType.Allow));
         fileInfo.SetAccessControl(security);
-    }
-
-    public void GrantRights(string path, string accountSid,
-        FileSystemRights rights = FileSystemRights.ReadAndExecute)
-    {
-        var sid = new SecurityIdentifier(accountSid);
-        if (Directory.Exists(path))
-        {
-            var dirInfo = new DirectoryInfo(path);
-            var dirSecurity = dirInfo.GetAccessControl();
-            dirSecurity.AddAccessRule(new FileSystemAccessRule(
-                sid, rights,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.None,
-                AccessControlType.Allow));
-            dirInfo.SetAccessControl(dirSecurity);
-        }
-        else
-        {
-            var fileInfo = new FileInfo(path);
-            var fileSecurity = fileInfo.GetAccessControl();
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(
-                sid, rights, AccessControlType.Allow));
-            fileInfo.SetAccessControl(fileSecurity);
-        }
     }
 }

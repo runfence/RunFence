@@ -9,9 +9,8 @@ namespace RunFence.Apps.UI;
 /// ApplicationsPanel grid. Uses pure mouse-event tracking (no OLE DoDragDrop) so the
 /// grid can have AllowDrop=false and receive cross-IL shell file drops via WM_DROPFILES.
 /// </summary>
-public class AppGridDragDropHandler
+public class AppGridDragDropHandler(IAppConfigService appConfigService)
 {
-    private readonly IAppConfigService _appConfigService;
     private DataGridView _grid = null!;
     private IApplicationsPanelState _state = null!;
     private Action<string> _assignAndSave = null!;
@@ -19,11 +18,6 @@ public class AppGridDragDropHandler
     private DataGridViewRow? _dropTargetHeaderRow;
     private Point _dragStartPoint;
     private AppEntry? _draggingApp;
-
-    public AppGridDragDropHandler(IAppConfigService appConfigService)
-    {
-        _appConfigService = appConfigService;
-    }
 
     public void Initialize(DataGridView grid, IApplicationsPanelState state, Action<string> assignAndSave)
     {
@@ -44,7 +38,7 @@ public class AppGridDragDropHandler
     {
         if (e.Button != MouseButtons.Left)
             return;
-        if (!_appConfigService.HasLoadedConfigs || _state.IsSortActive)
+        if (!appConfigService.HasLoadedConfigs || _state.IsSortActive)
             return;
 
         if (_draggingApp == null)
@@ -88,11 +82,11 @@ public class AppGridDragDropHandler
             return;
 
         var (targetConfigPath, _) = GetSectionForRow(hitTest.RowIndex);
-        var currentConfigPath = _appConfigService.GetConfigPath(draggedApp.Id);
+        var currentConfigPath = appConfigService.GetConfigPath(draggedApp.Id);
         if (string.Equals(targetConfigPath, currentConfigPath, StringComparison.OrdinalIgnoreCase))
             return;
 
-        _appConfigService.AssignApp(draggedApp.Id, targetConfigPath);
+        appConfigService.AssignApp(draggedApp.Id, targetConfigPath);
         _assignAndSave(draggedApp.Id);
     }
 
@@ -115,7 +109,7 @@ public class AppGridDragDropHandler
             return;
         }
 
-        var currentConfigPath = _appConfigService.GetConfigPath(_draggingApp!.Id);
+        var currentConfigPath = appConfigService.GetConfigPath(_draggingApp!.Id);
         if (string.Equals(targetConfigPath, currentConfigPath, StringComparison.OrdinalIgnoreCase))
         {
             ClearDropHighlight();

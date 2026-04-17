@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using InfraWindowNative = RunFence.Infrastructure.WindowNative;
 
 namespace RunFence.DragBridge;
 
@@ -12,17 +13,13 @@ namespace RunFence.DragBridge;
 /// </summary>
 public class GlobalHotkeyService : IGlobalHotkeyService, IRequiresInitialization
 {
-    private const int WH_KEYBOARD_LL = 13;
     private const uint LLKHF_LOWER_IL_INJECTED = 0x02;
-    private const uint WM_KEYDOWN = 0x0100;
-    private const uint WM_KEYUP = 0x0101;
-    private const uint WM_SYSKEYDOWN = 0x0104;
     private const uint WM_SYSKEYUP = 0x0105;
 
     private readonly record struct HotkeyEntry(int Id, int Modifiers, int Vk, bool Consume);
 
     private readonly List<HotkeyEntry> _hotkeys = [];
-    private readonly NativeInterop.LowLevelKeyboardProc _hookProc; // must be kept alive to prevent GC
+    private readonly InfraWindowNative.LowLevelKeyboardProc _hookProc; // must be kept alive to prevent GC
     private IntPtr _hook;
     private int _currentModifiers;
     private readonly ILoggingService _log;
@@ -38,7 +35,7 @@ public class GlobalHotkeyService : IGlobalHotkeyService, IRequiresInitialization
     public void Initialize()
     {
         _log.Info("GlobalHotkeyService: installing keyboard hook.");
-        _hook = NativeInterop.SetWindowsHookEx(WH_KEYBOARD_LL, _hookProc, NativeInterop.GetModuleHandle(null), 0);
+        _hook = InfraWindowNative.SetWindowsHookEx(InfraWindowNative.WH_KEYBOARD_LL, _hookProc, InfraWindowNative.GetModuleHandle(null), 0);
         if (_hook == IntPtr.Zero)
             _log.Warn("GlobalHotkeyService: Failed to install keyboard hook.");
         else
@@ -61,7 +58,7 @@ public class GlobalHotkeyService : IGlobalHotkeyService, IRequiresInitialization
         UnregisterAll();
         if (_hook != IntPtr.Zero)
         {
-            NativeInterop.UnhookWindowsHookEx(_hook);
+            InfraWindowNative.UnhookWindowsHookEx(_hook);
             _hook = IntPtr.Zero;
         }
     }
@@ -70,7 +67,7 @@ public class GlobalHotkeyService : IGlobalHotkeyService, IRequiresInitialization
     {
         if (nCode >= 0)
         {
-            var info = Marshal.PtrToStructure<NativeInterop.KBDLLHOOKSTRUCT>(lParam);
+            var info = Marshal.PtrToStructure<InfraWindowNative.KBDLLHOOKSTRUCT>(lParam);
             if ((info.flags & LLKHF_LOWER_IL_INJECTED) == 0)
             {
                 // Re-sync modifier state from OS on every keystroke. This prevents
@@ -82,20 +79,20 @@ public class GlobalHotkeyService : IGlobalHotkeyService, IRequiresInitialization
             }
         }
 
-        return NativeInterop.CallNextHookEx(_hook, nCode, wParam, lParam);
+        return InfraWindowNative.CallNextHookEx(_hook, nCode, wParam, lParam);
     }
 
     private static int GetLiveModifiers()
     {
         int mods = 0;
-        if ((NativeInterop.GetAsyncKeyState(0x11) & 0x8000) != 0)
+        if ((InfraWindowNative.GetAsyncKeyState(0x11) & 0x8000) != 0)
             mods |= 0x0002; // VK_CONTROL
-        if ((NativeInterop.GetAsyncKeyState(0x12) & 0x8000) != 0)
+        if ((InfraWindowNative.GetAsyncKeyState(0x12) & 0x8000) != 0)
             mods |= 0x0001; // VK_MENU (Alt)
-        if ((NativeInterop.GetAsyncKeyState(0x10) & 0x8000) != 0)
+        if ((InfraWindowNative.GetAsyncKeyState(0x10) & 0x8000) != 0)
             mods |= 0x0004; // VK_SHIFT
-        if ((NativeInterop.GetAsyncKeyState(0x5B) & 0x8000) != 0 ||
-            (NativeInterop.GetAsyncKeyState(0x5C) & 0x8000) != 0)
+        if ((InfraWindowNative.GetAsyncKeyState(0x5B) & 0x8000) != 0 ||
+            (InfraWindowNative.GetAsyncKeyState(0x5C) & 0x8000) != 0)
             mods |= 0x0008; // VK_LWIN/VK_RWIN
         return mods;
     }
@@ -103,8 +100,8 @@ public class GlobalHotkeyService : IGlobalHotkeyService, IRequiresInitialization
     /// <returns>True if the keystroke matched a registered hotkey and should be consumed.</returns>
     public bool ProcessKeystroke(uint message, uint vkCode)
     {
-        bool isKeyDown = message is WM_KEYDOWN or WM_SYSKEYDOWN;
-        bool isKeyUp = message is WM_KEYUP or WM_SYSKEYUP;
+        bool isKeyDown = message is InfraWindowNative.WM_KEYDOWN or InfraWindowNative.WM_SYSKEYDOWN;
+        bool isKeyUp = message is InfraWindowNative.WM_KEYUP or WM_SYSKEYUP;
 
         int modBit = VkToModBit((int)vkCode);
         if (modBit != 0)

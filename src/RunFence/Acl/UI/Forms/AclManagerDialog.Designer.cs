@@ -199,6 +199,7 @@ partial class AclManagerDialog
         // applyButton
         _applyButton.Text = "Apply";
         _applyButton.Enabled = false;
+        _applyButton.FlatStyle = FlatStyle.System;
         _applyButton.Size = new Size(75, 28);
         _applyButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
         _applyButton.Click += OnApplyClick;
@@ -274,6 +275,7 @@ partial class AclManagerDialog
 
         // closeButton
         _closeButton.Text = "Close";
+        _closeButton.FlatStyle = FlatStyle.System;
         _closeButton.DialogResult = DialogResult.Cancel;
         _closeButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
         _closeButton.Size = new Size(75, 28);

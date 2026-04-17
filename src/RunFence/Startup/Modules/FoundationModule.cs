@@ -16,7 +16,9 @@ public class FoundationModule : Module
         builder.RegisterType<GroupMembershipApi>().SingleInstance();
         builder.RegisterType<CredentialEncryptionService>().As<ICredentialEncryptionService>().SingleInstance();
         builder.RegisterType<PinService>().As<IPinService>().SingleInstance();
+        builder.RegisterType<ProductionConfigPaths>().As<IConfigPaths>().SingleInstance();
         builder.RegisterType<AppConfigIndex>().As<IAppFilter>().AsSelf().SingleInstance();
+        builder.RegisterType<AppConfigSaveHelper>().AsSelf().SingleInstance();
         builder.RegisterType<AppConfigService>().As<IAppConfigService>().SingleInstance();
         builder.RegisterType<DatabaseService>()
             .As<IDatabaseService>().As<IConfigRepository>().As<ICredentialRepository>().SingleInstance();
@@ -25,6 +27,8 @@ public class FoundationModule : Module
         builder.RegisterType<SidResolver>().As<ISidResolver>().SingleInstance();
         builder.RegisterType<AppInitializationHelper>().As<IAppInitializationHelper>().SingleInstance();
         builder.RegisterType<SecureDesktopHelper>().As<ISecureDesktopRunner>().SingleInstance();
+        builder.RegisterType<ModalCoordinator>().As<IModalCoordinator>().SingleInstance();
+        builder.RegisterType<PinResetFlowRunner>().As<IPinResetFlowRunner>().SingleInstance();
         builder.RegisterType<StartupUI>().As<IStartupUI>().SingleInstance();
         builder.RegisterType<SessionProvider>()
             .As<ISessionProvider>().As<IDatabaseProvider>().AsSelf().SingleInstance();
@@ -32,5 +36,7 @@ public class FoundationModule : Module
         builder.RegisterType<SidDisplayNameResolver>()
             .AsSelf()
             .SingleInstance();
+
+        builder.RegisterType<UserHiveManager>().As<IUserHiveManager>().SingleInstance();
     }
 }

@@ -10,6 +10,8 @@ namespace RunFence.Startup;
 public class StartupEnforcementService(
     IAclService aclService,
     IShortcutService shortcutService,
+    IBesideTargetShortcutService besideTargetShortcutService,
+    IShortcutDiscoveryService shortcutDiscovery,
     IIconService iconService,
     ILoggingService log,
     SidDisplayNameResolver displayNameResolver,
@@ -67,15 +69,23 @@ public class StartupEnforcementService(
                         // on the live database by the caller via ApplyEnforcementResult.
                         if (containerEntry != null)
                         {
-                            var targetPath = aclService.ResolveAclTargetPath(app);
-                            var traverseDir = Directory.Exists(targetPath)
-                                ? targetPath
-                                : Path.GetDirectoryName(targetPath);
-                            if (traverseDir != null)
+                            var containerSid = containerEntry.Sid;
+                            if (string.IsNullOrEmpty(containerSid))
                             {
-                                var (_, appliedPaths) = appContainerService.EnsureTraverseAccess(
-                                    containerEntry, traverseDir);
-                                traverseGrants.Add(new ContainerTraverseGrant(containerEntry, traverseDir, appliedPaths));
+                                log.Warn($"Skipping container traverse enforcement for '{containerEntry.Name}': SID not resolved");
+                            }
+                            else
+                            {
+                                var targetPath = aclService.ResolveAclTargetPath(app);
+                                var traverseDir = Directory.Exists(targetPath)
+                                    ? targetPath
+                                    : Path.GetDirectoryName(targetPath);
+                                if (traverseDir != null)
+                                {
+                                    var (_, appliedPaths) = appContainerService.EnsureTraverseAccess(
+                                        containerEntry, traverseDir);
+                                    traverseGrants.Add(new ContainerTraverseGrant(containerEntry, traverseDir, appliedPaths));
+                                }
                             }
                         }
                     }
@@ -123,7 +133,8 @@ public class StartupEnforcementService(
         {
             try
             {
-                shortcutService.EnforceShortcuts(shortcutApps, launcherPath);
+                var shortcutCache = shortcutDiscovery.CreateTraversalCache();
+                shortcutService.EnforceShortcuts(shortcutApps, launcherPath, shortcutCache);
             }
             catch (Exception ex)
             {
@@ -136,7 +147,7 @@ public class StartupEnforcementService(
         {
             try
             {
-                shortcutService.EnforceBesideTargetShortcuts(
+                besideTargetShortcutService.EnforceBesideTargetShortcuts(
                     database.Apps.Where(a => !a.IsUrlScheme), launcherPath,
                     app =>
                     {

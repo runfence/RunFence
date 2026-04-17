@@ -1,0 +1,14 @@
+<Project>
+
+    <!--
+      Non-Debug builds use a date-based InformationalVersion (1.0.YYYYMMDD) so the About
+      panel always shows a meaningful version instead of the SDK default "1.0.0+<hash>".
+      The installer script (build-installer.ps1) passes -p:InformationalVersion=... on the
+      command line, which takes precedence over this file, so installer builds are unaffected.
+    -->
+    <PropertyGroup Condition="'$(Configuration)' != 'Debug'">
+        <InformationalVersion>1.0.$([System.DateTime]::UtcNow.ToString('yyyyMMdd'))</InformationalVersion>
+        <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    </PropertyGroup>
+
+</Project>

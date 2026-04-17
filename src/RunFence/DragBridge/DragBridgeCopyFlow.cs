@@ -9,7 +9,7 @@ namespace RunFence.DragBridge;
 /// handling drop events and lazy resolve requests.
 /// </summary>
 public class DragBridgeCopyFlow(
-    DragBridgeProcessLauncher processLauncher,
+    IDragBridgePipeLauncher processLauncher,
     INotificationService notifications,
     ILoggingService log,
     ICapturedFileStore capturedFileStore,
@@ -27,6 +27,7 @@ public class DragBridgeCopyFlow(
         List<string> initialFiles,
         Point cursorPos,
         Func<CancellationToken, Task<List<string>?>>? resolveDelegate,
+        bool initialFilesResolved,
         nint restoreHwnd,
         CancellationToken ct)
     {
@@ -36,9 +37,9 @@ public class DragBridgeCopyFlow(
             if (pipeServer == null)
                 return;
 
-            // Write initial files (possibly empty)
+            // Write initial files (possibly empty). FilesResolved=true skips the resolve dance in the window.
             await DragBridgeProtocol.WriteAsync(pipeServer,
-                new DragBridgeData { FilePaths = initialFiles }, ct);
+                new DragBridgeData { FilePaths = initialFiles, FilesResolved = initialFilesResolved }, ct);
 
             // Read: drops (FileList) or resolve requests (ResolveRequest)
             while (true)
@@ -117,7 +118,7 @@ public class DragBridgeCopyFlow(
         finally
         {
             if (!success)
-                pipeServer.Dispose();
+                await pipeServer.DisposeAsync();
         }
     }
 

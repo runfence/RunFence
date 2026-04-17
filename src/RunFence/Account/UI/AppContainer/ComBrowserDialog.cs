@@ -18,6 +18,7 @@ public partial class ComBrowserDialog : Form
         public override string ToString() => $"{DisplayName}  —  {AppId}";
     }
 
+    /// <remarks>Synchronous load acceptable — HKCR\AppID enumeration is typically sub-second. Consider async with loading indicator if performance becomes an issue.</remarks>
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);

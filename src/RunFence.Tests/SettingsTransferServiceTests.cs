@@ -1,9 +1,8 @@
-using System.Security;
 using System.Security.AccessControl;
 using Moq;
-using RunFence.Acl.Permissions;
+using RunFence.Acl;
 using RunFence.Core;
-using RunFence.Launch;
+using RunFence.Core.Models;
 using RunFence.PrefTrans;
 using Xunit;
 
@@ -18,8 +17,38 @@ public class SettingsTransferServiceTests
     {
         var log = new Mock<ILoggingService>();
         _launcher = new Mock<IPrefTransLauncher>();
-        var permissionGrant = new Mock<IPermissionGrantService>();
-        _service = new SettingsTransferService(log.Object, _launcher.Object, permissionGrant.Object);
+        var pathGrantService = new Mock<IPathGrantService>();
+        _service = new SettingsTransferService(log.Object, _launcher.Object, pathGrantService.Object);
+    }
+
+    private sealed record FakePrefTransFixture(
+        TempDirectory TempDir,
+        string FakePrefTransPath,
+        Mock<IPrefTransLauncher> Launcher,
+        Mock<IPathGrantService> PathGrantService,
+        SettingsTransferService Service) : IDisposable
+    {
+        public void Dispose() => TempDir.Dispose();
+    }
+
+    private static FakePrefTransFixture CreateServiceWithFakePrefTrans(
+        Mock<IPrefTransLauncher>? launcher = null,
+        Mock<IPathGrantService>? pathGrantService = null)
+    {
+        var tempDir = new TempDirectory("SettingsTransfer");
+        var fakePrefTrans = Path.Combine(tempDir.Path, "preftrans.exe");
+        File.WriteAllText(fakePrefTrans, "");
+
+        launcher ??= new Mock<IPrefTransLauncher>();
+        pathGrantService ??= new Mock<IPathGrantService>();
+
+        var log = new Mock<ILoggingService>();
+        var service = new SettingsTransferService(log.Object, launcher.Object, pathGrantService.Object)
+        {
+            BaseDirectory = tempDir.Path
+        };
+
+        return new FakePrefTransFixture(tempDir, fakePrefTrans, launcher, pathGrantService, service);
     }
 
     // --- ValidatePrefTransExists tests ---
@@ -38,11 +67,14 @@ public class SettingsTransferServiceTests
     [Fact]
     public void ValidatePrefTransExists_ReturnsFalseWhenMissing()
     {
+        using var tempDir = new TempDirectory("SettingsTransfer_Missing");
         var log = new Mock<ILoggingService>();
         var launcher = new Mock<IPrefTransLauncher>();
-        var permissionGrant = new Mock<IPermissionGrantService>();
-        var service = new SettingsTransferService(log.Object, launcher.Object, permissionGrant.Object,
-            baseDirectory: Path.GetTempPath());
+        var pathGrantService = new Mock<IPathGrantService>();
+        var service = new SettingsTransferService(log.Object, launcher.Object, pathGrantService.Object)
+        {
+            BaseDirectory = tempDir.Path
+        };
 
         var result = service.ValidatePrefTransExists(out _);
 
@@ -56,49 +88,121 @@ public class SettingsTransferServiceTests
     {
         // When the launcher returns failure, SettingsTransferService propagates it.
         _launcher.Setup(l => l.RunAndWait(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<LaunchCredentials>(), It.IsAny<int>(), It.IsAny<Action?>()))
+                It.IsAny<string>(), It.IsAny<int>(), It.IsAny<Action?>()))
             .Returns(new SettingsTransferResult(false, "File path contains characters that are not safe for command execution."));
 
-        using var tempDir = new TempDirectory();
-        var fakePrefTrans = Path.Combine(tempDir.Path, "preftrans.exe");
-        File.WriteAllText(fakePrefTrans, "");
+        using var fx = CreateServiceWithFakePrefTrans(_launcher);
 
-        var log = new Mock<ILoggingService>();
-        var permissionGrant = new Mock<IPermissionGrantService>();
-        var service = new SettingsTransferService(log.Object, _launcher.Object, permissionGrant.Object,
-            baseDirectory: tempDir.Path);
-
-        var result = service.ExportDesktopSettings(@"C:\temp\out&bad.json");
+        var result = fx.Service.ExportDesktopSettings(@"C:\temp\out&bad.json");
 
         Assert.False(result.Success);
         Assert.NotEmpty(result.Message);
     }
 
     [Fact]
-    public void Import_CurrentAccount_InvalidPath_LauncherReturnsFailure()
+    public void Import_LauncherReturnsFailure_PropagatesFailure()
     {
         // When the launcher returns failure, SettingsTransferService propagates it.
         _launcher.Setup(l => l.RunAndWait(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<LaunchCredentials>(), It.IsAny<int>(), It.IsAny<Action?>()))
+                It.IsAny<string>(), It.IsAny<int>(), It.IsAny<Action?>()))
             .Returns(new SettingsTransferResult(false, "File path contains characters that are not safe for command execution."));
 
-        using var tempDir = new TempDirectory();
-        var fakePrefTrans = Path.Combine(tempDir.Path, "preftrans.exe");
-        var settingsFile = Path.Combine(tempDir.Path, "settings&bad.json");
-        File.WriteAllText(fakePrefTrans, "");
+        using var fx = CreateServiceWithFakePrefTrans(_launcher);
+        var settingsFile = Path.Combine(fx.TempDir.Path, "settings&bad.json");
         File.WriteAllText(settingsFile, "{}");
 
-        var log = new Mock<ILoggingService>();
-        var permissionGrant = new Mock<IPermissionGrantService>();
-        var service = new SettingsTransferService(log.Object, _launcher.Object, permissionGrant.Object,
-            baseDirectory: tempDir.Path);
-
-        var result = service.Import(settingsFile,
-            new LaunchCredentials(null, null, null, LaunchTokenSource.CurrentProcess),
-            accountSid: "S-1-5-21-0-0-0-1000");
+        var result = fx.Service.Import(settingsFile, accountSid: "S-1-5-21-0-0-0-1000");
 
         Assert.False(result.Success);
         Assert.NotEmpty(result.Message);
+    }
+
+    // --- Export: preftrans process launch ---
+
+    [Fact]
+    public void ExportDesktopSettings_LauncherCalledWithExpectedArguments()
+    {
+        // Arrange
+        string? capturedPrefTrans = null;
+        string? capturedMode = null;
+        string? capturedFilePath = null;
+
+        var launcher = new Mock<IPrefTransLauncher>();
+        launcher.Setup(l => l.RunAndWait(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<int>(), It.IsAny<Action?>()))
+            .Callback<string, string, string, string, int, Action?>((exe, mode, file, sid, _, _) =>
+            {
+                capturedPrefTrans = exe;
+                capturedMode = mode;
+                capturedFilePath = file;
+            })
+            .Returns(new SettingsTransferResult(true, ""));
+
+        using var fx = CreateServiceWithFakePrefTrans(launcher);
+        var outputPath = Path.Combine(fx.TempDir.Path, "out.json");
+
+        // Act
+        var result = fx.Service.ExportDesktopSettings(outputPath);
+
+        // Assert: launcher called with correct exe path and output file
+        Assert.True(result.Success);
+        Assert.Equal(fx.FakePrefTransPath, capturedPrefTrans);
+        Assert.Equal("store", capturedMode, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(outputPath, capturedFilePath);
+    }
+
+    [Fact]
+    public void Import_LauncherSuccess_ReturnsSuccess()
+    {
+        // Arrange
+        var launcher = new Mock<IPrefTransLauncher>();
+        launcher.Setup(l => l.RunAndWait(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<int>(), It.IsAny<Action?>()))
+            .Returns(new SettingsTransferResult(true, ""));
+
+        using var fx = CreateServiceWithFakePrefTrans(launcher);
+        var settingsFile = Path.Combine(fx.TempDir.Path, "settings.json");
+        File.WriteAllText(settingsFile, "{}");
+
+        // Act
+        var result = fx.Service.Import(settingsFile, accountSid: "S-1-5-21-0-0-0-1000");
+
+        // Assert
+        Assert.True(result.Success);
+    }
+
+    [Fact]
+    public void Import_LauncherCalledWithLoadModeAndAccountSid()
+    {
+        // Verifies that Import passes command="load" and the accountSid to the preftrans launcher.
+        // Arrange
+        const string accountSid = "S-1-5-21-0-0-0-1000";
+        string? capturedMode = null;
+        string? capturedSid = null;
+
+        var launcher = new Mock<IPrefTransLauncher>();
+        launcher.Setup(l => l.RunAndWait(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<int>(), It.IsAny<Action?>()))
+            .Callback<string, string, string, string, int, Action?>((_, mode, _, sid, _, _) =>
+            {
+                capturedMode = mode;
+                capturedSid = sid;
+            })
+            .Returns(new SettingsTransferResult(true, ""));
+
+        using var fx = CreateServiceWithFakePrefTrans(launcher);
+        var settingsFile = Path.Combine(fx.TempDir.Path, "settings.json");
+        File.WriteAllText(settingsFile, "{}");
+
+        // Act
+        var result = fx.Service.Import(settingsFile, accountSid: accountSid);
+
+        // Assert: launcher called with "load" mode and the correct account SID
+        Assert.True(result.Success);
+        Assert.Equal("load", capturedMode, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal(accountSid, capturedSid, StringComparer.OrdinalIgnoreCase);
     }
 
     // --- Import (credentials path) file error ---
@@ -106,9 +210,7 @@ public class SettingsTransferServiceTests
     [Fact]
     public void Import_Credentials_NonexistentSourceFile_ReturnsFailure()
     {
-        using var password = new SecureString();
         var result = _service.Import(@"C:\nonexistent\no_such_file.json",
-            new LaunchCredentials(password, "DOMAIN", "user1"),
             accountSid: "S-1-5-21-0-0-0-1000");
 
         Assert.False(result.Success);
@@ -121,28 +223,18 @@ public class SettingsTransferServiceTests
     public void Import_Credentials_PermissionGrantApplied_DatabaseModifiedReturned()
     {
         // Arrange: create a real temp dir with a dummy preftrans.exe and settings file
-        using var tempDir = new TempDirectory();
-        var fakePrefTrans = Path.Combine(tempDir.Path, "preftrans.exe");
-        var settingsFile = Path.Combine(tempDir.Path, "settings.json");
-        File.WriteAllText(fakePrefTrans, "");
-        File.WriteAllText(settingsFile, "{}");
-
-        var log = new Mock<ILoggingService>();
-        var mockGrant = new Mock<IPermissionGrantService>();
+        var mockGrant = new Mock<IPathGrantService>();
         mockGrant.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(),
-                It.IsAny<Func<string, string, bool>?>()))
-            .Returns(new EnsureAccessResult(GrantAdded: true, DatabaseModified: true));
+                It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
+            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
 
-        var launcher = new Mock<IPrefTransLauncher>();
-        var service = new SettingsTransferService(log.Object, launcher.Object, mockGrant.Object,
-            baseDirectory: tempDir.Path);
-        using var password = new SecureString();
+        using var fx = CreateServiceWithFakePrefTrans(pathGrantService: mockGrant);
+        var settingsFile = Path.Combine(fx.TempDir.Path, "settings.json");
+        File.WriteAllText(settingsFile, "{}");
 
         // Act
-        var result = service.Import(settingsFile,
-            new LaunchCredentials(password, "DOMAIN", "user1"),
-            accountSid: "S-1-5-21-0-0-0-1000");
+        var result = fx.Service.Import(settingsFile, accountSid: "S-1-5-21-0-0-0-1000");
 
         // Assert: DatabaseModified reflects that grants were applied
         Assert.True(result.DatabaseModified);
@@ -152,29 +244,19 @@ public class SettingsTransferServiceTests
     public void Import_Credentials_EnsureAccessThrowsOce_ReturnsDeclinedResult()
     {
         // Arrange
-        using var tempDir = new TempDirectory();
-        var fakePrefTrans = Path.Combine(tempDir.Path, "preftrans.exe");
-        var settingsFile = Path.Combine(tempDir.Path, "settings.json");
-        File.WriteAllText(fakePrefTrans, "");
-        File.WriteAllText(settingsFile, "{}");
-
-        var log = new Mock<ILoggingService>();
-        var mockGrant = new Mock<IPermissionGrantService>();
+        var mockGrant = new Mock<IPathGrantService>();
         // Simulate EnsureAccess throwing OperationCanceledException (e.g. confirm callback cancelled)
         mockGrant.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(),
-                It.IsAny<Func<string, string, bool>?>()))
+                It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
             .Throws(new OperationCanceledException());
 
-        var launcher = new Mock<IPrefTransLauncher>();
-        var service = new SettingsTransferService(log.Object, launcher.Object, mockGrant.Object,
-            baseDirectory: tempDir.Path);
-        using var password = new SecureString();
+        using var fx = CreateServiceWithFakePrefTrans(pathGrantService: mockGrant);
+        var settingsFile = Path.Combine(fx.TempDir.Path, "settings.json");
+        File.WriteAllText(settingsFile, "{}");
 
         // Act
-        var result = service.Import(settingsFile,
-            new LaunchCredentials(password, "DOMAIN", "user1"),
-            accountSid: "S-1-5-21-0-0-0-1000");
+        var result = fx.Service.Import(settingsFile, accountSid: "S-1-5-21-0-0-0-1000");
 
         // Assert
         Assert.False(result.Success);
@@ -182,37 +264,27 @@ public class SettingsTransferServiceTests
     }
 
     [Fact]
-    public void Import_Credentials_EnsureExeDirectoryAccess_CalledForPrefTrans_EnsureAccess_CalledForSettingsFile()
+    public void Import_Credentials_EnsureAccessCalledForExeDirAndSettingsFile()
     {
         // Arrange
-        using var tempDir = new TempDirectory();
-        var fakePrefTrans = Path.Combine(tempDir.Path, "preftrans.exe");
-        var settingsFile = Path.Combine(tempDir.Path, "settings.json");
-        File.WriteAllText(fakePrefTrans, "");
+        var mockGrant = new Mock<IPathGrantService>();
+
+        using var fx = CreateServiceWithFakePrefTrans(pathGrantService: mockGrant);
+        var settingsFile = Path.Combine(fx.TempDir.Path, "settings.json");
         File.WriteAllText(settingsFile, "{}");
 
-        var log = new Mock<ILoggingService>();
-        var mockGrant = new Mock<IPermissionGrantService>();
-        mockGrant.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<FileSystemRights>(),
-                It.IsAny<Func<string, string, bool>?>()))
-            .Returns(new EnsureAccessResult());
-
-        var launcher = new Mock<IPrefTransLauncher>();
-        var service = new SettingsTransferService(log.Object, launcher.Object, mockGrant.Object,
-            baseDirectory: tempDir.Path);
-        using var password = new SecureString();
-
         // Act
-        service.Import(settingsFile,
-            new LaunchCredentials(password, "DOMAIN", "user1"),
-            accountSid: "S-1-5-21-0-0-0-1000");
+        fx.Service.Import(settingsFile, accountSid: "S-1-5-21-0-0-0-1000");
 
-        // Assert: EnsureExeDirectoryAccess for preftrans (self-contained, handles grant+traverse).
-        // EnsureAccess for the settings file (grant tracked internally via RunOnUiThread).
-        mockGrant.Verify(g => g.EnsureExeDirectoryAccess(fakePrefTrans, It.IsAny<string>(), It.IsAny<Func<string, string, bool>?>()), Times.Once);
-        mockGrant.Verify(g => g.EnsureAccess(settingsFile, It.IsAny<string>(),
+        // Assert: EnsureAccess called for the exe directory (inlined from EnsureExeDirectoryAccess)
+        // and for the settings file.
+        mockGrant.Verify(g => g.EnsureAccess(
+            It.IsAny<string>(), fx.TempDir.Path, // exe directory = BaseDirectory (where preftrans.exe lives)
+            FileSystemRights.ReadAndExecute,
+            It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()), Times.Once);
+        mockGrant.Verify(g => g.EnsureAccess(
+            It.IsAny<string>(), settingsFile,
             It.IsAny<FileSystemRights>(),
-            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+            It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()), Times.Once);
     }
 }

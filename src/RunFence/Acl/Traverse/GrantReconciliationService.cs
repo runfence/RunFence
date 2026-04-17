@@ -1,4 +1,5 @@
 using System.Security.Principal;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -16,7 +17,7 @@ namespace RunFence.Acl.Traverse;
 /// 2. <see cref="ReconcileChangedSids"/> — background thread, does filesystem ACL reads/writes only.
 /// 3. <see cref="ApplyReconciliationResult"/> — UI thread, updates database without concurrent access.
 ///
-/// Also provides <see cref="ReconcileIfGroupsChanged"/> for synchronous callers (startup, Refresh).
+/// Also provides <see cref="ReconcileIfGroupsChanged"/> for startup and UI refresh callers.
 ///
 /// Automated locations reconciled (per SID):
 ///   1. Logon script directory + ancestors — if {SID}_block_login.cmd exists in scripts dir
@@ -28,7 +29,9 @@ public class GrantReconciliationService(
     ILocalGroupMembershipService localGroupMembership,
     ILoggingService log,
     ISessionSaver sessionSaver,
-    IDatabaseProvider databaseProvider)
+    IDatabaseProvider databaseProvider,
+    Func<AncestorTraverseGranter> ancestorTraverseGranterFactory,
+    IInteractiveUserResolver interactiveUserResolver)
 {
     /// <summary>Result of a reconciliation pass over a set of changed SIDs.</summary>
     public record ReconciliationResult(
@@ -47,7 +50,8 @@ public class GrantReconciliationService(
 
         database.AccountGroupSnapshots ??= new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
-        // Note: Remove during foreach is safe on .NET Core 3+ Dictionary (verified, no InvalidOperationException).
+        // .NET Core 3+ allows removing from Dictionary<TKey,TValue> during enumeration via foreach —
+        // this does not throw InvalidOperationException unlike List<T> or older frameworks.
         foreach (var snapshot in database.AccountGroupSnapshots)
         {
             if (database.Accounts.All(x => x.Sid != snapshot.Key))
@@ -61,7 +65,7 @@ public class GrantReconciliationService(
             var sid = sid0;
 
             // Skip AppContainer SIDs — they have fixed group membership
-            if (sid.StartsWith("S-1-15-2-", StringComparison.OrdinalIgnoreCase))
+            if (AclHelper.IsContainerSid(sid))
                 continue;
 
             // Skip local groups — group membership snapshots don't apply to groups themselves
@@ -158,8 +162,9 @@ public class GrantReconciliationService(
     }
 
     /// <summary>
-    /// Synchronous wrapper for startup and UI refresh calls.
-    /// Detects changes, reconciles synchronously, and applies to the database.
+    /// Wrapper for startup and UI refresh calls.
+    /// Detects changes on the UI thread, reconciles filesystem ACLs on a background thread,
+    /// then applies results to the database on the UI thread.
     /// </summary>
     public async Task<bool> ReconcileIfGroupsChanged()
     {
@@ -168,8 +173,8 @@ public class GrantReconciliationService(
             return false;
 
         var database = databaseProvider.GetDatabase();
-        var accountGrants = database.Accounts.ToDictionary(a => a.Sid, a => a.Grants, StringComparer.OrdinalIgnoreCase);
-        var result = ReconcileChangedSids(changed, accountGrants);
+        var accountGrants = database.Accounts.ToDictionary(a => a.Sid, a => a.Grants.ToList(), StringComparer.OrdinalIgnoreCase);
+        var result = await Task.Run(() => ReconcileChangedSids(changed, accountGrants));
         ApplyReconciliationResult(result);
         return true;
     }
@@ -184,17 +189,16 @@ public class GrantReconciliationService(
         try
         {
             var identity = new SecurityIdentifier(sid);
-            var granter = new AncestorTraverseGranter(log, aclPermission);
 
             // 1. Logon script directory
-            ReconcileLogonScript(sid, identity, newGroups, granter, newTraverseEntries, removedTraversePaths, accountGrants);
+            ReconcileLogonScript(sid, identity, newGroups, newTraverseEntries, removedTraversePaths, accountGrants);
 
             // 2. App directory (unlock.cmd parent) — interactive user only
-            if (string.Equals(sid, SidResolutionHelper.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
-                ReconcileAppDirectory(sid, identity, newGroups, granter, newTraverseEntries, removedTraversePaths, accountGrants);
+            if (string.Equals(sid, interactiveUserResolver.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
+                ReconcileAppDirectory(sid, identity, newGroups, newTraverseEntries, removedTraversePaths, accountGrants);
 
             // 3. DragBridge temp root
-            ReconcileDragBridgeTempRoot(sid, identity, newGroups, granter, newTraverseEntries, removedTraversePaths, accountGrants);
+            ReconcileDragBridgeTempRoot(sid, identity, newGroups, newTraverseEntries, removedTraversePaths, accountGrants);
         }
         catch (Exception ex)
         {
@@ -202,8 +206,7 @@ public class GrantReconciliationService(
         }
     }
 
-    public void ReconcileLogonScript(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        AncestorTraverseGranter granter,
+    private void ReconcileLogonScript(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
         Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
         HashSet<string> removedTraversePaths,
         IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants = null)
@@ -211,12 +214,11 @@ public class GrantReconciliationService(
         var scriptsDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RunFence", "scripts");
         var scriptFile = Path.Combine(scriptsDir, $"{sid}_block_login.cmd");
-        ReconcileTraverseLocation(sid, identity, groupSids, granter, scriptsDir, scriptFile,
+        ReconcileTraverseLocation(sid, identity, groupSids, scriptsDir, scriptFile,
             newTraverseEntries, removedTraversePaths, accountGrants);
     }
 
-    public void ReconcileAppDirectory(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        AncestorTraverseGranter granter,
+    private void ReconcileAppDirectory(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
         Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
         HashSet<string> removedTraversePaths,
         IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants = null)
@@ -224,24 +226,23 @@ public class GrantReconciliationService(
         var appDir = Path.GetDirectoryName(Constants.UnlockCmdPath);
         if (string.IsNullOrEmpty(appDir))
             return;
-        ReconcileTraverseLocation(sid, identity, groupSids, granter, appDir, null,
+        ReconcileTraverseLocation(sid, identity, groupSids, appDir, null,
             newTraverseEntries, removedTraversePaths, accountGrants);
     }
 
-    public void ReconcileDragBridgeTempRoot(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        AncestorTraverseGranter granter,
+    private void ReconcileDragBridgeTempRoot(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
         Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
         HashSet<string> removedTraversePaths,
         IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants = null)
     {
         var tempRoot = Path.Combine(Constants.ProgramDataDir, Constants.DragBridgeTempDir);
-        ReconcileTraverseLocation(sid, identity, groupSids, granter, tempRoot, null,
+        ReconcileTraverseLocation(sid, identity, groupSids, tempRoot, null,
             newTraverseEntries, removedTraversePaths, accountGrants);
     }
 
     private void ReconcileTraverseLocation(
         string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        AncestorTraverseGranter granter, string dirPath, string? prerequisiteFilePath,
+        string dirPath, string? prerequisiteFilePath,
         Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
         HashSet<string> removedTraversePaths,
         IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
@@ -251,6 +252,7 @@ public class GrantReconciliationService(
         if (prerequisiteFilePath != null && !File.Exists(prerequisiteFilePath))
             return;
 
+        var granter = ancestorTraverseGranterFactory();
         var (appliedPaths, anyAceAdded) = granter.GrantOnPathAndAncestors(dirPath, identity, groupSids: groupSids);
         if (anyAceAdded)
         {

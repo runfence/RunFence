@@ -1,14 +1,10 @@
-using RunFence.Infrastructure;
-
 namespace RunFence.Account.UI;
 
 /// <summary>
 /// Handles container-specific context menu actions (create, edit, delete container; copy/open profile;
 /// launch folder browser; copy SID) for the accounts grid.
 /// </summary>
-public class ContainerContextMenuHandler(
-    AccountContainerOrchestrator containerHandler,
-    ISessionProvider sessionProvider)
+public class ContainerContextMenuHandler(AccountContainerOrchestrator containerHandler)
 {
     private DataGridView _grid = null!;
 
@@ -21,23 +17,17 @@ public class ContainerContextMenuHandler(
 
     public void CreateContainer()
     {
-        var session = sessionProvider.GetSession();
-        containerHandler.CreateContainer(session.Database, session.CredentialStore, session.PinDerivedKey,
-            _grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
+        containerHandler.CreateContainer(_grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
     }
 
     public void EditContainer(ContainerRow containerRow)
     {
-        var session = sessionProvider.GetSession();
-        containerHandler.EditContainer(containerRow, session.Database, session.CredentialStore, session.PinDerivedKey,
-            _grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
+        containerHandler.EditContainer(containerRow, _grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
     }
 
     public void DeleteContainer(ContainerRow containerRow)
     {
-        var session = sessionProvider.GetSession();
-        containerHandler.DeleteContainer(containerRow, session.Database, session.CredentialStore, session.PinDerivedKey,
-            () => DataChangedAndRefresh?.Invoke());
+        containerHandler.DeleteContainer(containerRow, () => DataChangedAndRefresh?.Invoke());
     }
 
     public void CopyContainerProfilePath(ContainerRow containerRow)
@@ -47,13 +37,7 @@ public class ContainerContextMenuHandler(
 
     public void OpenContainerProfileFolder(ContainerRow containerRow)
     {
-        AccountContainerOrchestrator.OpenContainerProfileFolder(containerRow);
-    }
-
-    public void OpenContainerFolderBrowser(ContainerRow containerRow)
-    {
-        var session = sessionProvider.GetSession();
-        containerHandler.LaunchFolderBrowser(containerRow, session.Database.Settings, session.Database, session.CredentialStore, session.PinDerivedKey);
+        containerHandler.OpenContainerProfileFolder(containerRow);
     }
 
     public void OpenAclManager(ContainerRow containerRow)

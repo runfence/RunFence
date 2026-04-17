@@ -7,11 +7,11 @@ using RunFence.Licensing;
 
 namespace RunFence.Persistence.UI;
 
+/// <remarks>Deps above threshold: Load and Unload flows share 7 of 9 non-optional deps (<c>_sessionProvider</c>, <c>_appConfigService</c>, <c>_enforcementHandler</c>, <c>_handlerSyncHelper</c>, <c>_quickAccessPinService</c>, <c>_log</c>, <c>_mismatchKeyResolver</c>). Splitting load/unload into separate classes duplicates these deps — strictly worse than 11 in one place. Reviewed 2026-04-08.</remarks>
 public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposable
 {
     private readonly ISessionProvider _sessionProvider;
     private readonly IAppConfigService _appConfigService;
-    private readonly IConfigRepository _configRepository;
     private readonly ILoggingService _log;
     private readonly ILicenseService _licenseService;
     private readonly IQuickAccessPinService _quickAccessPinService;
@@ -20,6 +20,7 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
     private readonly ConfigEnforcementOrchestrator _enforcementHandler;
     private readonly ConfigMismatchKeyResolver _mismatchKeyResolver;
     private readonly HandlerSyncHelper _handlerSyncHelper;
+    private readonly IHandlerMappingService _handlerMappingService;
 
     public event Action? DataRefreshRequested;
     public event Action? TrayUpdateRequested;
@@ -27,20 +28,18 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
     public ConfigManagementOrchestrator(
         ISessionProvider sessionProvider,
         IAppConfigService appConfigService,
-        IConfigRepository configRepository,
         ILoggingService log,
         ConfigEnforcementOrchestrator enforcementHandler,
         ConfigMismatchKeyResolver mismatchKeyResolver,
         HandlerSyncHelper handlerSyncHelper,
+        IHandlerMappingService handlerMappingService,
         ILicenseService licenseService,
         IQuickAccessPinService quickAccessPinService,
-        ApplicationState? applicationState = null,
-        IUiThreadInvoker? uiThreadInvoker = null,
+        ConfigAvailabilityMonitor? availabilityMonitor = null,
         Action<IReadOnlyList<string>>? onShortcutConflicts = null)
     {
         _sessionProvider = sessionProvider;
         _appConfigService = appConfigService;
-        _configRepository = configRepository;
         _log = log;
         _licenseService = licenseService;
         _quickAccessPinService = quickAccessPinService;
@@ -48,10 +47,10 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
         _enforcementHandler = enforcementHandler;
         _mismatchKeyResolver = mismatchKeyResolver;
         _handlerSyncHelper = handlerSyncHelper;
-        if (applicationState != null && uiThreadInvoker != null)
-            _availabilityMonitor = new ConfigAvailabilityMonitor(
-                appConfigService, log, AutoUnloadUnavailableConfigs,
-                applicationState, uiThreadInvoker, applicationState.EnforcementGuard);
+        _handlerMappingService = handlerMappingService;
+        _availabilityMonitor = availabilityMonitor;
+        if (_availabilityMonitor != null)
+            _availabilityMonitor.AutoUnloadRequired += (_, unavailable) => AutoUnloadUnavailableConfigs(unavailable);
     }
 
     public (bool success, string? errorMessage) LoadApps(string configPath)
@@ -164,7 +163,7 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
             }
 
             if (loadedApps != null)
-                RollbackFailedLoad(configPath, loadedApps);
+                RollbackFailedLoad(configPath);
             return (false, "Cancelled.");
         }
         catch (Exception ex)
@@ -176,28 +175,34 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
             }
 
             if (loadedApps != null)
-                RollbackFailedLoad(configPath, loadedApps);
+                RollbackFailedLoad(configPath);
             _log.Error($"Failed to load config from {configPath}", ex);
             return (false, ex.Message);
         }
     }
 
-    private void RollbackFailedLoad(string configPath, IReadOnlyList<AppEntry> loadedApps)
+    private void RollbackFailedLoad(string configPath)
     {
         var session = _sessionProvider.GetSession();
         try
         {
-            // Mirror UnloadApps order: remove from database first so RevertApps sees correct remainingApps
-            _appConfigService.UnloadConfig(configPath, session.Database);
-            _enforcementHandler.RevertApps(loadedApps);
-            _enforcementHandler.RecomputeAllAncestorAcls(session.Database.Apps);
-            _handlerSyncHelper.Sync();
+            SyncRemovedHandlerKeys(session.Database, () =>
+            {
+                UnloadAndRevertConfig(configPath, session.Database);
+                _enforcementHandler.RecomputeAllAncestorAcls(session.Database.Apps);
+            });
             _log.Info($"Rolled back failed load of config: {configPath}");
         }
         catch (Exception ex)
         {
             _log.Error($"Rollback failed for config: {configPath}", ex);
         }
+    }
+
+    private void UnloadAndRevertConfig(string configPath, AppDatabase database)
+    {
+        var removed = _appConfigService.UnloadConfig(configPath, database);
+        _enforcementHandler.RevertApps(removed);
     }
 
     public IReadOnlyList<string> GetLoadedConfigPaths()
@@ -210,14 +215,11 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
         {
             var snapshotBefore = SnapshotAllowGrantPaths(session.Database);
 
-            var removed = _appConfigService.UnloadConfig(configPath, session.Database);
-
-            _enforcementHandler.RevertApps(removed);
-
-            _enforcementHandler.RecomputeAllAncestorAcls(session.Database.Apps);
-
-            // Sync handler registrations — unloaded config's associations are gone from the effective set
-            _handlerSyncHelper.Sync();
+            SyncRemovedHandlerKeys(session.Database, () =>
+            {
+                UnloadAndRevertConfig(configPath, session.Database);
+                _enforcementHandler.RecomputeAllAncestorAcls(session.Database.Apps);
+            });
 
             DataRefreshRequested?.Invoke();
             TrayUpdateRequested?.Invoke();
@@ -233,35 +235,8 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
         }
     }
 
-    public void SaveSecurityFindingsHash()
-    {
-        var session = _sessionProvider.GetSession();
-        using var scope = session.PinDerivedKey.Unprotect();
-        _configRepository.SaveConfig(session.Database, scope.Data, session.CredentialStore.ArgonSalt);
-    }
-
-    public void SaveConfigAfterEnforcement(AppDatabase database)
-    {
-        var session = _sessionProvider.GetSession();
-        using var scope = session.PinDerivedKey.Unprotect();
-        _appConfigService.SaveAllConfigs(database, scope.Data, session.CredentialStore.ArgonSalt);
-    }
-
-    public void CleanupAllApps(bool isEnforcementInProgress, bool isOperationInProgress)
-    {
-        var result = _enforcementHandler.CleanupAllApps(isEnforcementInProgress, isOperationInProgress);
-        if (result == CleanupAllAppsResult.OperationInProgress)
-        {
-            MessageBox.Show(
-                "An operation is in progress. Please wait for it to complete before cleaning up.",
-                "Operation In Progress",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            return;
-        }
-
-        Application.Exit();
-    }
+    public CleanupAllAppsResult CleanupAllApps(bool isEnforcementInProgress, bool isOperationInProgress)
+        => _enforcementHandler.CleanupAllApps(isEnforcementInProgress, isOperationInProgress);
 
     /// <summary>
     /// Sets the guard owner control used to disable UI during enforcement operations.
@@ -269,7 +244,7 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
     /// </summary>
     public void SetGuardOwner(Control guardOwner)
     {
-        _mismatchKeyResolver.SetGuardOwner(guardOwner);
+        _mismatchKeyResolver.Initialize(guardOwner);
     }
 
     public void ScheduleAvailabilityCheck()
@@ -282,17 +257,17 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
         {
             var snapshotBefore = SnapshotAllowGrantPaths(session.Database);
 
-            foreach (var path in unavailable)
+            SyncRemovedHandlerKeys(session.Database, () =>
             {
-                var removed = _appConfigService.UnloadConfig(path, session.Database);
-                _enforcementHandler.RevertApps(removed);
-                _log.Info($"Auto-unloaded config: {path}");
-            }
+                foreach (var path in unavailable)
+                {
+                    UnloadAndRevertConfig(path, session.Database);
+                    _log.Info($"Auto-unloaded config: {path}");
+                }
 
-            UnpinRemovedGrantPaths(session.Database, snapshotBefore);
-
-            _enforcementHandler.RecomputeAllAncestorAcls(session.Database.Apps);
-            _handlerSyncHelper.Sync();
+                UnpinRemovedGrantPaths(session.Database, snapshotBefore);
+                _enforcementHandler.RecomputeAllAncestorAcls(session.Database.Apps);
+            });
         }
         catch (Exception ex)
         {
@@ -301,6 +276,21 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IDisposabl
 
         DataRefreshRequested?.Invoke();
         TrayUpdateRequested?.Invoke();
+    }
+
+    private void SyncRemovedHandlerKeys(AppDatabase database, Action unloadAction)
+    {
+        var previousKeys = _handlerMappingService.GetEffectiveHandlerMappings(database).Keys
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        unloadAction();
+
+        var removedKeys = previousKeys
+            .Except(_handlerMappingService.GetEffectiveHandlerMappings(database).Keys,
+                StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        _handlerSyncHelper.Sync(removedKeys);
     }
 
     private static Dictionary<string, HashSet<string>> SnapshotAllowGrantPaths(AppDatabase database)

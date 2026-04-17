@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Moq;
 using RunFence.Acl;
+using RunFence.Acl.Permissions;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -21,14 +22,15 @@ public class AclManagerExportImportTests
 
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IAppConfigService> _appConfig = new();
-    private readonly Mock<IGrantedPathAclService> _aclService = new();
+    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IAclPermissionService> _aclPermission = new();
 
     private AclManagerExportImport CreateImport(AppDatabase? db = null, AclManagerPendingChanges? pending = null)
     {
         db ??= new AppDatabase();
         pending ??= new AclManagerPendingChanges();
         var dbProvider = new LambdaDatabaseProvider(() => db);
-        var exportImport = new AclManagerExportImport(_aclService.Object, _log.Object, dbProvider);
+        var exportImport = new AclManagerExportImport(_pathGrantService.Object, _aclPermission.Object, _log.Object, dbProvider);
         exportImport.Initialize(pending, TestSid, isContainer: false, owner: new NullWin32Window());
         return exportImport;
     }

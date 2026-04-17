@@ -1,17 +1,114 @@
 using System.Text;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
 
 namespace RunFence.Launch;
 
 /// <summary>
 /// Static helpers for process launch argument/working-directory resolution, URL validation,
-/// and cmd.exe metacharacter escaping. Shared between <see cref="ProcessLaunchService"/>
-/// and <see cref="AppContainerService"/>.
+/// cmd.exe metacharacter escaping, and target wrapping. Shared between callers in the launch pipeline.
 /// </summary>
 public static class ProcessLaunchHelper
 {
+    private static readonly HashSet<string> ScriptExtensions = new(StringComparer.OrdinalIgnoreCase)
+        { ".cmd", ".bat" };
+
+    private static readonly HashSet<string> ExeExtensions = new(StringComparer.OrdinalIgnoreCase)
+        { ".exe", ".com", ".scr", ".pif", ".cpl" };
+
+    /// <summary>
+    /// Wraps the target for launch when the target is not a native executable.
+    /// Scripts (.cmd, .bat) are wrapped with <c>cmd.exe /c</c>; other non-exe types are wrapped
+    /// with <c>rundll32.exe shell32.dll,ShellExec_RunDLL</c>. Native executables are returned as-is.
+    /// </summary>
+    /// <returns>
+    /// The (possibly wrapped) target and a flag indicating whether the launched process result
+    /// should be discarded — true when the target was wrapped with ShellExec_RunDLL (non-exe,
+    /// non-script files), false for native executables and scripts.
+    /// </returns>
+    public static (ProcessLaunchTarget Target, bool IsWrapped) WrapTargetForLaunch(ProcessLaunchTarget target)
+    {
+        var ext = Path.GetExtension(target.ExePath);
+        var isExe = ExeExtensions.Contains(ext);
+        if (isExe)
+            return (target, false);
+
+        var filePath = target.ExePath;
+
+        var workingDirectory = string.IsNullOrEmpty(target.WorkingDirectory)
+            ? Path.GetDirectoryName(filePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.Windows)
+            : target.WorkingDirectory;
+
+        if (ScriptExtensions.Contains(ext))
+        {
+            if (!PathHelper.IsPathSafeForCmd(filePath))
+                throw new InvalidOperationException("File path contains characters unsafe for cmd.exe execution.");
+
+            string argsString;
+            if (string.IsNullOrEmpty(target.Arguments))
+                argsString = "";
+            else
+            {
+                if (PathHelper.ContainsCmdUnescapableChars(target.Arguments))
+                    throw new InvalidOperationException("Arguments contain characters unsafe for cmd.exe execution.");
+                argsString = " " + EscapeCmdMetacharacters(target.Arguments);
+            }
+
+            return (new ProcessLaunchTarget(
+                ExePath: "cmd.exe",
+                Arguments: $"/c \"{filePath}\"{argsString}",
+                HideWindow: target.HideWindow,
+                WorkingDirectory: workingDirectory,
+                EnvironmentVariables: target.EnvironmentVariables
+            ), false);
+        }
+
+        if (string.Equals(ext, ".ps1", StringComparison.OrdinalIgnoreCase))
+        {
+            // PowerShell is launched directly via CreateProcess — not through cmd.exe.
+            // Arguments are parsed by PowerShell's own parser; cmd.exe escaping/validation must not be applied.
+            var argsString = string.IsNullOrEmpty(target.Arguments) ? "" : " " + target.Arguments;
+
+            return (new ProcessLaunchTarget(
+                ExePath: "powershell.exe",
+                Arguments: $"-ExecutionPolicy Bypass -File \"{filePath}\"{argsString}",
+                HideWindow: target.HideWindow,
+                WorkingDirectory: workingDirectory,
+                EnvironmentVariables: target.EnvironmentVariables
+            ), false);
+        }
+
+        // Non-exe, non-script: use rundll32 shell32.dll,ShellExec_RunDLL.
+        // Calls ShellExecuteEx internally — no file open, so locked files work fine.
+        // lpCmdLine is passed verbatim as lpFile; no quoting needed or supported.
+        return (new ProcessLaunchTarget(
+            ExePath: "rundll32.exe",
+            Arguments: "shell32.dll,ShellExec_RunDLL " + filePath,
+            WorkingDirectory: workingDirectory,
+            EnvironmentVariables: target.EnvironmentVariables
+        ), true);
+    }
+
+    /// <summary>
+    /// Validates the URL scheme and returns a <see cref="ProcessLaunchTarget"/> that launches the
+    /// URL via <c>rundll32.exe url.dll,FileProtocolHandler</c>.
+    /// Throws <see cref="InvalidOperationException"/> when the scheme is blocked or the URL is malformed.
+    /// </summary>
+    public static ProcessLaunchTarget BuildUrlLaunchTarget(string url)
+    {
+        if (!ValidateUrlScheme(url, out var error))
+            throw new InvalidOperationException($"URL scheme blocked: {error}");
+
+        // Use rundll32.exe url.dll,FileProtocolHandler instead of cmd.exe /c start.
+        // rundll32 passes everything after the entry point verbatim to ShellExecuteEx —
+        // no shell expansion, so %, &, spaces, etc. are all safe without escaping.
+        return new ProcessLaunchTarget
+        (
+            ExePath: "rundll32.exe",
+            Arguments: "url.dll,FileProtocolHandler " + url
+        );
+    }
+
     /// <summary>
     /// Returns the raw argument string to use for a launch.
     /// <para>
@@ -28,14 +125,14 @@ public static class ProcessLaunchHelper
     /// When no launcher arguments are passed, <see cref="AppEntry.DefaultArguments"/> is returned as-is.
     /// </para>
     /// </summary>
-    public static string? DetermineArguments(AppEntry app, string? launcherArguments)
+    public static string? DetermineArguments(AppEntry app, string? launcherArguments, string? associationArgsTemplate = null)
     {
         if (!app.AllowPassingArguments)
             return string.IsNullOrEmpty(app.DefaultArguments) ? null : app.DefaultArguments;
 
         if (!string.IsNullOrEmpty(launcherArguments))
         {
-            var template = app.ArgumentsTemplate;
+            var template = associationArgsTemplate ?? app.ArgumentsTemplate;
             if (!string.IsNullOrEmpty(template))
             {
                 if (template.Contains("%1"))
@@ -133,13 +230,13 @@ public static class ProcessLaunchHelper
         var colonIndex = url.IndexOf(':');
         var scheme = url[..colonIndex].ToLowerInvariant();
 
-        if (Constants.BlockedUrlSchemes.Any(blocked => scheme == blocked))
+        if (Constants.BlockedUrlSchemes.Contains(scheme))
         {
             error = $"URL scheme '{scheme}' is not allowed for security reasons.";
             return false;
         }
 
-        if (HasUnescapableCmdCharacters(url))
+        if (HasUnsafeUrlLaunchCharacters(url))
         {
             error = "URL contains characters that are unsafe for command execution.";
             return false;
@@ -166,29 +263,73 @@ public static class ProcessLaunchHelper
         return sb.ToString();
     }
 
-    private static bool HasUnescapableCmdCharacters(string url)
+    private static bool HasUnsafeUrlLaunchCharacters(string url)
     {
         foreach (var c in url)
         {
-            switch (c)
-            {
-                // Double quotes cannot be safely escaped for cmd.exe /c
-                case '"':
-                // Percent signs trigger environment variable expansion; ^% does not
-                // prevent expansion in cmd.exe /c, so there is no safe escape
-                case '%':
-                // Spaces cannot be reliably escaped for the 'start' built-in:
-                // ^<space> prevents cmd.exe command separation but start still
-                // splits on spaces when parsing its own arguments
-                case ' ':
-                    return true;
-            }
+            // Double quotes break command-line argument boundaries for any process
+            if (c == '"')
+                return true;
 
-            // Control characters (including \r, \n, \0) can break command parsing
+            // Control characters (including \r, \n, \0) break command-line parsing
             if (c <= 0x1F || c == 0x7F)
                 return true;
         }
 
         return false;
+    }
+
+    public static string BuildCommandLine(ProcessLaunchTarget psi)
+    {
+        var sb = new StringBuilder();
+        AppendQuotedArg(sb, psi.ExePath);
+        if (!string.IsNullOrEmpty(psi.Arguments))
+        {
+            sb.Append(' ');
+            sb.Append(psi.Arguments);
+        }
+
+        return sb.ToString();
+    }
+
+    public static void AppendQuotedArg(StringBuilder sb, string arg)
+    {
+        if (arg.Length > 0 && !arg.Contains(' ') && !arg.Contains('"') && !arg.Contains('\t'))
+        {
+            sb.Append(arg);
+            return;
+        }
+
+        // CommandLineToArgvW-compatible quoting: handle backslash sequences before quotes
+        sb.Append('"');
+        var backslashes = 0;
+        foreach (var c in arg)
+        {
+            switch (c)
+            {
+                case '\\':
+                    backslashes++;
+                    break;
+                case '"':
+                    sb.Append('\\', backslashes * 2 + 1);
+                    sb.Append('"');
+                    backslashes = 0;
+                    break;
+                default:
+                {
+                    if (backslashes > 0)
+                    {
+                        sb.Append('\\', backslashes);
+                        backslashes = 0;
+                    }
+
+                    sb.Append(c);
+                    break;
+                }
+            }
+        }
+
+        sb.Append('\\', backslashes * 2);
+        sb.Append('"');
     }
 }

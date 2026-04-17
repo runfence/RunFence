@@ -60,8 +60,8 @@ interfering with the rest of the session.
 When launching an app under an admin account, RunFence can strip the elevated
 privileges from the process token — the app runs as admin-group member but without
 active admin rights. Useful when an app requires an admin account but should not have
-full administrative power. Note: Administrators group membership cannot be removed, only
-the active elevation.
+full administrative power. Note: this is still not secure, the app can use well-known UAC 
+bypass techniques to elevate from this state. 
 
 ### Per-App Directory ACLs
 Lock or grant access to an app's own directory at the OS level:
@@ -328,6 +328,12 @@ Place files in a dedicated shared folder and use the Account ACL Manager to gran
 Explorer cannot run as a different Windows account in the same session. The Folder Browser button opens a file dialog under the specified account for full folder navigation. In options you can replace folder browser with your favorite file manager e.g. Total Commander.
 
 Note: if you open Explorer window (not file dialog) from inside an isolated account, e.g. from your download manager, the window will be opened under your interactive user account - not the isolated account. Everything you launch from Explorer window will be launched under your interactive account.
+
+**Can an isolated app interact with other accounts' processes?**
+
+Any normal app (non low-integrity/app-container) can see processes, their network connections and open windows - even belonging to other accounts. What it cannot do is writing their RAM or injecting code.
+
+RunFence sets up a protection for the apps it launches to prevent other account processes from reading their RAM. Though, apps launched under your interactive user account outside RunFence don't have such protection. So isolated apps are protected from reading each other's RAM but they can still read RAM of non-isolated apps; non-isolated apps can read AppContainer RAM but can't read other accounts apps RAM.
 
 **Can an isolated app capture keyboard input from my desktop?**
 

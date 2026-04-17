@@ -9,9 +9,9 @@ public partial class BlockedConnectionsDialog : Form
 {
     private readonly IBlockedConnectionReader _reader;
     private readonly IDnsResolver _dnsResolver;
+    private readonly BlockedConnectionAggregator _aggregator;
     private readonly IReadOnlyList<FirewallAllowlistEntry> _existingAllowlist;
     private readonly bool _forceEnableAuditLogging;
-    private readonly BlockedConnectionAggregator _aggregator = new();
     private List<BlockedConnectionRow> _rows = new();
     private readonly ConcurrentDictionary<string, IReadOnlyList<string>> _reverseDnsMap = new(StringComparer.OrdinalIgnoreCase);
     private readonly GridSortHelper _sortHelper = new();
@@ -19,20 +19,20 @@ public partial class BlockedConnectionsDialog : Form
     public List<FirewallAllowlistEntry> SelectedEntries { get; private set; } = new();
 
     public BlockedConnectionsDialog(
-        string displayName,
         IBlockedConnectionReader reader,
         IDnsResolver dnsResolver,
+        BlockedConnectionAggregator aggregator,
         IReadOnlyList<FirewallAllowlistEntry> existingAllowlist,
         bool enableAuditLogging = false)
     {
         _reader = reader;
         _dnsResolver = dnsResolver;
+        _aggregator = aggregator;
         _existingAllowlist = existingAllowlist;
         _forceEnableAuditLogging = enableAuditLogging;
 
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
-        Text = $"Blocked Connections \u2014 {displayName}";
         _sortHelper.EnableThreeStateSorting(_grid, PopulateGrid);
     }
 
@@ -66,7 +66,7 @@ public partial class BlockedConnectionsDialog : Form
             var connections = await Task.Run(() => _reader.ReadBlockedConnections(TimeSpan.FromHours(24)));
             _rows = _aggregator.AggregateByAddress(connections);
             _reverseDnsMap.Clear();
-            _rows = _rows.OrderByDescending(r => r.LastSeen).ToList();
+            // AggregateByAddress already sorts by LastSeen descending — no secondary sort needed.
             PopulateGrid();
             _ = ResolveDnsAsync();
         }

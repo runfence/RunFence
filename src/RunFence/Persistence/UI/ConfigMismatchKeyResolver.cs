@@ -14,11 +14,15 @@ public class ConfigMismatchKeyResolver(
     IPinService pinService,
     IDatabaseService databaseService,
     ISecureDesktopRunner secureDesktop,
-    ApplicationState? applicationState)
+    OperationGuard enforcementGuard)
 {
     private Control? _guardOwner;
 
-    public void SetGuardOwner(Control guardOwner)
+    /// <summary>
+    /// Provides the UI control used to disable the UI during PIN entry.
+    /// Call after the host form is created to complete wiring.
+    /// </summary>
+    public void Initialize(Control guardOwner)
     {
         _guardOwner = guardOwner;
     }
@@ -38,11 +42,10 @@ public class ConfigMismatchKeyResolver(
         byte[]? mismatchKey = null;
         DialogResult pinResult = DialogResult.Cancel;
 
-        var guard = applicationState?.EnforcementGuard;
-        if (guard != null && _guardOwner != null)
-            guard.Begin(_guardOwner);
+        if (_guardOwner != null)
+            enforcementGuard.Begin(_guardOwner);
         else
-            guard?.Begin();
+            enforcementGuard.Begin();
         try
         {
             secureDesktop.Run(() =>
@@ -70,10 +73,10 @@ public class ConfigMismatchKeyResolver(
         }
         finally
         {
-            if (guard != null && _guardOwner != null)
-                guard.End(_guardOwner);
+            if (_guardOwner != null)
+                enforcementGuard.End(_guardOwner);
             else
-                guard?.End();
+                enforcementGuard.End();
         }
 
         if (pinResult != DialogResult.OK)

@@ -149,4 +149,32 @@ public class GroupFilterHelperTests
         Assert.DoesNotContain(result, g => g.Username == "Device Owners");
         Assert.Contains(result, g => g.Username == "Developers");
     }
+
+    [Fact]
+    public void FilterForEditDialog_SortsUsersFirst_AdministratorsSecond_ThenAlphabetical()
+    {
+        // R2_TL8: FilterForEditDialog must apply the same sort order as FilterForGroupsPanel
+        var groups = new[]
+        {
+            Group("Zebra", "S-1-5-21-1234-9999"),
+            Group("Administrators", GroupFilterHelper.AdministratorsSid),
+            Group("Alpha", "S-1-5-21-1234-1001"),
+            Group("Users", GroupFilterHelper.UsersSid),
+        };
+        var currentGroupSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            GroupFilterHelper.UsersSid,
+            GroupFilterHelper.AdministratorsSid,
+            "S-1-5-21-1234-9999",
+            "S-1-5-21-1234-1001",
+        };
+        var neverFilteredNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var result = GroupFilterHelper.FilterForEditDialog(groups, currentGroupSids, neverFilteredNames).ToList();
+
+        Assert.Equal("Users", result[0].Username);
+        Assert.Equal("Administrators", result[1].Username);
+        Assert.Equal("Alpha", result[2].Username);
+        Assert.Equal("Zebra", result[3].Username);
+    }
 }

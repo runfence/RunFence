@@ -1,14 +1,16 @@
+using RunFence.Core.Models;
+
 namespace RunFence.Wizard.UI.Forms.Steps;
 
 /// <summary>
 /// Wizard step for choosing between running an untrusted app in an AppContainer or an isolated account.
 /// When account is selected, shows Low Integrity and ephemeral options.
-/// Raises <see cref="SelectionChanged"/> so <c>WizardDialog</c> can dynamically insert the appropriate
+/// Uses <see cref="SetBranchStepsProvider"/> so <c>WizardDialog</c> can dynamically insert the appropriate
 /// next step (<see cref="ContainerCapabilitiesStep"/> for container, <see cref="FirewallOptionsStep"/> for account).
 /// </summary>
 public class ContainerOrAccountStep : WizardStepPage
 {
-    private readonly Action<bool, bool, bool> _setOptions;
+    private readonly Action<bool, PrivilegeLevel, bool> _setOptions;
 
     private RadioButton _accountRadio = null!;
     private RadioButton _containerRadio = null!;
@@ -17,13 +19,7 @@ public class ContainerOrAccountStep : WizardStepPage
     private Label _accountDescLabel = null!;
     private Label _containerDescLabel = null!;
 
-    /// <summary>
-    /// Raised when the user switches between account and container mode.
-    /// Parameter is <c>true</c> when container mode is selected.
-    /// </summary>
-    public event Action<bool>? SelectionChanged;
-
-    public ContainerOrAccountStep(Action<bool, bool, bool> setOptions)
+    public ContainerOrAccountStep(Action<bool, PrivilegeLevel, bool> setOptions)
     {
         _setOptions = setOptions;
         BuildContent();
@@ -39,23 +35,24 @@ public class ContainerOrAccountStep : WizardStepPage
     public override void Collect()
     {
         var useContainer = _containerRadio.Checked;
-        var useLowIntegrity = !useContainer && _lowIntegrityCheckBox.Checked;
+        var privilegeLevel = !useContainer && _lowIntegrityCheckBox.Checked
+            ? PrivilegeLevel.LowIntegrity
+            : PrivilegeLevel.Basic;
         var isEphemeral = _ephemeralCheckBox.Checked;
-        _setOptions(useContainer, useLowIntegrity, isEphemeral);
+        _setOptions(useContainer, privilegeLevel, isEphemeral);
     }
 
     private void BuildContent()
     {
         SuspendLayout();
         Padding = new Padding(8);
-        AutoSize = true;
 
         _accountRadio = new RadioButton
         {
             Text = "Isolated account (without Users group)",
             Font = new Font("Segoe UI", 10),
             AutoSize = true,
-            Location = new Point(0, 0),
+            Dock = DockStyle.Top,
             Checked = true
         };
         _accountRadio.CheckedChanged += OnRadioChanged;
@@ -67,17 +64,18 @@ public class ContainerOrAccountStep : WizardStepPage
             AutoSize = false,
             Font = new Font("Segoe UI", 9f),
             ForeColor = SystemColors.GrayText,
-            Location = new Point(20, 22),
-            Width = 500,
-            Height = 36
+            Dock = DockStyle.Top,
+            Padding = new Padding(20, 0, 0, 8)
         };
+        TrackWrappingLabel(_accountDescLabel);
 
         _lowIntegrityCheckBox = new CheckBox
         {
             Text = "Run at Low Integrity Level",
             Font = new Font("Segoe UI", 9.5f),
             AutoSize = true,
-            Location = new Point(20, 62)
+            Dock = DockStyle.Top,
+            Padding = new Padding(20, 0, 0, 8)
         };
 
         _containerRadio = new RadioButton
@@ -85,7 +83,8 @@ public class ContainerOrAccountStep : WizardStepPage
             Text = "AppContainer (sandboxed)",
             Font = new Font("Segoe UI", 10),
             AutoSize = true,
-            Location = new Point(0, 92)
+            Dock = DockStyle.Top,
+            Padding = new Padding(0, 8, 0, 0)
         };
         _containerRadio.CheckedChanged += OnRadioChanged;
 
@@ -96,20 +95,27 @@ public class ContainerOrAccountStep : WizardStepPage
             AutoSize = false,
             Font = new Font("Segoe UI", 9f),
             ForeColor = SystemColors.GrayText,
-            Location = new Point(20, 114),
-            Width = 500,
-            Height = 36
+            Dock = DockStyle.Top,
+            Padding = new Padding(20, 0, 0, 8)
         };
+        TrackWrappingLabel(_containerDescLabel);
 
         _ephemeralCheckBox = new CheckBox
         {
             Text = "Ephemeral account (auto-deleted 24 hours after creation)",
             Font = new Font("Segoe UI", 9.5f),
             AutoSize = true,
-            Location = new Point(0, 158)
+            Dock = DockStyle.Top,
+            Padding = new Padding(0, 8, 0, 0)
         };
 
-        Controls.AddRange(_accountRadio, _accountDescLabel, _lowIntegrityCheckBox, _containerRadio, _containerDescLabel, _ephemeralCheckBox);
+        // Add in reverse order so Dock=Top stacks top-to-bottom
+        Controls.Add(_ephemeralCheckBox);
+        Controls.Add(_containerDescLabel);
+        Controls.Add(_containerRadio);
+        Controls.Add(_lowIntegrityCheckBox);
+        Controls.Add(_accountDescLabel);
+        Controls.Add(_accountRadio);
 
         ResumeLayout(false);
     }
@@ -138,7 +144,6 @@ public class ContainerOrAccountStep : WizardStepPage
         _ephemeralCheckBox.Text = isContainer
             ? "Ephemeral container (auto-deleted 24 hours after creation)"
             : "Ephemeral account (auto-deleted 24 hours after creation)";
-        SelectionChanged?.Invoke(isContainer);
 
         if (_branchStepsProvider != null)
             RequestReplaceFollowingSteps(_branchStepsProvider(isContainer));

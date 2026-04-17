@@ -12,7 +12,14 @@ namespace RunFence.Tests;
 public class CredentialHelperTests
 {
     private readonly Mock<ICredentialEncryptionService> _encryptionService = new();
+    private readonly Mock<ISidResolver> _sidResolver = new();
     private readonly byte[] _pinDerivedKey = new byte[32];
+    private readonly CredentialDecryptionService _service;
+
+    public CredentialHelperTests()
+    {
+        _service = new CredentialDecryptionService(_encryptionService.Object, _sidResolver.Object);
+    }
 
     [Fact]
     public void TryDecryptCredential_NotFound_ReturnsNotFound()
@@ -20,9 +27,8 @@ public class CredentialHelperTests
         var store = new CredentialStore();
         var accountSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
 
-        var status = CredentialHelper.TryDecryptCredential(
-            accountSid, store, _encryptionService.Object,
-            _pinDerivedKey, out var credEntry, out var password);
+        var status = _service.TryDecryptCredential(
+            accountSid, store, _pinDerivedKey, out var credEntry, out var password);
 
         Assert.Equal(CredentialLookupStatus.NotFound, status);
         Assert.Null(credEntry);
@@ -38,9 +44,8 @@ public class CredentialHelperTests
             Credentials = [new() { Id = Guid.NewGuid(), Sid = accountSid }]
         };
 
-        var status = CredentialHelper.TryDecryptCredential(
-            accountSid, store, _encryptionService.Object,
-            _pinDerivedKey, out var credEntry, out var password);
+        var status = _service.TryDecryptCredential(
+            accountSid, store, _pinDerivedKey, out var credEntry, out var password);
 
         Assert.Equal(CredentialLookupStatus.CurrentAccount, status);
         Assert.NotNull(credEntry);
@@ -59,9 +64,8 @@ public class CredentialHelperTests
             Credentials = [new() { Id = Guid.NewGuid(), Sid = otherSid, EncryptedPassword = [] }]
         };
 
-        var status = CredentialHelper.TryDecryptCredential(
-            requestedSid, store, _encryptionService.Object,
-            _pinDerivedKey, out var credEntry, out var password);
+        var status = _service.TryDecryptCredential(
+            requestedSid, store, _pinDerivedKey, out var credEntry, out var password);
 
         Assert.Equal(CredentialLookupStatus.NotFound, status);
         Assert.Null(credEntry);
@@ -77,9 +81,8 @@ public class CredentialHelperTests
             Credentials = [new() { Id = Guid.NewGuid(), Sid = accountSid, EncryptedPassword = [] }]
         };
 
-        var status = CredentialHelper.TryDecryptCredential(
-            accountSid, store, _encryptionService.Object,
-            _pinDerivedKey, out _, out var password);
+        var status = _service.TryDecryptCredential(
+            accountSid, store, _pinDerivedKey, out _, out var password);
 
         Assert.Equal(CredentialLookupStatus.MissingPassword, status);
         Assert.Null(password);
@@ -103,9 +106,8 @@ public class CredentialHelperTests
             .Setup(e => e.Decrypt(encryptedBytes, _pinDerivedKey))
             .Returns(expectedPassword);
 
-        var status = CredentialHelper.TryDecryptCredential(
-            accountSid, store, _encryptionService.Object,
-            _pinDerivedKey, out var credEntry, out var password);
+        var status = _service.TryDecryptCredential(
+            accountSid, store, _pinDerivedKey, out var credEntry, out var password);
 
         Assert.Equal(CredentialLookupStatus.Success, status);
         Assert.NotNull(credEntry);
@@ -119,12 +121,10 @@ public class CredentialHelperTests
     public void DecryptAndResolve_NotFound_ReturnsNull()
     {
         var store = new CredentialStore();
-        var sidResolver = new Mock<ISidResolver>();
         var accountSid = "S-1-5-21-1234567890-1234567890-1234567890-9999";
 
-        var result = CredentialHelper.DecryptAndResolve(
-            accountSid, store, _encryptionService.Object, _pinDerivedKey,
-            sidResolver.Object, null, out var status);
+        var result = _service.DecryptAndResolve(
+            accountSid, store, _pinDerivedKey, null, out var status);
 
         Assert.Null(result);
         Assert.Equal(CredentialLookupStatus.NotFound, status);
@@ -138,11 +138,9 @@ public class CredentialHelperTests
         {
             Credentials = [new() { Id = Guid.NewGuid(), Sid = accountSid, EncryptedPassword = [] }]
         };
-        var sidResolver = new Mock<ISidResolver>();
 
-        var result = CredentialHelper.DecryptAndResolve(
-            accountSid, store, _encryptionService.Object, _pinDerivedKey,
-            sidResolver.Object, null, out var status);
+        var result = _service.DecryptAndResolve(
+            accountSid, store, _pinDerivedKey, null, out var status);
 
         Assert.Null(result);
         Assert.Equal(CredentialLookupStatus.MissingPassword, status);
@@ -156,11 +154,9 @@ public class CredentialHelperTests
         {
             Credentials = [new() { Id = Guid.NewGuid(), Sid = accountSid }]
         };
-        var sidResolver = new Mock<ISidResolver>();
 
-        var result = CredentialHelper.DecryptAndResolve(
-            accountSid, store, _encryptionService.Object, _pinDerivedKey,
-            sidResolver.Object, null, out var status);
+        var result = _service.DecryptAndResolve(
+            accountSid, store, _pinDerivedKey, null, out var status);
 
         Assert.NotNull(result);
         Assert.Equal(LaunchTokenSource.CurrentProcess, result.Value.TokenSource);
@@ -181,12 +177,10 @@ public class CredentialHelperTests
         expectedPassword.AppendChar('p');
         expectedPassword.MakeReadOnly();
         _encryptionService.Setup(e => e.Decrypt(encryptedBytes, _pinDerivedKey)).Returns(expectedPassword);
-        var sidResolver = new Mock<ISidResolver>();
-        sidResolver.Setup(r => r.TryResolveName(accountSid)).Returns(@"DOMAIN\user1");
+        _sidResolver.Setup(r => r.TryResolveName(accountSid)).Returns(@"DOMAIN\user1");
 
-        var result = CredentialHelper.DecryptAndResolve(
-            accountSid, store, _encryptionService.Object, _pinDerivedKey,
-            sidResolver.Object, null, out var status);
+        var result = _service.DecryptAndResolve(
+            accountSid, store, _pinDerivedKey, null, out var status);
 
         Assert.NotNull(result);
         Assert.Equal(LaunchTokenSource.Credentials, result.Value.TokenSource);
@@ -217,9 +211,8 @@ public class CredentialHelperTests
         var nonCurrentSid = "S-1-5-21-1234567890-1234567890-1234567890-9999";
         var store = new CredentialStore();
 
-        var status = CredentialHelper.TryDecryptCredential(
-            nonCurrentSid, store, _encryptionService.Object,
-            _pinDerivedKey, out var credEntry, out var password);
+        var status = _service.TryDecryptCredential(
+            nonCurrentSid, store, _pinDerivedKey, out var credEntry, out var password);
 
         Assert.Equal(CredentialLookupStatus.NotFound, status);
         Assert.Null(credEntry);

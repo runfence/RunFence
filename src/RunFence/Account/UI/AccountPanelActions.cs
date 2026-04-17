@@ -1,4 +1,3 @@
-using RunFence.Account.UI.Forms;
 using RunFence.Core;
 using RunFence.Infrastructure;
 
@@ -8,23 +7,10 @@ namespace RunFence.Account.UI;
 /// Handles simple account panel actions: rename account, copy SID, copy profile path,
 /// open profile folder, and copy random password.
 /// </summary>
-public class AccountPanelActions
+public class AccountPanelActions(IWindowsAccountService windowsAccountService, ILocalUserProvider localUserProvider, ILoggingService log, ISidNameCacheService sidNameCache, ShellHelper shellHelper, ISystemDialogLauncher systemDialogLauncher)
 {
-    private readonly IWindowsAccountService _windowsAccountService;
-    private readonly ILocalUserProvider _localUserProvider;
-    private readonly ILoggingService _log;
-    private readonly ISidNameCacheService _sidNameCache;
-
     private DataGridView _grid = null!;
     private IAccountsPanelContext _context = null!;
-
-    public AccountPanelActions(IWindowsAccountService windowsAccountService, ILocalUserProvider localUserProvider, ILoggingService log, ISidNameCacheService sidNameCache)
-    {
-        _windowsAccountService = windowsAccountService;
-        _localUserProvider = localUserProvider;
-        _log = log;
-        _sidNameCache = sidNameCache;
-    }
 
     public void Initialize(DataGridView grid, IAccountsPanelContext context)
     {
@@ -39,7 +25,7 @@ public class AccountPanelActions
 
     public void CopyProfilePath(string sid)
     {
-        var path = _windowsAccountService.GetProfilePath(sid);
+        var path = windowsAccountService.GetProfilePath(sid);
         if (!string.IsNullOrEmpty(path))
             Clipboard.SetText(path);
         else
@@ -48,7 +34,7 @@ public class AccountPanelActions
 
     public void OpenProfileFolder(string sid)
     {
-        var path = _windowsAccountService.GetProfilePath(sid);
+        var path = windowsAccountService.GetProfilePath(sid);
         if (string.IsNullOrEmpty(path) || !Directory.Exists(path))
         {
             MessageBox.Show("No profile folder found for this account.", "Profile Folder", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -57,7 +43,7 @@ public class AccountPanelActions
 
         try
         {
-            ShellHelper.OpenInExplorer(path);
+            shellHelper.OpenInExplorer(path);
         }
         catch
         {
@@ -76,7 +62,7 @@ public class AccountPanelActions
             return;
         // Current account and interactive user renaming is intentionally allowed
         _grid.CurrentCell = row.Cells["Account"];
-        ((AccountsPanel)_context.OwnerControl).RenameInProgress = true;
+        _context.RenameInProgress = true;
         _grid.BeginEdit(true);
     }
 
@@ -85,15 +71,15 @@ public class AccountPanelActions
         _context.OperationGuard.Begin(_context.OwnerControl);
         try
         {
-            _windowsAccountService.RenameAccount(accountRow.Sid, accountRow.Username, newName);
+            windowsAccountService.RenameAccount(accountRow.Sid, accountRow.Username, newName);
             // Use the known new name directly — TryResolveName uses the LSA cache
             // which may still return the old name immediately after a rename.
-            _sidNameCache.UpdateName(accountRow.Sid, $"{Environment.MachineName}\\{newName}");
+            sidNameCache.UpdateName(accountRow.Sid, $"{Environment.MachineName}\\{newName}");
             _context.SaveAndRefresh();
         }
         catch (Exception ex)
         {
-            _log.Error($"Failed to rename account {accountRow.Username} to {newName}", ex);
+            log.Error($"Failed to rename account {accountRow.Username} to {newName}", ex);
             row.Cells["Account"].Value = originalCellValue;
             MessageBox.Show($"Failed to rename account: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -104,10 +90,20 @@ public class AccountPanelActions
     }
 
     public void OpenUserAccountsDialog()
-        => _windowsAccountService.OpenUserAccountsDialog();
+    {
+        try
+        {
+            systemDialogLauncher.OpenUserAccountsDialog();
+        }
+        catch (Exception ex)
+        {
+            log.Error("Failed to open User Accounts dialog", ex);
+            MessageBox.Show($"Failed to open dialog: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
 
     public void InvalidateLocalUserCache()
-        => _localUserProvider.InvalidateCache();
+        => localUserProvider.InvalidateCache();
 
     public void CopyRandomPassword()
     {
@@ -116,6 +112,8 @@ public class AccountPanelActions
         {
             var dataObject = new DataObject(DataFormats.UnicodeText, new string(passwordChars));
             dataObject.SetData("ExcludeClipboardContentFromMonitorProcessing", new MemoryStream(new byte[4]));
+            // No auto-clear of the clipboard: the user explicitly requested password generation and
+            // needs time to use it more than once. Clipboard lifetime is their responsibility.
             Clipboard.SetDataObject(dataObject, copy: true);
             _context.UpdateStatus("Random password copied to clipboard.");
         }

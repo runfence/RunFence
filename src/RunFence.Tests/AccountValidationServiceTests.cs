@@ -2,6 +2,8 @@ using System.Security.Principal;
 using Moq;
 using RunFence.Account;
 using RunFence.Core;
+using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -9,11 +11,17 @@ namespace RunFence.Tests;
 public class AccountValidationServiceTests
 {
     private readonly Mock<ILoggingService> _log = new();
+    private readonly Mock<ILocalGroupMembershipService> _groupMembership = new();
+    private readonly Mock<IProcessListService> _processListService = new();
     private readonly AccountValidationService _service;
 
     public AccountValidationServiceTests()
     {
-        _service = new AccountValidationService(_log.Object);
+        _groupMembership.Setup(s => s.GetMembersOfGroup(It.IsAny<string>())).Returns(new List<LocalUserAccount>());
+        _groupMembership.Setup(s => s.IsLocalGroup(It.IsAny<string>())).Returns(false);
+        _groupMembership.Setup(s => s.IsUserAccountEnabled(It.IsAny<string>())).Returns(true);
+        _processListService.Setup(s => s.GetProcessesForSid(It.IsAny<string>())).Returns([]);
+        _service = new AccountValidationService(_log.Object, _groupMembership.Object, _processListService.Object);
     }
 
     [Fact]
@@ -45,6 +53,21 @@ public class AccountValidationServiceTests
         _service.ValidateNotLastAdmin("S-1-5-21-0-0-0-99999", "test");
     }
 
+    [Fact]
+    public void ValidateNotLastAdmin_IsLastAdmin_Throws()
+    {
+        // Arrange: target is the only enabled admin account
+        var targetSid = "S-1-5-21-0-0-0-99994";
+        _groupMembership.Setup(s => s.GetMembersOfGroup("S-1-5-32-544"))
+            .Returns([new LocalUserAccount("admin_user", targetSid)]);
+        _groupMembership.Setup(s => s.IsLocalGroup(targetSid)).Returns(false);
+        _groupMembership.Setup(s => s.IsUserAccountEnabled("admin_user")).Returns(true);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => _service.ValidateNotLastAdmin(targetSid, "delete"));
+
+        Assert.Contains("last administrator", ex.Message);
+    }
+
     // --- ValidateNotInteractiveUser ---
 
     [Fact]
@@ -69,6 +92,20 @@ public class AccountValidationServiceTests
         // No exception: no processes found for this SID
     }
 
+    [Fact]
+    public void ValidateNoRunningProcesses_HasRunningProcesses_Throws()
+    {
+        // Arrange: process list service reports a running process for the target SID
+        var targetSid = "S-1-5-21-0-0-0-99993";
+        _processListService.Setup(s => s.GetProcessesForSid(targetSid))
+            .Returns([new ProcessInfo(1234, @"C:\Windows\System32\notepad.exe", null)]);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => _service.ValidateNoRunningProcesses(targetSid, "delete"));
+
+        Assert.Contains("running processes", ex.Message);
+        Assert.Contains("notepad", ex.Message);
+    }
+
     // --- GetProcessesRunningAsSid ---
 
     [Fact]
@@ -82,13 +119,16 @@ public class AccountValidationServiceTests
     }
 
     [Fact]
-    public void GetProcessesRunningAsSid_CurrentUserSid_ReturnsAtLeastOneProcess()
+    public void GetProcessesRunningAsSid_WhenProcessListServiceReturnsProcesses_ReturnsNames()
     {
-        // The current user must own at least one process (this test process itself).
-        var currentSid = WindowsIdentity.GetCurrent().User!.Value;
+        // Verify that GetProcessesRunningAsSid returns names from IProcessListService results.
+        var sid = "S-1-5-21-0-0-0-99995";
+        _processListService.Setup(s => s.GetProcessesForSid(sid))
+            .Returns([new ProcessInfo(1234, @"C:\Program Files\test.exe", null)]);
 
-        var result = _service.GetProcessesRunningAsSid(currentSid);
+        var result = _service.GetProcessesRunningAsSid(sid);
 
-        Assert.NotEmpty(result);
+        Assert.Single(result);
+        Assert.Equal("test", result[0]);
     }
 }

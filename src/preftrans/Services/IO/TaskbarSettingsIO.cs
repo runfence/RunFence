@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
@@ -17,16 +18,22 @@ namespace PrefTrans.Services.IO;
 /// Store apps) may still contain stale source account paths and produce broken taskbar items on
 /// the target account.
 /// </para>
+/// <para>
+/// COM calls (<c>WScript.Shell</c> via <c>CreateShortcut</c>) require an STA thread.
+/// <c>[STAThread]</c> on <c>Main</c> in <c>Program.cs</c> provides STA for the entire process.
+/// This is less robust than spinning a dedicated STA thread (as in SecurityScanner), but
+/// sufficient for a single-threaded CLI tool that never spawns background COM callers.
+/// </para>
 /// </summary>
-public static class TaskbarSettingsIO
+public class TaskbarSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast, IUserProfileFilter userProfileFilter) : ISettingsIO
 {
-    public static TaskbarSettings Read()
+    public TaskbarSettings Read()
     {
         var taskbar = new TaskbarSettings();
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (!string.IsNullOrEmpty(userProfile))
             taskbar.SourceProfilePath = userProfile;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegExplorerAdvanced);
             if (key == null)
@@ -39,7 +46,7 @@ public static class TaskbarSettingsIO
             taskbar.MultiMonitorButtonCombine = key.GetValue("MMTaskbarGlomLevel") as int?;
             taskbar.VirtualDesktopTaskbarFilter = key.GetValue("VirtualDesktopTaskbarFilter") as int?;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegTaskband);
             if (key == null)
@@ -47,12 +54,12 @@ public static class TaskbarSettingsIO
             taskbar.Favorites = key.GetValue("Favorites") as byte[];
             taskbar.FavoritesResolve = key.GetValue("FavoritesResolve") as byte[];
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegSearch);
             taskbar.SearchboxTaskbarMode = key?.GetValue("SearchboxTaskbarMode") as int?;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             var pinnedFolder = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -60,7 +67,7 @@ public static class TaskbarSettingsIO
             if (!Directory.Exists(pinnedFolder))
                 return;
 
-            var profilePaths = UserProfileFilter.GetUserProfilePaths();
+            var profilePaths = userProfileFilter.GetUserProfilePaths();
             var lnkFiles = Directory.GetFiles(pinnedFolder, "*.lnk");
             if (lnkFiles.Length == 0)
                 return;
@@ -78,7 +85,7 @@ public static class TaskbarSettingsIO
                 var shortcutFiles = new Dictionary<string, byte[]>();
                 foreach (var lnkPath in lnkFiles)
                 {
-                    SafeExecutor.Try(() =>
+                    safe.Try(() =>
                     {
                         dynamic lnk = shell.CreateShortcut(lnkPath);
                         try
@@ -88,15 +95,15 @@ public static class TaskbarSettingsIO
                             // and UWP package paths (Program Files\WindowsApps\)
                             if (string.IsNullOrEmpty(target))
                                 return;
-                            if (UserProfileFilter.ContainsUserProfilePath(target, profilePaths))
+                            if (userProfileFilter.ContainsUserProfilePath(target, profilePaths))
                                 return;
-                            if (UserProfileFilter.ContainsWindowsAppsPath(target))
+                            if (userProfileFilter.ContainsWindowsAppsPath(target))
                                 return;
                             var fileName = Path.GetFileName(lnkPath);
                             shortcuts.Add(fileName);
                             // Also capture the raw .lnk bytes so the target account can recreate
                             // the shortcut file even without access to the source account's AppData.
-                            SafeExecutor.Try(() => shortcutFiles[fileName] = File.ReadAllBytes(lnkPath), "reading");
+                            safe.Try(() => shortcutFiles[fileName] = File.ReadAllBytes(lnkPath), "reading");
                         }
                         finally
                         {
@@ -119,10 +126,10 @@ public static class TaskbarSettingsIO
         return taskbar;
     }
 
-    public static void Write(TaskbarSettings taskbar)
+    public void Write(TaskbarSettings taskbar)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegExplorerAdvanced);
 
@@ -143,7 +150,7 @@ public static class TaskbarSettingsIO
             Set("MMTaskbarGlomLevel", taskbar.MultiMonitorButtonCombine);
             Set("VirtualDesktopTaskbarFilter", taskbar.VirtualDesktopTaskbarFilter);
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (taskbar.Favorites == null && taskbar.FavoritesResolve == null)
                 return;
@@ -184,7 +191,7 @@ public static class TaskbarSettingsIO
                 key.SetValue("FavoritesResolve", favoritesResolve, RegistryValueKind.Binary);
             changed = true;
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             var taskBarFolder = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -203,7 +210,7 @@ public static class TaskbarSettingsIO
                                    !string.Equals(sourceProfile, targetProfile, StringComparison.OrdinalIgnoreCase);
                 foreach (var (fileName, content) in taskbar.PinnedShortcutFiles)
                 {
-                    SafeExecutor.Try(() =>
+                    safe.Try(() =>
                     {
                         var patched = shouldPatch
                             ? PatchProfilePath(content, sourceProfile!, targetProfile) ?? content
@@ -226,7 +233,7 @@ public static class TaskbarSettingsIO
                 }
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (taskbar.SearchboxTaskbarMode.HasValue)
             {
@@ -236,7 +243,7 @@ public static class TaskbarSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
 
     // Patches all occurrences of sourceProfile (UTF-16 LE) in the binary blob with targetProfile,
@@ -304,6 +311,7 @@ public static class TaskbarSettingsIO
         int end = data.Length - pattern.Length;
         for (int i = startPos; i <= end; i++)
         {
+            // LINQ in loop is acceptable — no highload scenarios in this tool.
             if (!pattern.Where((t, j) => data[i + j] != t).Any())
                 return i;
         }
@@ -319,4 +327,7 @@ public static class TaskbarSettingsIO
         var text = Encoding.Unicode.GetString(data);
         return text.IndexOf(path, StringComparison.OrdinalIgnoreCase) >= 0;
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Taskbar = Read();
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Taskbar != null) Write(s.Taskbar); }
 }

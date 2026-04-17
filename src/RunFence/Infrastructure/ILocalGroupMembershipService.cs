@@ -14,4 +14,10 @@ public interface ILocalGroupMembershipService
     void UpdateGroupDescription(string groupSid, string description);
     List<LocalUserAccount> GetMembersOfGroup(string groupSid);
     string? GetGroupDescription(string groupSid);
+
+    /// <summary>
+    /// Returns true if the local user account with the given SAM account name exists and is enabled.
+    /// Returns false for domain accounts, groups, or accounts that cannot be resolved locally.
+    /// </summary>
+    bool IsUserAccountEnabled(string username);
 }

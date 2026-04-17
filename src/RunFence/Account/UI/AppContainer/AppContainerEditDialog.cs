@@ -1,7 +1,6 @@
 using RunFence.Account.Lifecycle;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
 using RunFence.UI;
 
 namespace RunFence.Account.UI.AppContainer;
@@ -12,7 +11,6 @@ namespace RunFence.Account.UI.AppContainer;
 public partial class AppContainerEditDialog : Form
 {
     private readonly AppContainerEntry? _existing;
-    private readonly IAppContainerService _appContainerService;
     private readonly AppContainerEditService _editService;
     private ToolStripButton? _tsRemove;
 
@@ -51,11 +49,9 @@ public partial class AppContainerEditDialog : Form
 
     public bool DeleteRequested { get; private set; }
 
-    public AppContainerEditDialog(AppContainerEntry? existing,
-        IAppContainerService appContainerService, AppContainerEditService editService)
+    public AppContainerEditDialog(AppContainerEntry? existing, AppContainerEditService editService)
     {
         _existing = existing;
-        _appContainerService = appContainerService;
         _editService = editService;
 
         InitializeComponent();
@@ -94,14 +90,7 @@ public partial class AppContainerEditDialog : Form
         {
             _toolTip.SetToolTip(_profileNameBox, "Cannot be changed — determines the container SID.");
             _toolTip.SetToolTip(_sidBox, "Select and copy with Ctrl+C.");
-            try
-            {
-                _sidBox.Text = _appContainerService.GetSid(_existing!.Name);
-            }
-            catch
-            {
-                _sidBox.Text = "(unavailable)";
-            }
+            _sidBox.Text = !string.IsNullOrEmpty(_existing!.Sid) ? _existing.Sid : "(unavailable)";
         }
     }
 

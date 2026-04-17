@@ -20,8 +20,9 @@ public class DatabaseServiceTests : IDisposable
     {
         var log = new Mock<ILoggingService>();
         _tempDir = new TempDirectory("RunFence_DbTest");
-        _service = new DatabaseService(log.Object, configDir: _tempDir.Path, localDataDir: _tempDir.Path);
-        _plaintextService = new DatabaseService(log.Object, allowPlaintextConfig: true, configDir: _tempDir.Path, localDataDir: _tempDir.Path);
+        var paths = new TestConfigPaths(_tempDir.Path);
+        _service = new DatabaseService(log.Object, paths);
+        _plaintextService = new DatabaseService(log.Object, paths, allowPlaintextConfig: true);
         _pinDerivedKey = new byte[32];
         new Random(42).NextBytes(_pinDerivedKey);
         _argonSalt = new byte[32];
@@ -153,6 +154,58 @@ public class DatabaseServiceTests : IDisposable
 
         Assert.Single(loaded.Credentials);
         Assert.Equal("S-1-5-21-0-0-0-1001", loaded.Credentials[0].Sid);
+    }
+
+    [Fact]
+    public void SaveCredentialStore_And_LoadCredentialStore_PreservesAllFields()
+    {
+        // Direct round-trip: all CredentialStore fields survive save/load intact
+        var expectedSalt = new byte[Constants.Argon2SaltSize];
+        new Random(55).NextBytes(expectedSalt);
+        var expectedCanary = new byte[] { 0xAA, 0xBB, 0xCC, 0xDD };
+        var store = new CredentialStore
+        {
+            ArgonSalt = expectedSalt,
+            EncryptedCanary = expectedCanary,
+            Credentials = [new() { Sid = "S-1-5-21-0-0-0-1001", Id = Guid.NewGuid() }]
+        };
+
+        _service.SaveCredentialStore(store);
+        var loaded = _service.LoadCredentialStore();
+
+        Assert.Equal(expectedSalt, loaded.ArgonSalt);
+        Assert.Equal(expectedCanary, loaded.EncryptedCanary);
+        Assert.Single(loaded.Credentials);
+        Assert.Equal("S-1-5-21-0-0-0-1001", loaded.Credentials[0].Sid);
+        Assert.Equal(store.Credentials[0].Id, loaded.Credentials[0].Id);
+    }
+
+    [Fact]
+    public void SaveConfig_And_LoadConfig_PreservesAllAppFields()
+    {
+        // Direct round-trip: AppEntry fields survive encrypted save/load intact
+        var app = new AppEntry
+        {
+            Id = "roundtrip-id",
+            Name = "RoundtripApp",
+            ExePath = @"C:\apps\roundtrip.exe",
+            RestrictAcl = true,
+            ManageShortcuts = true,
+            IsUrlScheme = false
+        };
+        var db = new AppDatabase();
+        db.Apps.Add(app);
+
+        _service.SaveConfig(db, _pinDerivedKey, _argonSalt);
+        var loaded = _service.LoadConfig(_pinDerivedKey);
+
+        Assert.Single(loaded.Apps);
+        var loadedApp = loaded.Apps[0];
+        Assert.Equal("roundtrip-id", loadedApp.Id);
+        Assert.Equal("RoundtripApp", loadedApp.Name);
+        Assert.Equal(@"C:\apps\roundtrip.exe", loadedApp.ExePath);
+        Assert.True(loadedApp.RestrictAcl);
+        Assert.True(loadedApp.ManageShortcuts);
     }
 
     [Fact]
@@ -300,7 +353,7 @@ public class DatabaseServiceTests : IDisposable
 
         var dir = Path.Combine(_tempDir.Path, "filter_test");
         Directory.CreateDirectory(dir);
-        var serviceWithFilter = new DatabaseService(log.Object, appFilter: filter, configDir: dir, localDataDir: dir);
+        var serviceWithFilter = new DatabaseService(log.Object, new TestConfigPaths(dir), appFilter: filter);
 
         var database = new AppDatabase();
         database.Apps.Add(mainApp);
@@ -492,5 +545,12 @@ public class DatabaseServiceTests : IDisposable
     private class TestAppFilter(Func<AppDatabase, AppDatabase> filterFn) : IAppFilter
     {
         public AppDatabase FilterForMainConfig(AppDatabase database) => filterFn(database);
+    }
+
+    private class TestConfigPaths(string dir) : IConfigPaths
+    {
+        public string ConfigFilePath => Path.Combine(dir, "config.dat");
+        public string CredentialsFilePath => Path.Combine(dir, "credentials.dat");
+        public string LocalDataDir => dir;
     }
 }

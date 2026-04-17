@@ -8,7 +8,6 @@ namespace RunFence.Apps.UI;
 /// </summary>
 public interface IApplicationsPanelState
 {
-    SessionContext Session { get; }
     AppDatabase Database { get; }
     CredentialStore CredentialStore { get; }
     bool IsSortActive { get; }

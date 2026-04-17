@@ -79,7 +79,7 @@ public class WizardNavigationHandler
         if (_ctx.IsExecuting)
             return true; // cancel close
 
-        if (_ctx.CurrentStepIndex > 1 && !IsOnCompletionStep())
+        if (_ctx.CurrentStepIndex >= 1 && !IsOnCompletionStep())
         {
             var result = MessageBox.Show(
                 "The wizard is in progress. Are you sure you want to cancel?",

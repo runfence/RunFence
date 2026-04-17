@@ -13,10 +13,13 @@ partial class HandlerMappingsDialog
     private ToolStripButton _addButton;
     private ToolStripButton _editButton;
     private ToolStripButton _removeButton;
+    private ToolStripButton _reapplyButton;
     private ToolStripButton _openDefaultAppsButton;
     private StyledDataGridView _grid;
     private DataGridViewTextBoxColumn _colKey;
     private DataGridViewTextBoxColumn _colAppName;
+    private DataGridViewTextBoxColumn _colAccount;
+    private DataGridViewTextBoxColumn _colArgsTemplate;
     private ContextMenuStrip _contextMenu;
     private ToolStripMenuItem _ctxAdd;
     private ToolStripMenuItem _ctxEdit;
@@ -38,10 +41,13 @@ partial class HandlerMappingsDialog
         _addButton = new ToolStripButton();
         _editButton = new ToolStripButton();
         _removeButton = new ToolStripButton();
+        _reapplyButton = new ToolStripButton();
         _openDefaultAppsButton = new ToolStripButton();
         _grid = new StyledDataGridView();
         _colKey = new DataGridViewTextBoxColumn();
         _colAppName = new DataGridViewTextBoxColumn();
+        _colAccount = new DataGridViewTextBoxColumn();
+        _colArgsTemplate = new DataGridViewTextBoxColumn();
         _contextMenu = new ContextMenuStrip();
         _ctxAdd = new ToolStripMenuItem();
         _ctxEdit = new ToolStripMenuItem();
@@ -62,13 +68,14 @@ partial class HandlerMappingsDialog
         ClientSize = new Size(550, 400);
         MinimumSize = new Size(400, 300);
         FormClosing += OnFormClosing;
+        SizeChanged += OnDialogSizeChanged;
 
         // _toolbar
         _toolbar.Dock = DockStyle.Top;
         _toolbar.GripStyle = ToolStripGripStyle.Hidden;
         _toolbar.RenderMode = ToolStripRenderMode.System;
         _toolbar.ImageScalingSize = new Size(24, 24);
-        _toolbar.Items.AddRange(new ToolStripItem[] { _addButton, _editButton, _removeButton, _openDefaultAppsButton });
+        _toolbar.Items.AddRange(new ToolStripItem[] { _addButton, _editButton, _removeButton, _reapplyButton, _openDefaultAppsButton });
 
         // _addButton
         _addButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
@@ -87,6 +94,12 @@ partial class HandlerMappingsDialog
         _removeButton.Enabled = false;
         _removeButton.Click += OnRemoveClick;
 
+        // _reapplyButton
+        _reapplyButton.Text = "Reapply";
+        _reapplyButton.DisplayStyle = ToolStripItemDisplayStyle.Text;
+        _reapplyButton.Alignment = ToolStripItemAlignment.Right;
+        _reapplyButton.Click += OnReapplyClick;
+
         // _openDefaultAppsButton
         _openDefaultAppsButton.Text = "Open Default Apps";
         _openDefaultAppsButton.DisplayStyle = ToolStripItemDisplayStyle.Text;
@@ -101,10 +114,11 @@ partial class HandlerMappingsDialog
         _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _grid.MultiSelect = false;
         _grid.ContextMenuStrip = _contextMenu;
-        _grid.Columns.AddRange(new DataGridViewColumn[] { _colKey, _colAppName });
+        _grid.Columns.AddRange(new DataGridViewColumn[] { _colKey, _colAppName, _colAccount, _colArgsTemplate });
         _grid.SelectionChanged += OnGridSelectionChanged;
         _grid.MouseDown += OnGridMouseDown;
         _grid.KeyDown += OnGridKeyDown;
+        _grid.CellDoubleClick += OnGridCellDoubleClick;
 
         // _colKey
         _colKey.HeaderText = "Extension / Protocol";
@@ -115,8 +129,20 @@ partial class HandlerMappingsDialog
         // _colAppName
         _colAppName.HeaderText = "Application";
         _colAppName.Name = "colAppName";
-        _colAppName.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        _colAppName.Width = 200;
         _colAppName.ReadOnly = true;
+
+        // _colAccount
+        _colAccount.HeaderText = "Account";
+        _colAccount.Name = "colAccount";
+        _colAccount.Width = 130;
+        _colAccount.ReadOnly = true;
+
+        // _colArgsTemplate
+        _colArgsTemplate.HeaderText = "Args Template";
+        _colArgsTemplate.Name = "colArgsTemplate";
+        _colArgsTemplate.ReadOnly = true;
+        _colArgsTemplate.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
         // _contextMenu
         _contextMenu.Items.AddRange(new ToolStripItem[] { _ctxAdd, _ctxEdit, _ctxRemove });
@@ -137,9 +163,8 @@ partial class HandlerMappingsDialog
 
         // _warningLabel
         _warningLabel.Dock = DockStyle.Bottom;
-        _warningLabel.Height = 36;
-        _warningLabel.Padding = new Padding(5, 2, 5, 2);
-        _warningLabel.Text = "The interactive desktop user is always authorized to launch associated app entries.";
+        _warningLabel.Padding = new Padding(5, 4, 5, 4);
+        _warningLabel.Text = "Many common associations will require logging on into account, opening Default Apps and applying RunFence.";
         _warningLabel.ForeColor = SystemColors.GrayText;
 
         // Add controls

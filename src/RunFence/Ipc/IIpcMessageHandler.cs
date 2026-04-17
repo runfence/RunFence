@@ -4,5 +4,5 @@ namespace RunFence.Ipc;
 
 public interface IIpcMessageHandler
 {
-    IpcResponse HandleIpcMessage(IpcMessage message, string? callerIdentity, string? callerSid, bool isAdmin);
+    IpcResponse HandleIpcMessage(IpcMessage message, IpcCallerContext context);
 }

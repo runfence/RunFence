@@ -1,3 +1,5 @@
+using RunFence.Core.Models;
+
 namespace RunFence.Apps.UI;
 
 /// <summary>
@@ -10,8 +12,7 @@ public interface IAppEditDialogState
     bool IsFolder { get; }
     object? SelectedAccountItem { get; }
     bool ManageShortcuts { get; }
-    CheckState LaunchAsLowIlCheckState { get; }
-    CheckState SplitTokenCheckState { get; }
+    PrivilegeLevel? SelectedPrivilegeLevel { get; }
     bool OverrideIpcCallers { get; }
     string DefaultArgsText { get; }
     bool AllowPassArgs { get; }

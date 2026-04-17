@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Infrastructure;
@@ -22,39 +23,22 @@ public readonly record struct DragBridgeResolveResult(
 /// inaccessible files, optionally grants ACLs or copies to temp, then sends files over
 /// the named pipe to the DragBridge process.
 /// </summary>
-public class DragBridgePasteHandler
+public class DragBridgePasteHandler(
+    IDragBridgeAccessPrompt accessPrompt,
+    IDragBridgeTempFileManager tempManager,
+    INotificationService notifications,
+    ILoggingService log,
+    IUiThreadInvoker uiThreadInvoker,
+    IAclPermissionService aclPermission,
+    IPathGrantService pathGrantService,
+    SidDisplayNameResolver displayNameResolver)
 {
-    private readonly IDragBridgeAccessPrompt _accessPrompt;
-    private readonly IDragBridgeTempFileManager _tempManager;
-    private readonly INotificationService _notifications;
-    private readonly ILoggingService _log;
-    private readonly IUiThreadInvoker _uiThreadInvoker;
-    private readonly IAclPermissionService _aclPermission;
-    private readonly IPermissionGrantService _permissionGrantService;
-    private readonly SidDisplayNameResolver _displayNameResolver;
-
-    // Key: targetSid + "|" + sorted inaccessible paths. Only CopyToTemp* choices are remembered.
+    // Key: targetSid + "|" + sorted inaccessible paths. Only CopyToTemp is remembered (grant choices are permanent
+    // — access exists on next drag so the dialog never reappears).
+    // Capacity-limited to 100 entries with oldest-first eviction to prevent unbounded memory growth.
+    private const int RememberedChoicesMaxCapacity = 100;
     private readonly Dictionary<string, DragBridgeAccessAction> _rememberedChoices = new();
-
-    public DragBridgePasteHandler(
-        IDragBridgeAccessPrompt accessPrompt,
-        IDragBridgeTempFileManager tempManager,
-        INotificationService notifications,
-        ILoggingService log,
-        IUiThreadInvoker uiThreadInvoker,
-        IAclPermissionService aclPermission,
-        IPermissionGrantService permissionGrantService,
-        SidDisplayNameResolver displayNameResolver)
-    {
-        _accessPrompt = accessPrompt;
-        _tempManager = tempManager;
-        _notifications = notifications;
-        _log = log;
-        _uiThreadInvoker = uiThreadInvoker;
-        _aclPermission = aclPermission;
-        _permissionGrantService = permissionGrantService;
-        _displayNameResolver = displayNameResolver;
-    }
+    private readonly Queue<string> _rememberedChoicesOrder = new();
 
     public async Task<DragBridgeResolveResult> ResolveFileAccessAsync(
         SecurityIdentifier targetSid,
@@ -63,13 +47,11 @@ public class DragBridgePasteHandler
         IReadOnlyDictionary<string, string>? sidNames,
         CancellationToken ct)
     {
-        _tempManager.CleanupOldFolders(TimeSpan.FromHours(24));
-
         // Step 0: Verify files still exist
         var existingPaths = filePaths.Where(p => File.Exists(p) || Directory.Exists(p)).ToList();
         if (existingPaths.Count == 0)
         {
-            _uiThreadInvoker.Invoke(() => _notifications.ShowWarning("Drag Bridge",
+            uiThreadInvoker.Invoke(() => notifications.ShowWarning("Drag Bridge",
                 $"{filePaths.Count - existingPaths.Count} source file(s) no longer exist."));
             return new DragBridgeResolveResult(null, false, []);
         }
@@ -78,18 +60,18 @@ public class DragBridgePasteHandler
 
         // Step 1: Verify source user can read captured files
         var unreadableBySource = filePaths
-            .Where(p => _aclPermission.NeedsPermissionGrant(p, sourceSid, FileSystemRights.Read))
+            .Where(p => aclPermission.NeedsPermissionGrant(p, sourceSid, FileSystemRights.Read))
             .ToList();
         if (unreadableBySource.Count > 0)
         {
-            _uiThreadInvoker.Invoke(() => _notifications.ShowWarning("Drag Bridge",
+            uiThreadInvoker.Invoke(() => notifications.ShowWarning("Drag Bridge",
                 $"Source account cannot read {unreadableBySource.Count} file(s). Cannot continue paste."));
             return new DragBridgeResolveResult(null, false, []);
         }
 
         // Step 2: Check if target user can access the files
         var inaccessibleByTarget = filePaths
-            .Where(p => _aclPermission.NeedsPermissionGrant(p, targetSid.Value, FileSystemRights.Read))
+            .Where(p => aclPermission.NeedsPermissionGrant(p, targetSid.Value, FileSystemRights.Read))
             .ToList();
 
         var grantedPaths = new List<string>();
@@ -108,8 +90,17 @@ public class DragBridgePasteHandler
                 if (chosen == null)
                     return new DragBridgeResolveResult(null, false, []); // cancelled
                 action = chosen.Value;
-                if (action is DragBridgeAccessAction.CopyToTemp or DragBridgeAccessAction.CopyToTempWholeFolder)
+                if (action is DragBridgeAccessAction.CopyToTemp)
+                {
+                    if (_rememberedChoices.Count >= RememberedChoicesMaxCapacity)
+                    {
+                        var oldest = _rememberedChoicesOrder.Dequeue();
+                        _rememberedChoices.Remove(oldest);
+                    }
+
+                    _rememberedChoicesOrder.Enqueue(choiceKey);
                     _rememberedChoices[choiceKey] = action;
+                }
             }
 
             switch (action)
@@ -123,8 +114,8 @@ public class DragBridgePasteHandler
                             // Grants Read + Synchronize on the specific file (not ReadAndExecute on parent directory).
                             // DragBridge only needs to read this exact file, not launch it.
                             // Outer GrantAccess action selection is the user approval — silent confirm here.
-                            var r = _permissionGrantService.EnsureAccess(
-                                path, targetSid.Value,
+                            var r = pathGrantService.EnsureAccess(
+                                targetSid.Value, path,
                                 FileSystemRights.Read | FileSystemRights.Synchronize,
                                 confirm: null);
                             dbModified |= r.DatabaseModified;
@@ -133,7 +124,33 @@ public class DragBridgePasteHandler
                         }
                         catch (Exception ex)
                         {
-                            _log.Warn($"DragBridgePasteHandler: failed to grant access to '{path}': {ex.Message}");
+                            log.Warn($"DragBridgePasteHandler: failed to grant access to '{path}': {ex.Message}");
+                        }
+                    }
+
+                    break;
+                }
+                case DragBridgeAccessAction.GrantFolderAccess:
+                {
+                    // Grants ReadAndExecute on each unique parent folder (or the folder itself for directory paths),
+                    // covering all contents via full inheritance. Returns original paths — no temp copies.
+                    var sourceDirs = inaccessibleByTarget
+                        .Select(p => Directory.Exists(p) ? p : Path.GetDirectoryName(p)!)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    foreach (var dir in sourceDirs)
+                    {
+                        try
+                        {
+                            var r = pathGrantService.EnsureAccess(
+                                targetSid.Value, dir, FileSystemRights.ReadAndExecute, confirm: null);
+                            dbModified |= r.DatabaseModified;
+                            if (r.GrantAdded)
+                                grantedPaths.Add(dir);
+                        }
+                        catch (Exception ex)
+                        {
+                            log.Warn($"DragBridgePasteHandler: failed to grant folder access to '{dir}': {ex.Message}");
                         }
                     }
 
@@ -145,31 +162,16 @@ public class DragBridgePasteHandler
                         // Container SID resolution is not feasible: all container apps share the same owner SID
                         // (the interactive user), so there is no reliable way to identify which container is
                         // the target from the window owner SID alone. Users can manually grant access via "Copy SID".
-                        var tempFolder = _tempManager.CreateTempFolder(targetSid.Value, containerSid: null);
-                        var tempPaths = _tempManager.CopyFilesToTemp(tempFolder, inaccessibleByTarget);
+                        var tempFolder = tempManager.CreateTempFolder(targetSid.Value, containerSid: null);
+                        var tempPaths = tempManager.CopyFilesToTemp(tempFolder, inaccessibleByTarget);
 
                         // Replace inaccessible paths with their actual temp copies (names may differ due to collision renaming)
                         filePaths = filePaths.Except(inaccessibleByTarget).Concat(tempPaths).ToList();
                     }
                     catch (Exception ex)
                     {
-                        _log.Error("DragBridgePasteHandler: failed to create temp folder for paste", ex);
-                        _uiThreadInvoker.Invoke(() => _notifications.ShowError("Drag Bridge", "Failed to copy files to temp folder."));
-                        return new DragBridgeResolveResult(null, false, []);
-                    }
-
-                    break;
-                // CopyToTempWholeFolder
-                default:
-                    try
-                    {
-                        var tempFolder = _tempManager.CreateTempFolder(targetSid.Value, containerSid: null);
-                        filePaths = CopyWholeFoldersToTemp(tempFolder, filePaths, inaccessibleByTarget);
-                    }
-                    catch (Exception ex)
-                    {
-                        _log.Error("DragBridgePasteHandler: failed to create temp folder for whole-folder paste", ex);
-                        _uiThreadInvoker.Invoke(() => _notifications.ShowError("Drag Bridge", "Failed to copy folders to temp folder."));
+                        log.Error("DragBridgePasteHandler: failed to create temp folder for paste", ex);
+                        uiThreadInvoker.Invoke(() => notifications.ShowError("Drag Bridge", "Failed to copy files to temp folder."));
                         return new DragBridgeResolveResult(null, false, []);
                     }
 
@@ -180,39 +182,15 @@ public class DragBridgePasteHandler
         return new DragBridgeResolveResult(filePaths, dbModified, grantedPaths);
     }
 
-    private List<string> CopyWholeFoldersToTemp(string tempFolder, List<string> filePaths, List<string> inaccessibleByTarget)
-    {
-        // Determine the unique parent directories of inaccessible paths.
-        // For inaccessible directories, use the directory itself; for files, use the parent.
-        var sourceDirs = inaccessibleByTarget
-            .Select(p => Directory.Exists(p) ? p : Path.GetDirectoryName(p)!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var dirMapping = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var srcDir in sourceDirs)
-        {
-            var tempPaths = _tempManager.CopyFilesToTemp(tempFolder, [srcDir]);
-            if (tempPaths.Count > 0)
-                dirMapping[srcDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)] = tempPaths[0];
-        }
-
-        return filePaths.Select(p => RemapToTempDir(p, dirMapping)).ToList();
-    }
-
-    private static string RemapToTempDir(string path, Dictionary<string, string> dirMapping)
-    {
-        var normalized = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        foreach (var (srcDir, tempDir) in dirMapping)
-        {
-            if (normalized.Equals(srcDir, StringComparison.OrdinalIgnoreCase))
-                return tempDir;
-            if (normalized.StartsWith(srcDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                return Path.Combine(tempDir, normalized[(srcDir.Length + 1)..]);
-        }
-
-        return path; // already accessible
-    }
+    /// <summary>
+    /// Returns true if any file is missing or inaccessible by the target account, indicating a
+    /// resolution dialog will be needed. Used as a pre-check before opening the DragBridge window
+    /// so that files already accessible start as resolved — no extra drag required.
+    /// </summary>
+    public bool NeedsAccessResolution(SecurityIdentifier targetSid, IReadOnlyList<string> filePaths)
+        => filePaths.Any(p =>
+            (!File.Exists(p) && !Directory.Exists(p)) ||
+            aclPermission.NeedsPermissionGrant(p, targetSid.Value, FileSystemRights.Read));
 
     private static string MakeChoiceKey(string targetSid, IEnumerable<string> inaccessiblePaths)
         => targetSid + "|" + string.Join("|", inaccessiblePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase));
@@ -225,26 +203,28 @@ public class DragBridgePasteHandler
     {
         var tcs = new TaskCompletionSource<DragBridgeAccessAction?>();
 
-        var targetDisplayName = _displayNameResolver.GetDisplayName(targetSid.Value, null, sidNames);
-        var totalSize = inaccessiblePaths
-            .Where(File.Exists)
-            .Sum(p =>
-            {
-                try
-                {
-                    return new FileInfo(p).Length;
-                }
-                catch
-                {
-                    return 0L;
-                }
-            });
-
-        _uiThreadInvoker.Invoke(() =>
+        var targetDisplayName = displayNameResolver.GetDisplayName(targetSid.Value, null, sidNames);
+        var totalSize = inaccessiblePaths.Sum(p =>
         {
             try
             {
-                var result = _accessPrompt.Ask(targetDisplayName, inaccessiblePaths, totalSize);
+                if (File.Exists(p))
+                    return new FileInfo(p).Length;
+                if (Directory.Exists(p))
+                    return new DirectoryInfo(p).EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length);
+                return 0L;
+            }
+            catch (Exception)
+            {
+                return 0L;
+            }
+        });
+
+        uiThreadInvoker.Invoke(() =>
+        {
+            try
+            {
+                var result = accessPrompt.Ask(targetDisplayName, inaccessiblePaths, totalSize);
                 tcs.SetResult(result);
             }
             catch (Exception ex)

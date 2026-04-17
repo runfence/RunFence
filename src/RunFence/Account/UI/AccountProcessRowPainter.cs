@@ -17,6 +17,20 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander)
     private static readonly Image _iconLoadingPlaceholder = new Bitmap(1, 1);
     private readonly Dictionary<string, Image?> _processIconCache = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Clears the process icon cache to release GDI resources. Called on full grid refresh so
+    /// stale icons for processes that are no longer running are not retained indefinitely.
+    /// </summary>
+    public void ClearIconCache()
+    {
+        foreach (var img in _processIconCache.Values)
+        {
+            if (img != null && !ReferenceEquals(img, _iconLoadingPlaceholder))
+                img.Dispose();
+        }
+        _processIconCache.Clear();
+    }
+
     public void Initialize(DataGridView grid, IGridSortState sortState, bool hasProcessService)
     {
         _grid = grid;
@@ -63,6 +77,9 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander)
             {
                 _processIconCache[exePath] = _iconLoadingPlaceholder;
                 string capturedPath = exePath;
+                // Task.Run without cancellation is intentional: icon extraction is fast and short-lived.
+                // Cancelling mid-extraction would leave the cache slot in an indeterminate state.
+                // The grid disposal check in ContinueWith prevents UI access after the grid is closed.
                 Task.Run(() => ShortcutIconHelper.ExtractIcon(capturedPath, iconSize)).ContinueWith(t =>
                 {
                     _processIconCache[capturedPath] = t.IsFaulted ? null : t.Result;

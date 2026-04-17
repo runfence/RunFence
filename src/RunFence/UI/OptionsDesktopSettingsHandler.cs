@@ -1,7 +1,5 @@
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch;
 using RunFence.PrefTrans;
 
 namespace RunFence.UI;
@@ -9,9 +7,7 @@ namespace RunFence.UI;
 /// <summary>
 /// Handles desktop settings path configuration and export for <see cref="RunFence.UI.Forms.OptionsPanel"/>.
 /// </summary>
-public class OptionsDesktopSettingsHandler(
-    ISettingsTransferService settingsTransferService,
-    IAppLaunchOrchestrator launchOrchestrator)
+public class OptionsDesktopSettingsHandler(ISettingsTransferService settingsTransferService)
 {
     /// <summary>
     /// Commits the default desktop settings path to settings.
@@ -47,14 +43,4 @@ public class OptionsDesktopSettingsHandler(
             throw new InvalidOperationException(result.Message);
     }
 
-    /// <summary>
-    /// Opens the given file for editing in the interactive user's default editor.
-    /// </summary>
-    public void OpenForEdit(string filePath)
-    {
-        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-        if (interactiveSid == null)
-            return;
-        launchOrchestrator.LaunchExe("cmd.exe", interactiveSid, ["/c", "start", "", filePath]);
-    }
 }

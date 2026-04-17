@@ -7,7 +7,7 @@ namespace RunFence.Wizard;
 /// Centralizes evaluation license checks for wizard templates. Returns false (with error
 /// reported to progress) when a limit is hit so templates can early-return immediately.
 /// </summary>
-public class WizardLicenseChecker(ILicenseService licenseService)
+public class WizardLicenseChecker(ILicenseService licenseService, IEvaluationLimitHelper evaluationLimitHelper)
 {
     /// <summary>
     /// Checks whether adding another credential is within the evaluation limit.
@@ -19,7 +19,7 @@ public class WizardLicenseChecker(ILicenseService licenseService)
     {
         if (!checkCredential)
             return true;
-        var credCount = EvaluationLimitHelper.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
+        var credCount = evaluationLimitHelper.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
         if (licenseService.CanAddCredential(credCount))
             return true;
         progress.ReportError(licenseService.GetRestrictionMessage(EvaluationFeature.Credentials, credCount)!);

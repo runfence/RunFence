@@ -11,5 +11,5 @@ public enum HelloVerificationResult
 public interface IWindowsHelloService
 {
     Task<bool> IsAvailableAsync();
-    HelloVerificationResult VerifySync(string message);
+    Task<HelloVerificationResult> VerifyAsync(string message);
 }

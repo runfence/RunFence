@@ -2,10 +2,9 @@ using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Licensing;
 using RunFence.RunAs.UI;
 using RunFence.RunAs.UI.Forms;
-using RunFence.Security;
-using RunFence.UI.Forms;
 
 namespace RunFence.RunAs;
 
@@ -14,39 +13,41 @@ namespace RunFence.RunAs;
 /// including lock/unlock and new account/container creation.
 /// </summary>
 public class RunAsDialogPresenter(
-    ISecureDesktopRunner secureDesktop,
+    IModalCoordinator modalCoordinator,
     RunAsDosProtection dosProtection,
     RunAsPermissionChecker permissionChecker,
-    RunAsAccountCreator accountCreator,
+    RunAsUserAccountCreator userAccountCreator,
+    RunAsContainerCreator containerCreator,
     RunAsCredentialPersister credentialPersister,
     IAppStateProvider appState,
     IAppLockControl appLock,
     SessionContext session,
+    IEvaluationLimitHelper evaluationLimitHelper,
     Func<RunAsDialog> dialogFactory)
 {
     /// <summary>
     /// Handles lock/unlock, shows the RunAs dialog, and resolves new account/container requests.
     /// Returns the dialog result (possibly empty), or null if lock/unlock failed.
-    /// Sets <paramref name="unlockedForRunAs"/> to true if the app was unlocked for this flow.
+    /// Calls <paramref name="setUnlockedForRunAs"/> with true if the app was unlocked for this flow.
     /// </summary>
-    public RunAsDialogResult? ShowRunAsDialog(string filePath, string? arguments,
-        ShortcutContext? shortcutContext, bool isAdmin, out bool unlockedForRunAs)
+    public async Task<RunAsDialogResult?> ShowRunAsDialogAsync(string filePath, string? arguments,
+        ShortcutContext? shortcutContext, bool isAdmin, Action<bool> setUnlockedForRunAs)
     {
-        unlockedForRunAs = false;
+        setUnlockedForRunAs(false);
 
         if (appLock.IsLocked)
         {
-            if (!appLock.TryUnlock(isAdmin))
+            if (!await appLock.TryUnlockAsync(isAdmin))
             {
                 MessageBox.Show("Could not unlock the application.", "RunFence",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return null;
             }
 
-            unlockedForRunAs = true;
+            setUnlockedForRunAs(true);
         }
 
-        var empty = new RunAsDialogResult(null, null, null, false, false, false, false, false, null, null);
+        var empty = RunAsDialogResult.Empty();
 
         var credentials = session.CredentialStore.Credentials;
         var existingApps = appState.Database.Apps;
@@ -59,42 +60,36 @@ public class RunAsDialogPresenter(
         bool createNewAccountRequested = false;
         bool createNewContainerRequested = false;
 
-        DataPanel.BeginModal();
-        try
+        modalCoordinator.RunOnSecureDesktop(() =>
         {
-            secureDesktop.Run(() =>
+            var dlg = dialogFactory();
+            dlg.Initialize(new RunAsDialogOptions(
+                FilePath: filePath,
+                Arguments: arguments,
+                Credentials: credentials.ToList(),
+                ExistingApps: existingApps.ToList(),
+                LastUsedAccountSid: credentialPersister.LastUsedRunAsAccountSid,
+                SidsNeedingPermission: sidsNeedingPermission,
+                SidNames: appState.Database.SidNames,
+                ShortcutContext: shortcutContext,
+                AppContainers: appState.Database.AppContainers,
+                LastUsedContainerName: credentialPersister.LastUsedRunAsContainerName,
+                CurrentUserSid: SidResolutionHelper.GetCurrentUserSid(),
+                AccountPrivilegeLevels: appState.Database.Accounts
+                    .Where(a => !string.IsNullOrEmpty(a.Sid))
+                    .ToDictionary(a => a.Sid, a => a.PrivilegeLevel,
+                        StringComparer.OrdinalIgnoreCase)));
+            using (dlg)
             {
-                var dlg = dialogFactory();
-                dlg.Initialize(new RunAsDialogOptions(
-                    FilePath: filePath,
-                    Arguments: arguments,
-                    Credentials: credentials.ToList(),
-                    ExistingApps: existingApps.ToList(),
-                    LastUsedAccountSid: credentialPersister.LastUsedRunAsAccountSid,
-                    SidsNeedingPermission: sidsNeedingPermission,
-                    SidNames: appState.Database.SidNames,
-                    ShortcutContext: shortcutContext,
-                    AppContainers: appState.Database.AppContainers,
-                    LastUsedContainerName: credentialPersister.LastUsedRunAsContainerName,
-                    CurrentUserSid: SidResolutionHelper.GetCurrentUserSid(),
-                    SplitTokenOptOutSids: appState.Database.Accounts.Where(a => a.SplitTokenOptOut).Select(a => a.Sid).ToList(),
-                    LowIntegrityDefaultSids: appState.Database.Accounts.Where(a => a.LowIntegrityDefault).Select(a => a.Sid).ToList()));
-                using (dlg)
+                dlgResult = dlg.ShowDialog();
+                if (dlgResult == DialogResult.OK)
                 {
-                    dlgResult = dlg.ShowDialog();
-                    if (dlgResult == DialogResult.OK)
-                    {
-                        capturedResult = dlg.CaptureResult();
-                        createNewAccountRequested = dlg.CreateNewAccountRequested;
-                        createNewContainerRequested = dlg.CreateNewContainerRequested;
-                    }
+                    capturedResult = dlg.CaptureResult();
+                    createNewAccountRequested = dlg.CreateNewAccountRequested;
+                    createNewContainerRequested = dlg.CreateNewContainerRequested;
                 }
-            });
-        }
-        finally
-        {
-            DataPanel.EndModal();
-        }
+            }
+        });
 
         if (dlgResult != DialogResult.OK || capturedResult == null)
         {
@@ -112,24 +107,45 @@ public class RunAsDialogPresenter(
         if (createNewContainerRequested)
         {
             capturedResult.AdHocPassword?.Dispose();
-            var newContainer = accountCreator.CreateNewContainer();
+            var newContainer = containerCreator.CreateNewContainer();
             if (newContainer == null)
                 return empty;
-            return new RunAsDialogResult(null, newContainer, capturedResult.PermissionGrant,
-                capturedResult.CreateAppEntryOnly, capturedResult.LaunchAsLowIntegrity, false,
-                capturedResult.UpdateOriginalShortcut, false, capturedResult.EditExistingApp, capturedResult.ExistingAppForLaunch);
+            return new RunAsDialogResult(
+                Credential: null,
+                SelectedContainer: newContainer,
+                PermissionGrant: capturedResult.PermissionGrant,
+                CreateAppEntryOnly: capturedResult.CreateAppEntryOnly,
+                PrivilegeLevel: PrivilegeLevel.Basic,
+                UpdateOriginalShortcut: capturedResult.UpdateOriginalShortcut,
+                RevertShortcutRequested: false,
+                EditExistingApp: capturedResult.EditExistingApp,
+                ExistingAppForLaunch: capturedResult.ExistingAppForLaunch);
         }
 
         if (createNewAccountRequested)
         {
             capturedResult.AdHocPassword?.Dispose();
-            var newCred = accountCreator.CreateNewAccount(filePath, dosProtection, out var newAccountGrant);
+
+            if (!evaluationLimitHelper.CheckCredentialLimit(session.CredentialStore.Credentials))
+            {
+                dosProtection.RecordDecline();
+                return empty;
+            }
+
+            var newCred = userAccountCreator.CreateNewAccount(filePath, dosProtection, out var newAccountGrant);
             if (newCred == null)
                 return empty;
             var grantSelection = newAccountGrant ?? capturedResult.PermissionGrant;
-            return new RunAsDialogResult(newCred, null, grantSelection,
-                capturedResult.CreateAppEntryOnly, capturedResult.LaunchAsLowIntegrity, capturedResult.LaunchAsSplitToken,
-                capturedResult.UpdateOriginalShortcut, false, capturedResult.EditExistingApp, capturedResult.ExistingAppForLaunch);
+            return new RunAsDialogResult(
+                Credential: newCred,
+                SelectedContainer: null,
+                PermissionGrant: grantSelection,
+                CreateAppEntryOnly: capturedResult.CreateAppEntryOnly,
+                PrivilegeLevel: capturedResult.PrivilegeLevel,
+                UpdateOriginalShortcut: capturedResult.UpdateOriginalShortcut,
+                RevertShortcutRequested: false,
+                EditExistingApp: capturedResult.EditExistingApp,
+                ExistingAppForLaunch: capturedResult.ExistingAppForLaunch);
         }
 
         if (capturedResult.Credential == null)

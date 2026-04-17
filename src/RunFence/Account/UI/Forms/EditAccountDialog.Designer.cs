@@ -24,8 +24,8 @@ partial class EditAccountDialog
     private CheckBox _allowLocalhostCheckBox;
     private CheckBox _allowLanCheckBox;
     private CheckBox _ephemeralCheckBox;
-    private CheckBox _splitTokenCheckBox;
-    private CheckBox _lowIntegrityCheckBox;
+    private Label _privilegeLevelLabel;
+    private ComboBox _privilegeLevelComboBox;
     private Label _installLabel;
     private CheckedListBox _installListBox;
     private Label _settingsLabel;
@@ -68,8 +68,8 @@ partial class EditAccountDialog
         _allowLanCheckBox = new CheckBox();
         _ephemeralCheckBox = new CheckBox();
         _toolTip = new ToolTip();
-        _splitTokenCheckBox = new CheckBox();
-        _lowIntegrityCheckBox = new CheckBox();
+        _privilegeLevelLabel = new Label();
+        _privilegeLevelComboBox = new ComboBox();
         _installLabel = new Label();
         _installListBox = new CheckedListBox();
         _settingsLabel = new Label();
@@ -172,15 +172,16 @@ partial class EditAccountDialog
         _allowLocalhostCheckBox.Location = new Point(305, 155);
         _allowLocalhostCheckBox.AutoSize = true;
 
-        // _splitTokenCheckBox
-        _splitTokenCheckBox.Text = "De-elevate by default";
-        _splitTokenCheckBox.Location = new Point(305, 183);
-        _splitTokenCheckBox.AutoSize = true;
+        // _privilegeLevelLabel
+        _privilegeLevelLabel.Text = "Default privilege level:";
+        _privilegeLevelLabel.Location = new Point(305, 183);
+        _privilegeLevelLabel.AutoSize = true;
 
-        // _lowIntegrityCheckBox
-        _lowIntegrityCheckBox.Text = "Launch as low integrity by default";
-        _lowIntegrityCheckBox.Location = new Point(305, 211);
-        _lowIntegrityCheckBox.AutoSize = true;
+        // _privilegeLevelComboBox
+        _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        _privilegeLevelComboBox.Location = new Point(305, 205);
+        _privilegeLevelComboBox.Size = new Size(200, 23);
+        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Basic", "Low Integrity" });
 
         // _ephemeralCheckBox
         _ephemeralCheckBox.Text = "Ephemeral (auto-delete after 24h)";
@@ -227,6 +228,8 @@ partial class EditAccountDialog
         _cancelButton.FlatStyle = FlatStyle.System;
 
         // EditAccountDialog
+        AutoScaleDimensions = new SizeF(7F, 15F);
+        AutoScaleMode = AutoScaleMode.Font;
         Text = "Edit Account";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -242,7 +245,7 @@ partial class EditAccountDialog
             _settingsLabel, _settingsPathTextBox, _browseButton,
             _logonCheckBox, _networkLoginCheckBox, _bgAutorunCheckBox,
             _allowInternetCheckBox, _allowLocalhostCheckBox, _allowLanCheckBox,
-            _splitTokenCheckBox, _lowIntegrityCheckBox, _ephemeralCheckBox,
+            _privilegeLevelLabel, _privilegeLevelComboBox, _ephemeralCheckBox,
             _installLabel, _installListBox,
             _statusLabel, _deleteButton, _okButton, _cancelButton
         });

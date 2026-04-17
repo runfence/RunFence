@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 
@@ -8,36 +9,28 @@ namespace RunFence.Persistence;
 /// Manages additional app config files loaded from removable/external media.
 /// All mutations happen on the UI thread (same contract as SessionContext).
 /// </summary>
-public class AppConfigService : IAppConfigService
+public class AppConfigService(
+    ILoggingService log,
+    AppConfigIndex index,
+    IGrantConfigTracker grantTracker,
+    IHandlerMappingService handlerMappings,
+    IDatabaseService databaseService,
+    AppConfigSaveHelper saveHelper,
+    IAppEntryIdGenerator idGenerator)
+    : IAppConfigService
 {
-    private readonly ILoggingService _log;
-    private readonly AppConfigIndex _index;
-    private readonly IGrantConfigTracker _grantTracker;
-    private readonly IHandlerMappingService _handlerMappings;
-    private readonly IDatabaseService _databaseService;
-    private AppConfigSaveHelper SaveHelper => field ??= new AppConfigSaveHelper(_grantTracker, _handlerMappings, _databaseService);
-
-    public AppConfigService(ILoggingService log, AppConfigIndex index, IGrantConfigTracker grantTracker, IHandlerMappingService handlerMappings, IDatabaseService databaseService)
-    {
-        _log = log;
-        _index = index;
-        _grantTracker = grantTracker;
-        _handlerMappings = handlerMappings;
-        _databaseService = databaseService;
-    }
-
     // --- Query ---
 
-    public string? GetConfigPath(string appId) => _index.GetConfigPath(appId);
+    public string? GetConfigPath(string appId) => index.GetConfigPath(appId);
 
     public List<AppEntry> GetAppsForConfig(string path, AppDatabase database) =>
-        _index.GetAppsForConfig(Normalize(path), database);
+        index.GetAppsForConfig(Normalize(path), database);
 
-    public IReadOnlyList<string> GetLoadedConfigPaths() => _index.GetLoadedConfigPaths();
+    public IReadOnlyList<string> GetLoadedConfigPaths() => index.GetLoadedConfigPaths();
 
-    public bool HasLoadedConfigs => _index.HasLoadedConfigs;
+    public bool HasLoadedConfigs => index.HasLoadedConfigs;
 
-    public List<string> GetUnavailableConfigPaths() => _index.GetUnavailableConfigPaths();
+    public List<string> GetUnavailableConfigPaths() => index.GetUnavailableConfigPaths();
 
     // --- Load / Unload ---
 
@@ -57,16 +50,16 @@ public class AppConfigService : IAppConfigService
         }
 
         // Guard against duplicate loads (List lacks HashSet's implicit deduplication)
-        if (_index.ContainsLoadedPath(normalized))
+        if (index.ContainsLoadedPath(normalized))
         {
-            _log.Warn($"Config path already loaded, ignoring duplicate load: {normalized}");
+            log.Warn($"Config path already loaded, ignoring duplicate load: {normalized}");
             return [];
         }
 
         AppConfig config;
         try
         {
-            config = _databaseService.LoadAppConfig(normalized, pinDerivedKey);
+            config = databaseService.LoadAppConfig(normalized, pinDerivedKey);
         }
         catch (CryptographicException ex)
         {
@@ -84,27 +77,13 @@ public class AppConfigService : IAppConfigService
             // ID collision: regenerate if already used
             if (database.Apps.Any(a => a.Id == app.Id))
             {
-                string? newId = null;
-                for (int i = 0; i < 10; i++)
-                {
-                    var candidate = AppEntry.GenerateId();
-                    if (database.Apps.All(a => a.Id != candidate))
-                    {
-                        newId = candidate;
-                        break;
-                    }
-                }
-
-                if (newId == null)
-                    throw new InvalidOperationException("Could not generate a unique app ID after 10 attempts.");
-
-                _log.Info($"App '{app.Name}' had ID collision, regenerated: {app.Id} → {newId}");
+                var newId = idGenerator.GenerateUniqueId(database.Apps.Select(a => a.Id));
+                log.Info($"App '{app.Name}' had ID collision, regenerated: {app.Id} → {newId}");
                 app.Id = newId;
             }
 
             database.Apps.Add(app);
-            _index.AssignApp(app.Id, normalized);
-            _handlerMappings.SetAppConfig(app.Id, normalized);
+            index.AssignApp(app.Id, normalized);
             loadedApps.Add(app);
         }
 
@@ -123,39 +102,38 @@ public class AppConfigService : IAppConfigService
                         continue;
 
                     dbAccount.Grants.Add(entry);
-                    _grantTracker.AssignGrant(configAccount.Sid, entry, normalized);
+                    grantTracker.AssignGrant(configAccount.Sid, entry, normalized);
                 }
             }
         }
 
         // Register extra config with the handler mapping service (always, to maintain load order
         // for GetEffectiveHandlerMappings overlay, even if this config has no handler mappings now).
-        _handlerMappings.RegisterConfigMappings(normalized, config.HandlerMappings ?? []);
+        handlerMappings.RegisterConfigMappings(normalized, config.HandlerMappings ?? new Dictionary<string, HandlerMappingEntry>());
 
-        _index.AddLoadedPath(normalized);
-        _log.Info($"Loaded {loadedApps.Count} app(s) from {normalized}");
+        index.AddLoadedPath(normalized);
+        log.Info($"Loaded {loadedApps.Count} app(s) from {normalized}");
         return loadedApps;
     }
 
     public List<AppEntry> UnloadConfig(string path, AppDatabase database)
     {
         var normalized = Normalize(path);
-        if (!_index.ContainsLoadedPath(normalized))
+        if (!index.ContainsLoadedPath(normalized))
         {
-            _log.Info($"Config path not loaded, nothing to unload: {normalized}");
+            log.Info($"Config path not loaded, nothing to unload: {normalized}");
             return [];
         }
 
-        var removedApps = _index.GetAppsForConfig(normalized, database);
+        var removedApps = index.GetAppsForConfig(normalized, database);
         foreach (var app in removedApps)
         {
             database.Apps.Remove(app);
-            _index.UnassignApp(app.Id);
-            _handlerMappings.SetAppConfig(app.Id, null);
+            index.UnassignApp(app.Id);
         }
 
         // Remove grants tracked to this config
-        var removedGrants = _grantTracker.UnregisterConfigGrants(normalized);
+        var removedGrants = grantTracker.UnregisterConfigGrants(normalized);
 
         foreach (var (sid, grantPath, isDeny, isTraverseOnly) in removedGrants)
         {
@@ -169,17 +147,17 @@ public class AppConfigService : IAppConfigService
             }
         }
 
-        _handlerMappings.UnregisterConfigMappings(normalized);
-        _index.RemoveLoadedPath(normalized);
-        _log.Info($"Unloaded {removedApps.Count} app(s) from {normalized}");
+        handlerMappings.UnregisterConfigMappings(normalized);
+        index.RemoveLoadedPath(normalized);
+        log.Info($"Unloaded {removedApps.Count} app(s) from {normalized}");
         return removedApps;
     }
 
     public void CreateEmptyConfig(string path, byte[] pinDerivedKey, byte[] argonSalt)
     {
         var normalized = Normalize(path);
-        _databaseService.SaveAppConfig(new AppConfig(), normalized, pinDerivedKey, argonSalt);
-        _log.Info($"Created empty config at {normalized}");
+        databaseService.SaveAppConfig(new AppConfig(), normalized, pinDerivedKey, argonSalt);
+        log.Info($"Created empty config at {normalized}");
     }
 
     // --- Mapping ---
@@ -188,16 +166,14 @@ public class AppConfigService : IAppConfigService
     {
         var normalized = configPath != null ? Normalize(configPath) : null;
         if (normalized == null)
-            _index.UnassignApp(appId);
+            index.UnassignApp(appId);
         else
-            _index.AssignApp(appId, normalized);
-        _handlerMappings.SetAppConfig(appId, normalized);
+            index.AssignApp(appId, normalized);
     }
 
     public void RemoveApp(string appId)
     {
-        _index.UnassignApp(appId);
-        _handlerMappings.SetAppConfig(appId, null);
+        index.UnassignApp(appId);
     }
 
     // --- Save (delegated to AppConfigSaveHelper) ---
@@ -207,7 +183,7 @@ public class AppConfigService : IAppConfigService
     {
         var configPath = GetConfigPath(appId);
         var apps = configPath != null ? GetAppsForConfig(configPath, database) : [];
-        SaveHelper.SaveConfigForApp(configPath, apps, database, pinDerivedKey, argonSalt);
+        saveHelper.SaveConfigForApp(configPath, apps, database, pinDerivedKey, argonSalt);
     }
 
     public void SaveConfigAtPath(string configPath, AppDatabase database,
@@ -215,7 +191,7 @@ public class AppConfigService : IAppConfigService
     {
         var normalized = Path.GetFullPath(configPath);
         var apps = GetAppsForConfig(normalized, database);
-        SaveHelper.SaveConfigAtPath(normalized, apps, database, pinDerivedKey, argonSalt);
+        saveHelper.SaveConfigAtPath(normalized, apps, database, pinDerivedKey, argonSalt);
     }
 
     public void SaveAllConfigs(AppDatabase database, byte[] pinDerivedKey, byte[] argonSalt)
@@ -223,7 +199,7 @@ public class AppConfigService : IAppConfigService
         var additionalConfigs = GetLoadedConfigPaths()
             .Select(path => (path, GetAppsForConfig(path, database)))
             .ToList();
-        SaveHelper.SaveAllConfigs(additionalConfigs, database, pinDerivedKey, argonSalt);
+        saveHelper.SaveAllConfigs(additionalConfigs, database, pinDerivedKey, argonSalt);
     }
 
     public void ReencryptAndSaveAll(CredentialStore store, AppDatabase database,
@@ -232,12 +208,12 @@ public class AppConfigService : IAppConfigService
         var additionalConfigs = GetLoadedConfigPaths()
             .Select(path => (path, GetAppsForConfig(path, database)))
             .ToList();
-        SaveHelper.ReencryptAndSaveAll(store, additionalConfigs, database, newPinDerivedKey);
+        saveHelper.ReencryptAndSaveAll(store, additionalConfigs, database, newPinDerivedKey);
     }
 
     public void SaveImportedConfig(string path, List<AppEntry> apps,
         byte[] pinDerivedKey, byte[] argonSalt)
-        => SaveHelper.SaveImportedConfig(path, apps, pinDerivedKey, argonSalt);
+        => saveHelper.SaveImportedConfig(path, apps, pinDerivedKey, argonSalt);
 
     // --- Private helpers ---
 

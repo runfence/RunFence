@@ -31,6 +31,7 @@ public class AccountContextMenuItems
     public required ToolStripMenuItem PinFolderBrowserToTray { get; init; }
     public required ToolStripMenuItem PinDiscoveryToTray { get; init; }
     public required ToolStripMenuItem PinTerminalToTray { get; init; }
+    public required ToolStripMenuItem ManageAssociations { get; init; }
     public required ToolStripMenuItem CopySid { get; init; }
     public required ToolStripMenuItem CopyProfilePath { get; init; }
     public required ToolStripMenuItem OpenProfileFolder { get; init; }

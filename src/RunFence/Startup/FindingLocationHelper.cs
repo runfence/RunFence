@@ -1,13 +1,13 @@
-using System.Diagnostics;
 using Microsoft.Win32;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Launch;
 
 namespace RunFence.Startup;
 
-public static class FindingLocationHelper
+public class FindingLocationHelper(ILaunchFacade launchFacade, ShellHelper shellHelper)
 {
-    public static void OpenLocation(StartupSecurityFinding finding)
+    public void OpenLocation(StartupSecurityFinding finding)
     {
         var target = finding.NavigationTarget;
         if (string.IsNullOrEmpty(target))
@@ -18,7 +18,7 @@ public static class FindingLocationHelper
         if (target.EndsWith(".msc", StringComparison.OrdinalIgnoreCase) &&
             !target.Contains('\\') && !target.Contains('/'))
         {
-            LaunchMmcSnapIn(target);
+            LaunchBestEffort("mmc.exe", target);
             return;
         }
 
@@ -41,25 +41,25 @@ public static class FindingLocationHelper
         // File/folder paths
         if (Directory.Exists(target))
         {
-            LaunchViaExplorer($"\"{target}\"");
+            LaunchBestEffort("explorer.exe", $"\"{target}\"");
         }
         else if (File.Exists(target))
         {
-            LaunchViaExplorer($"/select,\"{target}\"");
+            LaunchBestEffort("explorer.exe", $"/select,\"{target}\"");
         }
         else
         {
             var parent = Path.GetDirectoryName(target);
             if (!string.IsNullOrEmpty(parent) && Directory.Exists(parent))
-                LaunchViaExplorer($"\"{parent}\"");
+                LaunchBestEffort("explorer.exe", $"\"{parent}\"");
         }
     }
 
-    private static void OpenDriveProperties(string drivePath)
+    private void OpenDriveProperties(string drivePath)
     {
         try
         {
-            ShellHelper.ShowProperties(drivePath);
+            shellHelper.ShowProperties(drivePath);
         }
         catch
         {
@@ -67,7 +67,7 @@ public static class FindingLocationHelper
         }
     }
 
-    private static void OpenRegistryKey(string fullPath)
+    private void OpenRegistryKey(string fullPath)
     {
         try
         {
@@ -79,53 +79,14 @@ public static class FindingLocationHelper
             /* best effort */
         }
 
-        LaunchShellExecute("regedit.exe");
+        LaunchBestEffort("regedit.exe");
     }
 
-    private static void LaunchMmcSnapIn(string snapInName)
+    private void LaunchBestEffort(string fileName, string? arguments = null)
     {
         try
         {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "mmc.exe",
-                Arguments = snapInName,
-                UseShellExecute = true
-            });
-        }
-        catch
-        {
-            /* best effort */
-        }
-    }
-
-    private static void LaunchShellExecute(string fileName, string? arguments = null)
-    {
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = fileName,
-                Arguments = arguments ?? string.Empty,
-                UseShellExecute = true
-            });
-        }
-        catch
-        {
-            /* best effort */
-        }
-    }
-
-    private static void LaunchViaExplorer(string arguments)
-    {
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                Arguments = arguments,
-                UseShellExecute = true
-            });
+            launchFacade.LaunchFile(fileName, AccountLaunchIdentity.CurrentAccountElevated, arguments)?.Dispose();
         }
         catch
         {

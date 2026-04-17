@@ -1,3 +1,4 @@
+using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Launch;
@@ -7,15 +8,8 @@ namespace RunFence.Apps.UI;
 /// <summary>
 /// Validates inputs and constructs an AppEntry from dialog state.
 /// </summary>
-public class AppEntryBuilder
+public class AppEntryBuilder(IAppEntryIdGenerator idGenerator)
 {
-    private readonly IProcessLaunchService _processLaunchService;
-
-    public AppEntryBuilder(IProcessLaunchService processLaunchService)
-    {
-        _processLaunchService = processLaunchService;
-    }
-
     /// <summary>
     /// Validates all inputs for creating/editing an AppEntry.
     /// Returns null if valid, or an error message string if invalid.
@@ -39,7 +33,7 @@ public class AppEntryBuilder
         {
             if (appContainerName != null)
                 return "URL scheme apps are not supported with AppContainers.";
-            if (!_processLaunchService.ValidateUrlScheme(exePath, out var urlError))
+            if (!ProcessLaunchHelper.ValidateUrlScheme(exePath, out var urlError))
                 return urlError;
         }
         else if (isFolder)
@@ -80,7 +74,7 @@ public class AppEntryBuilder
 
         return new AppEntry
         {
-            Id = opts.ExistingId ?? opts.PreGeneratedId ?? GenerateUniqueId(new List<AppEntry>()),
+            Id = opts.ExistingId ?? opts.PreGeneratedId ?? idGenerator.GenerateUniqueId((opts.ExistingApps ?? []).Select(a => a.Id)),
             Name = opts.Name.Trim(),
             ExePath = opts.ExePath,
             IsUrlScheme = isUrl,
@@ -89,8 +83,7 @@ public class AppEntryBuilder
             AllowPassingArguments = !opts.IsFolder && opts.AllowPassArgs,
             WorkingDirectory = opts.IsFolder || isUrl ? null : resolvedWorkDir,
             AllowPassingWorkingDirectory = !opts.IsFolder && !isUrl && opts.AllowPassWorkingDir,
-            LaunchAsLowIntegrity = opts.LaunchAsLowIntegrity,
-            RunAsSplitToken = opts.RunAsSplitToken,
+            PrivilegeLevel = opts.PrivilegeLevel,
             AccountSid = opts.AccountSid,
             AppContainerName = opts.AppContainerName,
             RestrictAcl = opts.RestrictAcl,
@@ -109,16 +102,4 @@ public class AppEntryBuilder
         };
     }
 
-    public static string GenerateUniqueId(List<AppEntry> existingApps)
-    {
-        var existingIds = new HashSet<string>(existingApps.Select(a => a.Id));
-        for (int i = 0; i < 100; i++)
-        {
-            var id = AppEntry.GenerateId();
-            if (!existingIds.Contains(id))
-                return id;
-        }
-
-        return AppEntry.GenerateId();
-    }
 }

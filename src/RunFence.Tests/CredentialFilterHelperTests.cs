@@ -9,6 +9,7 @@ namespace RunFence.Tests;
 public class CredentialFilterHelperTests
 {
     private readonly Mock<ISidResolver> _resolver = new();
+    private CredentialFilterHelper CreateHelper() => new(_resolver.Object);
 
     private static CredentialEntry MakeCred(string sid) =>
         new() { Id = Guid.NewGuid(), Sid = sid, EncryptedPassword = [] };
@@ -21,8 +22,7 @@ public class CredentialFilterHelperTests
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
         var cred = MakeCred(currentSid);
 
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [cred], sidNames: null, _resolver.Object);
+        var result = CreateHelper().FilterResolvableCredentials([cred], sidNames: null);
 
         Assert.Single(result);
         Assert.Equal(currentSid, result[0].Sid);
@@ -35,8 +35,7 @@ public class CredentialFilterHelperTests
         var cred = MakeCred(sid);
         _resolver.Setup(r => r.TryResolveName(sid)).Returns(@"DOMAIN\user");
 
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [cred], sidNames: null, _resolver.Object);
+        var result = CreateHelper().FilterResolvableCredentials([cred], sidNames: null);
 
         Assert.Single(result);
     }
@@ -49,8 +48,7 @@ public class CredentialFilterHelperTests
         var sidNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [sid] = "SomeUser" };
         _resolver.Setup(r => r.TryResolveName(sid)).Returns((string?)null);
 
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [cred], sidNames, _resolver.Object);
+        var result = CreateHelper().FilterResolvableCredentials([cred], sidNames);
 
         Assert.Single(result);
     }
@@ -63,8 +61,7 @@ public class CredentialFilterHelperTests
         var existing = new AppEntry { AccountSid = sid.ToLower() };
         _resolver.Setup(r => r.TryResolveName(It.IsAny<string>())).Returns((string?)null);
 
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [cred], sidNames: null, _resolver.Object, existing);
+        var result = CreateHelper().FilterResolvableCredentials([cred], sidNames: null, existing);
 
         Assert.Single(result);
     }
@@ -76,8 +73,7 @@ public class CredentialFilterHelperTests
         var cred = MakeCred(sid);
         _resolver.Setup(r => r.TryResolveName(sid)).Returns((string?)null);
 
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [cred], sidNames: null, _resolver.Object);
+        var result = CreateHelper().FilterResolvableCredentials([cred], sidNames: null);
 
         Assert.Empty(result);
     }
@@ -91,8 +87,7 @@ public class CredentialFilterHelperTests
         var cred = MakeCred(sid);
         _resolver.Setup(r => r.TryResolveName(sid)).Returns((string?)null);
 
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [cred], sidNames: null, _resolver.Object);
+        var result = CreateHelper().FilterResolvableCredentials([cred], sidNames: null);
 
         Assert.Empty(result);
     }
@@ -104,8 +99,7 @@ public class CredentialFilterHelperTests
         var cred = MakeCred(sid);
         _resolver.Setup(r => r.TryResolveName(sid)).Returns((string?)null);
 
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [cred], sidNames: null, _resolver.Object, existing: null);
+        var result = CreateHelper().FilterResolvableCredentials([cred], sidNames: null, existing: null);
 
         Assert.Empty(result);
     }
@@ -113,8 +107,7 @@ public class CredentialFilterHelperTests
     [Fact]
     public void Filter_EmptyCredentials_ReturnsEmpty()
     {
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [], sidNames: null, _resolver.Object);
+        var result = CreateHelper().FilterResolvableCredentials([], sidNames: null);
 
         Assert.Empty(result);
     }
@@ -135,9 +128,8 @@ public class CredentialFilterHelperTests
         var sidNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             { [sidNameSid] = "UserB" };
 
-        var result = CredentialFilterHelper.FilterResolvableCredentials(
-            [MakeCred(resolverSid), MakeCred(sidNameSid), MakeCred(filteredSid)],
-            sidNames, _resolver.Object);
+        var result = CreateHelper().FilterResolvableCredentials(
+            [MakeCred(resolverSid), MakeCred(sidNameSid), MakeCred(filteredSid)], sidNames);
 
         Assert.Equal(2, result.Count);
         Assert.Contains(result, c => c.Sid == resolverSid);

@@ -1,17 +1,36 @@
-using System.Diagnostics;
 using System.Reflection;
+using RunFence.Launch;
 
 namespace RunFence.Licensing.UI.Forms;
 
 public partial class AboutPanel : UserControl
 {
     private readonly ILicenseService _licenseService;
+    private readonly ILaunchFacade _launchFacade;
 
-    internal AboutPanel(ILicenseService licenseService)
+    public AboutPanel(ILicenseService licenseService, ILaunchFacade launchFacade)
     {
         _licenseService = licenseService;
+        _launchFacade = launchFacade;
         InitializeComponent();
         PopulateContent();
+
+        // Refresh when license status changes externally (e.g., activation from another dialog,
+        // or expiry detected by ShouldShowNag). LicenseStatusChanged may fire on any thread,
+        // so marshal to the UI thread before touching controls.
+        licenseService.LicenseStatusChanged += OnLicenseStatusChanged;
+    }
+
+    partial void OnDisposing()
+    {
+        _licenseService.LicenseStatusChanged -= OnLicenseStatusChanged;
+    }
+
+    private void OnLicenseStatusChanged()
+    {
+        if (IsDisposed || !IsHandleCreated)
+            return;
+        BeginInvoke(PopulateContent);
     }
 
     private void PopulateContent()
@@ -64,7 +83,7 @@ public partial class AboutPanel : UserControl
 
     private void OnActivateLicenseClick(object? sender, EventArgs e)
     {
-        using var dlg = new EvaluationNagDialog(_licenseService, skipCountdown: true);
+        using var dlg = new EvaluationNagDialog(_licenseService, _launchFacade, skipCountdown: true);
         dlg.ShowDialog(this);
         if (_licenseService.IsLicensed)
             PopulateContent();
@@ -85,8 +104,6 @@ public partial class AboutPanel : UserControl
         OpenUrl("https://github.com/runfence/RunFence/blob/master/README.md");
     }
 
-    private static void OpenUrl(string url)
-    {
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-    }
+    private void OpenUrl(string url) =>
+        _launchFacade.LaunchUrl(url, AccountLaunchIdentity.InteractiveUser);
 }

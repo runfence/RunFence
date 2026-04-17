@@ -1,12 +1,12 @@
 using System.Security;
 using RunFence.Account;
 using RunFence.Account.UI;
+using RunFence.Apps.Shortcuts;
 using RunFence.Infrastructure;
 using RunFence.Account.UI.Forms;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Security;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -20,7 +20,7 @@ namespace RunFence.Wizard.Templates;
 ///   <item>Create new account — AccountNameStep is inserted dynamically after <see cref="AccountPickerStep"/>
 ///         when the user selects "Create new account".</item>
 ///   <item>Use existing account — if the selected account has no stored credential the wizard shows
-///         <see cref="CredentialEditDialog"/> on the secure desktop (via <see cref="ISecureDesktopRunner"/>)
+///         <see cref="CredentialEditDialog"/> on the secure desktop (via <see cref="WizardCredentialCollector"/>)
 ///         before advancing to <see cref="AppPathStep"/>.</item>
 /// </list>
 /// </summary>
@@ -28,14 +28,14 @@ public class ElevatedAppTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
     IAccountCredentialManager credentialManager,
-    IWindowsAccountService windowsAccountService,
     ILocalGroupMembershipService groupMembership,
     ILocalUserProvider localUserProvider,
     ISidResolver sidResolver,
+    CredentialFilterHelper credentialFilterHelper,
     SessionContext session,
     WizardLicenseChecker licenseChecker,
-    ISecureDesktopRunner secureDesktopRunner,
-    Func<CredentialEditDialog> credentialEditDialogFactory)
+    Func<WizardCredentialCollector> credentialCollectorFactory,
+    IShortcutDiscoveryService discoveryService)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -59,16 +59,17 @@ public class ElevatedAppTemplate(
                 _data.SelectedExistingSid = sid;
                 _data.CreateNewAccount = isCreate;
             },
-            windowsAccountService: windowsAccountService,
             groupMembership: groupMembership,
             localUserProvider: localUserProvider,
-            credentials: session.CredentialStore.Credentials,
             sidResolver: sidResolver,
-            sidNames: session.Database.SidNames,
-            groupSid: GroupFilterHelper.AdministratorsSid,
-            stepTitle: "Select Administrator Account",
-            infoText: "Select an existing administrator account, or choose \"Create new account\" to add a dedicated one. " +
-                      "Accounts with a green dot have stored credentials; gray dot means you will be prompted for a password.",
+            credentialFilterHelper: credentialFilterHelper,
+            options: new AccountPickerStepOptions(
+                Credentials: session.CredentialStore.Credentials,
+                SidNames: session.Database.SidNames,
+                GroupSid: GroupFilterHelper.AdministratorsSid,
+                StepTitle: "Select Administrator Account",
+                InfoText: "Select an existing administrator account, or choose \"Create new account\" to add a dedicated one. " +
+                          "Accounts with a green dot have stored credentials; gray dot means you will be prompted for a password."),
             followingStepsFactory: isCreate =>
             {
                 var appPathStep = new AppPathStep(
@@ -77,6 +78,7 @@ public class ElevatedAppTemplate(
                         _data.AppPath = path;
                         _data.AppName = name;
                     },
+                    discoveryService,
                     description: "Select the application to launch under the administrator account. " +
                                  "A desktop shortcut will be created to run it elevated.");
 
@@ -93,7 +95,14 @@ public class ElevatedAppTemplate(
 
                 return [appPathStep];
             },
-            commitAction: CollectCredentialIfNeededAsync);
+            commitAction: progress =>
+            {
+                if (_data.CreateNewAccount || string.IsNullOrEmpty(_data.SelectedExistingSid))
+                    return Task.CompletedTask;
+                var pw = credentialCollectorFactory().CollectIfNeeded(_data.SelectedExistingSid, session, progress);
+                if (pw != null) _data.CollectedPassword = pw;
+                return Task.CompletedTask;
+            });
 
         var initialAppPathStep = new AppPathStep(
             (path, name) =>
@@ -101,6 +110,7 @@ public class ElevatedAppTemplate(
                 _data.AppPath = path;
                 _data.AppName = name;
             },
+            discoveryService,
             description: "Select the application to launch under the administrator account. " +
                          "A desktop shortcut will be created to run it elevated.");
 
@@ -117,8 +127,6 @@ public class ElevatedAppTemplate(
             return;
         if (!licenseChecker.CheckCanAddApp(session, progress))
             return;
-
-        Guid? credId = null;
 
         if (_data.CreateNewAccount)
         {
@@ -164,12 +172,11 @@ public class ElevatedAppTemplate(
             var appName = _data.AppName;
             var appPath = _data.AppPath;
 
-            // For new admin accounts: use SetupOptions to store credential + set SplitTokenOptOut
+            // For new admin accounts: store credential + use HighestAllowed (no de-elevation)
             var setupOptions = new WizardSetupOptions(
                 StoreCredential: true,
                 IsEphemeral: false,
-                SplitTokenOptOut: true, // full admin — no de-elevation
-                LowIntegrityDefault: false,
+                PrivilegeLevel: PrivilegeLevel.HighestAllowed,
                 FirewallSettings: null,
                 DesktopSettingsPath: null,
                 InstallPackages: null,
@@ -206,12 +213,10 @@ public class ElevatedAppTemplate(
         // Store credential if it was collected from the secure desktop dialog
         if (_data.CollectedPassword != null)
         {
-            var (success, newCredId, error) = credentialManager.AddNewCredential(
+            var (success, _, error) = credentialManager.AddNewCredential(
                 sid, _data.CollectedPassword, session.CredentialStore, session.PinDerivedKey);
             if (!success && error != null)
                 progress.ReportError($"Credential: {error}");
-            else
-                credId = newCredId;
         }
 
         // Build and add app entry via executor
@@ -222,8 +227,7 @@ public class ElevatedAppTemplate(
             var saveOnlyParams = new WizardStandardFlowParams(
                 Request: null,
                 SetupOptions: null,
-                AccountSid: sid,
-                ExistingCredentialId: credId);
+                AccountSid: sid);
             await executor.ExecuteAsync(saveOnlyParams, progress);
             return;
         }
@@ -246,67 +250,9 @@ public class ElevatedAppTemplate(
                     aclMode: AclMode.Deny,
                     manageShortcuts: true)
             ],
-            ExistingCredentialId: credId,
             CreateDesktopShortcut: true);
 
         await executor.ExecuteAsync(existingFlowParams, progress);
-    }
-
-    /// <summary>
-    /// Mid-wizard async hook: if the selected existing account has no stored credential,
-    /// shows <see cref="CredentialEditDialog"/> on the secure desktop to collect the password.
-    /// Returns without error when the user provides a valid password or when no password is needed.
-    /// </summary>
-    private async Task CollectCredentialIfNeededAsync(IWizardProgressReporter progress)
-    {
-        // Only needed for existing accounts without a stored credential
-        if (_data.CreateNewAccount || string.IsNullOrEmpty(_data.SelectedExistingSid))
-            return;
-
-        var sid = _data.SelectedExistingSid;
-        bool alreadyHasCredential = session.CredentialStore.Credentials
-            .Any(c => string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase));
-
-        if (alreadyHasCredential)
-            return;
-
-        // Collect password on secure desktop
-        SecureString? collected = null;
-        Exception? dialogException = null;
-
-        var credEntry = new CredentialEntry { Id = Guid.NewGuid(), Sid = sid };
-
-        try
-        {
-            secureDesktopRunner.Run(() =>
-            {
-                using var dlg = credentialEditDialogFactory();
-                dlg.Initialize(existing: credEntry, hasStoredPassword: false,
-                    sidNames: session.Database.SidNames);
-
-                var dr = dlg.ShowDialog();
-                if (dr == DialogResult.OK)
-                    collected = dlg.Password;
-            });
-        }
-        catch (Exception ex)
-        {
-            dialogException = ex;
-        }
-
-        if (dialogException != null)
-        {
-            progress.ReportError($"Credential dialog: {dialogException.Message}");
-            throw new OperationCanceledException("Credential collection failed.", dialogException);
-        }
-
-        if (collected == null)
-        {
-            progress.ReportError("Password is required to use this account.");
-            throw new OperationCanceledException("Password is required to use this account.");
-        }
-
-        _data.CollectedPassword = collected;
     }
 
     private sealed class CommitData

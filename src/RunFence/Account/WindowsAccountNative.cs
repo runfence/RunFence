@@ -4,6 +4,11 @@ namespace RunFence.Account;
 
 internal static class WindowsAccountNative
 {
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool LogonUser(string lpszUsername, string? lpszDomain,
+        string lpszPassword, int dwLogonType, int dwLogonProvider, out IntPtr phToken);
+
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct USER_INFO_0
     {

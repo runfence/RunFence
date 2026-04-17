@@ -151,80 +151,30 @@ public class IconService(ILoggingService log, string? iconDir = null) : IIconSer
     private void SaveBadgedIcon(Icon sourceIcon, string outputPath, string accountSid)
     {
         var sizes = new[] { 16, 32, 48, 256 };
-
+        using var icon = IconBuilder.CreateMultiSizeIcon(sizes, (g, size) =>
+        {
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            using var sourceBmp = sourceIcon.ToBitmap();
+            g.DrawImage(sourceBmp, 0, 0, size, size);
+            DrawBadge(g, size, accountSid);
+        });
         using var ms = new MemoryStream();
-        using var writer = new BinaryWriter(ms);
-
-        // ICO header
-        writer.Write((short)0); // Reserved
-        writer.Write((short)1); // ICO type
-        writer.Write((short)sizes.Length);
-
-        // Placeholder for directory entries
-        var directoryStart = ms.Position;
-        for (int i = 0; i < sizes.Length; i++)
-        {
-            writer.Write(new byte[16]); // 16 bytes per entry
-        }
-
-        var imageOffsets = new long[sizes.Length];
-        var imageSizes = new int[sizes.Length];
-
-        for (int i = 0; i < sizes.Length; i++)
-        {
-            imageOffsets[i] = ms.Position;
-
-            using var bmp = new Bitmap(sizes[i], sizes[i], PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-
-                // Draw the source icon
-                using var sourceBmp = sourceIcon.ToBitmap();
-                g.DrawImage(sourceBmp, 0, 0, sizes[i], sizes[i]);
-
-                // Draw badge overlay
-                DrawBadge(g, sizes[i], accountSid);
-            }
-
-            // Write as PNG for each size
-            using var pngStream = new MemoryStream();
-            bmp.Save(pngStream, ImageFormat.Png);
-            var pngBytes = pngStream.ToArray();
-            writer.Write(pngBytes);
-            imageSizes[i] = pngBytes.Length;
-        }
-
-        // Go back and write directory entries
-        ms.Position = directoryStart;
-        for (int i = 0; i < sizes.Length; i++)
-        {
-            writer.Write((byte)(sizes[i] >= 256 ? 0 : sizes[i])); // Width
-            writer.Write((byte)(sizes[i] >= 256 ? 0 : sizes[i])); // Height
-            writer.Write((byte)0); // Color palette
-            writer.Write((byte)0); // Reserved
-            writer.Write((short)1); // Color planes
-            writer.Write((short)32); // Bits per pixel
-            writer.Write(imageSizes[i]);
-            writer.Write((int)imageOffsets[i]);
-        }
-
+        icon.Save(ms);
         File.WriteAllBytes(outputPath, ms.ToArray());
     }
 
     private static Icon? ExtractFolderIcon()
     {
-        var hIcon = ShellIconHelper.GetFileIconHandle(
+        var hIcon = ShellNative.GetFileIconHandle(
             Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-            ShellIconHelper.FILE_ATTRIBUTE_DIRECTORY,
-            ShellIconHelper.SHGFI_ICON | ShellIconHelper.SHGFI_LARGEICON | ShellIconHelper.SHGFI_USEFILEATTRIBUTES);
+            FileSecurityNative.FILE_ATTRIBUTE_DIRECTORY,
+            ShellNative.SHGFI_ICON | ShellNative.SHGFI_LARGEICON | ShellNative.SHGFI_USEFILEATTRIBUTES);
 
         if (hIcon == IntPtr.Zero)
             return null;
 
         var icon = (Icon)Icon.FromHandle(hIcon).Clone();
-        NativeMethods.DestroyIcon(hIcon);
+        WindowNative.DestroyIcon(hIcon);
         return icon;
     }
 

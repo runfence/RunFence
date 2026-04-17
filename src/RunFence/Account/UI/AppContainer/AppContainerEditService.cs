@@ -22,8 +22,7 @@ public record AppContainerEditResult(
 public class AppContainerEditService(
     IAppContainerService appContainerService,
     IDatabaseProvider databaseProvider,
-    ILoggingService log,
-    ISidNameCacheService sidNameCache)
+    ILoggingService log)
 {
     /// <summary>
     /// Applies edit changes to an existing AppContainer entry (mutates it in place).
@@ -71,6 +70,7 @@ public class AppContainerEditService(
         try
         {
             var containerSid = appContainerService.GetSid(existing.Name);
+            existing.Sid = containerSid;
             var oldCom = existing.ComAccessClsids ?? [];
             foreach (var clsid in newComClsids.Except(oldCom, StringComparer.OrdinalIgnoreCase))
             {
@@ -99,8 +99,6 @@ public class AppContainerEditService(
                     comErrors.Add($"Revoke {clsid}: {ex.Message}");
                 }
             }
-
-            sidNameCache.UpdateName(containerSid, displayName);
         }
         catch (Exception ex)
         {
@@ -169,7 +167,7 @@ public class AppContainerEditService(
             try
             {
                 var sid = appContainerService.GetSid(entry.Name);
-                sidNameCache.UpdateName(sid, entry.DisplayName);
+                entry.Sid = sid;
                 var grantedClsids = new List<string>();
                 foreach (var clsid in comClsids)
                 {

@@ -1,6 +1,6 @@
-using System.Diagnostics;
 using RunFence.Apps.UI;
 using RunFence.Core;
+using RunFence.Launch;
 using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Licensing.UI.Forms;
@@ -8,12 +8,15 @@ namespace RunFence.Licensing.UI.Forms;
 public partial class EvaluationNagDialog : Form
 {
     private readonly ILicenseService _licenseService;
+    private readonly ILaunchFacade _launchFacade;
     private Timer? _countdownTimer;
+    private Timer? _flashTimer;
     private int _secondsRemaining = 5;
 
-    internal EvaluationNagDialog(ILicenseService licenseService, bool skipCountdown = false)
+    internal EvaluationNagDialog(ILicenseService licenseService, ILaunchFacade launchFacade, bool skipCountdown = false)
     {
         _licenseService = licenseService;
+        _launchFacade = launchFacade;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         _machineCodeTextBox.Text = licenseService.MachineCode;
@@ -53,6 +56,8 @@ public partial class EvaluationNagDialog : Form
         if (_secondsRemaining > 0 && e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
+            // Flash the countdown button so the user understands why close was blocked.
+            FlashCountdownButton();
             return;
         }
 
@@ -64,7 +69,37 @@ public partial class EvaluationNagDialog : Form
         _countdownTimer?.Stop();
         _countdownTimer?.Dispose();
         _countdownTimer = null;
+        _flashTimer?.Stop();
+        _flashTimer?.Dispose();
+        _flashTimer = null;
         base.OnFormClosed(e);
+    }
+
+    private void FlashCountdownButton()
+    {
+        if (_flashTimer != null)
+            return; // already flashing; ignore repeated close attempts during animation
+
+        var flashText = $"\u23F3 Please wait... ({_secondsRemaining}s)";
+        int flipCount = 0;
+
+        _continueButton.Text = flashText;
+        _flashTimer = new Timer { Interval = 250 };
+        _flashTimer.Tick += (_, _) =>
+        {
+            flipCount++;
+            // Odd ticks restore countdown text; even ticks show flash text.
+            // Always use current _secondsRemaining so text stays accurate if countdown ticked during flash.
+            _continueButton.Text = flipCount % 2 == 0 ? flashText : $"Continue Evaluation ({_secondsRemaining}s)";
+            if (flipCount >= 5) // ~1.25s total, then restore
+            {
+                _flashTimer!.Stop();
+                _flashTimer.Dispose();
+                _flashTimer = null;
+                _continueButton.Text = $"Continue Evaluation ({_secondsRemaining}s)";
+            }
+        };
+        _flashTimer.Start();
     }
 
     private void OnCountdownTick(object? sender, EventArgs e)
@@ -73,12 +108,18 @@ public partial class EvaluationNagDialog : Form
         if (_secondsRemaining <= 0)
         {
             _countdownTimer!.Stop();
+            _flashTimer?.Stop();
+            _flashTimer?.Dispose();
+            _flashTimer = null;
             _continueButton.Enabled = true;
             _continueButton.Text = "Continue Evaluation";
         }
         else
         {
-            UpdateCountdownText();
+            // Skip updating the button text while a flash animation is running;
+            // the flash will restore the correct text when it completes.
+            if (_flashTimer == null)
+                UpdateCountdownText();
         }
     }
 
@@ -111,12 +152,14 @@ public partial class EvaluationNagDialog : Form
 
     private void OnPaymentLinkClicked(object? sender, LinkLabelLinkClickedEventArgs e)
     {
-        Process.Start(new ProcessStartInfo("https://github.com/runfence/RunFence/blob/master/PAYMENT.md")
-            { UseShellExecute = true });
+        OpenUrl("https://github.com/runfence/RunFence/blob/master/PAYMENT.md");
     }
 
     private void OnEmailLinkClicked(object? sender, LinkLabelLinkClickedEventArgs e)
     {
-        Process.Start(new ProcessStartInfo("mailto:runfencedev@gmail.com") { UseShellExecute = true });
+        OpenUrl("mailto:runfencedev@gmail.com");
     }
+
+    private void OpenUrl(string url) =>
+        _launchFacade.LaunchUrl(url, AccountLaunchIdentity.InteractiveUser);
 }

@@ -1,10 +1,11 @@
 using RunFence.Core;
 using RunFence.Core.Ipc;
+using RunFence.Persistence;
 using RunFence.Startup.UI;
 
 namespace RunFence.Startup;
 
-public class SessionAcquisitionHandler(IStartupUI ui)
+public class SessionAcquisitionHandler(IStartupUI ui, IConfigPaths configPaths)
 {
     /// <summary>
     /// Acquires the single-instance mutex or performs session takeover.
@@ -18,7 +19,7 @@ public class SessionAcquisitionHandler(IStartupUI ui)
         if (singleInstance.TryAcquire())
             return true;
 
-        var isFirstRun = !File.Exists(Path.Combine(Constants.LocalAppDataDir, "credentials.dat"));
+        var isFirstRun = !File.Exists(configPaths.CredentialsFilePath);
 
         if (!ui.ConfirmTakeover(isFirstRun, isBackground))
             return false;
@@ -37,6 +38,10 @@ public class SessionAcquisitionHandler(IStartupUI ui)
         bool acquired = false;
         for (int attempt = 0; attempt < 3; attempt++)
         {
+            // Thread.Sleep is intentional here: this runs before Application.Run, so there is no
+            // message loop to pump. Async/await is not viable at this point in the startup sequence.
+            // We wait up to 3 seconds (3 × 1s) for the prior instance to release the mutex after
+            // receiving the Shutdown IPC message.
             Thread.Sleep(1000);
             if (singleInstance.TryAcquire())
             {

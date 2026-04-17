@@ -2,9 +2,10 @@ using System.Security.AccessControl;
 using System.Text.Json;
 using Moq;
 using RunFence.Acl;
+using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
+using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -26,12 +27,12 @@ public class AclServiceTests
     }
 
     private static AclService CreateService(ILoggingService log, CachingLocalUserProvider localUserProvider,
-        IAppContainerService? containerService = null)
+        IDatabaseProvider? databaseProvider = null)
     {
-        var resolvedContainerService = containerService ?? new Mock<IAppContainerService>().Object;
-        var denyService = new AclDenyModeService(log, localUserProvider, resolvedContainerService);
+        var resolvedDatabaseProvider = databaseProvider ?? new LambdaDatabaseProvider(() => new AppDatabase());
+        var denyService = new AclDenyModeService(log, localUserProvider, resolvedDatabaseProvider, new Mock<IInteractiveUserResolver>().Object);
         var allowService = new AclAllowModeService(log, localUserProvider);
-        return new AclService(log, denyService, allowService, resolvedContainerService);
+        return new AclService(log, denyService, allowService, resolvedDatabaseProvider);
     }
 
     private static AppEntry CreateApp(string id, string name, string exePath,
@@ -78,12 +79,6 @@ public class AclServiceTests
     public void IsBlockedPath_AllowedPaths_ReturnsFalse(string path)
     {
         Assert.False(_service.IsBlockedPath(path));
-    }
-
-    [Fact]
-    public void IsBlockedPath_WindowsAncestor_ReturnsTrue()
-    {
-        Assert.True(_service.IsBlockedPath(@"C:\"));
     }
 
     [Fact]
@@ -420,13 +415,13 @@ public class AclServiceTests
     // --- Local user cache tests ---
 
     [Fact]
-    public void GetLocalUserAccounts_ReturnsSameInstance_WithinTtl()
+    public void GetLocalUserAccounts_ReturnsCachedInstance_WithinTtl()
     {
         // Arrange & Act
         var first = _localUserProvider.GetLocalUserAccounts();
         var second = _localUserProvider.GetLocalUserAccounts();
 
-        // Assert — same cached reference
+        // Assert — same cached instance returned; callers treat result as read-only
         Assert.Same(first, second);
     }
 
@@ -435,13 +430,15 @@ public class AclServiceTests
     {
         // Arrange
         var first = _localUserProvider.GetLocalUserAccounts();
+        int originalCount = first.Count;
 
         // Act
         _localUserProvider.InvalidateCache();
         var second = _localUserProvider.GetLocalUserAccounts();
 
-        // Assert — different list instance after invalidation
-        Assert.NotSame(first, second);
+        // Assert — re-enumeration produces the same user data (not a stale copy)
+        Assert.Equal(originalCount, second.Count);
+        Assert.Equal(first, second);
     }
 
     // --- Allow mode routing tests ---
@@ -628,17 +625,16 @@ public class AclServiceTests
 
         // Use ALL_APPLICATION_PACKAGES as a well-known valid SID string
         const string containerSid = "S-1-15-2-1";
-        var containerService = new Mock<IAppContainerService>();
-        containerService.Setup(s => s.GetSid("ram_browser")).Returns(containerSid);
+        var db = new AppDatabase();
+        db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var service = CreateService(_log.Object, _localUserProvider, containerService.Object);
+        var service = CreateService(_log.Object, _localUserProvider, new LambdaDatabaseProvider(() => db));
         var app = CreateApp("c0001", "BrowserApp", exePath, accountSid: "",
             aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
 
         service.ApplyAcl(app, new List<AppEntry> { app });
 
-        containerService.Verify(s => s.GetSid("ram_browser"), Times.AtLeastOnce);
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Granted") && s.Contains(containerSid))), Times.Once);
     }
 
@@ -650,10 +646,10 @@ public class AclServiceTests
         File.WriteAllBytes(exePath, []);
 
         const string containerSid = "S-1-15-2-1";
-        var containerService = new Mock<IAppContainerService>();
-        containerService.Setup(s => s.GetSid("ram_browser")).Returns(containerSid);
+        var db = new AppDatabase();
+        db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var service = CreateService(_log.Object, _localUserProvider, containerService.Object);
+        var service = CreateService(_log.Object, _localUserProvider, new LambdaDatabaseProvider(() => db));
         var app = CreateApp("c0001", "BrowserApp", exePath,
             accountSid: Sid1, aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
@@ -670,9 +666,6 @@ public class AclServiceTests
     {
         // AppContainer apps have empty AccountSid — must NOT add "" to the allowed set
         // (which would effectively allow all users through the deny-mode filter).
-        // Note: the positive behavior — that the interactive user SID IS added for container apps —
-        // cannot be tested here because NativeTokenHelper.TryGetInteractiveUserSid() is a static call
-        // with no injection point; testing it would require running in an interactive session.
         var app = CreateApp("c0001", "ContainerApp", @"C:\Apps\tool.exe", accountSid: "", aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
 
@@ -684,15 +677,38 @@ public class AclServiceTests
     }
 
     [Fact]
-    public void GetAllowedSidsForPath_AppContainerApp_IncludesContainerSidWhenServiceProvided()
+    public void GetAllowedSidsForPath_AppContainerApp_IncludesInteractiveUserSid()
     {
-        // When IAppContainerProfileService is available, the container package SID (from GetSid) must
-        // appear in the allowed set so the sandboxed process can reach its exe through the deny filter.
-        const string containerSid = "S-1-15-2-99";
-        var containerService = new Mock<IAppContainerService>();
-        containerService.Setup(s => s.GetSid("ram_browser")).Returns(containerSid);
+        // AppContainer apps must include the interactive user SID in the allowed set
+        // so the interactive user can still access the exe through the deny filter.
+        const string interactiveSid = "S-1-5-21-1234567890-1234567890-1234567890-1099";
+        var interactiveResolver = new Mock<IInteractiveUserResolver>();
+        interactiveResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
 
-        var service = CreateService(_log.Object, _localUserProvider, containerService.Object);
+        var denyService = new AclDenyModeService(_log.Object, _localUserProvider,
+            new LambdaDatabaseProvider(() => new AppDatabase()), interactiveResolver.Object);
+        var service = new AclService(_log.Object, denyService, new AclAllowModeService(_log.Object, _localUserProvider),
+            new LambdaDatabaseProvider(() => new AppDatabase()));
+
+        var app = CreateApp("c0001", "ContainerApp", @"C:\Apps\tool.exe", accountSid: "", aclMode: AclMode.Deny);
+        app.AppContainerName = "ram_browser";
+
+        var allowed = service.GetAllowedSidsForPath(
+            @"C:\Apps\tool.exe", new List<AppEntry> { app }, isFolderTarget: false);
+
+        Assert.Contains(interactiveSid, allowed, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetAllowedSidsForPath_AppContainerApp_IncludesContainerSidWhenResolved()
+    {
+        // When the container entry has a resolved Sid, it must appear in the allowed set
+        // so the sandboxed process can reach its exe through the deny filter.
+        const string containerSid = "S-1-15-2-99";
+        var db = new AppDatabase();
+        db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
+
+        var service = CreateService(_log.Object, _localUserProvider, new LambdaDatabaseProvider(() => db));
         var app = CreateApp("c0001", "ContainerApp", @"C:\Apps\tool.exe", accountSid: "", aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
 

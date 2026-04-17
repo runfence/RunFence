@@ -1,9 +1,9 @@
-using System.Security.AccessControl;
 using Moq;
-using RunFence.Acl.Permissions;
-using RunFence.Acl.Traverse;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.DragBridge;
+using RunFence.Infrastructure;
+using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -11,24 +11,22 @@ namespace RunFence.Tests;
 public class DragBridgeTempFileManagerTests : IDisposable
 {
     private readonly Mock<ILoggingService> _log;
-    private readonly Mock<IAclPermissionService> _aclPermission;
+    private readonly Mock<IPathGrantService> _pathGrantService;
+    private readonly Mock<ITempDirectoryAclHelper> _aclHelper;
     private readonly string _testBase;
     private readonly DragBridgeTempFileManager _manager;
 
     public DragBridgeTempFileManagerTests()
     {
         _log = new Mock<ILoggingService>();
-        _aclPermission = new Mock<IAclPermissionService>();
-        // Return empty group SIDs and report effective rights as covered so no real ACL modification is attempted
-        _aclPermission.Setup(a => a.ResolveAccountGroupSids(It.IsAny<string>())).Returns([]);
-        _aclPermission.Setup(a => a.HasEffectiveRights(
-            It.IsAny<DirectorySecurity>(),
-            It.IsAny<string>(),
-            It.IsAny<IReadOnlyList<string>>(),
-            It.IsAny<FileSystemRights>())).Returns(true);
-        var traverseGranter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object);
+        _pathGrantService = new Mock<IPathGrantService>();
+        _aclHelper = new Mock<ITempDirectoryAclHelper>();
+        var sessionSaver = new Mock<ISessionSaver>();
+        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
+        uiThreadInvoker.Setup(u => u.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
         _testBase = Path.Combine(Path.GetTempPath(), $"ram_test_{Guid.NewGuid():N}");
-        _manager = new DragBridgeTempFileManager(_log.Object, _aclPermission.Object, traverseGranter, _testBase);
+        _manager = new DragBridgeTempFileManager(_log.Object, _pathGrantService.Object,
+            sessionSaver.Object, uiThreadInvoker.Object, _aclHelper.Object, _testBase);
     }
 
     public void Dispose()
@@ -138,11 +136,55 @@ public class DragBridgeTempFileManagerTests : IDisposable
     [Fact]
     public void CleanupOldFolders_NonExistentRoot_DoesNotThrow()
     {
-        var traverseGranter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object);
-        var manager = new DragBridgeTempFileManager(_log.Object, _aclPermission.Object, traverseGranter, @"C:\nonexistent_base_xyz");
+        var sessionSaver = new Mock<ISessionSaver>();
+        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
+        var manager = new DragBridgeTempFileManager(_log.Object, _pathGrantService.Object,
+            sessionSaver.Object, uiThreadInvoker.Object,
+            new Mock<ITempDirectoryAclHelper>().Object, @"C:\nonexistent_base_xyz");
 
         var ex = Record.Exception(() => manager.CleanupOldFolders(TimeSpan.FromHours(1)));
 
         Assert.Null(ex);
+    }
+
+    [Fact]
+    public void CreateTempFolder_TraverseGrantModified_SavesConfig()
+    {
+        var (sessionSaver, _) = CreateManagerWithTraverseResult(traverseModified: true);
+
+        sessionSaver.Verify(s => s.SaveConfig(), Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public void CreateTempFolder_TraverseNotModified_DoesNotSaveConfig()
+    {
+        var (sessionSaver, _) = CreateManagerWithTraverseResult(traverseModified: false);
+
+        sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
+    }
+
+    /// <summary>
+    /// Creates a <see cref="DragBridgeTempFileManager"/> with <see cref="IPathGrantService.AddTraverse"/>
+    /// returning the specified <paramref name="traverseModified"/> flag, calls
+    /// <see cref="DragBridgeTempFileManager.CreateTempFolder"/> once, and returns the
+    /// <see cref="ISessionSaver"/> mock for verification.
+    /// </summary>
+    private (Mock<ISessionSaver> SessionSaver, DragBridgeTempFileManager Manager)
+        CreateManagerWithTraverseResult(bool traverseModified)
+    {
+        var currentSid = SidResolutionHelper.GetCurrentUserSid();
+        _pathGrantService.Setup(s => s.AddTraverse(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns((traverseModified, new List<string>()));
+
+        var sessionSaver = new Mock<ISessionSaver>();
+        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
+        if (traverseModified)
+            uiThreadInvoker.Setup(u => u.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
+
+        var manager = new DragBridgeTempFileManager(_log.Object, _pathGrantService.Object,
+            sessionSaver.Object, uiThreadInvoker.Object, _aclHelper.Object, _testBase);
+
+        manager.CreateTempFolder(currentSid);
+        return (sessionSaver, manager);
     }
 }

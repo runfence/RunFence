@@ -1,21 +1,22 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class TrayIconsSettingsIO
+public class TrayIconsSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static TrayIconsSettings Read()
+    public TrayIconsSettings Read()
     {
         var trayIcons = new TrayIconsSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegExplorer);
             if (key?.GetValue("EnableAutoTray") is int v)
                 trayIcons.EnableAutoTray = v;
         }, "reading");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegNotifyIconSettings);
             if (key == null)
@@ -38,10 +39,10 @@ public static class TrayIconsSettingsIO
         return trayIcons;
     }
 
-    public static void Write(TrayIconsSettings trayIcons)
+    public void Write(TrayIconsSettings trayIcons)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (trayIcons.EnableAutoTray.HasValue)
             {
@@ -50,7 +51,7 @@ public static class TrayIconsSettingsIO
                 changed = true;
             }
         }, "writing");
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             if (trayIcons.PerAppVisibility != null)
             {
@@ -87,6 +88,10 @@ public static class TrayIconsSettingsIO
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.Broadcast();
+            broadcast.Broadcast();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.TrayIcons = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.TrayIcons != null) Write(s.TrayIcons); }
 }

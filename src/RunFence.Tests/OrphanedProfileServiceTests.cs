@@ -11,14 +11,8 @@ namespace RunFence.Tests;
 
 public class OrphanedProfileServiceTests : IDisposable
 {
-    private readonly Mock<ILoggingService> _log;
-    private readonly TempDirectory _usersDir;
-
-    public OrphanedProfileServiceTests()
-    {
-        _log = new Mock<ILoggingService>();
-        _usersDir = new TempDirectory("OrphanedProfiles_Test");
-    }
+    private readonly Mock<ILoggingService> _log = new();
+    private readonly TempDirectory _usersDir = new("OrphanedProfiles_Test");
 
     public void Dispose() => _usersDir.Dispose();
 
@@ -403,23 +397,17 @@ public class OrphanedProfileServiceTests : IDisposable
 
     // --- Test subclass ---
 
-    private sealed class TestOrphanedProfileService : OrphanedProfileService
+    private sealed class TestOrphanedProfileService(
+        ILoggingService log,
+        string usersDir,
+        IEnumerable<(string Sid, string ProfilePath)> entries,
+        HashSet<string> aliveAccounts)
+        : OrphanedProfileService(log, new NTTranslateApi(log), new GroupPolicyScriptHelper(new LogonScriptIniManager(), log), usersDir)
     {
-        private readonly List<(string Sid, string ProfilePath)> _entries;
-        private readonly HashSet<string> _aliveAccounts;
-
-        public TestOrphanedProfileService(
-            ILoggingService log, string usersDir,
-            IEnumerable<(string Sid, string ProfilePath)> entries,
-            HashSet<string> aliveAccounts)
-            : base(log, new NTTranslateApi(log), new GroupPolicyScriptHelper(new LogonScriptIniManager(), log), usersDir)
-        {
-            _entries = entries.ToList();
-            _aliveAccounts = aliveAccounts;
-        }
+        private readonly List<(string Sid, string ProfilePath)> _entries = entries.ToList();
 
         protected override IEnumerable<(string Sid, string ProfilePath)> GetProfileRegistryEntries() => _entries;
 
-        protected override bool AccountExists(string sidString) => _aliveAccounts.Contains(sidString);
+        protected override bool AccountExists(string sidString) => aliveAccounts.Contains(sidString);
     }
 }

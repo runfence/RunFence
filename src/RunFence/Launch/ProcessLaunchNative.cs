@@ -1,7 +1,7 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using RunFence.Core;
 
 namespace RunFence.Launch;
 
@@ -30,6 +30,7 @@ public static class ProcessLaunchNative
     public const uint LOGON_WITH_PROFILE = 0x00000001;
     public const uint SE_GROUP_INTEGRITY = 0x00000020;
     public const int TOKEN_INTEGRITY_LEVEL = 25; // TokenIntegrityLevel
+    public const int TOKEN_DEFAULT_DACL = 6; // TokenDefaultDacl
     public const string MediumIntegritySid = "S-1-16-8192";
     public const string LowIntegritySid = "S-1-16-4096";
 
@@ -105,7 +106,7 @@ public static class ProcessLaunchNative
     public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    public static extern bool CreateProcessWithTokenW(IntPtr hToken, uint dwLogonFlags,
+    static extern bool CreateProcessWithTokenW(IntPtr hToken, uint dwLogonFlags,
         string? lpApplicationName, [In, Out] StringBuilder lpCommandLine,
         uint dwCreationFlags, IntPtr lpEnvironment, string? lpCurrentDirectory,
         ref STARTUPINFO lpStartupInfo,
@@ -116,6 +117,25 @@ public static class ProcessLaunchNative
 
     [DllImport("userenv.dll", SetLastError = true)]
     public static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
+
+    [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool LoadUserProfile(IntPtr hToken, ref PROFILEINFO lpProfileInfo);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    public static extern bool UnloadUserProfile(IntPtr hToken, IntPtr hProfile);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct PROFILEINFO
+    {
+        public int dwSize;
+        public int dwFlags;
+        public string? lpUserName;
+        public string? lpProfilePath;
+        public string? lpDefaultPath;
+        public string? lpServerName;
+        public string? lpPolicyPath;
+        public IntPtr hProfile;
+    }
 
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool LogonUser(string lpszUsername, string? lpszDomain,
@@ -137,73 +157,20 @@ public static class ProcessLaunchNative
         IntPtr lpTokenAttributes, int ImpersonationLevel, int TokenType, out IntPtr phNewToken);
 
     [DllImport("advapi32.dll", SetLastError = true)]
-    public static extern bool CreateRestrictedToken(IntPtr ExistingTokenHandle, uint Flags,
-        uint DisableSidCount, IntPtr SidsToDisable,
-        uint DeletePrivilegeCount, IntPtr PrivilegesToDelete,
-        uint RestrictedSidCount, IntPtr SidsToRestrict,
+    public static extern bool CreateRestrictedToken(
+        IntPtr ExistingTokenHandle,
+        uint Flags,
+        uint DisableSidCount,
+        [MarshalAs(UnmanagedType.LPArray)] SID_AND_ATTRIBUTES[]? SidsToDisable,
+        uint DeletePrivilegeCount,
+        IntPtr PrivilegesToDelete,
+        uint RestrictedSidCount,
+        [MarshalAs(UnmanagedType.LPArray)] SID_AND_ATTRIBUTES[]? SidsToRestrict,
         out IntPtr NewTokenHandle);
 
-    public static string BuildCommandLine(ProcessStartInfo psi)
-    {
-        var sb = new StringBuilder();
-        AppendQuotedArg(sb, psi.FileName);
-        if (!string.IsNullOrEmpty(psi.Arguments))
-        {
-            sb.Append(' ');
-            sb.Append(psi.Arguments);
-        }
-        else
-        {
-            foreach (var arg in psi.ArgumentList)
-            {
-                sb.Append(' ');
-                AppendQuotedArg(sb, arg);
-            }
-        }
-
-        return sb.ToString();
-    }
-
-    public static void AppendQuotedArg(StringBuilder sb, string arg)
-    {
-        if (arg.Length > 0 && !arg.Contains(' ') && !arg.Contains('"') && !arg.Contains('\t'))
-        {
-            sb.Append(arg);
-            return;
-        }
-
-        // CommandLineToArgvW-compatible quoting: handle backslash sequences before quotes
-        sb.Append('"');
-        var backslashes = 0;
-        foreach (var c in arg)
-        {
-            switch (c)
-            {
-                case '\\':
-                    backslashes++;
-                    break;
-                case '"':
-                    sb.Append('\\', backslashes * 2 + 1);
-                    sb.Append('"');
-                    backslashes = 0;
-                    break;
-                default:
-                {
-                    if (backslashes > 0)
-                    {
-                        sb.Append('\\', backslashes);
-                        backslashes = 0;
-                    }
-
-                    sb.Append(c);
-                    break;
-                }
-            }
-        }
-
-        sb.Append('\\', backslashes * 2);
-        sb.Append('"');
-    }
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        string sddl, uint revision, out IntPtr sd, out uint size);
 
     /// <summary>
     /// Launches a process using <paramref name="hToken"/> via CreateProcessWithTokenW and returns
@@ -231,26 +198,100 @@ public static class ProcessLaunchNative
     /// </param>
     public const string DefaultInteractiveDesktop = "WinSta0\\Default";
 
-    public static PROCESS_INFORMATION LaunchWithToken(IntPtr hToken,
-        ProcessStartInfo psi, IntPtr pEnvironment, string? lpDesktop = DefaultInteractiveDesktop, bool hideWindow = false)
+    // CreateProcessWithToken and CreateProcessWithLogon are tightly coupled native interop logic —
+    // they directly orchestrate P/Invoke calls, handle structs, and manage unmanaged resources.
+    // They are not candidates for extraction as business logic.
+    public static PROCESS_INFORMATION CreateProcessWithToken(IntPtr hToken,
+        ProcessLaunchTarget psi, IntPtr pEnvironment, ILoggingService log, string? lpDesktop = DefaultInteractiveDesktop)
     {
         var creationFlags = pEnvironment != IntPtr.Zero ? CREATE_UNICODE_ENVIRONMENT : 0u;
 
-        var cmdLine = BuildCommandLine(psi);
+        if (pEnvironment == IntPtr.Zero && psi.EnvironmentVariables?.Count > 0)
+            throw new ArgumentException("Environment variables are specified but EnvironmentBlock was not created");
+        
+        var cmdLine = ProcessLaunchHelper.BuildCommandLine(psi);
         var cmdLineSb = new StringBuilder(cmdLine, cmdLine.Length + 1);
         var si = new STARTUPINFO
         {
             cb = Marshal.SizeOf<STARTUPINFO>(),
             lpDesktop = lpDesktop,
             dwFlags = STARTF_USESHOWWINDOW,
-            wShowWindow = hideWindow ? (ushort)0 : SW_SHOWNORMAL
+            wShowWindow = psi.HideWindow ? (ushort)0 : SW_SHOWNORMAL
         };
         var workDir = string.IsNullOrEmpty(psi.WorkingDirectory) ? null : psi.WorkingDirectory;
 
+        log.Info($"CreateProcessWithTokenW, workDir = {workDir}, cmdLine = {cmdLine}, lpDesktop = {lpDesktop}");
         if (!CreateProcessWithTokenW(hToken, LOGON_WITH_PROFILE, null, cmdLineSb,
                 creationFlags, pEnvironment, workDir, ref si, out var pi))
             throw new Win32Exception(Marshal.GetLastWin32Error());
 
         return pi;
+    }
+    
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcessWithLogonW(
+        string lpUsername,
+        string? lpDomain,
+        IntPtr lpPassword,
+        uint dwLogonFlags,
+        string? lpApplicationName,
+        [In, Out] StringBuilder lpCommandLine,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string? lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
+
+    public static PROCESS_INFORMATION CreateProcessWithLogon(ProcessLaunchTarget psi, LaunchCredentials credentials, ILoggingService log)
+    {
+        if (psi.EnvironmentVariables?.Count > 0)
+            throw new ArgumentException("Environment variables are not supported, use token launch instead");
+        
+        IntPtr passwordPtr = IntPtr.Zero;
+
+        try
+        {
+            passwordPtr = Marshal.SecureStringToGlobalAllocUnicode(credentials.Password!);
+
+            var si = new STARTUPINFO
+            {
+                cb = Marshal.SizeOf<STARTUPINFO>(),
+                // DO NOT assign desktop here - it will not work
+                //lpDesktop = ProcessLaunchNative.DefaultInteractiveDesktop,
+                dwFlags = STARTF_USESHOWWINDOW,
+                wShowWindow = psi.HideWindow ? (ushort)0 : SW_SHOWNORMAL
+            };
+
+            var cmdLine = new StringBuilder(ProcessLaunchHelper.BuildCommandLine(psi));
+
+            var workDir = string.IsNullOrEmpty(psi.WorkingDirectory) ? null : psi.WorkingDirectory;
+
+            log.Info("CreateProcessWithLogonW, workDir = " + workDir + ", cmdLine = " + cmdLine + ", user = " + credentials.Username);
+
+            if (!CreateProcessWithLogonW(
+                    credentials.Username!,
+                    credentials.Domain,
+                    passwordPtr,
+                    LOGON_WITH_PROFILE,
+                    null,
+                    cmdLine,
+                    0u,
+                    IntPtr.Zero,
+                    workDir,
+                    ref si,
+                    out var pi))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            return pi;
+        }
+        finally
+        {
+            if (passwordPtr != IntPtr.Zero)
+            {
+                Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
+            }
+        }
     }
 }

@@ -17,10 +17,6 @@ internal class MachineIdProvider : IMachineIdProvider
     // A determined user can spoof the UUID; we accept this tradeoff for usability.
     private readonly byte[] _machineIdHash;
 
-    public MachineIdProvider() : this(GetSmbiosUuid())
-    {
-    }
-
     public MachineIdProvider(ILoggingService log) : this(GetSmbiosUuid(), log)
     {
     }
@@ -87,36 +83,5 @@ internal class MachineIdProvider : IMachineIdProvider
         return sb.ToString();
     }
 
-    public static string Base32Encode(byte[] data)
-    {
-        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-        var result = new StringBuilder();
-        int buffer = data[0];
-        int next = 1;
-        int bitsLeft = 8;
-        while (bitsLeft > 0 || next < data.Length)
-        {
-            if (bitsLeft < 5)
-            {
-                if (next < data.Length)
-                {
-                    buffer <<= 8;
-                    buffer |= data[next++] & 0xFF;
-                    bitsLeft += 8;
-                }
-                else
-                {
-                    int pad = 5 - bitsLeft;
-                    buffer <<= pad;
-                    bitsLeft += pad;
-                }
-            }
-
-            int index = 0x1F & (buffer >> (bitsLeft - 5));
-            bitsLeft -= 5;
-            result.Append(alphabet[index]);
-        }
-
-        return result.ToString();
-    }
+    public static string Base32Encode(byte[] data) => Base32.Encode(data);
 }

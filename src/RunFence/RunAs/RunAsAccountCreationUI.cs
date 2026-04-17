@@ -1,51 +1,57 @@
 using RunFence.Account;
 using RunFence.Account.UI.AppContainer;
 using RunFence.Account.UI.Forms;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch.Container;
-using RunFence.UI.Forms;
 
 namespace RunFence.RunAs;
 
 /// <summary>
 /// Handles dialog creation and display for the RunAs account and container creation flows.
 /// </summary>
+/// <remarks>Asymmetric by design: account dialog needs post-creation credential flow (password entry → encrypt → save), container dialog does not (profile created by OS).</remarks>
 public class RunAsAccountCreationUI(
-    IAppContainerService appContainerService,
     Func<EditAccountDialog> editAccountDialogFactory,
-    AppContainerEditService containerEditService)
+    AppContainerEditService containerEditService,
+    IModalCoordinator modalCoordinator)
 {
     /// <summary>
-    /// Shows the EditAccountDialog for account creation.
-    /// Returns the dialog on success (DialogResult.OK and CreatedSid set), or null if cancelled.
+    /// Shows the EditAccountDialog for account creation wrapped with <see cref="IModalCoordinator.BeginModal"/>.
+    /// On success (DialogResult.OK and CreatedSid set), returns the dialog WITH modal still active —
+    /// the caller is responsible for calling <see cref="IModalCoordinator.EndModal"/> in a finally block
+    /// that also wraps all post-dialog work (permission prompts, settings application).
+    /// On cancel, EndModal is called here and the result has <see cref="ShowCreateAccountResult.WasCancelled"/> set.
     /// Caller must dispose the returned dialog.
-    /// Caller is responsible for BeginModal/EndModal tracking around the entire operation.
     /// </summary>
-    public EditAccountDialog? ShowCreateAccountDialog(string filePath, RunAsDosProtection dosProtection)
+    public ShowCreateAccountResult ShowCreateAccountDialog(string filePath, RunAsDosProtection dosProtection)
     {
         var prefillUsername = UsernameHelper.GenerateFromPath(filePath);
         EditAccountDialog? dlg = null;
+        modalCoordinator.BeginModal();
         try
         {
             dlg = editAccountDialogFactory();
             dlg.InitializeForCreate(prefillUsername);
             dlg.StartPosition = FormStartPosition.CenterScreen;
-            dlg.Shown += (_, _) => NativeInterop.ForceToForeground(dlg);
+            dlg.Shown += (_, _) => { WindowForegroundHelper.ForceToForeground(dlg.Handle); dlg.BringToFront(); };
             var result = dlg.ShowDialog();
 
             if (result != DialogResult.OK || dlg.CreatedSid == null)
             {
                 dosProtection.RecordDecline();
                 dlg.Dispose();
-                return null;
+                modalCoordinator.EndModal();
+                return new ShowCreateAccountResult(null, WasCancelled: true);
             }
 
-            return dlg;
+            // Modal remains active — caller owns EndModal to cover post-dialog work.
+            return new ShowCreateAccountResult(dlg, WasCancelled: false);
         }
         catch
         {
             dlg?.Dispose();
+            modalCoordinator.EndModal();
             throw;
         }
     }
@@ -56,13 +62,13 @@ public class RunAsAccountCreationUI(
     /// </summary>
     public AppContainerEntry? ShowCreateContainerDialog()
     {
-        DataPanel.BeginModal();
+        modalCoordinator.BeginModal();
         AppContainerEditDialog? dlg = null;
         try
         {
-            dlg = new AppContainerEditDialog(null, appContainerService, containerEditService);
+            dlg = new AppContainerEditDialog(null, containerEditService);
             dlg.StartPosition = FormStartPosition.CenterScreen;
-            dlg.Shown += (_, _) => NativeInterop.ForceToForeground(dlg);
+            dlg.Shown += (_, _) => { WindowForegroundHelper.ForceToForeground(dlg.Handle); dlg.BringToFront(); };
             var result = dlg.ShowDialog();
 
             if (result != DialogResult.OK)
@@ -71,7 +77,7 @@ public class RunAsAccountCreationUI(
         }
         finally
         {
-            DataPanel.EndModal();
+            modalCoordinator.EndModal();
             dlg?.Dispose();
         }
     }

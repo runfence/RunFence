@@ -30,9 +30,14 @@ partial class AboutPanel
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
             components?.Dispose();
+            OnDisposing();
+        }
         base.Dispose(disposing);
     }
+
+    partial void OnDisposing();
 
     private void InitializeComponent()
     {

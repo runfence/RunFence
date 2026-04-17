@@ -1,9 +1,10 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch.Container;
+using RunFence.Persistence;
 
 namespace RunFence.Acl;
 
@@ -14,7 +15,9 @@ namespace RunFence.Acl;
 public class AclDenyModeService(
     ILoggingService log,
     ILocalUserProvider localUserProvider,
-    IAppContainerProfileService appContainerService)
+    IDatabaseProvider databaseProvider,
+    IInteractiveUserResolver interactiveUserResolver)
+    : IAclDenyModeService
 {
     /// <summary>
     /// Returns all deny-mode apps whose resolved ACL target matches <paramref name="targetPath"/>.
@@ -73,7 +76,7 @@ public class AclDenyModeService(
             {
                 if (!interactiveSidResolved)
                 {
-                    interactiveSid = NativeTokenHelper.TryGetInteractiveUserSid()?.Value;
+                    interactiveSid = interactiveUserResolver.GetInteractiveUserSid();
                     interactiveSidResolved = true;
                 }
 
@@ -82,15 +85,11 @@ public class AclDenyModeService(
 
                 // Also allow the container package SID so the sandboxed process can reach its exe
                 {
-                    try
-                    {
-                        var containerSid = appContainerService.GetSid(app.AppContainerName);
+                    var containerSid = AclHelper.ResolveContainerSid(databaseProvider.GetDatabase(), app.AppContainerName);
+                    if (containerSid != null)
                         allowed.Add(containerSid);
-                    }
-                    catch (Exception ex)
-                    {
-                        log.Warn($"AclDenyModeService: could not resolve container SID for '{app.AppContainerName}': {ex.Message}");
-                    }
+                    else
+                        log.Warn($"AclDenyModeService: container SID not resolved for '{app.AppContainerName}'");
                 }
             }
             else
@@ -191,18 +190,11 @@ public class AclDenyModeService(
             }
         }
 
-        var dirInfo = new DirectoryInfo(folderPath);
-        var security = dirInfo.GetAccessControl();
-        if (!AclHelper.ApplyAclDiff(security, desiredRules, rule =>
+        return AclHelper.ModifyAclIf(folderPath, isFolder: true, security =>
+            AclHelper.ApplyAclDiff(security, desiredRules, rule =>
                 rule is { AccessControlType: AccessControlType.Deny, IdentityReference: SecurityIdentifier sid } &&
                 managedSidObjects.Contains(sid) &&
-                (rule.FileSystemRights & AclRightsHelper.ManagedDenyRightsMask) != 0))
-        {
-            return false;
-        }
-
-        dirInfo.SetAccessControl(security);
-        return true;
+                (rule.FileSystemRights & AclRightsHelper.ManagedDenyRightsMask) != 0));
     }
 
     private bool ApplyDenyRules(FileSystemSecurity security, List<LocalUserAccount> localUsers,
@@ -251,7 +243,7 @@ public class AclDenyModeService(
             if (!exists)
                 return;
 
-            AclHelper.ModifyAclIf(path, isFolder, security => RemoveManagedDenyAces(security, knownSids));
+            AclHelper.ModifyAclIf(path, isFolder, security => AclHelper.RemoveManagedDenyAces(security, knownSids));
         }
         catch (Exception ex)
         {
@@ -259,22 +251,4 @@ public class AclDenyModeService(
         }
     }
 
-    public static bool RemoveManagedDenyAces(FileSystemSecurity security, HashSet<SecurityIdentifier> knownSids)
-    {
-        var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
-        var changed = false;
-        foreach (FileSystemAccessRule rule in rules)
-        {
-            if (rule.AccessControlType == AccessControlType.Deny &&
-                rule.IdentityReference is SecurityIdentifier sid &&
-                knownSids.Contains(sid) &&
-                (rule.FileSystemRights & AclRightsHelper.ManagedDenyRightsMask) != 0)
-            {
-                security.RemoveAccessRuleSpecific(rule);
-                changed = true;
-            }
-        }
-
-        return changed;
-    }
 }

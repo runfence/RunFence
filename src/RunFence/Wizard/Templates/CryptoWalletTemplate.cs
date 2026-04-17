@@ -1,4 +1,5 @@
 using RunFence.Account.UI;
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
 using RunFence.UI;
@@ -12,23 +13,13 @@ namespace RunFence.Wizard.Templates;
 /// Creates a dedicated account, stores credentials, and creates an app entry with a deny ACL
 /// on the parent folder to protect against accidental launch of a malicious replacement.
 /// </summary>
-public class CryptoWalletTemplate : IWizardTemplate
+public class CryptoWalletTemplate(
+    WizardTemplateExecutor executor,
+    WizardAccountSetupHelperFactory setupHelperFactory,
+    IShortcutDiscoveryService discoveryService)
+    : IWizardTemplate
 {
-    private readonly WizardTemplateExecutor _executor;
-    private readonly WizardAccountSetupHelperFactory _setupHelperFactory;
-    private readonly SessionContext _session;
-
     private readonly CommitData _data = new();
-
-    public CryptoWalletTemplate(
-        WizardTemplateExecutor executor,
-        WizardAccountSetupHelperFactory setupHelperFactory,
-        SessionContext session)
-    {
-        _executor = executor;
-        _setupHelperFactory = setupHelperFactory;
-        _session = session;
-    }
 
     public string DisplayName => "Crypto Wallet / Password Manager";
     public string Description => "Run a wallet or password manager in an isolated account with ACL protection.";
@@ -44,7 +35,7 @@ public class CryptoWalletTemplate : IWizardTemplate
         _data.Reset();
         return
         [
-            _setupHelperFactory.CreateAccountNameStep(
+            setupHelperFactory.CreateAccountNameStep(
                 (name, _) => _data.Username = name,
                 showPassword: false,
                 maxNameLength: 20,
@@ -57,41 +48,33 @@ public class CryptoWalletTemplate : IWizardTemplate
                     _data.AppPath = path;
                     _data.AppName = name;
                 },
+                discoveryService,
                 description: "Select the wallet or password manager executable. " +
                              "A deny ACL will be placed on its parent folder to prevent accidental launch of a malicious replacement.")
         ];
     }
 
-    public async Task ExecuteAsync(IWizardProgressReporter progress)
+    public Task ExecuteAsync(IWizardProgressReporter progress)
     {
         if (string.IsNullOrEmpty(_data.Username))
         {
             progress.ReportError("No account name was provided.");
-            return;
+            return Task.CompletedTask;
         }
 
         if (string.IsNullOrEmpty(_data.AppPath) || string.IsNullOrEmpty(_data.AppName))
         {
             progress.ReportError("No application path was provided.");
-            return;
+            return Task.CompletedTask;
         }
 
-        var passwordChars = PasswordHelper.GenerateRandomPassword();
-        string passwordText;
-        try
-        {
-            passwordText = new string(passwordChars);
-        }
-        finally
-        {
-            Array.Clear(passwordChars, 0, passwordChars.Length);
-        }
+        var defaults = setupHelperFactory.CreateAccountDefaults();
 
         progress.ReportStatus($"Creating account '{_data.Username}'...");
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: _data.Username,
-            PasswordText: passwordText,
-            ConfirmPasswordText: passwordText,
+            PasswordText: defaults.Password,
+            ConfirmPasswordText: defaults.Password,
             IsEphemeral: false,
             CheckedGroups: [],
             UncheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
@@ -103,10 +86,9 @@ public class CryptoWalletTemplate : IWizardTemplate
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
             IsEphemeral: false,
-            SplitTokenOptOut: false,
-            LowIntegrityDefault: false,
+            PrivilegeLevel: PrivilegeLevel.Basic,
             FirewallSettings: null,
-            DesktopSettingsPath: _session.Database.Settings.DefaultDesktopSettingsPath,
+            DesktopSettingsPath: defaults.DesktopSettingsPath,
             InstallPackages: null,
             TrayTerminal: false);
 
@@ -126,9 +108,10 @@ public class CryptoWalletTemplate : IWizardTemplate
                     aclMode: AclMode.Deny,
                     manageShortcuts: true,
                     aclTarget: AclTarget.Folder)
-            ]);
+            ],
+            CreateDesktopShortcut: true);
 
-        await _executor.ExecuteAsync(flowParams, progress);
+        return executor.ExecuteAsync(flowParams, progress);
     }
 
     private sealed class CommitData

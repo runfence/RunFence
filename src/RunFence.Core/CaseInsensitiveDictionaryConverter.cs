@@ -51,7 +51,7 @@ public abstract class CaseInsensitiveDictionaryConverter<TValue> : JsonConverter
 
     /// <summary>
     /// Returns true if the entry should be omitted from the serialized output.
-    /// Default: never skip.
+    /// Default: never skip. Subclasses may override to filter entries.
     /// </summary>
-    protected bool ShouldSkipEntry(TValue value) => false;
+    protected virtual bool ShouldSkipEntry(TValue value) => false;
 }

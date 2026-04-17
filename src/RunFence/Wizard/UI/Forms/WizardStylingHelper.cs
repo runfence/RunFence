@@ -10,7 +10,6 @@ namespace RunFence.Wizard.UI.Forms;
 public static class WizardStylingHelper
 {
     private static readonly Color AccentColor = Color.FromArgb(0x19, 0x67, 0xD2);
-    private static readonly Color AccentHoverColor = Color.FromArgb(0x10, 0x57, 0xC2);
     private static readonly Color DotOutlineColor = Color.FromArgb(0xCC, 0xCC, 0xCC);
 
     /// <summary>
@@ -25,10 +24,7 @@ public static class WizardStylingHelper
         Panel progressPanel,
         Label titleLabel,
         Label statusLabel,
-        Label errorLabel,
-        Button backButton,
-        Button cancelButton,
-        Button nextButton)
+        Label errorLabel)
     {
         form.BackColor = Color.White;
         headerPanel.BackColor = Color.White;
@@ -44,33 +40,6 @@ public static class WizardStylingHelper
 
         errorLabel.Font = new Font("Segoe UI", 9f);
         errorLabel.ForeColor = Color.FromArgb(0xC0, 0x20, 0x20);
-
-        // Back button — muted
-        backButton.BackColor = Color.White;
-        backButton.ForeColor = Color.FromArgb(0x44, 0x44, 0x44);
-        backButton.FlatAppearance.BorderColor = Color.FromArgb(0xCC, 0xCC, 0xCC);
-        backButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(0xEE, 0xEE, 0xEE);
-
-        // Cancel button — muted
-        cancelButton.BackColor = Color.White;
-        cancelButton.ForeColor = Color.FromArgb(0x44, 0x44, 0x44);
-        cancelButton.FlatAppearance.BorderColor = Color.FromArgb(0xCC, 0xCC, 0xCC);
-        cancelButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(0xEE, 0xEE, 0xEE);
-
-        ApplyAccentButtonStyle(nextButton);
-    }
-
-    /// <summary>
-    /// Applies the blue accent button style (used for the Next/Commit button).
-    /// Also called from the wizard dialog when building new accent buttons at runtime.
-    /// </summary>
-    private static void ApplyAccentButtonStyle(Button btn)
-    {
-        btn.BackColor = AccentColor;
-        btn.ForeColor = Color.White;
-        btn.FlatAppearance.BorderSize = 0;
-        btn.FlatAppearance.MouseOverBackColor = AccentHoverColor;
-        btn.Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Regular);
     }
 
     /// <summary>

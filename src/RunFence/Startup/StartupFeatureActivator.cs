@@ -1,4 +1,5 @@
 using RunFence.Apps;
+using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
 using RunFence.Persistence;
@@ -20,20 +21,19 @@ public class StartupFeatureActivator(
     ISessionProvider sessionProvider,
     IStartupOptions startupOptions,
     LockManager lockManager,
-    ILicenseService licenseService)
+    ILicenseService licenseService,
+    IEvaluationLimitHelper evaluationLimitHelper)
 {
-    public void ActivateContextMenus()
+    public void ActivateContextMenus(AppDatabase database)
     {
-        var database = sessionProvider.GetSession().Database;
         if (database.Settings.EnableRunAsContextMenu)
             contextMenuService.Register();
         else
             contextMenuService.Unregister();
     }
 
-    public void SyncHandlerRegistrations()
+    public void SyncHandlerRegistrations(AppDatabase database)
     {
-        var database = sessionProvider.GetSession().Database;
         var effectiveMappings = handlerMappingService.GetEffectiveHandlerMappings(database);
         appHandlerRegistrationService.Sync(effectiveMappings, database.Apps);
     }
@@ -43,9 +43,9 @@ public class StartupFeatureActivator(
         if (startupOptions.IsBackground)
             return;
         var session = sessionProvider.GetSession();
-        var credCount = EvaluationLimitHelper.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
+        var credCount = evaluationLimitHelper.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
         if (session.Database.Apps.Count == 0 && credCount == 0)
-            mainForm.Shown += (_, _) => wizardLauncher.OpenWizard(mainForm);
+            mainForm.Shown += async (_, _) => await wizardLauncher.OpenWizardAsync(mainForm);
     }
 
     public void ConfigureBackgroundMode(MainForm mainForm)

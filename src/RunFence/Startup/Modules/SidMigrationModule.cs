@@ -9,11 +9,15 @@ public class SidMigrationModule : Module
     protected override void Load(ContainerBuilder builder)
     {
         builder.RegisterType<SidAclScanService>()
-            .AsSelf()
+            .As<ISidAclScanService>()
             .SingleInstance();
 
         builder.RegisterType<SidMigrationService>()
             .As<ISidMigrationService>()
+            .SingleInstance();
+
+        builder.RegisterType<SidDeletionHandler>()
+            .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<InAppMigrationHandler>()

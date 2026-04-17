@@ -8,23 +8,15 @@ namespace RunFence.Persistence;
 
 public class DatabaseService(
     ILoggingService log,
+    IConfigPaths configPaths,
     IAppFilter? appFilter = null,
-    bool allowPlaintextConfig = false,
-    string? configDir = null,
-    string? localDataDir = null)
+    bool allowPlaintextConfig = false)
     : IDatabaseService
 {
     private readonly Lock _saveLock = new();
 
-    private string ConfigFilePath
-    {
-        get => Path.Combine(field, "config.dat");
-    } = configDir ?? Constants.RoamingAppDataDir;
-
-    private string CredentialsFilePath
-    {
-        get => Path.Combine(field, "credentials.dat");
-    } = localDataDir ?? Constants.LocalAppDataDir;
+    private string ConfigFilePath => configPaths.ConfigFilePath;
+    private string CredentialsFilePath => configPaths.CredentialsFilePath;
 
     // --- IConfigRepository ---
 
@@ -67,7 +59,6 @@ public class DatabaseService(
             var dbToSave = ApplyFilter(database);
             var json = SerializeToBytes(dbToSave);
             var encrypted = ConfigEncryptionHelper.EncryptConfig(json, pinDerivedKey, ConfigFileType.MainConfig, argonSalt);
-            EnsureDirectory(ConfigFilePath);
             AtomicWrite(ConfigFilePath, encrypted);
             log.Info("Config saved (encrypted).");
         }
@@ -125,7 +116,6 @@ public class DatabaseService(
     {
         lock (_saveLock)
         {
-            EnsureDirectory(CredentialsFilePath);
             AtomicWrite(CredentialsFilePath, SerializeToBytes(store));
             log.Info("Credential store saved.");
         }
@@ -164,7 +154,6 @@ public class DatabaseService(
         {
             var json = SerializeToBytes(config);
             var encrypted = ConfigEncryptionHelper.EncryptConfig(json, pinDerivedKey, ConfigFileType.AppConfig, argonSalt);
-            EnsureDirectory(configPath);
             AtomicWrite(configPath, encrypted);
         }
     }
@@ -255,6 +244,10 @@ public class DatabaseService(
                     createdFiles.Add(targetPath);
                 }
             }
+
+            // All files written successfully — clean up .bak files (no longer needed for rollback)
+            foreach (var (_, bakPath) in replacedFiles)
+                try { File.Delete(bakPath); } catch { }
         }
         catch
         {
@@ -302,6 +295,7 @@ public class DatabaseService(
 
     private static void AtomicWrite(string targetPath, byte[] data)
     {
+        EnsureDirectory(targetPath);
         var dir = Path.GetDirectoryName(targetPath)!;
         var tmpPath = Path.Combine(dir, $"{Path.GetFileName(targetPath)}.{Guid.NewGuid():N}.tmp");
         var bakPath = targetPath + ".bak";
@@ -311,6 +305,7 @@ public class DatabaseService(
         if (File.Exists(targetPath))
         {
             File.Replace(tmpPath, targetPath, bakPath);
+            try { File.Delete(bakPath); } catch { }
         }
         else
         {

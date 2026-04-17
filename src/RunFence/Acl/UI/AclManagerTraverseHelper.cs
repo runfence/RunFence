@@ -3,7 +3,7 @@ using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.UI;
 
@@ -16,35 +16,29 @@ namespace RunFence.Acl.UI;
 public class AclManagerTraverseHelper(
     IAppConfigService appConfigService,
     IAclPermissionService aclPermission,
-    IAppContainerService containerService,
-    IUserTraverseService userTraverseService,
+    IAclPathIconProvider iconProvider,
     IGrantConfigTracker grantConfigTracker,
-    IDatabaseProvider databaseProvider)
+    IDatabaseProvider databaseProvider,
+    IReparsePointPromptHelper reparsePointHelper,
+    TraverseEntryResolver resolver)
 {
     private DataGridView _traverseGrid = null!;
     private string _sid = null!;
     private Font? _boldFont;
-    private readonly Dictionary<GrantedPathEntry, GrantedPathEntry> _syntheticEntries = new();
-    private TraverseEntryResolver _resolver = null!;
     private AclManagerPendingChanges _pending = null!;
     private GridSortHelper? _sortHelper;
     private Lazy<IReadOnlyList<string>> _groupSids = null!;
-    private bool _isContainer;
 
     public void Initialize(
         DataGridView traverseGrid,
         string sid,
         AclManagerPendingChanges pending,
-        bool isContainer,
         GridSortHelper? sortHelper = null)
     {
         _traverseGrid = traverseGrid;
         _sid = sid;
         _pending = pending;
-        _isContainer = isContainer;
         _sortHelper = sortHelper;
-        _resolver = new TraverseEntryResolver(sid, databaseProvider, isContainer, containerService,
-            userTraverseService, aclPermission, _syntheticEntries, grantConfigTracker);
         _groupSids = new Lazy<IReadOnlyList<string>>(() => aclPermission.ResolveAccountGroupSids(sid));
     }
 
@@ -60,7 +54,6 @@ public class AclManagerTraverseHelper(
     {
         _traverseGrid.Rows.Clear();
         FixableEntries.Clear();
-        _syntheticEntries.Clear();
         bool hasLoadedConfigs = appConfigService.HasLoadedConfigs;
 
         List<GrantedPathEntry> traverseEntries;
@@ -92,9 +85,9 @@ public class AclManagerTraverseHelper(
         var allEntriesToShow = traverseEntries.Concat(pendingNewAdds).ToList();
 
         var mainEntries = allEntriesToShow
-            .Where(e => GetEffectiveTraverseConfigPath(e) == null)
+            .Where(e => _pending.GetEffectiveConfigPath(e, grantConfigTracker, _sid) == null)
             .ToList();
-        bool hasPendingForMain = pendingNewAdds.Any(e => GetEffectiveTraverseConfigPath(e) == null);
+        bool hasPendingForMain = pendingNewAdds.Any(e => _pending.GetEffectiveConfigPath(e, grantConfigTracker, _sid) == null);
         AddTraverseRows(mainEntries, "Main Config", configPath: null,
             showIfEmpty: hasLoadedConfigs || hasPendingForMain);
 
@@ -102,24 +95,12 @@ public class AclManagerTraverseHelper(
         {
             var configEntries = allEntriesToShow
                 .Where(e => string.Equals(
-                    GetEffectiveTraverseConfigPath(e), configPath, StringComparison.OrdinalIgnoreCase))
+                    _pending.GetEffectiveConfigPath(e, grantConfigTracker, _sid), configPath, StringComparison.OrdinalIgnoreCase))
                 .ToList();
             AddTraverseRows(configEntries, Path.GetFileName(configPath), configPath, showIfEmpty: true);
         }
 
         _traverseGrid.ClearSelection();
-    }
-
-    /// <summary>
-    /// Returns the effective config path for a traverse entry, accounting for any pending
-    /// config-section move that hasn't been applied yet.
-    /// </summary>
-    private string? GetEffectiveTraverseConfigPath(GrantedPathEntry e)
-    {
-        var path = Path.GetFullPath(e.Path);
-        if (_pending.PendingTraverseConfigMoves.TryGetValue(path, out var pendingTarget))
-            return pendingTarget;
-        return grantConfigTracker.GetGrantConfigPath(_sid, e);
     }
 
     private void AddTraverseRows(List<GrantedPathEntry> entries, string sectionTitle, string? configPath, bool showIfEmpty = false)
@@ -145,10 +126,10 @@ public class AclManagerTraverseHelper(
 
         if (entry.AllAppliedPaths is { Count: > 0 })
         {
-            if (!PathExists(entry.Path))
+            if (!AclHelper.PathExists(entry.Path))
             {
                 AddSingleTraverseRow(entry, isGray: true);
-                var (synthetic, allEffective) = _resolver.CreateNearestAncestorEntry(entry, sidIdentity, groupSids);
+                var (synthetic, allEffective) = resolver.CreateNearestAncestorEntry(entry, sidIdentity, groupSids);
                 if (synthetic != null)
                 {
                     if (synthetic.AllAppliedPaths is { Count: > 0 })
@@ -161,13 +142,13 @@ public class AclManagerTraverseHelper(
             {
                 // Yellow only if any path in AllAppliedPaths lacks effective traverse
                 // (explicit + inherited + group membership) — not just an explicit ACE.
-                bool allEffective = entry.AllAppliedPaths.All(p => _resolver.HasEffectiveTraverse(p, sidIdentity, groupSids));
+                bool allEffective = entry.AllAppliedPaths.All(p => resolver.HasEffectiveTraverse(p, sidIdentity, groupSids));
                 AddSingleTraverseRow(entry, isGray: false, isYellow: !allEffective);
             }
         }
         else
         {
-            if (!PathExists(entry.Path))
+            if (!AclHelper.PathExists(entry.Path))
             {
                 AddSingleTraverseRow(entry, isGray: true);
             }
@@ -187,8 +168,8 @@ public class AclManagerTraverseHelper(
                     entry.AllAppliedPaths = ancestorPaths;
 
                 bool allEffective = ancestorPaths.Count > 0
-                    ? ancestorPaths.All(p => _resolver.HasEffectiveTraverse(p, sidIdentity, groupSids))
-                    : _resolver.HasEffectiveTraverse(entry.Path, sidIdentity, groupSids);
+                    ? ancestorPaths.All(p => resolver.HasEffectiveTraverse(p, sidIdentity, groupSids))
+                    : resolver.HasEffectiveTraverse(entry.Path, sidIdentity, groupSids);
                 AddSingleTraverseRow(entry, isGray: false, isYellow: !allEffective);
             }
         }
@@ -201,7 +182,7 @@ public class AclManagerTraverseHelper(
         row.Tag = entry;
 
         row.Cells[_traverseGrid.Columns[AclManagerGrantsHelper.ColIcon]!.Index].Value =
-            AclPathIconProvider.GetIcon(entry.Path);
+            iconProvider.GetIcon(entry.Path);
         row.Cells[_traverseGrid.Columns["TraversePath"]!.Index].Value = entry.Path;
 
         var normalizedPath = Path.GetFullPath(entry.Path);
@@ -252,6 +233,7 @@ public class AclManagerTraverseHelper(
             using var ofd = new OpenFileDialog();
             ofd.Title = "Select file to grant traverse access";
             ofd.Filter = "All files (*.*)|*.*";
+            FileDialogHelper.AddInteractiveUserCustomPlaces(ofd);
             if (ofd.ShowDialog(owner) != DialogResult.OK)
                 return null;
             selectedPath = ofd.FileName;
@@ -260,7 +242,7 @@ public class AclManagerTraverseHelper(
         if (string.IsNullOrEmpty(selectedPath))
             return null;
 
-        var pathsToAdd = ReparsePointPromptHelper.ResolveForAdd(selectedPath, owner);
+        var pathsToAdd = reparsePointHelper.ResolveForAdd(selectedPath, owner);
         return pathsToAdd.Aggregate<string, string?>(null, (current, p) => AddTraversePathDirect(p) ?? current);
     }
 
@@ -357,69 +339,4 @@ public class AclManagerTraverseHelper(
         return true;
     }
 
-    /// <summary>
-    /// Immediately applies traverse ACEs to NTFS for a traverse entry.
-    /// Called from Apply pipeline on a background thread.
-    /// Returns the list of paths that had ACEs applied (for the caller to set
-    /// <see cref="GrantedPathEntry.AllAppliedPaths"/>), or an empty list if no paths were visited.
-    /// </summary>
-    public List<string> ApplyTraverseEntryNow(GrantedPathEntry entry)
-    {
-        if (_isContainer)
-        {
-            var database = databaseProvider.GetDatabase();
-            var container = database.AppContainers.FirstOrDefault(c =>
-                string.Equals(containerService.GetSid(c.Name), _sid, StringComparison.OrdinalIgnoreCase));
-            if (container != null)
-            {
-                var (_, appliedPaths) = containerService.EnsureTraverseAccess(container, entry.Path);
-                return appliedPaths;
-            }
-
-            return [];
-        }
-
-        var (_, visitedPaths) = userTraverseService.EnsureTraverseAccess(_sid, entry.Path);
-        return visitedPaths;
-    }
-
-    /// <summary>
-    /// Re-applies traverse ACEs for an existing (Fix) entry and updates
-    /// <see cref="GrantedPathEntry.AllAppliedPaths"/> with the freshly visited paths,
-    /// removing any stale or deleted entries from tracking.
-    /// Called from Apply pipeline on a background thread.
-    /// </summary>
-    public void FixTraverseEntryNow(GrantedPathEntry entry)
-    {
-        if (_isContainer)
-        {
-            var database = databaseProvider.GetDatabase();
-            var container = database.AppContainers.FirstOrDefault(c =>
-                string.Equals(containerService.GetSid(c.Name), _sid, StringComparison.OrdinalIgnoreCase));
-            if (container != null)
-            {
-                var (_, appliedPaths) = containerService.EnsureTraverseAccess(container, entry.Path);
-                if (appliedPaths.Count > 0)
-                    entry.AllAppliedPaths = appliedPaths;
-            }
-        }
-        else
-        {
-            var (_, visitedPaths) = userTraverseService.EnsureTraverseAccess(_sid, entry.Path);
-            if (visitedPaths.Count > 0)
-                entry.AllAppliedPaths = visitedPaths;
-        }
-    }
-
-    /// <summary>
-    /// Immediately reverts traverse ACEs from NTFS for a traverse entry.
-    /// Called from Apply pipeline on a background thread.
-    /// Delegates to <see cref="TraverseEntryResolver"/> for the underlying operation.
-    /// </summary>
-    public void RevertTraverseEntry(GrantedPathEntry entry)
-    {
-        _resolver.RevertTraverseAces(entry);
-    }
-
-    private static bool PathExists(string path) => Directory.Exists(path) || File.Exists(path);
 }

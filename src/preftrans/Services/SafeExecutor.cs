@@ -2,9 +2,9 @@ using System.Security;
 
 namespace PrefTrans.Services;
 
-public static class SafeExecutor
+public class SafeExecutor : ISafeExecutor
 {
-    public static void Try(Action action, string operation)
+    public void Try(Action action, string operation)
     {
         try
         {

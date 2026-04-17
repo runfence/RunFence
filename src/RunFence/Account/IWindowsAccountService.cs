@@ -2,8 +2,6 @@ namespace RunFence.Account;
 
 public interface IWindowsAccountService
 {
-    void OpenUserAccountsDialog();
-    bool IsAccountDisabled(string username);
     void DeleteUser(string sid);
     string CreateLocalUser(string username, string password);
     string? GetProfilePath(string sid);

@@ -5,7 +5,6 @@ using RunFence.Acl.UI.Forms;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
-using RunFence.UI.Forms;
 
 namespace RunFence.Groups.UI;
 
@@ -14,12 +13,13 @@ namespace RunFence.Groups.UI;
 /// Builds the known-SIDs set from local groups (instead of CredentialStore used by AccountBulkScanHandler).
 /// </summary>
 public class GroupBulkScanOrchestrator(
+    IModalCoordinator modalCoordinator,
     IAccountAclBulkScanService bulkScan,
     ILocalGroupMembershipService groupMembership,
     IAclService aclService,
     ISidNameCacheService sidNameCache,
     ILoggingService log,
-    AccountBulkScanHandler bulkScanHandler,
+    IAccountBulkScanHandler bulkScanHandler,
     IDatabaseProvider databaseProvider)
 {
     public async Task ScanAcls(
@@ -57,8 +57,7 @@ public class GroupBulkScanOrchestrator(
         try
         {
             var progress = new Progress<long>(count => setStatusText($"Scanning ACLs... {count} items"));
-            using var cts = new CancellationTokenSource();
-            scanResults = await bulkScan.ScanAllAccountsAsync(rootPath, knownSids, progress, cts.Token);
+            scanResults = await bulkScan.ScanAllAccountsAsync(rootPath, knownSids, progress, CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -73,7 +72,7 @@ public class GroupBulkScanOrchestrator(
         }
 
         var database = databaseProvider.GetDatabase();
-        scanResults = AccountBulkScanHandler.FilterManagedPaths(scanResults, database.Apps, aclService);
+        scanResults = bulkScanHandler.FilterManagedPaths(scanResults, database.Apps, aclService);
 
         if (scanResults.Count == 0)
         {
@@ -83,7 +82,7 @@ public class GroupBulkScanOrchestrator(
         }
 
         using var dialog = new AclBulkScanResultDialog(scanResults, sidNameCache);
-        if (DataPanel.ShowModal(dialog, owner) != DialogResult.OK)
+        if (modalCoordinator.ShowModal(dialog, owner) != DialogResult.OK)
             return;
 
         var selected = dialog.SelectedResults;

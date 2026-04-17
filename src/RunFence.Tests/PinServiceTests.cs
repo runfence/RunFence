@@ -69,24 +69,9 @@ public class PinServiceTests
     }
 
     [Fact]
-    public void CreateNewStore_AndVerifyPin_RoundTrip()
-    {
-        var store = _pinService.CreateNewStore("mypin123");
-
-        Assert.NotNull(store);
-        Assert.Equal(32, store.ArgonSalt.Length);
-        Assert.NotEmpty(store.EncryptedCanary);
-        Assert.Empty(store.Credentials);
-
-        var verified = _pinService.VerifyPin("mypin123", store, out var key);
-        Assert.True(verified);
-        Assert.Equal(32, key.Length);
-    }
-
-    [Fact]
     public void VerifyPin_WrongPin_ReturnsFalse()
     {
-        var store = _pinService.CreateNewStore("correctpin");
+        var (store, _) = _pinService.ResetPin("correctpin");
 
         var verified = _pinService.VerifyPin("wrongpin", store, out var key);
         Assert.False(verified);
@@ -96,7 +81,7 @@ public class PinServiceTests
     [Fact]
     public void ChangePin_WithOldKey_VerifiesCanaryBeforeProceeding()
     {
-        var store = _pinService.CreateNewStore("testpin");
+        var (store, _) = _pinService.ResetPin("testpin");
         _pinService.VerifyPin("testpin", store, out var oldKey);
 
         // Should succeed with correct old key
@@ -108,7 +93,7 @@ public class PinServiceTests
     [Fact]
     public void ChangePin_WithOldKey_WrongKey_Throws()
     {
-        var store = _pinService.CreateNewStore("correctpin");
+        var (store, _) = _pinService.ResetPin("correctpin");
 
         var wrongKey = new byte[32];
         new Random(77).NextBytes(wrongKey);
@@ -120,7 +105,7 @@ public class PinServiceTests
     [Fact]
     public void ChangePin_ReencryptsCredentials()
     {
-        var store = _pinService.CreateNewStore("oldpin");
+        var (store, _) = _pinService.ResetPin("oldpin");
 
         // Add a credential with encrypted password
         _pinService.VerifyPin("oldpin", store, out var oldKey);
@@ -162,7 +147,7 @@ public class PinServiceTests
     [Fact]
     public void ChangePin_PreservesCurrentAccountCredentials()
     {
-        var store = _pinService.CreateNewStore("oldpin");
+        var (store, _) = _pinService.ResetPin("oldpin");
         store.Credentials.Add(new CredentialEntry
         {
             Id = Guid.NewGuid(),
@@ -181,7 +166,7 @@ public class PinServiceTests
     [Fact]
     public void ChangePin_ReturnsUsableKey()
     {
-        var store = _pinService.CreateNewStore("oldpin");
+        var (store, _) = _pinService.ResetPin("oldpin");
         _pinService.VerifyPin("oldpin", store, out var oldKey);
         var (newStore, newKey) = _pinService.ChangePin(oldKey, "newpin", store);
 
@@ -197,11 +182,13 @@ public class PinServiceTests
         var (store, pinDerivedKey) = _pinService.ResetPin("newpin");
 
         Assert.NotNull(store);
+        Assert.Equal(32, store.ArgonSalt.Length);
         Assert.NotEmpty(store.EncryptedCanary);
         Assert.Empty(store.Credentials);
         Assert.NotNull(pinDerivedKey);
 
-        var verified = _pinService.VerifyPin("newpin", store, out _);
+        var verified = _pinService.VerifyPin("newpin", store, out var key);
         Assert.True(verified);
+        Assert.Equal(32, key.Length);
     }
 }

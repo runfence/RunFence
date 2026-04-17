@@ -87,6 +87,7 @@ partial class AclConfigSection
 
         // _aclModePanel
         _aclModePanel.Location = new Point(15, 30);
+        _aclModePanel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         _aclModePanel.Size = new Size(470, 50);
         _aclModePanel.Controls.AddRange(new Control[] { _aclModeDenyRadio, _aclModeAllowRadio });
 
@@ -105,10 +106,12 @@ partial class AclConfigSection
         // _aclSeparator
         _aclSeparator.BorderStyle = BorderStyle.Fixed3D;
         _aclSeparator.Location = new Point(15, 78);
+        _aclSeparator.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         _aclSeparator.Size = new Size(470, 2);
 
         // _aclTargetPanel
         _aclTargetPanel.Location = new Point(15, 85);
+        _aclTargetPanel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         _aclTargetPanel.Size = new Size(470, 25);
         _aclTargetPanel.Controls.AddRange(new Control[] { _aclFileRadio, _aclFolderRadio });
 
@@ -126,12 +129,14 @@ partial class AclConfigSection
 
         // _folderDepthComboBox
         _folderDepthComboBox.Location = new Point(55, 110);
+        _folderDepthComboBox.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         _folderDepthComboBox.Size = new Size(425, 23);
         _folderDepthComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _folderDepthComboBox.SelectedIndexChanged += OnFolderDepthSelectedIndexChanged;
 
         // _aclPathLabel
         _aclPathLabel.Location = new Point(35, 135);
+        _aclPathLabel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         _aclPathLabel.Size = new Size(445, 20);
         _aclPathLabel.ForeColor = Color.DarkBlue;
         _aclPathLabel.Font = new Font(DefaultFont.FontFamily, 8f);
@@ -143,6 +148,7 @@ partial class AclConfigSection
 
         // _deniedRightsComboBox
         _deniedRightsComboBox.Location = new Point(140, 155);
+        _deniedRightsComboBox.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         _deniedRightsComboBox.Size = new Size(340, 23);
         _deniedRightsComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _deniedRightsComboBox.Items.AddRange(new object[] { "Deny execute", "Deny execute + write", "Deny execute + read + write" });
@@ -150,6 +156,7 @@ partial class AclConfigSection
 
         // _allowPanel (contains toolbar + grid for allow-mode entries)
         _allowPanel.Location = new Point(10, 157);
+        _allowPanel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         _allowPanel.Size = new Size(480, 175);
         _allowPanel.Visible = false;
         _allowPanel.Controls.Add(_allowEntriesGrid);
@@ -214,6 +221,7 @@ partial class AclConfigSection
 
         // _allowConflictLabel
         _allowConflictLabel.Location = new Point(10, 340);
+        _allowConflictLabel.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top;
         _allowConflictLabel.Size = new Size(480, 20);
         _allowConflictLabel.ForeColor = Color.Red;
         _allowConflictLabel.Visible = false;

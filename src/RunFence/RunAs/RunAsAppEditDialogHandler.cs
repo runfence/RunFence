@@ -3,9 +3,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
-using RunFence.Persistence;
 using RunFence.RunAs.UI;
-using RunFence.UI.Forms;
 
 namespace RunFence.RunAs;
 
@@ -15,24 +13,24 @@ namespace RunFence.RunAs;
 /// </summary>
 public class RunAsAppEditDialogHandler(
     IAppStateProvider appState,
-    IDataChangeNotifier dataChangeNotifier,
-    IAppLaunchOrchestrator launchOrchestrator,
-    ILoggingService log,
+    IAppEntryLauncher entryLauncher,
     SessionContext session,
-    IAppConfigService appConfigService,
     Func<AppEditDialog> dialogFactory,
     AppEntryPermissionPrompter permissionPrompter,
-    RunAsAppEntryManager appEntryManager)
+    IModalCoordinator modalCoordinator,
+    IRunAsLaunchErrorHandler launchErrorHandler,
+    RunAsAppShortcutCreator shortcutCreator,
+    IAppEditCommitService commitService)
 {
     public void OpenAppEditDialogForContainer(AppEntry? editExistingApp, string filePath,
-        AppContainerEntry container, bool launchAsLowIntegrity, string? originalLnkPath,
+        AppContainerEntry container, string? originalLnkPath,
         bool updateOriginalShortcut)
     {
         if (editExistingApp != null)
             OpenAppEditDialog(editExistingApp, originalLnkPath: originalLnkPath,
                 updateOriginalShortcut: updateOriginalShortcut);
         else
-            OpenAppEditDialog(null, filePath, null, launchAsLowIntegrity,
+            OpenAppEditDialog(null, filePath, null,
                 originalLnkPath, updateOriginalShortcut,
                 initialContainerName: container.Name);
     }
@@ -45,17 +43,12 @@ public class RunAsAppEditDialogHandler(
         AppEntry? existing,
         string? filePath = null,
         CredentialEntry? credential = null,
-        bool? launchAsLowIntegrity = null,
         string? originalLnkPath = null,
         bool updateOriginalShortcut = false,
         string? initialContainerName = null,
-        bool? launchAsSplitToken = null)
+        PrivilegeLevel? privilegeLevel = null)
     {
-        var originalConfigPath = existing != null
-            ? appConfigService.GetConfigPath(existing.Id)
-            : null;
-
-        DataPanel.BeginModal();
+        modalCoordinator.BeginModal();
         try
         {
             AppEditDialogOptions options = existing != null
@@ -64,8 +57,7 @@ public class RunAsAppEditDialogHandler(
                     ExePath: filePath,
                     AccountSid: credential?.Sid,
                     ContainerName: initialContainerName,
-                    LaunchAsLowIl: launchAsLowIntegrity,
-                    RunAsSplitToken: launchAsSplitToken,
+                    PrivilegeLevel: privilegeLevel,
                     LaunchNow: true);
 
             var dlg = dialogFactory();
@@ -80,72 +72,21 @@ public class RunAsAppEditDialogHandler(
             using (dlg)
             {
                 dlg.StartPosition = FormStartPosition.CenterScreen;
-                dlg.Shown += (_, _) => NativeInterop.ForceToForeground(dlg);
+                dlg.Shown += (_, _) => { WindowForegroundHelper.ForceToForeground(dlg.Handle); dlg.BringToFront(); };
 
                 dlg.ApplyRequested += () =>
                 {
-                    if (existing != null)
-                    {
-                        var index = appState.Database.Apps.FindIndex(a => a.Id == existing.Id);
-                        if (index < 0)
-                            return;
+                    if (!commitService.Commit(dlg.Result, existing, dlg.SelectedConfigPath))
+                        return;
 
-                        appEntryManager.RevertAppChanges(existing);
-                        appState.Database.Apps[index] = dlg.Result;
-                        appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
-                        try
-                        {
-                            appEntryManager.ApplyAppChanges(dlg.Result);
-                            using var scope = session.PinDerivedKey.Unprotect();
-                            appConfigService.SaveAllConfigs(appState.Database, scope.Data,
-                                session.CredentialStore.ArgonSalt);
-                        }
-                        catch
-                        {
-                            appState.Database.Apps[index] = existing;
-                            appConfigService.AssignApp(existing.Id, originalConfigPath);
-                            try
-                            {
-                                appEntryManager.ApplyAppChanges(existing);
-                            }
-                            catch (Exception restoreEx)
-                            {
-                                log.Error("Failed to restore ACL after edit failure", restoreEx);
-                            }
-
-                            throw;
-                        }
-
-                        if (updateOriginalShortcut && originalLnkPath != null)
-                            appEntryManager.TryUpdateOriginalShortcut(originalLnkPath, dlg.Result.Id);
-
-                        try
-                        {
-                            dataChangeNotifier.NotifyDataChanged();
-                        }
-                        catch (Exception ex)
-                        {
-                            log.Warn($"Failed to refresh UI: {ex.Message}");
-                        }
-                    }
-                    else
-                    {
-                        if (!appEntryManager.PersistNewAppEntry(dlg.Result, dlg.SelectedConfigPath))
-                            return;
-
-                        if (updateOriginalShortcut && originalLnkPath != null)
-                            appEntryManager.TryUpdateOriginalShortcut(originalLnkPath, dlg.Result.Id);
-                    }
+                    if (updateOriginalShortcut && originalLnkPath != null)
+                        shortcutCreator.TryUpdateOriginalShortcut(originalLnkPath, dlg.Result.Id);
 
                     if (permissionPrompter.PromptAndGrant(dlg, dlg.Result))
-                    {
-                        using var traverseScope = session.PinDerivedKey.Unprotect();
-                        appConfigService.SaveAllConfigs(appState.Database, traverseScope.Data,
-                            session.CredentialStore.ArgonSalt);
-                    }
+                        commitService.SaveAllConfigs();
 
                     if (dlg.LaunchNow)
-                        appEntryManager.RunWithLaunchErrorHandling(() => launchOrchestrator.Launch(dlg.Result, null), dlg.Result.ExePath);
+                        launchErrorHandler.RunWithErrorHandling(() => entryLauncher.Launch(dlg.Result, null), dlg.Result.ExePath);
 
                     dlg.DialogResult = DialogResult.OK;
                     dlg.Close();
@@ -156,7 +97,7 @@ public class RunAsAppEditDialogHandler(
         }
         finally
         {
-            DataPanel.EndModal();
+            modalCoordinator.EndModal();
         }
     }
 }

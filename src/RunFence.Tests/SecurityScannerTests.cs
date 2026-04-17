@@ -198,14 +198,10 @@ public class SecurityScannerTests
     [Fact]
     public void RunChecks_DenyOverridesAllow_NotFlagged()
     {
-        var dirSec = new DirectorySecurity();
-        dirSec.SetAccessRuleProtection(true, false);
-        dirSec.AddAccessRule(new FileSystemAccessRule(
-            new SecurityIdentifier(AdminsSid), FileSystemRights.FullControl, AccessControlType.Allow));
-        dirSec.AddAccessRule(new FileSystemAccessRule(
-            new SecurityIdentifier(UserSid1), FileSystemRights.WriteData | FileSystemRights.ReadAndExecute, AccessControlType.Allow));
-        dirSec.AddAccessRule(new FileSystemAccessRule(
-            new SecurityIdentifier(UserSid1), FileSystemRights.WriteData, AccessControlType.Deny));
+        var dirSec = CreateDirSecurity(
+            (AdminsSid, FileSystemRights.FullControl, AccessControlType.Allow),
+            (UserSid1, FileSystemRights.WriteData | FileSystemRights.ReadAndExecute, AccessControlType.Allow),
+            (UserSid1, FileSystemRights.WriteData, AccessControlType.Deny));
 
         var scanner = CreatePublicStartupScanner(dirSec);
         var results = scanner.RunChecks();
@@ -1426,6 +1422,10 @@ public class SecurityScannerTests
 
     // ===== Wow6432 per-user paths test (validates B2 fix) =====
 
+    // These tests use DefaultScannerDataAccess (real OS APIs) intentionally: the scanner's
+    // path-building logic depends on registry hive naming conventions that are best verified
+    // against the real implementation rather than a fabricated test double.
+
     [Fact]
     public void GetWow6432RunKeyPaths_WithUserSid_ReturnsHkuPaths()
     {
@@ -2210,6 +2210,55 @@ public class SecurityScannerTests
         Assert.Equal(UserSid2, diskRootFindings[0].VulnerableSid);
     }
 
+    [Fact]
+    public void RunChecks_IfeoWow6432WritableKey_Flagged()
+    {
+        // The Wow6432 IFEO key is a separate registry key checked alongside the main IFEO key.
+        // A non-admin with CreateSubKey on this key can insert a debugger entry targeting any 32-bit exe.
+        var regSec = CreateRegSecurity(
+            (AdminsSid, RegistryRights.FullControl, AccessControlType.Allow),
+            (UserSid1, RegistryRights.CreateSubKey, AccessControlType.Allow));
+
+        var scanner = CreateIsolatedScanner(s => s.SetIfeoWow6432RegistryKeySecurity(regSec));
+
+        var results = scanner.RunChecks();
+
+        var ifeoFindings = results.Where(f =>
+            f.Category == StartupSecurityCategory.RegistryRunKey &&
+            f.TargetDescription.Contains("Image File Execution Options")).ToList();
+        Assert.Single(ifeoFindings);
+        Assert.Equal(UserSid1, ifeoFindings[0].VulnerableSid);
+        Assert.StartsWith("HKEY_LOCAL_MACHINE", ifeoFindings[0].NavigationTarget);
+    }
+
+    [Fact]
+    public void RunChecks_IfeoSubkeyVerifierDlls_CollectedAsAutorun()
+    {
+        // VerifierDlls value under an IFEO subkey is collected as an autorun path.
+        // A writable verifier DLL is flagged as an autorun finding.
+        var fileSec = CreateFileSecurity(
+            (AdminsSid, FileSystemRights.FullControl, AccessControlType.Allow),
+            (UserSid1, FileSystemRights.WriteData, AccessControlType.Allow));
+        var parentDirSec = CreateDirSecurity(
+            (AdminsSid, FileSystemRights.FullControl, AccessControlType.Allow));
+
+        var scanner = CreateIsolatedScanner(s =>
+        {
+            s.AddIfeoSubkeyName("notepad.exe");
+            s.SetIfeoVerifierDlls("notepad.exe", @"C:\Tools\verifier.dll");
+            s.AddFileExists(@"C:\Tools\verifier.dll");
+            s.AddFileSecurity(@"C:\Tools\verifier.dll", fileSec);
+            s.AddDirectorySecurity(@"C:\Tools", parentDirSec);
+        });
+
+        var results = scanner.RunChecks();
+
+        var verifierFindings = results.Where(f =>
+            f is { Category: StartupSecurityCategory.RegistryRunKey, TargetDescription: @"C:\Tools\verifier.dll" }).ToList();
+        Assert.Single(verifierFindings);
+        Assert.Equal(UserSid1, verifierFindings[0].VulnerableSid);
+    }
+
     // --- Test IScannerDataAccess implementation ---
 
     public sealed class TestScannerDataAccess : IScannerDataAccess
@@ -2341,6 +2390,7 @@ public class SecurityScannerTests
         public void SetGpScriptsDir(string userSid, string dir) => _gpScriptsDirs[userSid] = dir;
         public void AddIfeoSubkeyName(string name) => _ifeoSubkeyNames.Add(name);
         public void SetIfeoDebuggerPath(string exeName, string? path) => _ifeoDebuggerPaths[exeName] = path;
+        public void AddFileSecurityThrows(string path) => _fileSecurityThrows.Add(path);
         public void SetAllUserProfiles(List<(string Sid, string? ProfilePath)> profiles) => _allUserProfiles = profiles;
 
         private int? _accountLockoutThreshold;
@@ -2382,6 +2432,14 @@ public class SecurityScannerTests
         public HashSet<string>? TryGetGroupMemberSids(string groupSid) =>
             _groupMembers.GetValueOrDefault(groupSid);
 
+        public Dictionary<string, HashSet<string>?> BulkLookupGroupMemberSids(IReadOnlyList<string> sids)
+        {
+            var result = new Dictionary<string, HashSet<string>?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var sid in sids)
+                result[sid] = _groupMembers.GetValueOrDefault(sid);
+            return result;
+        }
+
         public List<ScheduledTaskInfo> GetTaskSchedulerData() => _taskSchedulerData ?? [];
 
         public List<string> GetLogonScriptPaths(string userSid) =>
@@ -2418,7 +2476,9 @@ public class SecurityScannerTests
         public string? GetIfeoDebuggerPath(string exeName) =>
             _ifeoDebuggerPaths.GetValueOrDefault(exeName);
 
-        public string? GetIfeoVerifierDlls(string exeName) => null;
+        private readonly Dictionary<string, string?> _ifeoVerifierDlls = new(StringComparer.OrdinalIgnoreCase);
+        public void SetIfeoVerifierDlls(string exeName, string? dlls) => _ifeoVerifierDlls[exeName] = dlls;
+        public string? GetIfeoVerifierDlls(string exeName) => _ifeoVerifierDlls.GetValueOrDefault(exeName);
 
         public List<AppInitDllEntry> GetAppInitDllEntries() =>
             _appInitDllEntries.Count > 0 ? _appInitDllEntries : [];
@@ -2443,7 +2503,9 @@ public class SecurityScannerTests
         public RegistrySecurity? GetWinlogonRegistryKeySecurity() => _winlogonKeySecurity;
         public List<string> GetWinlogonExePaths() => _winlogonExePaths;
         public RegistrySecurity? GetIfeoRegistryKeySecurity() => _ifeoKeySecurity;
-        public RegistrySecurity? GetIfeoWow6432RegistryKeySecurity() => null;
+        private RegistrySecurity? _ifeoWow6432KeySecurity;
+        public void SetIfeoWow6432RegistryKeySecurity(RegistrySecurity security) => _ifeoWow6432KeySecurity = security;
+        public RegistrySecurity? GetIfeoWow6432RegistryKeySecurity() => _ifeoWow6432KeySecurity;
 
         public bool DirectoryExists(string path) =>
             _dirSecurities.ContainsKey(path) || _folderFiles.ContainsKey(path) || _dirSecurityThrows.Contains(path);

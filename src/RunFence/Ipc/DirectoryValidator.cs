@@ -28,32 +28,32 @@ public class DirectoryValidator(IAclPermissionService aclPermissionService) : ID
         var realPath = resolveResult.ResolvedPath!;
 
         // 3. Open and lock: no FILE_SHARE_DELETE to prevent deletion/rename while held
-        var hFile = NativeMethods.CreateFile(realPath, NativeMethods.GENERIC_READ,
-            NativeMethods.FILE_SHARE_READ | NativeMethods.FILE_SHARE_WRITE,
-            IntPtr.Zero, NativeMethods.OPEN_EXISTING,
-            NativeMethods.FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
-        if (hFile == NativeMethods.INVALID_HANDLE_VALUE)
+        var hFile = FileSecurityNative.CreateFile(realPath, FileSecurityNative.GENERIC_READ,
+            FileSecurityNative.FILE_SHARE_READ | FileSecurityNative.FILE_SHARE_WRITE,
+            IntPtr.Zero, FileSecurityNative.OPEN_EXISTING,
+            FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+        if (hFile == FileSecurityNative.INVALID_HANDLE_VALUE)
             return Invalid("Could not open directory.");
 
         // 4. Verify it is actually a directory
-        if (!NativeMethods.GetFileInformationByHandle(hFile, out var info))
+        if (!FileSecurityNative.GetFileInformationByHandle(hFile, out var info))
         {
-            NativeMethods.CloseHandle(hFile);
+            ProcessNative.CloseHandle(hFile);
             return Invalid("Could not read file attributes.");
         }
 
-        if ((info.dwFileAttributes & NativeMethods.FILE_ATTRIBUTE_DIRECTORY) == 0)
+        if ((info.dwFileAttributes & FileSecurityNative.FILE_ATTRIBUTE_DIRECTORY) == 0)
         {
-            NativeMethods.CloseHandle(hFile);
+            ProcessNative.CloseHandle(hFile);
             return Invalid("Path is not a directory.");
         }
 
         // 5. Get canonical path via the held handle (final sanity check after reparse resolution)
         var sb = new StringBuilder(32768);
-        var len = NativeMethods.GetFinalPathNameByHandle(hFile, sb, (uint)sb.Capacity, 0);
+        var len = FileSecurityNative.GetFinalPathNameByHandle(hFile, sb, (uint)sb.Capacity, 0);
         if (len == 0 || len > sb.Capacity)
         {
-            NativeMethods.CloseHandle(hFile);
+            ProcessNative.CloseHandle(hFile);
             return Invalid("Could not resolve canonical path.");
         }
 
@@ -65,7 +65,7 @@ public class DirectoryValidator(IAclPermissionService aclPermissionService) : ID
         // 6. Verify the caller can list this directory
         if (aclPermissionService.NeedsPermissionGrant(canonicalPath, callerSid, FileSystemRights.ListDirectory))
         {
-            NativeMethods.CloseHandle(hFile);
+            ProcessNative.CloseHandle(hFile);
             return Invalid("Caller does not have access to the directory.");
         }
 
@@ -90,26 +90,26 @@ public class DirectoryValidator(IAclPermissionService aclPermissionService) : ID
 
         for (int depth = 0; depth < 5; depth++)
         {
-            var attrs = NativeMethods.GetFileAttributes(currentPath);
-            if (attrs == NativeMethods.INVALID_FILE_ATTRIBUTES)
+            var attrs = FileSecurityNative.GetFileAttributes(currentPath);
+            if (attrs == FileSecurityNative.INVALID_FILE_ATTRIBUTES)
                 return new ResolveResult(false, Error: "Path does not exist or is inaccessible.");
 
-            if ((attrs & NativeMethods.FILE_ATTRIBUTE_REPARSE_POINT) == 0)
+            if ((attrs & FileSecurityNative.FILE_ATTRIBUTE_REPARSE_POINT) == 0)
                 return new ResolveResult(true, ResolvedPath: currentPath);
 
             // Open the reparse point itself (not following it) to read the target
-            var hRp = NativeMethods.CreateFile(currentPath, NativeMethods.GENERIC_READ,
-                NativeMethods.FILE_SHARE_READ | NativeMethods.FILE_SHARE_WRITE,
-                IntPtr.Zero, NativeMethods.OPEN_EXISTING,
-                NativeMethods.FILE_FLAG_BACKUP_SEMANTICS | NativeMethods.FILE_FLAG_OPEN_REPARSE_POINT,
+            var hRp = FileSecurityNative.CreateFile(currentPath, FileSecurityNative.GENERIC_READ,
+                FileSecurityNative.FILE_SHARE_READ | FileSecurityNative.FILE_SHARE_WRITE,
+                IntPtr.Zero, FileSecurityNative.OPEN_EXISTING,
+                FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS | FileSecurityNative.FILE_FLAG_OPEN_REPARSE_POINT,
                 IntPtr.Zero);
-            if (hRp == NativeMethods.INVALID_HANDLE_VALUE)
+            if (hRp == FileSecurityNative.INVALID_HANDLE_VALUE)
                 return new ResolveResult(false, Error: "Could not open reparse point.");
 
             try
             {
-                var buffer = new byte[NativeMethods.MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
-                bool ok = NativeMethods.DeviceIoControl(hRp, NativeMethods.FSCTL_GET_REPARSE_POINT,
+                var buffer = new byte[FileSecurityNative.MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+                bool ok = FileSecurityNative.DeviceIoControl(hRp, FileSecurityNative.FSCTL_GET_REPARSE_POINT,
                     IntPtr.Zero, 0, buffer, (uint)buffer.Length, out _, IntPtr.Zero);
                 if (!ok)
                     return new ResolveResult(false, Error: "Could not read reparse point data.");
@@ -125,7 +125,7 @@ public class DirectoryValidator(IAclPermissionService aclPermissionService) : ID
             }
             finally
             {
-                NativeMethods.CloseHandle(hRp);
+                ProcessNative.CloseHandle(hRp);
             }
         }
 
@@ -142,8 +142,8 @@ public class DirectoryValidator(IAclPermissionService aclPermissionService) : ID
             return null;
 
         var reparseTag = BitConverter.ToUInt32(buffer, 0);
-        if (reparseTag != NativeMethods.IO_REPARSE_TAG_SYMLINK &&
-            reparseTag != NativeMethods.IO_REPARSE_TAG_MOUNT_POINT)
+        if (reparseTag != FileSecurityNative.IO_REPARSE_TAG_SYMLINK &&
+            reparseTag != FileSecurityNative.IO_REPARSE_TAG_MOUNT_POINT)
             return null;
 
         // Both SymbolicLink and MountPoint share the same offsets 8..15 for name lengths.
@@ -154,7 +154,7 @@ public class DirectoryValidator(IAclPermissionService aclPermissionService) : ID
         if (substituteNameLength == 0)
             return null;
 
-        int pathBufferStart = reparseTag == NativeMethods.IO_REPARSE_TAG_SYMLINK ? 20 : 16;
+        int pathBufferStart = reparseTag == FileSecurityNative.IO_REPARSE_TAG_SYMLINK ? 20 : 16;
         int absoluteOffset = pathBufferStart + substituteNameOffset;
         if (absoluteOffset + substituteNameLength > buffer.Length)
             return null;

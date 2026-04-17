@@ -1,4 +1,5 @@
 using System.Security.AccessControl;
+using RunFence.Account;
 using RunFence.Acl.UI.Forms;
 
 namespace RunFence.Acl.UI;
@@ -32,6 +33,17 @@ public static class AclPermissionDialogHelper
             _ => dlg.SelectedPath != null ? new AncestorPermissionResult(dlg.SelectedPath, dlg.GrantedRights) : null
         };
     }
+
+    /// <summary>
+    /// Creates a permission prompt delegate that shows a dialog with the account or container
+    /// display name resolved via <paramref name="sidNameCache"/>. The prompt returns <c>true</c>
+    /// to grant permissions or throws <see cref="OperationCanceledException"/> if the user cancels.
+    /// </summary>
+    public static Func<string, string, bool> CreateLaunchPermissionPrompt(
+        ISidNameCacheService sidNameCache, IWin32Window? owner = null)
+        => (path, sid) => ShowPermissionDialog(owner, "Missing permissions",
+                $"'{sidNameCache.GetDisplayName(sid)}' needs access to:\n{path}")
+            ?? throw new OperationCanceledException();
 
     /// <summary>Returns true = grant, false = skip, null = cancel.</summary>
     public static bool? ShowPermissionDialog(IWin32Window? owner, string heading, string text,

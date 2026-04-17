@@ -8,9 +8,8 @@ public interface ICapturedFileStore
     CapturedFilesResult GetCapturedFiles();
 }
 
-public class CapturedFileStore : ICapturedFileStore
+public class CapturedFileStore(Func<long> tickCount) : ICapturedFileStore
 {
-    private readonly Func<long> _tickCount;
     private readonly Lock _captureLock = new();
     private string? _copySourceSid;
     private List<string>? _capturedFilePaths;
@@ -20,18 +19,13 @@ public class CapturedFileStore : ICapturedFileStore
     {
     }
 
-    public CapturedFileStore(Func<long> tickCount)
-    {
-        _tickCount = tickCount;
-    }
-
     public void SetCapturedFiles(List<string> files, string sourceSid)
     {
         lock (_captureLock)
         {
             _capturedFilePaths = files;
             _copySourceSid = sourceSid;
-            _captureTicks = _tickCount();
+            _captureTicks = tickCount();
         }
     }
 
@@ -39,7 +33,7 @@ public class CapturedFileStore : ICapturedFileStore
     {
         lock (_captureLock)
         {
-            var expired = _capturedFilePaths != null && _tickCount() - _captureTicks > 5 * 60 * 1000;
+            var expired = _capturedFilePaths != null && tickCount() - _captureTicks > 5 * 60 * 1000;
             if (expired)
             {
                 _capturedFilePaths = null;

@@ -27,6 +27,7 @@ public class AppSettings
     public List<string> SeenDiskRootAclKeys { get; set; } = [];
 
     public bool HasShownFirstAccountWarning { get; set; }
+    public bool HasShownUsersGroupWarning { get; set; }
     public bool UacSameAccountWarningSuppressed { get; set; }
 
     // Last used RunAs selection (persisted for pre-selection in RunAs dialog; mutually exclusive)
@@ -39,7 +40,15 @@ public class AppSettings
     /// Null when empty (omitted from JSON).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public Dictionary<string, string>? HandlerMappings { get; set; }
+    public Dictionary<string, HandlerMappingEntry>? HandlerMappings { get; set; }
+
+    /// <summary>
+    /// Direct handler associations: extension/protocol → raw command or HKLM class name.
+    /// Stored in main config only — commands/paths are machine-specific.
+    /// Null when empty (omitted from JSON).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, DirectHandlerEntry>? DirectHandlerMappings { get; set; }
 
     /// <summary>
     /// Original value of <c>HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\CredUI\EnumerateAdministrators</c>
@@ -60,11 +69,20 @@ public class AppSettings
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? UacAdminEnumerationSid { get; set; }
 
+    /// <summary>
+    /// SID of the interactive desktop user at last startup. Used to detect interactive user changes
+    /// and trigger container SID re-derivation when needed. Empty = never recorded (first run).
+    /// </summary>
+    public string LastInteractiveUserSid { get; set; } = string.Empty;
+
     // Drag Bridge
     public bool EnableDragBridge { get; set; }
 
     // Keys.Control | Keys.Alt | Keys.Q  (0x20000 | 0x40000 | 0x51 = 0x60051)
     public int DragBridgeCopyHotkey { get; set; } = 0x60051;
+
+    // Firewall
+    public bool BlockIcmpWhenInternetBlocked { get; set; } = true;
 
     /// <summary>
     /// Returns a shallow copy of this settings object. Primitive and string properties
@@ -86,12 +104,20 @@ public class AppSettings
         LastSecurityFindingsHash = LastSecurityFindingsHash,
         SeenDiskRootAclKeys = SeenDiskRootAclKeys.ToList(),
         HasShownFirstAccountWarning = HasShownFirstAccountWarning,
+        HasShownUsersGroupWarning = HasShownUsersGroupWarning,
         UacSameAccountWarningSuppressed = UacSameAccountWarningSuppressed,
         LastUsedRunAsAccountSid = LastUsedRunAsAccountSid,
         LastUsedRunAsContainerName = LastUsedRunAsContainerName,
+        LastInteractiveUserSid = LastInteractiveUserSid,
         EnableDragBridge = EnableDragBridge,
         DragBridgeCopyHotkey = DragBridgeCopyHotkey,
-        HandlerMappings = HandlerMappings != null ? new Dictionary<string, string>(HandlerMappings) : null,
+        BlockIcmpWhenInternetBlocked = BlockIcmpWhenInternetBlocked,
+        HandlerMappings = HandlerMappings != null
+            ? new Dictionary<string, HandlerMappingEntry>(HandlerMappings, StringComparer.OrdinalIgnoreCase)
+            : null,
+        DirectHandlerMappings = DirectHandlerMappings != null
+            ? new Dictionary<string, DirectHandlerEntry>(DirectHandlerMappings, StringComparer.OrdinalIgnoreCase)
+            : null,
         OriginalUacAdminEnumeration = OriginalUacAdminEnumeration,
         UacAdminEnumerationSid = UacAdminEnumerationSid,
     };

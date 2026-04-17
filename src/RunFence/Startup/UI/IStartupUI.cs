@@ -37,6 +37,12 @@ public interface IStartupUI
     /// Returns true if the user confirmed, false to abort.
     /// </summary>
     bool ConfirmTakeover(bool isFirstRun, bool isBackground);
+
+    /// <summary>
+    /// Shows a configuration decryption error and asks whether to start fresh with an empty config.
+    /// Returns true if the user chose to start fresh, false to exit.
+    /// </summary>
+    bool ConfirmStartFresh();
 }
 
 /// <summary>Outcome of a PIN verification prompt.</summary>

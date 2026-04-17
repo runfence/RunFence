@@ -25,11 +25,11 @@ public record AppEntryBuildOptions(
     string? ExistingId,
     DateTime? LastKnownExeTimestamp,
     string? PreGeneratedId,
-    bool? LaunchAsLowIntegrity = null,
+    PrivilegeLevel? PrivilegeLevel = null,
     string? AppContainerName = null,
-    bool? RunAsSplitToken = null,
     Dictionary<string, string>? EnvironmentVariables = null,
-    string? ArgumentsTemplate = null)
+    string? ArgumentsTemplate = null,
+    List<AppEntry>? ExistingApps = null)
 {
     /// <summary>
     /// Creates an <see cref="AppEntryBuildOptions"/> with sensible defaults for use from wizard templates.
@@ -44,7 +44,7 @@ public record AppEntryBuildOptions(
         AclMode aclMode,
         bool manageShortcuts,
         AclTarget aclTarget = AclTarget.File,
-        bool? launchAsLowIntegrity = null,
+        PrivilegeLevel? privilegeLevel = null,
         string? appContainerName = null)
         => new(
             Name: name,
@@ -66,6 +66,6 @@ public record AppEntryBuildOptions(
             ExistingId: null,
             LastKnownExeTimestamp: null,
             PreGeneratedId: null,
-            LaunchAsLowIntegrity: launchAsLowIntegrity,
+            PrivilegeLevel: privilegeLevel,
             AppContainerName: appContainerName);
 }

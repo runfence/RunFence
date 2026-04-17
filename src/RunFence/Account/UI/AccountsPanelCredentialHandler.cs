@@ -1,5 +1,6 @@
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Launch;
 
 namespace RunFence.Account.UI;
 
@@ -17,8 +18,7 @@ public class AccountsPanelCredentialHandler : IDisposable
     private readonly IPreviousWindowTracker _windowTracker;
     private readonly AccountPasswordHandler _passwordHandler;
     private readonly AccountCredentialOperations _credentialOperations;
-
-    public event Action<IReadOnlyList<InstallablePackage>, AccountRow>? InstallPackagesRequested;
+    private readonly ToolLauncher _launchService;
 
     /// <summary>Raised when the credential operations need to open the create user dialog.</summary>
     public event Action<string?, string?>? CreateUserDialogRequested;
@@ -34,16 +34,18 @@ public class AccountsPanelCredentialHandler : IDisposable
         AccountPasswordHandler passwordHandler,
         ISessionProvider sessionProvider,
         OperationGuard operationGuard,
-        IPreviousWindowTracker windowTracker)
+        IPreviousWindowTracker windowTracker,
+        ToolLauncher launchService)
     {
         _credentialOperations = credentialOperations;
         _passwordHandler = passwordHandler;
         _sessionProvider = sessionProvider;
         _operationGuard = operationGuard;
         _windowTracker = windowTracker;
+        _launchService = launchService;
 
         _credentialOperations.InstallPackagesRequested += (packages, ar) =>
-            InstallPackagesRequested?.Invoke(packages, ar);
+            _launchService.InstallPackages(packages, new AccountLaunchIdentity(ar.Sid));
         _credentialOperations.CreateUserDialogRequested += (username, password) =>
             CreateUserDialogRequested?.Invoke(username, password);
         _credentialOperations.DeleteUserRequested += (accountRow, selectedIndex) =>
@@ -79,32 +81,29 @@ public class AccountsPanelCredentialHandler : IDisposable
 
     // --- Password operations ---
 
-    public void CopyPassword(AccountRow accountRow)
+    public async Task CopyPasswordAsync(AccountRow accountRow)
     {
         if (accountRow.Credential == null || accountRow.Credential.IsCurrentAccount || !accountRow.HasStoredPassword)
             return;
 
         var session = _sessionProvider.GetSession();
-        _passwordHandler.CopyPassword(accountRow, session, session.CredentialStore, _operationGuard,
+        await _passwordHandler.CopyPasswordAsync(accountRow, session, session.CredentialStore, _operationGuard,
             _ownerControl.FindForm() ?? _ownerControl, text => _callbacks.UpdateStatus(text));
     }
 
-    public void TypePassword(AccountRow accountRow)
+    public async Task TypePasswordAsync(AccountRow accountRow)
     {
         if (accountRow.Credential == null || accountRow.Credential.IsCurrentAccount || !accountRow.HasStoredPassword)
             return;
 
         var session = _sessionProvider.GetSession();
         var previousHwnd = _windowTracker.PreviousWindow;
-        _passwordHandler.TypePassword(accountRow, session, session.CredentialStore, _operationGuard,
+        await _passwordHandler.TypePasswordAsync(accountRow, session, session.CredentialStore, _operationGuard,
             _ownerControl.FindForm() ?? _ownerControl, previousHwnd, text => _callbacks.UpdateStatus(text));
     }
 
     public void RotatePassword(AccountRow accountRow)
     {
-        if (accountRow.Credential?.IsCurrentAccount == true || SidResolutionHelper.IsInteractiveUserSid(accountRow.Sid))
-            return;
-
         var session = _sessionProvider.GetSession();
         _passwordHandler.RotatePassword(accountRow, session, session.CredentialStore, _operationGuard,
             _ownerControl.FindForm() ?? _ownerControl, text => _callbacks.UpdateStatus(text),

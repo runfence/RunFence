@@ -11,6 +11,13 @@ namespace RunFence.Tests;
 /// Tests for the IpcOpenFolderHandler logic.
 /// Uses mocked IAppStateProvider, IAppLockControl, IUiThreadInvoker, IDirectoryValidator.
 /// </summary>
+/// <remarks>
+/// Authorization bypass is by design: the OpenFolder IPC command carries no per-caller authorization
+/// check because the verb handler is registered in the interactive user's own HKU registry hive —
+/// only processes running under that account can trigger it. Opening a folder in Explorer grants no
+/// elevated access; path safety is enforced by IDirectoryValidator (including TOCTOU protection).
+/// See IpcOpenFolderHandler for the in-code comment.
+/// </remarks>
 public class OpenFolderHandlerTests
 {
     private const string CallerSid = "S-1-5-21-100-200-300-1001";
@@ -55,7 +62,7 @@ public class OpenFolderHandlerTests
     }
 
     private IpcOpenFolderHandler CreateHandler(bool noValidator = false)
-        => new(_appState.Object, _appLock.Object, _uiThreadInvoker.Object,
+        => new(_appLock.Object, new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object),
             noValidator ? null : _validator.Object, _log.Object, _shellFolderOpener.Object);
 
     private static IpcMessage OpenFolderMessage(string? path)

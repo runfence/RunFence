@@ -12,30 +12,30 @@ public class LocalGroupMembershipService(
     ILocalUserProvider localUserProvider) : ILocalGroupMembershipService
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
-    private readonly Lock _cacheLock = new();
 
-    private List<LocalUserAccount>? _localGroupsCache;
-    private DateTime _localGroupsCacheTime;
+    // Non-keyed: uses constant key `true` for the single-entry cache.
+    private readonly CachedLookup<bool, List<LocalUserAccount>> _localGroupsCache
+        = new(CacheTtl);
 
-    private readonly Dictionary<string, (List<LocalUserAccount> Data, DateTime Time)> _groupsForUserCache
-        = new(StringComparer.OrdinalIgnoreCase);
+    private readonly CachedLookup<string, List<LocalUserAccount>> _groupsForUserCache
+        = new(CacheTtl, StringComparer.OrdinalIgnoreCase);
 
-    private readonly Dictionary<string, (List<LocalUserAccount> Data, DateTime Time)> _membersCache
-        = new(StringComparer.OrdinalIgnoreCase);
+    private readonly CachedLookup<string, List<LocalUserAccount>> _membersCache
+        = new(CacheTtl, StringComparer.OrdinalIgnoreCase);
 
-    private readonly Dictionary<string, (string? Data, DateTime Time)> _descriptionCache
-        = new(StringComparer.OrdinalIgnoreCase);
+    private readonly CachedLookup<string, string?> _descriptionCache
+        = new(CacheTtl, StringComparer.OrdinalIgnoreCase);
 
     public void AddUserToGroups(string userSid, string username, List<string> groupSids)
     {
         try { ModifyGroupMembership(userSid, username, groupSids, (group, user) => group.Members.Add(user), "add"); }
-        finally { lock (_cacheLock) { _groupsForUserCache.Remove(userSid); foreach (var g in groupSids) _membersCache.Remove(g); } }
+        finally { _groupsForUserCache.Invalidate(userSid); _membersCache.InvalidateAll(groupSids); }
     }
 
     public void RemoveUserFromGroups(string userSid, string username, List<string> groupSids)
     {
         try { ModifyGroupMembership(userSid, username, groupSids, (group, user) => group.Members.Remove(user), "remove"); }
-        finally { lock (_cacheLock) { _groupsForUserCache.Remove(userSid); foreach (var g in groupSids) _membersCache.Remove(g); } }
+        finally { _groupsForUserCache.Invalidate(userSid); _membersCache.InvalidateAll(groupSids); }
     }
 
     private void ModifyGroupMembership(string userSid, string username, IEnumerable<string> groupSids,
@@ -78,20 +78,7 @@ public class LocalGroupMembershipService(
     }
 
     public List<LocalUserAccount> GetGroupsForUser(string sid)
-    {
-        lock (_cacheLock)
-        {
-            if (_groupsForUserCache.TryGetValue(sid, out var cached) && DateTime.UtcNow - cached.Time < CacheTtl)
-                return cached.Data;
-        }
-        var result = FetchGroupsForUser(sid);
-        lock (_cacheLock)
-        {
-            if (!_groupsForUserCache.TryGetValue(sid, out var existing) || DateTime.UtcNow - existing.Time >= CacheTtl)
-                _groupsForUserCache[sid] = (result, DateTime.UtcNow);
-        }
-        return result;
-    }
+        => _groupsForUserCache.Get(sid, () => FetchGroupsForUser(sid));
 
     private List<LocalUserAccount> FetchGroupsForUser(string sid)
     {
@@ -150,23 +137,7 @@ public class LocalGroupMembershipService(
     }
 
     public List<LocalUserAccount> GetLocalGroups()
-    {
-        lock (_cacheLock)
-        {
-            if (_localGroupsCache != null && DateTime.UtcNow - _localGroupsCacheTime < CacheTtl)
-                return _localGroupsCache;
-        }
-        var result = FetchLocalGroups();
-        lock (_cacheLock)
-        {
-            if (_localGroupsCache == null || DateTime.UtcNow - _localGroupsCacheTime >= CacheTtl)
-            {
-                _localGroupsCache = result;
-                _localGroupsCacheTime = DateTime.UtcNow;
-            }
-        }
-        return result;
-    }
+        => _localGroupsCache.Get(true, FetchLocalGroups);
 
     private List<LocalUserAccount> FetchLocalGroups()
     {
@@ -221,7 +192,7 @@ public class LocalGroupMembershipService(
         }
         finally
         {
-            lock (_cacheLock) { _localGroupsCache = null; }
+            _localGroupsCache.Clear();
         }
     }
 
@@ -245,7 +216,9 @@ public class LocalGroupMembershipService(
         }
         finally
         {
-            lock (_cacheLock) { _localGroupsCache = null; _membersCache.Remove(groupSid); _descriptionCache.Remove(groupSid); }
+            _localGroupsCache.Clear();
+            _membersCache.Invalidate(groupSid);
+            _descriptionCache.Invalidate(groupSid);
         }
     }
 
@@ -281,25 +254,12 @@ public class LocalGroupMembershipService(
         }
         finally
         {
-            lock (_cacheLock) { _descriptionCache.Remove(groupSid); }
+            _descriptionCache.Invalidate(groupSid);
         }
     }
 
     public List<LocalUserAccount> GetMembersOfGroup(string groupSid)
-    {
-        lock (_cacheLock)
-        {
-            if (_membersCache.TryGetValue(groupSid, out var cached) && DateTime.UtcNow - cached.Time < CacheTtl)
-                return cached.Data;
-        }
-        var result = FetchMembersOfGroup(groupSid);
-        lock (_cacheLock)
-        {
-            if (!_membersCache.TryGetValue(groupSid, out var existing) || DateTime.UtcNow - existing.Time >= CacheTtl)
-                _membersCache[groupSid] = (result, DateTime.UtcNow);
-        }
-        return result;
-    }
+        => _membersCache.Get(groupSid, () => FetchMembersOfGroup(groupSid));
 
     private List<LocalUserAccount> FetchMembersOfGroup(string groupSid)
     {
@@ -336,20 +296,7 @@ public class LocalGroupMembershipService(
     }
 
     public string? GetGroupDescription(string groupSid)
-    {
-        lock (_cacheLock)
-        {
-            if (_descriptionCache.TryGetValue(groupSid, out var cached) && DateTime.UtcNow - cached.Time < CacheTtl)
-                return cached.Data;
-        }
-        var result = FetchGroupDescription(groupSid);
-        lock (_cacheLock)
-        {
-            if (!_descriptionCache.TryGetValue(groupSid, out var existing) || DateTime.UtcNow - existing.Time >= CacheTtl)
-                _descriptionCache[groupSid] = (result, DateTime.UtcNow);
-        }
-        return result;
-    }
+        => _descriptionCache.Get(groupSid, () => FetchGroupDescription(groupSid));
 
     private string? FetchGroupDescription(string groupSid)
     {
@@ -382,6 +329,22 @@ public class LocalGroupMembershipService(
     public bool IsLocalGroup(string sid) =>
         sid.StartsWith("S-1-5-32-", StringComparison.OrdinalIgnoreCase) ||
         GetLocalGroups().Any(g => string.Equals(g.Sid, sid, StringComparison.OrdinalIgnoreCase));
+
+    public bool IsUserAccountEnabled(string username)
+    {
+        var ret = GroupMembershipNative.NetUserGetInfo(null, username, 1, out var bufPtr);
+        if (ret != 0)
+            return false;
+        try
+        {
+            var info = Marshal.PtrToStructure<GroupMembershipNative.USER_INFO_1>(bufPtr);
+            return (info.usri1_flags & GroupMembershipNative.UF_ACCOUNTDISABLE) == 0;
+        }
+        finally
+        {
+            GroupMembershipNative.NetApiBufferFree(bufPtr);
+        }
+    }
 
     private string? GetGroupName(string groupSid)
     {

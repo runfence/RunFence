@@ -82,9 +82,9 @@ partial class AclBulkScanResultDialog
 
         // _infoLabel
         _infoLabel.Dock = DockStyle.Top;
-        _infoLabel.Height = 28;
+        _infoLabel.AutoSize = true;
         _infoLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _infoLabel.Padding = new Padding(5, 0, 5, 0);
+        _infoLabel.Padding = new Padding(5, 4, 5, 4);
         _infoLabel.Text = "Select accounts to import ACL entries from the scan results:";
 
         // _buttonPanel

@@ -16,7 +16,8 @@ public class EditAccountDialogCreateHandlerTests
 
     private readonly Mock<IWindowsAccountService> _account = new();
     private readonly Mock<ILocalGroupMembershipService> _groupMembership = new();
-    private readonly Mock<IAccountRestrictionService> _restriction = new();
+    private readonly Mock<IAccountLoginRestrictionService> _loginRestriction = new();
+    private readonly Mock<IAccountLsaRestrictionService> _lsaRestriction = new();
     private readonly Mock<ILicenseService> _licenseService = new();
     private readonly EditAccountDialogCreateHandler _handler;
 
@@ -25,7 +26,7 @@ public class EditAccountDialogCreateHandlerTests
         _account.Setup(a => a.CreateLocalUser(It.IsAny<string>(), It.IsAny<string>())).Returns(CreatedSid);
         _licenseService.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(true);
         _handler = new EditAccountDialogCreateHandler(
-            _account.Object, _groupMembership.Object, _restriction.Object, _licenseService.Object);
+            _account.Object, _groupMembership.Object, _loginRestriction.Object, _lsaRestriction.Object, _licenseService.Object);
     }
 
     [Fact]
@@ -154,7 +155,7 @@ public class EditAccountDialogCreateHandlerTests
     {
         _handler.Execute(MakeRequest(allowNetworkLogin: false));
 
-        _restriction.Verify(r => r.SetLocalOnlyBySid(CreatedSid, true), Times.Once);
+        _lsaRestriction.VerifySetLocalOnly(CreatedSid, true);
     }
 
     [Fact]
@@ -162,7 +163,7 @@ public class EditAccountDialogCreateHandlerTests
     {
         _handler.Execute(MakeRequest(allowNetworkLogin: true));
 
-        _restriction.Verify(r => r.SetLocalOnlyBySid(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        _lsaRestriction.VerifySetLocalOnlyNeverCalled();
     }
 
     [Fact]
@@ -171,7 +172,7 @@ public class EditAccountDialogCreateHandlerTests
         // licenseService: null means no license enforcement; blocked logon should be applied directly
         _handler.Execute(MakeRequest(allowLogon: false));
 
-        _restriction.Verify(r => r.SetLoginBlockedBySid(CreatedSid, "newuser", true), Times.Once);
+        _loginRestriction.VerifySetLoginBlocked(CreatedSid, "newuser", true);
     }
 
     [Fact]
@@ -182,13 +183,23 @@ public class EditAccountDialogCreateHandlerTests
         licenseService.Setup(l => l.CanHideAccount(0)).Returns(false);
         licenseService.Setup(l => l.GetRestrictionMessage(EvaluationFeature.HiddenAccounts, 0))
             .Returns("Limit reached");
-        var handler = new EditAccountDialogCreateHandler(_account.Object, _groupMembership.Object, _restriction.Object, licenseService.Object);
+        var handler = new EditAccountDialogCreateHandler(_account.Object, _groupMembership.Object,
+            _loginRestriction.Object, _lsaRestriction.Object, licenseService.Object);
 
         var result = handler.Execute(MakeRequest(allowLogon: false));
 
         Assert.NotNull(result);
         Assert.Contains("Limit reached", result.Errors);
-        _restriction.Verify(r => r.SetLoginBlockedBySid(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        _loginRestriction.VerifySetLoginBlockedNeverCalled();
+    }
+
+    [Fact]
+    public void Execute_AllowLogonTrue_DoesNotCallSetLoginBlocked()
+    {
+        // R2_TL5: AllowLogon=true means no logon restriction should be applied
+        _handler.Execute(MakeRequest(allowLogon: true));
+
+        _loginRestriction.VerifySetLoginBlockedNeverCalled();
     }
 
     [Fact]
@@ -196,7 +207,7 @@ public class EditAccountDialogCreateHandlerTests
     {
         _handler.Execute(MakeRequest(allowBgAutorun: false));
 
-        _restriction.Verify(r => r.SetNoBgAutostartBySid(CreatedSid, true), Times.Once);
+        _lsaRestriction.VerifySetNoBgAutostart(CreatedSid, true);
     }
 
     [Fact]
@@ -204,14 +215,14 @@ public class EditAccountDialogCreateHandlerTests
     {
         _handler.Execute(MakeRequest(allowBgAutorun: true));
 
-        _restriction.Verify(r => r.SetNoBgAutostartBySid(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        _lsaRestriction.VerifySetNoBgAutostartNeverCalled();
     }
 
     [Fact]
     public void Execute_RestrictionThrows_CollectsErrorInResult()
     {
         // Arrange: SetLocalOnlyBySid throws; user was already created
-        _restriction.Setup(r => r.SetLocalOnlyBySid(It.IsAny<string>(), It.IsAny<bool>()))
+        _lsaRestriction.Setup(r => r.SetLocalOnlyBySid(It.IsAny<string>(), It.IsAny<bool>()))
             .Throws(new Exception("LSA error"));
 
         var result = _handler.Execute(MakeRequest(allowNetworkLogin: false));

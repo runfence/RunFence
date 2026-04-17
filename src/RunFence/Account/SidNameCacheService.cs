@@ -1,3 +1,4 @@
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Persistence;
 
@@ -12,8 +13,17 @@ public class SidNameCacheService(ISidResolver sidResolver, IDatabaseProvider dat
 {
     public string GetDisplayName(string sid)
     {
+        var db = databaseProvider.GetDatabase();
+        if (AclHelper.IsContainerSid(sid))
+        {
+            var container = db.AppContainers.FirstOrDefault(c =>
+                string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase));
+            if (container != null)
+                return !string.IsNullOrEmpty(container.DisplayName) ? container.DisplayName : container.Name;
+        }
+
         var preResolved = sidResolver.TryResolveName(sid);
-        return SidNameResolver.GetDisplayName(sid, preResolved, sidResolver, databaseProvider.GetDatabase().SidNames);
+        return SidNameResolver.GetDisplayName(sid, preResolved, sidResolver, db.SidNames);
     }
 
     public string ResolveAndCache(string sid, string? fallbackName = null)

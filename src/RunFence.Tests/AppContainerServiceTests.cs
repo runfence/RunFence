@@ -1,7 +1,8 @@
 using Moq;
-using RunFence.Acl.Traverse;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Launch.Container;
+using RunFence.Launch.Tokens;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -11,10 +12,14 @@ public class AppContainerServiceTests
     private static AppContainerService CreateService()
     {
         var log = new Mock<ILoggingService>();
-        var userTraverseService = new Mock<IUserTraverseService>();
+        var pathGrantService = new Mock<IPathGrantService>();
         var environmentSetup = new Mock<IAppContainerEnvironmentSetup>();
         var profileSetup = new AppContainerProfileSetup(log.Object, environmentSetup.Object);
-        return new AppContainerService(log.Object, userTraverseService.Object, environmentSetup.Object, profileSetup);
+        var dataFolderService = new AppContainerDataFolderService(log.Object, pathGrantService.Object);
+        var explorerTokenProvider = new Mock<IExplorerTokenProvider>();
+        var sidProvider = new AppContainerSidProvider();
+        return new AppContainerService(log.Object, pathGrantService.Object, profileSetup, dataFolderService,
+            () => new AppContainerComAccessService(log.Object), explorerTokenProvider.Object, sidProvider);
     }
 
     [Fact]
@@ -102,5 +107,33 @@ public class AppContainerServiceTests
         var result = CreateService().GetContainerDataPath("ram_browser");
 
         Assert.Equal(AppContainerPaths.GetContainerDataPath("ram_browser"), result);
+    }
+
+    // --- DeleteProfile (non-existent profile) ---
+
+    [Fact]
+    public void DeleteProfile_NonExistentProfile_DoesNotThrow()
+    {
+        // DeleteProfile should log a warning but not throw when the OS profile doesn't exist.
+        // DeleteAppContainerProfile returns a non-zero HRESULT for missing profiles, which is logged.
+        var service = CreateService();
+
+        var exception = Record.Exception(() => service.DeleteProfile("ram_nonexistent_profile_xyz_test"));
+
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void ProfileExists_NonExistentProfile_ReturnsFalse_AfterDeleteProfile()
+    {
+        // After deleting a profile that doesn't exist, ProfileExists should return false
+        // (same as if it was never created). This verifies that DeleteProfile + ProfileExists
+        // are consistent even when the profile was not present.
+        var service = CreateService();
+
+        service.DeleteProfile("ram_never_created_xyz_test");
+        var exists = service.ProfileExists("ram_never_created_xyz_test");
+
+        Assert.False(exists);
     }
 }

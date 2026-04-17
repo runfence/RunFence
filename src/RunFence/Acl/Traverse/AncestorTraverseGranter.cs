@@ -8,10 +8,10 @@ namespace RunFence.Acl.Traverse;
 /// <summary>
 /// Grants and reverts non-inheritable Traverse + ReadAttributes + Synchronize ACEs on ancestor
 /// directories for a given SID. Shared by both AppContainer and regular-user traverse logic.
-/// Uses SetFileSecurity (via TraverseAclNative) to avoid recursive NTFS auto-inheritance propagation
+/// Uses SetFileSecurity (via ITraverseAcl) to avoid recursive NTFS auto-inheritance propagation
 /// that SetNamedSecurityInfo triggers on large directory trees.
 /// </summary>
-public class AncestorTraverseGranter(ILoggingService log, IAclPermissionService aclPermission)
+public class AncestorTraverseGranter(ILoggingService log, IAclPermissionService aclPermission, ITraverseAcl traverseAcl)
 {
     /// <summary>
     /// Grants Traverse + ReadAttributes + Synchronize (no inheritance) on <paramref name="path"/> and each
@@ -63,7 +63,7 @@ public class AncestorTraverseGranter(ILoggingService log, IAclPermissionService 
                 }
                 else
                 {
-                    effectivelyCovered = TraverseAclNative.HasExplicitTraverseAce(current.FullName, identity);
+                    effectivelyCovered = traverseAcl.HasExplicitTraverseAce(current.FullName, identity);
                 }
 
                 visitedPaths.Add(current.FullName);
@@ -75,7 +75,7 @@ public class AncestorTraverseGranter(ILoggingService log, IAclPermissionService 
                     continue;
                 }
 
-                TraverseAclNative.AddAllowAce(current.FullName, identity);
+                traverseAcl.AddAllowAce(current.FullName, identity);
                 anyAceAdded = true;
                 log.Info($"Granted traverse on '{current.FullName}'");
             }
@@ -99,9 +99,9 @@ public class AncestorTraverseGranter(ILoggingService log, IAclPermissionService 
     {
         try
         {
-            if (TraverseAclNative.HasExplicitTraverseAce(dirPath, identity))
+            if (traverseAcl.HasExplicitTraverseAce(dirPath, identity))
             {
-                TraverseAclNative.RemoveTraverseOnlyAce(dirPath, identity);
+                traverseAcl.RemoveTraverseOnlyAce(dirPath, identity);
                 log.Info($"Removed traverse ACE on '{dirPath}'");
             }
         }

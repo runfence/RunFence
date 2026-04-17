@@ -14,7 +14,8 @@ namespace RunFence.Account.UI;
 /// </summary>
 public class AccountContextMenuHandler(
     IWindowsAccountService windowsAccountService,
-    AccountLauncher launcher,
+    AccountToolResolver toolResolver,
+    PackageInstallService packageInstallService,
     ISessionProvider sessionProvider,
     IProcessTerminationService processTerminationService)
 {
@@ -23,7 +24,6 @@ public class AccountContextMenuHandler(
 
     public event Action<string>? AppNavigationRequested;
     public event Action<string>? NewAppRequested;
-    public event Action<InstallablePackage>? InstallRequested;
 
     public void Initialize(DataGridView grid, AccountProcessDisplayManager? processDisplayManager)
     {
@@ -39,7 +39,8 @@ public class AccountContextMenuHandler(
         SetContainerItemsVisible(i, false);
         SetProcessItemsVisible(i, false);
 
-        var isCurrentAccount = accountRow.Credential?.IsCurrentAccount == true;
+        var isCurrentAccount = accountRow.Credential?.IsCurrentAccount == true
+            || string.Equals(accountRow.Sid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase);
         var isInteractiveUser = SidResolutionHelper.IsInteractiveUserSid(accountRow.Sid);
         var isUnavailable = accountRow.IsUnavailable;
         var canLaunch = !isUnavailable &&
@@ -64,6 +65,9 @@ public class AccountContextMenuHandler(
         i.PinTerminalToTray.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
         i.PinTerminalToTray.Checked = !string.IsNullOrEmpty(accountRow.Sid) &&
                                       db.GetAccount(accountRow.Sid)?.TrayTerminal == true;
+        i.ManageAssociations.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
+        i.ManageAssociations.Checked = !string.IsNullOrEmpty(accountRow.Sid) &&
+                                       (db.GetAccount(accountRow.Sid)?.ManageAssociations ?? true);
         i.CopySid.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
         i.CopyProfilePath.Enabled = !isUnavailable && !string.IsNullOrEmpty(accountRow.Sid);
         var profilePath = windowsAccountService.GetProfilePath(accountRow.Sid);
@@ -71,13 +75,15 @@ public class AccountContextMenuHandler(
         i.CopyPassword.Enabled = accountRow.Credential != null && !isCurrentAccount && !isUnavailable && accountRow.HasStoredPassword;
         i.TypePassword.Enabled = accountRow.Credential != null && !isCurrentAccount && !isUnavailable && accountRow.HasStoredPassword;
         i.RotatePassword.Enabled = !isCurrentAccount && !isInteractiveUser && !isUnavailable;
+        // Allowing empty password for the current admin account is by design —
+        // it lets the admin set up logon access without a credential entry.
         i.SetEmptyPassword.Enabled = !isUnavailable;
 
         i.EditSubmenu.Enabled = !isUnavailable;
 
         bool canInstall = !isUnavailable &&
                           (SidResolutionHelper.CanLaunchWithoutPassword(accountRow.Sid) || accountRow.HasStoredPassword);
-        var useWindowsTerminal = canLaunch && launcher.ResolveTerminalExe(accountRow.Sid) != "cmd.exe";
+        var useWindowsTerminal = canLaunch && toolResolver.ResolveTerminalExe(accountRow.Sid) != "cmd.exe";
         i.ManageSeparator.Visible = true;
         i.ManageSubmenu.Visible = true;
         i.ManageSubmenu.Enabled = !isUnavailable;
@@ -96,7 +102,7 @@ public class AccountContextMenuHandler(
         foreach (var (package, item) in i.InstallItems)
         {
             item.Visible = true;
-            bool installed = launcher.IsPackageInstalled(package, accountRow.Sid);
+            bool installed = packageInstallService.IsPackageInstalled(package, accountRow.Sid);
             item.Text = installed ? $"{package.DisplayName} \u2713" : $"Install {package.DisplayName}";
             item.Enabled = canInstall && !installed;
         }
@@ -202,10 +208,7 @@ public class AccountContextMenuHandler(
             NewAppRequested?.Invoke(sid);
     }
 
-    public void InstallPackage(InstallablePackage package)
-        => InstallRequested?.Invoke(package);
-
-    private static void SetAccountItemsVisible(AccountContextMenuItems i, bool visible)
+    public static void SetAccountItemsVisible(AccountContextMenuItems i, bool visible)
     {
         i.AddCredential.Visible = visible;
         i.AddCredentialSeparator.Visible = visible;
@@ -214,6 +217,7 @@ public class AccountContextMenuHandler(
         i.PinFolderBrowserToTray.Visible = visible;
         i.PinDiscoveryToTray.Visible = visible;
         i.PinTerminalToTray.Visible = visible;
+        i.ManageAssociations.Visible = visible;
         i.CopySid.Visible = visible;
         i.CopyProfilePath.Visible = visible;
         i.OpenProfileFolder.Visible = visible;

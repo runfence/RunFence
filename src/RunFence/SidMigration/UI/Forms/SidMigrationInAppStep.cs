@@ -62,10 +62,10 @@ public partial class SidMigrationInAppStep : UserControl
         }
 
         _applyButton.Visible = hasActions;
-        _resultLabel.Visible = hasActions;
+        _resultLabel.Visible = false;
     }
 
-    private void OnApplyClick(object? sender, EventArgs e)
+    private async void OnApplyClick(object? sender, EventArgs e)
     {
         var validationError = _inAppMigrationHandler.Validate(_filteredMappings, _filteredDeletes);
         if (validationError != null)
@@ -75,28 +75,39 @@ public partial class SidMigrationInAppStep : UserControl
             return;
         }
 
-        var (messages, success, saveError) = _inAppMigrationHandler.Apply(_filteredMappings, _filteredDeletes, _session);
+        _applyButton.Enabled = false;
+        _resultLabel.ForeColor = SystemColors.GrayText;
+        _resultLabel.Text = "Applying...";
+        _resultLabel.Visible = true;
+
+        var (messages, success, saveError) = await _inAppMigrationHandler.ApplyAsync(_filteredMappings, _filteredDeletes, _session);
+
+        if (IsDisposed)
+            return;
 
         if (!success)
         {
+            _applyButton.Enabled = true;
             _resultLabel.ForeColor = Color.Red;
             _resultLabel.Text = messages.Count > 0 ? messages[0] : "Migration failed.";
             return;
         }
 
-        _applyButton.Enabled = false;
         MigrationApplied?.Invoke(this, EventArgs.Empty);
 
-        if (saveError != null)
+        if (!IsDisposed)
         {
-            _resultLabel.ForeColor = Color.OrangeRed;
-            _resultLabel.Text = string.Join("\n", messages) +
-                                $"\nSave failed: {saveError}. Please restart the application.";
-        }
-        else
-        {
-            _resultLabel.ForeColor = Color.DarkGreen;
-            _resultLabel.Text = string.Join("\n", messages);
+            if (saveError != null)
+            {
+                _resultLabel.ForeColor = Color.OrangeRed;
+                _resultLabel.Text = string.Join("\n", messages) +
+                                    $"\nSave failed: {saveError}. Please restart the application.";
+            }
+            else
+            {
+                _resultLabel.ForeColor = Color.DarkGreen;
+                _resultLabel.Text = string.Join("\n", messages);
+            }
         }
     }
 }

@@ -1,5 +1,7 @@
+using Moq;
 using RunFence.Acl.UI;
 using RunFence.Core.Models;
+using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -29,6 +31,10 @@ public class AclManagerPendingChangesTests
     [InlineData("traverseAdds")]
     [InlineData("traverseRemoves")]
     [InlineData("traverseFixes")]
+    [InlineData("untrackGrants")]
+    [InlineData("untrackTraverse")]
+    [InlineData("configMoves")]
+    [InlineData("traverseConfigMoves")]
     public void HasPendingChanges_SingleCollectionNonEmpty_ReturnsTrue(string collection)
     {
         var entry = MakeEntry(@"C:\Foo");
@@ -41,7 +47,7 @@ public class AclManagerPendingChangesTests
                 _pending.PendingRemoves[(@"C:\Foo", false)] = entry;
                 break;
             case "modifications":
-                _pending.PendingModifications[(@"C:\Foo", false)] = entry;
+                _pending.PendingModifications[(@"C:\Foo", false)] = new PendingModification(entry, WasIsDeny: false, WasOwn: false, NewIsDeny: false, NewRights: null);
                 break;
             case "traverseAdds":
                 _pending.PendingTraverseAdds[@"C:\Foo"] = entry;
@@ -51,6 +57,18 @@ public class AclManagerPendingChangesTests
                 break;
             case "traverseFixes":
                 _pending.PendingTraverseFixes[@"C:\Foo"] = entry;
+                break;
+            case "untrackGrants":
+                _pending.PendingUntrackGrants[(@"C:\Foo", false)] = entry;
+                break;
+            case "untrackTraverse":
+                _pending.PendingUntrackTraverse[@"C:\Foo"] = entry;
+                break;
+            case "configMoves":
+                _pending.PendingConfigMoves[(@"C:\Foo", false)] = null;
+                break;
+            case "traverseConfigMoves":
+                _pending.PendingTraverseConfigMoves[@"C:\Foo"] = null;
                 break;
         }
 
@@ -64,10 +82,14 @@ public class AclManagerPendingChangesTests
     {
         _pending.PendingAdds[(@"C:\Foo", false)] = MakeEntry(@"C:\Foo");
         _pending.PendingRemoves[(@"C:\Bar", true)] = MakeEntry(@"C:\Bar", isDeny: true);
-        _pending.PendingModifications[(@"C:\Baz", false)] = MakeEntry(@"C:\Baz");
+        _pending.PendingModifications[(@"C:\Baz", false)] = new PendingModification(MakeEntry(@"C:\Baz"), WasIsDeny: false, WasOwn: false, NewIsDeny: false, NewRights: null);
         _pending.PendingTraverseAdds[@"C:\T1"] = MakeTraverseEntry(@"C:\T1");
         _pending.PendingTraverseRemoves[@"C:\T2"] = MakeTraverseEntry(@"C:\T2");
         _pending.PendingTraverseFixes[@"C:\T3"] = MakeTraverseEntry(@"C:\T3");
+        _pending.PendingUntrackGrants[(@"C:\U1", false)] = MakeEntry(@"C:\U1");
+        _pending.PendingUntrackTraverse[@"C:\U2"] = MakeTraverseEntry(@"C:\U2");
+        _pending.PendingConfigMoves[(@"C:\C1", false)] = null;
+        _pending.PendingTraverseConfigMoves[@"C:\C2"] = null;
 
         _pending.Clear();
 
@@ -78,6 +100,10 @@ public class AclManagerPendingChangesTests
         Assert.Empty(_pending.PendingTraverseAdds);
         Assert.Empty(_pending.PendingTraverseRemoves);
         Assert.Empty(_pending.PendingTraverseFixes);
+        Assert.Empty(_pending.PendingUntrackGrants);
+        Assert.Empty(_pending.PendingUntrackTraverse);
+        Assert.Empty(_pending.PendingConfigMoves);
+        Assert.Empty(_pending.PendingTraverseConfigMoves);
     }
 
     // --- Add then modify stays in PendingAdds only ---
@@ -117,7 +143,7 @@ public class AclManagerPendingChangesTests
     public void ModifyExistingDbEntry_InPendingModifications()
     {
         var entry = MakeEntry(@"C:\Foo");
-        _pending.PendingModifications[(@"C:\Foo", false)] = entry;
+        _pending.PendingModifications[(@"C:\Foo", false)] = new PendingModification(entry, WasIsDeny: false, WasOwn: false, NewIsDeny: false, NewRights: null);
 
         Assert.True(_pending.IsPendingModification(@"C:\Foo", isDeny: false));
         Assert.False(_pending.IsPendingAdd(@"C:\Foo", isDeny: false));
@@ -299,5 +325,193 @@ public class AclManagerPendingChangesTests
         var db = MakeDbWithGrant(sid, @"C:\Foo\Bar", isDeny: false);
 
         Assert.True(_pending.ExistsInDbOrPending(db, sid, @"c:\foo\bar", isDeny: false));
+    }
+
+    // --- GetEffectiveIsDeny ---
+
+    [Fact]
+    public void GetEffectiveIsDeny_NoPendingMod_ReturnsEntryIsDeny()
+    {
+        var entry = MakeEntry(@"C:\Foo");
+
+        Assert.False(_pending.GetEffectiveIsDeny(entry));
+    }
+
+    [Fact]
+    public void GetEffectiveIsDeny_PendingModeSwitchToDeny_ReturnsNewIsDeny()
+    {
+        var entry = MakeEntry(@"C:\Foo");
+        _pending.PendingModifications[(@"C:\Foo", false)] = new PendingModification(
+            entry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: null);
+
+        Assert.True(_pending.GetEffectiveIsDeny(entry));
+    }
+
+    // --- GetEffectiveRights ---
+
+    [Fact]
+    public void GetEffectiveRights_NoPendingMod_ReturnsEntrySavedRights()
+    {
+        var entry = MakeEntry(@"C:\Foo");
+        var rights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: false);
+        entry.SavedRights = rights;
+
+        Assert.Equal(rights, _pending.GetEffectiveRights(entry));
+    }
+
+    [Fact]
+    public void GetEffectiveRights_PendingModWithNewRights_ReturnsNewRights()
+    {
+        var entry = MakeEntry(@"C:\Foo");
+        entry.SavedRights = new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false);
+        var newRights = new SavedRightsState(Execute: true, Write: true, Read: true, Special: false, Own: false);
+        _pending.PendingModifications[(@"C:\Foo", false)] = new PendingModification(
+            entry, WasIsDeny: false, WasOwn: false, NewIsDeny: false, NewRights: newRights);
+
+        Assert.Equal(newRights, _pending.GetEffectiveRights(entry));
+    }
+
+    [Fact]
+    public void GetEffectiveRights_PendingModWithNullNewRights_FallsBackToEntrySavedRights()
+    {
+        var entry = MakeEntry(@"C:\Foo");
+        var originalRights = new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false);
+        entry.SavedRights = originalRights;
+        _pending.PendingModifications[(@"C:\Foo", false)] = new PendingModification(
+            entry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: null);
+
+        // NewRights is null → fall back to entry.SavedRights
+        Assert.Equal(originalRights, _pending.GetEffectiveRights(entry));
+    }
+
+    // --- IsPendingConfigMove with pending mode switch ---
+
+    [Fact]
+    public void IsPendingConfigMove_DirectKey_ReturnsTrue()
+    {
+        _pending.PendingConfigMoves[(@"C:\Foo", false)] = "extra.rfn";
+
+        Assert.True(_pending.IsPendingConfigMove(@"C:\Foo", isDeny: false));
+    }
+
+    [Fact]
+    public void IsPendingConfigMove_ReKeyedByModeSwitch_ReturnsTrue()
+    {
+        // After a mode switch (Allow→Deny), config move is stored at the new mode key (Deny=true).
+        // IsPendingConfigMove with the original key (Deny=false) should still detect it via the pending mod.
+        var entry = MakeEntry(@"C:\Foo");
+        _pending.PendingModifications[(@"C:\Foo", false)] = new PendingModification(
+            entry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: null);
+        _pending.PendingConfigMoves[(@"C:\Foo", true)] = "extra.rfn";
+
+        Assert.True(_pending.IsPendingConfigMove(@"C:\Foo", isDeny: false));
+    }
+
+    [Fact]
+    public void IsPendingConfigMove_NoMatch_ReturnsFalse()
+    {
+        Assert.False(_pending.IsPendingConfigMove(@"C:\Foo", isDeny: false));
+    }
+
+    // --- IsPendingGrantChange ---
+
+    [Fact]
+    public void IsPendingGrantChange_PendingAdd_ReturnsTrue()
+    {
+        _pending.PendingAdds[(@"C:\Foo", false)] = MakeEntry(@"C:\Foo");
+
+        Assert.True(_pending.IsPendingGrantChange(@"C:\Foo", isDeny: false));
+    }
+
+    [Fact]
+    public void IsPendingGrantChange_PendingModification_ReturnsTrue()
+    {
+        var entry = MakeEntry(@"C:\Foo");
+        _pending.PendingModifications[(@"C:\Foo", false)] = new PendingModification(
+            entry, WasIsDeny: false, WasOwn: false, NewIsDeny: false, NewRights: null);
+
+        Assert.True(_pending.IsPendingGrantChange(@"C:\Foo", isDeny: false));
+    }
+
+    [Fact]
+    public void IsPendingGrantChange_PendingConfigMove_ReturnsTrue()
+    {
+        _pending.PendingConfigMoves[(@"C:\Foo", false)] = "extra.rfn";
+
+        Assert.True(_pending.IsPendingGrantChange(@"C:\Foo", isDeny: false));
+    }
+
+    [Fact]
+    public void IsPendingGrantChange_NothingPending_ReturnsFalse()
+    {
+        Assert.False(_pending.IsPendingGrantChange(@"C:\Foo", isDeny: false));
+    }
+
+    // --- GetEffectiveConfigPath ---
+
+    [Fact]
+    public void GetEffectiveConfigPath_GrantWithPendingMove_ReturnsPendingTarget()
+    {
+        var entry = MakeEntry(@"C:\Foo");
+        _pending.PendingConfigMoves[(@"C:\Foo", false)] = "extra.rfn";
+        var tracker = new Mock<IGrantConfigTracker>().Object;
+
+        var result = _pending.GetEffectiveConfigPath(entry, tracker, "S-1-5-21-1");
+
+        Assert.Equal("extra.rfn", result);
+    }
+
+    [Fact]
+    public void GetEffectiveConfigPath_GrantWithModeSwitchAndPendingMove_UsesEffectiveIsDeny()
+    {
+        // Entry is Allow (IsDeny=false), but has a pending mode switch to Deny.
+        // The config move is stored under the Deny key.
+        var entry = MakeEntry(@"C:\Foo", isDeny: false);
+        _pending.PendingModifications[(@"C:\Foo", false)] = new PendingModification(
+            entry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: null);
+        _pending.PendingConfigMoves[(@"C:\Foo", true)] = "extra.rfn";
+        var tracker = new Mock<IGrantConfigTracker>().Object;
+
+        var result = _pending.GetEffectiveConfigPath(entry, tracker, "S-1-5-21-1");
+
+        Assert.Equal("extra.rfn", result);
+    }
+
+    [Fact]
+    public void GetEffectiveConfigPath_GrantNoPendingMove_FallsBackToTracker()
+    {
+        var entry = MakeEntry(@"C:\Foo");
+        const string sid = "S-1-5-21-1";
+        var tracker = new Mock<IGrantConfigTracker>();
+        tracker.Setup(t => t.GetGrantConfigPath(sid, entry)).Returns("committed.rfn");
+
+        var result = _pending.GetEffectiveConfigPath(entry, tracker.Object, sid);
+
+        Assert.Equal("committed.rfn", result);
+    }
+
+    [Fact]
+    public void GetEffectiveConfigPath_TraverseWithPendingMove_ReturnsPendingTarget()
+    {
+        var entry = MakeTraverseEntry(@"C:\Foo");
+        _pending.PendingTraverseConfigMoves[@"C:\Foo"] = "extra.rfn";
+        var tracker = new Mock<IGrantConfigTracker>().Object;
+
+        var result = _pending.GetEffectiveConfigPath(entry, tracker, "S-1-5-21-1");
+
+        Assert.Equal("extra.rfn", result);
+    }
+
+    [Fact]
+    public void GetEffectiveConfigPath_TraverseNoPendingMove_FallsBackToTracker()
+    {
+        var entry = MakeTraverseEntry(@"C:\Foo");
+        const string sid = "S-1-5-21-1";
+        var tracker = new Mock<IGrantConfigTracker>();
+        tracker.Setup(t => t.GetGrantConfigPath(sid, entry)).Returns((string?)null);
+
+        var result = _pending.GetEffectiveConfigPath(entry, tracker.Object, sid);
+
+        Assert.Null(result);
     }
 }

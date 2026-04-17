@@ -6,19 +6,23 @@ namespace RunFence.Persistence.UI;
 
 /// <summary>
 /// Monitors loaded additional config file paths for availability (e.g., removable media removed).
-/// Automatically unloads configs that are no longer accessible, then calls
-/// <param cref="onAutoUnload"/> to revert enforcement and refresh the UI.
+/// Automatically unloads configs that are no longer accessible, then raises
+/// <see cref="AutoUnloadRequired"/> to revert enforcement and refresh the UI.
 /// </summary>
 public class ConfigAvailabilityMonitor(
     IAppConfigService appConfigService,
     ILoggingService log,
-    Action<List<string>> onAutoUnload,
     IAppStateProvider appStateProvider,
     IUiThreadInvoker uiThreadInvoker,
     OperationGuard enforcementGuard)
     : IDisposable
 {
     private Timer? _timer;
+
+    /// <summary>
+    /// Raised on the UI thread when one or more loaded configs become unavailable and should be auto-unloaded.
+    /// </summary>
+    public event EventHandler<List<string>>? AutoUnloadRequired;
 
     /// <summary>
     /// Arms (or re-arms) the availability check timer. Safe to call from the UI thread at any time.
@@ -92,6 +96,6 @@ public class ConfigAvailabilityMonitor(
             return;
 
         log.Info($"Auto-unloading {unavailable.Count} unavailable config path(s)");
-        onAutoUnload(unavailable);
+        AutoUnloadRequired?.Invoke(this, unavailable);
     }
 }

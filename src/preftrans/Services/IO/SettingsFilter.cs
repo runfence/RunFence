@@ -1,12 +1,20 @@
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class SettingsFilter
+public class SettingsFilter : ISettingsFilter
 {
-    public static void FilterUserProfilePaths(UserSettings settings)
+    private readonly IUserProfileFilter _userProfileFilter;
+
+    public SettingsFilter(IUserProfileFilter userProfileFilter)
     {
-        var profilePaths = UserProfileFilter.GetUserProfilePaths();
+        _userProfileFilter = userProfileFilter;
+    }
+
+    public void FilterUserProfilePaths(UserSettings settings)
+    {
+        var profilePaths = _userProfileFilter.GetUserProfilePaths();
         if (profilePaths.Length == 0)
             return;
 
@@ -14,8 +22,8 @@ public static class SettingsFilter
         if (settings.Environment?.Variables != null)
         {
             var toRemove = settings.Environment.Variables
-                .Where(kv => UserProfileFilter.ContainsUserProfilePath(kv.Value.Value, profilePaths)
-                             || UserProfileFilter.ContainsWindowsAppsPath(kv.Value.Value))
+                .Where(kv => _userProfileFilter.ContainsUserProfilePath(kv.Value.Value, profilePaths)
+                             || _userProfileFilter.ContainsWindowsAppsPath(kv.Value.Value))
                 .Select(kv => kv.Key)
                 .ToList();
             foreach (var key in toRemove)
@@ -27,17 +35,18 @@ public static class SettingsFilter
         // TrayIcons: remove entries with ExecutablePath inside profile or in WindowsApps
         if (settings.TrayIcons?.PerAppVisibility != null)
         {
-            settings.TrayIcons.PerAppVisibility.RemoveAll(e => UserProfileFilter.ContainsUserProfilePath(e.ExecutablePath, profilePaths)
-                                                               || UserProfileFilter.ContainsWindowsAppsPath(e.ExecutablePath));
+            settings.TrayIcons.PerAppVisibility.RemoveAll(e => _userProfileFilter.ContainsUserProfilePath(e.ExecutablePath, profilePaths)
+                                                               || _userProfileFilter.ContainsWindowsAppsPath(e.ExecutablePath));
             if (settings.TrayIcons.PerAppVisibility.Count == 0)
                 settings.TrayIcons.PerAppVisibility = null;
         }
 
-        // Notifications: remove per-app entries with app ID path inside profile
+        // Notifications: remove per-app entries with app ID path inside profile or in WindowsApps
         if (settings.Notifications?.PerAppSuppression != null)
         {
             var toRemove = settings.Notifications.PerAppSuppression
-                .Where(kv => UserProfileFilter.ContainsUserProfilePath(kv.Key, profilePaths))
+                .Where(kv => _userProfileFilter.ContainsUserProfilePath(kv.Key, profilePaths)
+                             || _userProfileFilter.ContainsWindowsAppsPath(kv.Key))
                 .Select(kv => kv.Key)
                 .ToList();
             foreach (var key in toRemove)
@@ -48,15 +57,15 @@ public static class SettingsFilter
 
         // Desktop: null out wallpaper if inside profile
         if (settings.Desktop != null &&
-            UserProfileFilter.ContainsUserProfilePath(settings.Desktop.WallpaperPath, profilePaths))
+            _userProfileFilter.ContainsUserProfilePath(settings.Desktop.WallpaperPath, profilePaths))
         {
             settings.Desktop.WallpaperPath = null;
         }
 
         // ScreenSaver: null out executable path if inside profile or in WindowsApps
         if (settings.ScreenSaver != null &&
-            (UserProfileFilter.ContainsUserProfilePath(settings.ScreenSaver.ExecutablePath, profilePaths)
-             || UserProfileFilter.ContainsWindowsAppsPath(settings.ScreenSaver.ExecutablePath)))
+            (_userProfileFilter.ContainsUserProfilePath(settings.ScreenSaver.ExecutablePath, profilePaths)
+             || _userProfileFilter.ContainsWindowsAppsPath(settings.ScreenSaver.ExecutablePath)))
         {
             settings.ScreenSaver.ExecutablePath = null;
         }
@@ -66,9 +75,9 @@ public static class SettingsFilter
         if (settings.FileAssociations?.Associations != null)
         {
             var toRemove = settings.FileAssociations.Associations
-                .Where(kv => UserProfileFilter.ContainsUserProfilePath(kv.Value.OpenCommand, profilePaths)
-                             || UserProfileFilter.ContainsWindowsAppsPath(kv.Value.OpenCommand)
-                             || UserProfileFilter.IsUwpProgId(kv.Value.ProgId))
+                .Where(kv => _userProfileFilter.ContainsUserProfilePath(kv.Value.OpenCommand, profilePaths)
+                             || _userProfileFilter.ContainsWindowsAppsPath(kv.Value.OpenCommand)
+                             || _userProfileFilter.IsUwpProgId(kv.Value.ProgId))
                 .Select(kv => kv.Key)
                 .ToList();
             foreach (var key in toRemove)
@@ -76,6 +85,5 @@ public static class SettingsFilter
             if (settings.FileAssociations.Associations.Count == 0)
                 settings.FileAssociations.Associations = null;
         }
-
     }
 }

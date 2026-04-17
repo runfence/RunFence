@@ -1,15 +1,16 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class EnvironmentSettingsIO
+public class EnvironmentSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static EnvironmentSettings Read()
+    public EnvironmentSettings Read()
     {
         var env = new EnvironmentSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegEnvironment);
             if (key == null)
@@ -36,24 +37,41 @@ public static class EnvironmentSettingsIO
         return env;
     }
 
-    public static void Write(EnvironmentSettings env)
+    /// <remarks>
+    /// Write semantics are <b>additive (merge)</b>: existing variables in the target account that
+    /// are not present in <paramref name="env"/> are left untouched. This is intentional — the
+    /// target account may have custom variables (e.g., tool-specific PATH additions) that should
+    /// not be removed. Only variables explicitly present in the imported settings are written.
+    /// <para>
+    /// Write path intentionally uses exact-match BlockedEnvVars only — partial-match
+    /// BlockedEnvVarsParts filter is for read-path display safety, not a security boundary.
+    /// preftrans runs elevated with full env access.
+    /// </para>
+    /// </remarks>
+    public void Write(EnvironmentSettings env)
     {
         if (env.Variables == null)
             return;
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegEnvironment);
             foreach (var (name, envVar) in env.Variables)
             {
                 if (envVar.Value == null)
                     continue;
+                if (Constants.BlockedEnvVars.Contains(name))
+                    continue;
+                // Sensitive substring filtering intentionally not applied to Write — preftrans operates under target user credentials.
                 var kind = envVar.Kind == "ExpandSZ" ? RegistryValueKind.ExpandString : RegistryValueKind.String;
                 key.SetValue(name, envVar.Value, kind);
                 changed = true;
             }
         }, "writing");
         if (changed)
-            BroadcastHelper.BroadcastEnvironment();
+            broadcast.BroadcastEnvironment();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Environment = Read();
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Environment != null) Write(s.Environment); }
 }

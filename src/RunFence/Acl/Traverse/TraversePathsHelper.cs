@@ -17,7 +17,7 @@ public static class TraversePathsHelper
         var normalized = Path.GetFullPath(path);
         if (traversePaths.Any(e =>
                 e.IsTraverseOnly &&
-                string.Equals(Path.GetFullPath(e.Path), normalized, StringComparison.OrdinalIgnoreCase)))
+                string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase)))
             return false;
 
         traversePaths.Add(new GrantedPathEntry

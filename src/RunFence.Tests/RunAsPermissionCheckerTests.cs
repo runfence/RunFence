@@ -2,7 +2,6 @@ using Moq;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Container;
 using RunFence.RunAs;
 using Xunit;
 
@@ -16,10 +15,9 @@ public class RunAsPermissionCheckerTests
     private const string SafePath = @"C:\Apps\MyApp\app.exe";
 
     private readonly Mock<IAclPermissionService> _aclPermission = new();
-    private readonly Mock<IAppContainerService> _appContainerService = new();
 
     private RunAsPermissionChecker CreateChecker()
-        => new(_aclPermission.Object, _appContainerService.Object);
+        => new(_aclPermission.Object);
 
     // ── ComputeSidsNeedingPermission — blocked paths ──────────────────────
 
@@ -140,9 +138,8 @@ public class RunAsPermissionCheckerTests
     public void ComputeSidsNeedingPermission_ContainerNeedsPermission_ContainerSidIncluded()
     {
         // Arrange: container SID needs a grant
-        _appContainerService.Setup(s => s.GetSid("rfn_test")).Returns(ContainerSid);
         _aclPermission.Setup(p => p.NeedsPermissionGrantOrParent(SafePath, ContainerSid)).Returns(true);
-        var containers = new List<AppContainerEntry> { new() { Name = "rfn_test" } };
+        var containers = new List<AppContainerEntry> { new() { Name = "rfn_test", Sid = ContainerSid } };
         var checker = CreateChecker();
 
         // Act
@@ -157,9 +154,8 @@ public class RunAsPermissionCheckerTests
     public void ComputeSidsNeedingPermission_ContainerAlreadyHasPermission_ContainerSidNotIncluded()
     {
         // Arrange
-        _appContainerService.Setup(s => s.GetSid("rfn_test")).Returns(ContainerSid);
         _aclPermission.Setup(p => p.NeedsPermissionGrantOrParent(SafePath, ContainerSid)).Returns(false);
-        var containers = new List<AppContainerEntry> { new() { Name = "rfn_test" } };
+        var containers = new List<AppContainerEntry> { new() { Name = "rfn_test", Sid = ContainerSid } };
         var checker = CreateChecker();
 
         // Act
@@ -171,11 +167,10 @@ public class RunAsPermissionCheckerTests
     }
 
     [Fact]
-    public void ComputeSidsNeedingPermission_GetSidThrows_ContainerSkipped()
+    public void ComputeSidsNeedingPermission_ContainerSidNotResolved_ContainerSkipped()
     {
-        // Arrange: GetSid throws (container not yet created or OS error) — must not crash
-        _appContainerService.Setup(s => s.GetSid("rfn_broken")).Throws(new InvalidOperationException("OS error"));
-        var containers = new List<AppContainerEntry> { new() { Name = "rfn_broken" } };
+        // Arrange: entry.Sid is empty (not yet resolved) — must not crash, must be skipped
+        var containers = new List<AppContainerEntry> { new() { Name = "rfn_unresolved", Sid = "" } };
         var checker = CreateChecker();
 
         // Act — must not throw

@@ -1,6 +1,7 @@
 #region
 
 using System.Security;
+using RunFence.Account.UI;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -20,8 +21,12 @@ public partial class EditAccountDialog : Form
     public string? NewPasswordText { get; private set; }
     public bool IsEphemeral { get; private set; }
     public string? SettingsImportPath { get; private set; }
-    public bool UseSplitTokenDefault => _splitTokenCheckBox.Checked;
-    public bool UseLowIntegrityDefault => _lowIntegrityCheckBox.Checked;
+    public PrivilegeLevel SelectedPrivilegeLevel => _privilegeLevelComboBox.SelectedIndex switch
+    {
+        0 => PrivilegeLevel.HighestAllowed,
+        2 => PrivilegeLevel.LowIntegrity,
+        _ => PrivilegeLevel.Basic,
+    };
     public bool DeleteRequested { get; private set; }
     public bool AllowInternet { get; private set; } = true;
     public bool AllowLocalhost { get; private set; } = true;
@@ -32,13 +37,15 @@ public partial class EditAccountDialog : Form
     // Create mode output properties
     public string? CreatedSid { get; private set; }
     public SecureString? CreatedPassword { get; private set; }
+    public bool UsersGroupUnchecked { get; private set; }
     public IReadOnlyList<InstallablePackage> SelectedInstallPackages { get; private set; } = [];
 
     // Characters invalid in Windows SAM account names
     public static readonly char[] InvalidNameChars = ['\"', '/', '\\', '[', ']', ':', ';', '|', '=', ',', '+', '*', '?', '<', '>'];
 
     private readonly ILocalGroupMembershipService _groupMembership;
-    private readonly IAccountRestrictionService _accountRestriction;
+    private readonly IAccountLoginRestrictionService _loginRestriction;
+    private readonly IAccountLsaRestrictionService _lsaRestriction;
     private readonly EditAccountDialogCreateHandler _createHandler;
     private readonly EditAccountDialogSaveHandler _saveHandler;
     private readonly IDatabaseProvider _databaseProvider;
@@ -55,9 +62,6 @@ public partial class EditAccountDialog : Form
     private bool _originalAllowLan;
     private bool _isCreating;
     private readonly InstallPackageSelector _packageSelector = new();
-    private bool _isAdminChecked;
-
-    public bool IsSplitTokenApplicable => _isCreating || _isAdminChecked;
 
     private static readonly HashSet<string> NeverFilteredGroupNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -66,13 +70,15 @@ public partial class EditAccountDialog : Form
 
     public EditAccountDialog(
         ILocalGroupMembershipService groupMembership,
-        IAccountRestrictionService accountRestriction,
+        IAccountLoginRestrictionService loginRestriction,
+        IAccountLsaRestrictionService lsaRestriction,
         EditAccountDialogCreateHandler createHandler,
         EditAccountDialogSaveHandler saveHandler,
         IDatabaseProvider databaseProvider)
     {
         _groupMembership = groupMembership;
-        _accountRestriction = accountRestriction;
+        _loginRestriction = loginRestriction;
+        _lsaRestriction = lsaRestriction;
         _createHandler = createHandler;
         _saveHandler = saveHandler;
         _databaseProvider = databaseProvider;
@@ -89,11 +95,10 @@ public partial class EditAccountDialog : Form
         string username,
         bool isEphemeral,
         bool isCurrentAccount = false,
-        bool isSplitTokenDefault = false,
-        bool isLowIntegrityDefault = false,
+        PrivilegeLevel privilegeLevel = PrivilegeLevel.Basic,
         int currentHiddenCount = 0,
         FirewallAccountSettings? firewallSettings = null,
-        AccountLauncher? launcher = null,
+        PackageInstallService? packageInstallService = null,
         bool canInstall = true)
     {
         _isCreating = false;
@@ -113,9 +118,9 @@ public partial class EditAccountDialog : Form
         _groups = GroupFilterHelper.FilterForEditDialog(
             _groupMembership.GetLocalGroups(), _currentGroupSids, NeverFilteredGroupNames).ToList();
 
-        _localOnlyState = _accountRestriction.GetLocalOnlyState(sid);
-        _noLogonState = _accountRestriction.GetNoLogonState(sid, username);
-        _noBgAutostartState = _accountRestriction.GetNoBgAutostartState(sid);
+        _localOnlyState = _lsaRestriction.GetLocalOnlyState(sid);
+        _noLogonState = _loginRestriction.GetNoLogonState(sid, username);
+        _noBgAutostartState = _lsaRestriction.GetNoBgAutostartState(sid);
 
         _usernameTextBox.Text = username;
         _usernameTextBox.SelectionStart = username.Length;
@@ -136,12 +141,7 @@ public partial class EditAccountDialog : Form
         _allowLocalhostCheckBox.Checked = effectiveFirewall.AllowLocalhost;
         _allowLanCheckBox.Checked = effectiveFirewall.AllowLan;
         _ephemeralCheckBox.Checked = isEphemeral;
-        var isAdmin = _currentGroupSids.Contains(GroupFilterHelper.AdministratorsSid);
-        _splitTokenCheckBox.Checked = isSplitTokenDefault;
-        UpdateSplitTokenState(isAdmin);
-        _toolTip.SetToolTip(_splitTokenCheckBox, LaunchFlags.DeElevateTooltip);
-        _groupsListBox.ItemCheck += OnGroupsItemCheck;
-        _lowIntegrityCheckBox.Checked = isLowIntegrityDefault;
+        SetPrivilegeLevel(privilegeLevel);
 
         if (SidResolutionHelper.IsInteractiveUserSid(sid) && _noLogonState == false)
             _logonCheckBox.Enabled = false;
@@ -160,7 +160,7 @@ public partial class EditAccountDialog : Form
             _browseButton.Enabled = false;
         }
 
-        ConfigureInstallList(canInstall, launcher != null ? p => launcher.IsPackageInstalled(p, sid) : null);
+        ConfigureInstallList(canInstall, packageInstallService != null ? p => packageInstallService.IsPackageInstalled(p, sid) : null);
     }
 
     /// <summary>
@@ -208,14 +208,13 @@ public partial class EditAccountDialog : Form
         }
 
         _settingsPathTextBox.Text = defaults.DesktopSettingsPath;
-        _splitTokenCheckBox.Checked = defaults.UseSplitToken;
-        UpdateSplitTokenState(false); // Administrators not checked initially
-        _toolTip.SetToolTip(_splitTokenCheckBox, LaunchFlags.DeElevateTooltip);
-        _groupsListBox.ItemCheck += OnGroupsItemCheck;
-        _lowIntegrityCheckBox.Checked = defaults.UseLowIntegrity;
+        SetPrivilegeLevel(defaults.PrivilegeLevel);
         _logonCheckBox.CheckState = ToCheckState(defaults.AllowLogon);
         _networkLoginCheckBox.CheckState = ToCheckState(defaults.AllowNetworkLogin);
-        _bgAutorunCheckBox.CheckState = ToCheckState(defaults.AllowBgAutorun);
+        // In create mode, bgAutorun cannot be Indeterminate — the value is always known for a new account.
+        // Indeterminate is only meaningful when editing an existing account where the state was set externally.
+        _bgAutorunCheckBox.ThreeState = false;
+        _bgAutorunCheckBox.Checked = defaults.AllowBgAutorun;
         _allowInternetCheckBox.Checked = defaults.AllowInternet;
         _allowLocalhostCheckBox.Checked = defaults.AllowLocalhost;
         _allowLanCheckBox.Checked = defaults.AllowLan;
@@ -251,7 +250,22 @@ public partial class EditAccountDialog : Form
             _settingsPathTextBox.Text = dlg.FileName;
     }
 
-    private void OnOkClick(object? sender, EventArgs e)
+    /// <summary>
+    /// Validates a Windows SAM account name. Returns null if valid, or an error message if invalid.
+    /// </summary>
+    private static string? ValidateUsername(string name)
+    {
+        if (name.Length is 0 or > 20)
+            return "Account name must be 1\u201320 characters.";
+        if (name.IndexOfAny(InvalidNameChars) >= 0)
+            return "Account name contains invalid characters.";
+        if (name.EndsWith('.'))
+            return "Account name cannot end with a period.";
+        return null;
+    }
+
+    /// <remarks>OS calls (LSA, SAM) are thread-safe; UI state is captured before Task.Run.</remarks>
+    private async void OnOkClick(object? sender, EventArgs e)
     {
         if (_isCreating)
         {
@@ -260,22 +274,18 @@ public partial class EditAccountDialog : Form
         }
 
         _okButton.Enabled = false;
+        _cancelButton.Enabled = false;
         _statusLabel.Text = "";
         Errors.Clear();
 
         // Validate username
         var name = _usernameTextBox.Text.Trim();
-        if (name.Length is 0 or > 20)
+        var usernameError = ValidateUsername(name);
+        if (usernameError != null)
         {
-            _statusLabel.Text = "Account name must be 1\u201320 characters.";
+            _statusLabel.Text = usernameError;
             _okButton.Enabled = true;
-            return;
-        }
-
-        if (name.IndexOfAny(InvalidNameChars) >= 0)
-        {
-            _statusLabel.Text = "Account name contains invalid characters.";
-            _okButton.Enabled = true;
+            _cancelButton.Enabled = true;
             return;
         }
 
@@ -284,6 +294,7 @@ public partial class EditAccountDialog : Form
         {
             _statusLabel.Text = "Passwords do not match.";
             _okButton.Enabled = true;
+            _cancelButton.Enabled = true;
             return;
         }
 
@@ -310,7 +321,8 @@ public partial class EditAccountDialog : Form
         static bool? ChangedValue(CheckState current, CheckState original) =>
             current != original ? current == CheckState.Checked : null;
 
-        var saveResult = _saveHandler.Execute(new EditAccountDialogSaveHandler.SaveAccountRequest(
+        // Capture all UI state before background execution
+        var request = new EditAccountDialogSaveHandler.SaveAccountRequest(
             Sid: _sid,
             CurrentUsername: _currentUsername,
             NewName: name,
@@ -321,43 +333,56 @@ public partial class EditAccountDialog : Form
             NewLogon: ChangedValue(_logonCheckBox.CheckState, ToCheckState(Invert(_noLogonState))),
             NewBgAutorun: ChangedValue(_bgAutorunCheckBox.CheckState, ToCheckState(Invert(_noBgAutostartState))),
             CurrentHiddenCount: _currentHiddenCount,
-            NoLogonState: _noLogonState));
+            NoLogonState: _noLogonState);
+        var settingsPath = _settingsPathTextBox.Text.Trim();
+        var allowInternet = _allowInternetCheckBox.Checked;
+        var allowLocalhost = _allowLocalhostCheckBox.Checked;
+        var allowLan = _allowLanCheckBox.Checked;
+        var isEphemeral = _ephemeralCheckBox.Checked;
+        var passwordText = _passwordTextBox.Text;
+        var installPackages = CollectSelectedInstallPackages();
+
+        // Execute slow OS operations (group membership queries, renames, restrictions) on background thread.
+        var saveResult = await Task.Run(() => _saveHandler.Execute(request));
+
+        if (IsDisposed)
+            return;
 
         if (saveResult.ValidationError != null)
         {
             _statusLabel.Text = saveResult.ValidationError;
             _okButton.Enabled = true;
+            _cancelButton.Enabled = true;
             return;
         }
 
         Errors.AddRange(saveResult.Errors);
 
         // Desktop settings import path (actual import is done by the caller after password change)
-        var settingsPath = _settingsPathTextBox.Text.Trim();
         if (settingsPath.Length > 0 && File.Exists(settingsPath))
             SettingsImportPath = settingsPath;
 
         // Firewall settings: collect and apply if changed
-        AllowInternet = _allowInternetCheckBox.Checked;
-        AllowLocalhost = _allowLocalhostCheckBox.Checked;
-        AllowLan = _allowLanCheckBox.Checked;
+        AllowInternet = allowInternet;
+        AllowLocalhost = allowLocalhost;
+        AllowLan = allowLan;
         FirewallSettingsChanged = AllowInternet != _originalAllowInternet
                                   || AllowLocalhost != _originalAllowLocalhost
                                   || AllowLan != _originalAllowLan;
 
         NewUsername = saveResult.NewUsername;
-        IsEphemeral = _ephemeralCheckBox.Checked;
+        IsEphemeral = isEphemeral;
 
-        if (_passwordTextBox.Text.Length > 0)
+        if (passwordText.Length > 0)
         {
             NewPassword = new SecureString();
-            foreach (char c in _passwordTextBox.Text)
+            foreach (char c in passwordText)
                 NewPassword.AppendChar(c);
             NewPassword.MakeReadOnly();
-            NewPasswordText = _passwordTextBox.Text;
+            NewPasswordText = passwordText;
         }
 
-        SelectedInstallPackages = CollectSelectedInstallPackages();
+        SelectedInstallPackages = installPackages;
 
         DialogResult = DialogResult.OK;
         Close();
@@ -366,13 +391,26 @@ public partial class EditAccountDialog : Form
     private void OnCreateClick()
     {
         _okButton.Enabled = false;
+        _cancelButton.Enabled = false;
         _statusLabel.Text = "";
         Errors.Clear();
+
+        // Validate username
+        var name = _usernameTextBox.Text.Trim();
+        var usernameError = ValidateUsername(name);
+        if (usernameError != null)
+        {
+            _statusLabel.Text = usernameError;
+            _okButton.Enabled = true;
+            _cancelButton.Enabled = true;
+            return;
+        }
 
         if (_passwordTextBox.Text.Length == 0)
         {
             _statusLabel.Text = "Password is required.";
             _okButton.Enabled = true;
+            _cancelButton.Enabled = true;
             return;
         }
 
@@ -409,6 +447,7 @@ public partial class EditAccountDialog : Form
         {
             _statusLabel.Text = _createHandler.LastValidationError;
             _okButton.Enabled = true;
+            _cancelButton.Enabled = true;
             return;
         }
 
@@ -418,6 +457,8 @@ public partial class EditAccountDialog : Form
         NewUsername = result.Username;
         IsEphemeral = result.IsEphemeral;
         Errors.AddRange(result.Errors);
+        UsersGroupUnchecked = uncheckedDefaultGroups.Any(g =>
+            string.Equals(g.Sid, GroupFilterHelper.UsersSid, StringComparison.OrdinalIgnoreCase));
 
         // Desktop settings import path (actual import is done by the caller)
         var settingsPath = _settingsPathTextBox.Text.Trim();
@@ -443,25 +484,15 @@ public partial class EditAccountDialog : Form
         Close();
     }
 
-    private void OnGroupsItemCheck(object? sender, ItemCheckEventArgs e)
+    private void SetPrivilegeLevel(PrivilegeLevel mode)
     {
-        if (!string.Equals(_groups[e.Index].Sid, GroupFilterHelper.AdministratorsSid, StringComparison.OrdinalIgnoreCase))
-            return;
-        UpdateSplitTokenState(e.NewValue == CheckState.Checked);
-    }
-
-    private void UpdateSplitTokenState(bool isAdminChecked)
-    {
-        _isAdminChecked = isAdminChecked;
-        if (isAdminChecked)
+        _privilegeLevelComboBox.SelectedIndex = mode switch
         {
-            _splitTokenCheckBox.Enabled = true;
-        }
-        else
-        {
-            _splitTokenCheckBox.Checked = true;
-            _splitTokenCheckBox.Enabled = false;
-        }
+            PrivilegeLevel.HighestAllowed => 0,
+            PrivilegeLevel.LowIntegrity => 2,
+            _ => 1,
+        };
+        _toolTip.SetToolTip(_privilegeLevelComboBox, LaunchUiConstants.PrivilegeLevelTooltip);
     }
 
     private static bool? Invert(bool? v) => !v;

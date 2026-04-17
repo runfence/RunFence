@@ -1,9 +1,13 @@
 using System.Runtime.InteropServices;
+using RunFence.Core;
 
 namespace RunFence.Firewall;
 
-public class ComFirewallRuleManager : IFirewallRuleManager
+public class ComFirewallRuleManager(ILoggingService log) : IFirewallRuleManager
 {
+    // Creating HNetCfg.FwPolicy2 on each call is intentional: the COM object is lightweight
+    // and stateless from the caller's perspective. Caching it across calls risks stale state
+    // (e.g. rule collections out of sync after external changes made by Windows or other tools).
     private dynamic GetPolicy()
     {
         var policyType = Type.GetTypeFromProgID("HNetCfg.FwPolicy2")
@@ -59,6 +63,8 @@ public class ComFirewallRuleManager : IFirewallRuleManager
             {
             }
         }
+
+        log.Debug($"Rule '{existingName}' not found for update");
     }
 
     public void RemoveRule(string name)

@@ -12,7 +12,10 @@ namespace RunFence.Account;
 /// </summary>
 public record AccountCreationDefaults(
     string Username,
-    string Password,
+    string Password, // Plain string by design: all consumers assign this to a WinForms TextBox.Text, which is
+                     // inherently a .NET string. SecureString overloads offer no benefit here since the text
+                     // is immediately exposed as a string in the UI. The char[] used to generate the password
+                     // is cleared in Create() immediately after constructing this string.
     List<(string Sid, string Name)> CheckedGroups,
     bool AllowLogon,
     bool AllowNetworkLogin,
@@ -21,8 +24,7 @@ public record AccountCreationDefaults(
     bool AllowLan,
     bool AllowLocalhost,
     bool IsEphemeral,
-    bool UseSplitToken,
-    bool UseLowIntegrity,
+    PrivilegeLevel PrivilegeLevel,
     string DesktopSettingsPath,
     List<InstallablePackage> InstallPackages)
 {
@@ -32,23 +34,16 @@ public record AccountCreationDefaults(
     /// Password is a randomly generated strong password.
     /// Groups default to checked=Users (Windows adds new accounts to Users automatically),
     /// unchecked=empty (no other groups are unchecked by default).
-    /// All restrictions default to the most permissive state (logon allowed, internet allowed, etc.)
-    /// so that templates only need to override what they restrict.
+    /// Internet is allowed by default; LAN and Localhost are blocked by default (more secure isolation).
     /// </summary>
     public static AccountCreationDefaults Create(AppDatabase database, ILocalGroupMembershipService groupMembership)
     {
         var allGroups = GroupFilterHelper.FilterForCreateDialog(groupMembership.GetLocalGroups()).ToList();
 
-        // Users group is pre-checked (Windows auto-adds new accounts to it).
-        // All other groups start unchecked (user can add them explicitly).
-        var checkedGroups = allGroups
-            .Where(g => string.Equals(g.Sid, GroupFilterHelper.UsersSid, StringComparison.OrdinalIgnoreCase))
-            .Select(g => (g.Sid, g.Username))
-            .ToList();
-
-        // UncheckedGroups is empty — only the Users group is tracked for potential removal,
-        // but it stays checked by default so there's nothing to remove.
-        var uncheckedGroups = new List<(string Sid, string Name)>();
+        // Users group is unchecked by default: Windows adds all authenticated users to BUILTIN\Users
+        // at the token level regardless of SAM membership, so explicit membership is redundant.
+        // All groups start unchecked; user can add them explicitly.
+        List<(string Sid, string Name)> checkedGroups = [];
 
         char[]? generatedChars = null;
         string password;
@@ -71,11 +66,10 @@ public record AccountCreationDefaults(
             AllowNetworkLogin: false,
             AllowBgAutorun: false,
             AllowInternet: true,
-            AllowLan: true,
-            AllowLocalhost: true,
+            AllowLan: false,
+            AllowLocalhost: false,
             IsEphemeral: false,
-            UseSplitToken: true,
-            UseLowIntegrity: false,
+            PrivilegeLevel: PrivilegeLevel.Basic,
             DesktopSettingsPath: database.Settings.DefaultDesktopSettingsPath,
             InstallPackages: []);
     }

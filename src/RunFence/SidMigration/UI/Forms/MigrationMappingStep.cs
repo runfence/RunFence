@@ -9,6 +9,7 @@ namespace RunFence.SidMigration.UI.Forms;
 /// UserControl for Step 3 (SID Mapping Review) of SidMigrationDialog.
 /// Owns the loading label and delegates grid building to SidMigrationMappingBuilder.
 /// </summary>
+/// <remarks>Manually constructed by SidMigrationDialog with runtime data — not DI-registered.</remarks>
 public partial class MigrationMappingStep : UserControl
 {
     private readonly SessionContext _session;
@@ -44,8 +45,13 @@ public partial class MigrationMappingStep : UserControl
     {
         var logic = new SidMigrationMappingLogic(
             _session, _sidMigrationService, _localUserProvider, _orphanedSids, _sidResolver, _sidNameCache);
-        _builder = new SidMigrationMappingBuilder(logic, _log, this, _orphanedSids);
-        _builder.Ready += onReady;
+        _builder = new SidMigrationMappingBuilder(logic, _log, _orphanedSids);
+        _builder.Ready += () =>
+        {
+            if (_builder.Content != null)
+                Controls.Add(_builder.Content);
+            onReady();
+        };
         _builder.Failed += onFailed;
         _ = _builder.BuildMappingsAsync(_loadingLabel);
     }

@@ -1,3 +1,4 @@
+using RunFence.Account;
 using RunFence.Apps.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -13,22 +14,30 @@ namespace RunFence.Apps.UI;
 public class ApplicationsHandlerSyncHelper(
     IAppHandlerRegistrationService handlerRegistrationService,
     IHandlerMappingService handlerMappingService,
-    ILoggingService log,
-    IDatabaseProvider databaseProvider)
+    IAssociationAutoSetService autoSetService,
+    ISidNameCacheService sidNameCache,
+    IDatabaseProvider databaseProvider,
+    Func<HandlerMappingsDialog> handlerMappingsDialogFactory)
 {
-    public Dictionary<string, string> GetEffectiveMappings()
+    /// <summary>
+    /// Returns all handler mappings across all loaded configs (key → all entries per key).
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<HandlerMappingEntry>> GetAllMappings()
     {
         var database = databaseProvider.GetDatabase();
-        return handlerMappingService.GetEffectiveHandlerMappings(database);
+        return handlerMappingService.GetAllHandlerMappings(database);
     }
 
     /// <summary>
     /// Opens the handler associations management dialog.
     /// </summary>
-    public void OpenAssociationsDialog(IWin32Window owner, Func<AppDatabase> getDatabase, Action saveDatabase)
+    public void OpenAssociationsDialog(IWin32Window owner, Action saveDatabase)
     {
-        using var dlg = new HandlerMappingsDialog(handlerMappingService, handlerRegistrationService,
-            log, getDatabase, saveDatabase);
+        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
+        var interactiveUsername = interactiveSid != null ? sidNameCache.GetDisplayName(interactiveSid) ?? "User" : "User";
+
+        using var dlg = handlerMappingsDialogFactory();
+        dlg.Initialize(() => databaseProvider.GetDatabase(), saveDatabase, interactiveUsername);
         dlg.ShowDialog(owner);
     }
 
@@ -41,21 +50,34 @@ public class ApplicationsHandlerSyncHelper(
     {
         var database = databaseProvider.GetDatabase();
         var existingAppIds = new HashSet<string>(database.Apps.Select(a => a.Id));
-        var effectiveMappings = handlerMappingService.GetEffectiveHandlerMappings(database);
+        var allMappings = handlerMappingService.GetAllHandlerMappings(database);
         bool changed = false;
-        foreach (var kvp in effectiveMappings.ToList())
+        var removedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kvp in allMappings)
         {
-            if (!existingAppIds.Contains(kvp.Value))
+            foreach (var entry in kvp.Value)
             {
-                handlerMappingService.RemoveHandlerMapping(kvp.Key, database);
-                changed = true;
+                if (!existingAppIds.Contains(entry.AppId))
+                {
+                    handlerMappingService.RemoveHandlerMapping(kvp.Key, entry.AppId, database);
+                    removedKeys.Add(kvp.Key);
+                    changed = true;
+                }
             }
         }
 
         if (changed)
         {
+            var remainingMappings = handlerMappingService.GetAllHandlerMappings(database);
+            foreach (var key in removedKeys)
+            {
+                if (!remainingMappings.ContainsKey(key))
+                    autoSetService.RestoreKeyForAllUsers(key);
+            }
+
             var updatedMappings = handlerMappingService.GetEffectiveHandlerMappings(database);
             handlerRegistrationService.Sync(updatedMappings, database.Apps);
+            autoSetService.AutoSetForAllUsers();
         }
 
         return changed;

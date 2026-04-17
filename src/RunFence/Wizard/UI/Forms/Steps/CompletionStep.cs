@@ -3,7 +3,7 @@ namespace RunFence.Wizard.UI.Forms.Steps;
 /// <summary>
 /// Final step shown after a template's <see cref="IWizardTemplate.ExecuteAsync"/> completes.
 /// Displays a summary of what was created and any non-fatal errors.
-/// Closing is done via the footer Cancel/Close button.
+/// Closing is done via the "Done" button (Next) or the "Close" button (Cancel).
 /// </summary>
 public class CompletionStep : WizardStepPage
 {

@@ -7,6 +7,7 @@ public partial class AncestorPermissionDialog : Form
 {
     private readonly IReadOnlyList<string> _ancestors;
     private readonly FileSystemRights _baseRights;
+    private readonly Font _headingFont;
 
     /// <summary>The path selected by the user, or null if the skip button was chosen.</summary>
     public string? SelectedPath { get; private set; }
@@ -26,7 +27,8 @@ public partial class AncestorPermissionDialog : Form
         Icon = AppIcons.GetAppIcon();
         _shieldIcon.Image = SystemIcons.Shield.ToBitmap();
         _headingLabel.Text = heading;
-        _headingLabel.Font = new Font(Font.FontFamily, Font.Size + 1, FontStyle.Bold);
+        _headingFont = new Font(Font.FontFamily, Font.Size + 1, FontStyle.Bold);
+        _headingLabel.Font = _headingFont;
         _headingLabel.ForeColor = Color.FromArgb(0x00, 0x33, 0x99);
 
         foreach (var path in ancestors)

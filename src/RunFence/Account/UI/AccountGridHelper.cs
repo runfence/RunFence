@@ -6,7 +6,15 @@ namespace RunFence.Account.UI;
 
 public static class AccountGridHelper
 {
+    // Shared sentinel used for grid rows with no icon. Must never be disposed by grid row cleanup.
     public static readonly Bitmap EmptyIcon = new(1, 1);
+
+    /// <summary>
+    /// Returns the <see cref="AccountRow"/> tagged on the selected grid row, or <c>null</c>
+    /// when no row is selected or the selected row is not an account row.
+    /// </summary>
+    public static AccountRow? GetSelectedAccountRow(DataGridView grid)
+        => grid.SelectedRows.Count > 0 ? grid.SelectedRows[0].Tag as AccountRow : null;
 
     private static Font? _boldFont;
     private static Font? _boldFontBase;

@@ -1,8 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
-using RunFence.Acl.Permissions;
 using RunFence.Core;
-using RunFence.Core.Models;
 
 namespace RunFence.Acl;
 
@@ -15,7 +13,7 @@ namespace RunFence.Acl;
 /// Requires <c>SeBackupPrivilege</c>, <c>SeRestorePrivilege</c>, and
 /// <c>SeTakeOwnershipPrivilege</c> — enabled at startup in <c>Program.cs</c>.
 /// </summary>
-public class DriveAclReplacer(IPermissionGrantService permissionGrantService, ILoggingService log)
+public class DriveAclReplacer(IPathGrantService pathGrantService, ILoggingService log)
 {
     private static readonly SecurityIdentifier UsersSid =
         new(WellKnownSidType.BuiltinUsersSid, null);
@@ -30,7 +28,7 @@ public class DriveAclReplacer(IPermissionGrantService permissionGrantService, IL
     /// Replaces broad-access ACEs on <paramref name="drivePath"/> for the given <paramref name="targetSid"/>.
     /// Non-fatal errors are returned as a string; null means success.
     /// </summary>
-    public string? ReplaceDriveAcl(string drivePath, string targetSid, SavedRightsState savedRights)
+    public string? ReplaceDriveAcl(string drivePath, string targetSid)
     {
         try
         {
@@ -40,6 +38,13 @@ public class DriveAclReplacer(IPermissionGrantService permissionGrantService, IL
             var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier))
                 .Cast<FileSystemAccessRule>()
                 .ToList();
+
+            // Build a HashSet of existing target-SID rules keyed by (maskedRights, InheritanceFlags, PropagationFlags, AccessControlType)
+            // for O(1) duplicate checks in the loop below.
+            var existingTargetRuleKeys = new HashSet<(FileSystemRights, InheritanceFlags, PropagationFlags, AccessControlType)>(
+                rules
+                    .Where(r => r.IdentityReference.Equals(targetIdentity))
+                    .Select(r => (r.FileSystemRights & FileSystemRights.FullControl, r.InheritanceFlags, r.PropagationFlags, r.AccessControlType)));
 
             bool changed = false;
 
@@ -64,17 +69,8 @@ public class DriveAclReplacer(IPermissionGrantService permissionGrantService, IL
                 }
 
                 // Add equivalent ACE for the target SID, unless an identical ACE already exists.
-                var existingRules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier))
-                    .Cast<FileSystemAccessRule>();
-
-                bool duplicate = existingRules.Any(r =>
-                    r.IdentityReference.Equals(targetIdentity) &&
-                    (r.FileSystemRights & FileSystemRights.FullControl) == maskedRights &&
-                    r.InheritanceFlags == rule.InheritanceFlags &&
-                    r.PropagationFlags == rule.PropagationFlags &&
-                    r.AccessControlType == rule.AccessControlType);
-
-                if (!duplicate)
+                var key = (maskedRights, rule.InheritanceFlags, rule.PropagationFlags, rule.AccessControlType);
+                if (!existingTargetRuleKeys.Contains(key))
                 {
                     security.AddAccessRule(new FileSystemAccessRule(
                         targetIdentity,
@@ -82,6 +78,7 @@ public class DriveAclReplacer(IPermissionGrantService permissionGrantService, IL
                         rule.InheritanceFlags,
                         rule.PropagationFlags,
                         rule.AccessControlType));
+                    existingTargetRuleKeys.Add(key);
                 }
 
                 changed = true;
@@ -98,9 +95,8 @@ public class DriveAclReplacer(IPermissionGrantService permissionGrantService, IL
             if (changed)
                 new DirectoryInfo(drivePath).SetAccessControl(security);
 
-            // Record in AccountGrants regardless of whether ACEs were changed
-            // (the wizard already applied the ACLs directly; we just track what was done).
-            permissionGrantService.RecordGrantWithRights(drivePath, targetSid, savedRights);
+            // Sync DB with actual NTFS state — reads back ACEs we (or other code) just wrote.
+            pathGrantService.UpdateFromPath(drivePath, targetSid);
 
             return null;
         }

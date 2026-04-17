@@ -1,4 +1,5 @@
 using RunFence.Acl;
+using RunFence.Account;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -14,18 +15,25 @@ namespace RunFence.Apps;
 public class AppEntryEnforcementHelper(
     IAclService aclService,
     IShortcutService shortcutService,
+    IBesideTargetShortcutService besideTargetShortcutService,
     IIconService iconService,
-    ISidResolver sidResolver,
-    IInteractiveUserDesktopProvider desktopProvider)
+    ISidNameCacheService sidNameCache,
+    IInteractiveUserDesktopProvider desktopProvider,
+    ILoggingService log)
 {
     /// <summary>
     /// Applies ACL, creates/updates icon, updates exe timestamp, replaces managed shortcuts,
     /// and creates a beside-target shortcut. Does NOT call RecomputeAllAncestorAcls.
     /// </summary>
+    /// <remarks>
+    /// For AppContainer apps, beside-target shortcut creation requires an active interactive user
+    /// (explorer.exe). When the interactive user is unavailable, the shortcut is skipped and will
+    /// be created on the next enforcement cycle.
+    /// </remarks>
     public void ApplyChanges(
         AppEntry app,
         IReadOnlyList<AppEntry> allApps,
-        IReadOnlyDictionary<string, string> sidNames)
+        ShortcutTraversalCache shortcutCache)
     {
         if (app is { RestrictAcl: true, IsUrlScheme: false })
             aclService.ApplyAcl(app, allApps);
@@ -41,7 +49,7 @@ public class AppEntryEnforcementHelper(
 
         var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
         if (app.ManageShortcuts && File.Exists(launcherPath))
-            shortcutService.ReplaceShortcuts(app, launcherPath, iconPath);
+            shortcutService.ReplaceShortcuts(app, launcherPath, iconPath, shortcutCache);
 
         if (!app.IsUrlScheme && File.Exists(launcherPath))
         {
@@ -49,11 +57,19 @@ public class AppEntryEnforcementHelper(
             var effectiveSid = app.AppContainerName != null
                 ? NativeTokenHelper.TryGetInteractiveUserSid()?.Value
                 : app.AccountSid;
-            var username = effectiveSid != null
-                ? SidNameResolver.ResolveUsername(effectiveSid, sidResolver, sidNames)
-                : null;
-            if (!string.IsNullOrEmpty(username))
-                shortcutService.CreateBesideTargetShortcut(app, launcherPath, iconPath, username);
+            if (effectiveSid != null)
+            {
+                var username = sidNameCache.GetDisplayName(effectiveSid);
+                // Only create the shortcut when a real name was resolved (not just the raw SID)
+                if (!string.Equals(username, effectiveSid, StringComparison.OrdinalIgnoreCase))
+                    besideTargetShortcutService.CreateBesideTargetShortcut(app, launcherPath, iconPath, username);
+            }
+            else if (app.AppContainerName != null)
+            {
+                // Beside-target shortcut skipped because the interactive user (explorer.exe) is not
+                // running. The shortcut will be created on the next enforcement cycle.
+                log.Warn($"AppEntryEnforcementHelper: interactive user not available, skipping beside-target shortcut for {app.Name}");
+            }
         }
     }
 
@@ -78,13 +94,13 @@ public class AppEntryEnforcementHelper(
     /// Does NOT call RecomputeAllAncestorAcls.
     /// <paramref name="allApps"/> must include <paramref name="app"/> (RevertAcl filters internally).
     /// </summary>
-    public void RevertChanges(AppEntry app, IReadOnlyList<AppEntry> allApps)
+    public void RevertChanges(AppEntry app, IReadOnlyList<AppEntry> allApps, ShortcutTraversalCache shortcutCache)
     {
         if (app is { RestrictAcl: true, IsUrlScheme: false })
             aclService.RevertAcl(app, allApps);
         if (app.ManageShortcuts)
-            shortcutService.RevertShortcuts(app);
+            shortcutService.RevertShortcuts(app, shortcutCache);
         if (!app.IsUrlScheme)
-            shortcutService.RemoveBesideTargetShortcut(app);
+            besideTargetShortcutService.RemoveBesideTargetShortcut(app);
     }
 }

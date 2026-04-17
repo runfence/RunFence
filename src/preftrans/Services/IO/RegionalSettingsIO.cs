@@ -1,15 +1,16 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
+using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
 
-public static class RegionalSettingsIO
+public class RegionalSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast) : ISettingsIO
 {
-    public static RegionalSettings Read()
+    public RegionalSettings Read()
     {
         var regional = new RegionalSettings();
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegInternational);
             if (key == null)
@@ -40,10 +41,10 @@ public static class RegionalSettingsIO
         return regional;
     }
 
-    public static void Write(RegionalSettings regional)
+    public void Write(RegionalSettings regional)
     {
         bool changed = false;
-        SafeExecutor.Try(() =>
+        safe.Try(() =>
         {
             using var key = Registry.CurrentUser.CreateSubKey(Constants.RegInternational);
 
@@ -79,6 +80,10 @@ public static class RegionalSettingsIO
             Set("iNegCurr", regional.CurrencyNegativePattern);
         }, "writing");
         if (changed)
-            BroadcastHelper.BroadcastIntl();
+            broadcast.BroadcastIntl();
     }
+
+    void ISettingsIO.ReadInto(UserSettings s) => s.Regional = Read();
+
+    void ISettingsIO.WriteFrom(UserSettings s) { if (s.Regional != null) Write(s.Regional); }
 }

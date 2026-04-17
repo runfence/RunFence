@@ -18,9 +18,6 @@ public class AccountNameStep : WizardStepPage
     private TextBox _passwordTextBox = null!;
     private Label _descriptionLabel = null!;
 
-    private const int DescHeight = 64;
-    private const int DescGap = 8;
-
     public AccountNameStep(
         Action<string, string> setNameAndPassword,
         bool showPassword = false,
@@ -48,6 +45,8 @@ public class AccountNameStep : WizardStepPage
             return $"Account name must be at most {_maxNameLength} character{(_maxNameLength == 1 ? "" : "s")}.";
         if (name.IndexOfAny(['/', '\\', '[', ']', ':', ';', '|', '=', ',', '+', '*', '?', '<', '>']) >= 0)
             return "Account name contains invalid characters.";
+        if (name.EndsWith('.'))
+            return "Account name cannot end with a period.";
         if (_accountExists?.Invoke(name) == true)
             return "An account with this name already exists.";
         if (_requirePassword && _showPassword && _passwordTextBox.Text.Length == 0)
@@ -67,32 +66,32 @@ public class AccountNameStep : WizardStepPage
         Padding = new Padding(8);
 
         bool hasDesc = !string.IsNullOrEmpty(description);
-        int offset = hasDesc ? DescHeight + DescGap : 0;
 
         _descriptionLabel = new Label
         {
             Text = description ?? string.Empty,
             AutoSize = false,
             Font = new Font("Segoe UI", 9.5f),
-            Location = new Point(0, 0),
-            Width = 540,
-            Height = DescHeight,
+            Dock = DockStyle.Top,
+            Padding = new Padding(0, 0, 0, 8),
             Visible = hasDesc
         };
+        if (hasDesc)
+            TrackWrappingLabel(_descriptionLabel);
 
         _usernameLabel = new Label
         {
             Text = "Account name:",
             AutoSize = true,
             Font = new Font("Segoe UI", 10),
-            Location = new Point(0, offset)
+            Dock = DockStyle.Top,
+            Padding = new Padding(0, 0, 0, 4)
         };
 
         _usernameTextBox = new TextBox
         {
             Font = new Font("Segoe UI", 10),
-            Location = new Point(0, offset + 22),
-            Width = 300,
+            Dock = DockStyle.Top,
             MaxLength = _maxNameLength
         };
 
@@ -101,20 +100,30 @@ public class AccountNameStep : WizardStepPage
             Text = "Password:",
             AutoSize = true,
             Font = new Font("Segoe UI", 10),
-            Location = new Point(0, offset + 56),
+            Dock = DockStyle.Top,
+            Padding = new Padding(0, 12, 0, 4),
             Visible = _showPassword
         };
 
         _passwordTextBox = new TextBox
         {
             Font = new Font("Segoe UI", 10),
-            Location = new Point(0, offset + 78),
-            Width = 300,
+            Dock = DockStyle.Top,
             UseSystemPasswordChar = true,
             Visible = _showPassword
         };
 
-        Controls.AddRange(_descriptionLabel, _usernameLabel, _usernameTextBox, _passwordLabel, _passwordTextBox);
+        // Add in reverse order so Dock=Top stacks top-to-bottom
+        if (_showPassword)
+        {
+            Controls.Add(_passwordTextBox);
+            Controls.Add(_passwordLabel);
+        }
+        Controls.Add(_usernameTextBox);
+        Controls.Add(_usernameLabel);
+        if (hasDesc)
+            Controls.Add(_descriptionLabel);
+
         ResumeLayout(false);
     }
 }

@@ -5,41 +5,19 @@ using RunFence.Persistence.UI;
 
 namespace RunFence.Ipc;
 
-public class IpcMessageHandler : IIpcMessageHandler
+public class IpcMessageHandler(
+    IAppStateProvider appState,
+    IAppLockControl appLock,
+    IpcUiInvoker ipcUiInvoker,
+    ILoggingService log,
+    IpcLaunchHandler launchHandler,
+    IpcOpenFolderHandler openFolderHandler,
+    IIdleMonitorService idleMonitor,
+    IConfigManagementContext? configContext = null,
+    IpcAssociationHandler? associationHandler = null)
+    : IIpcMessageHandler
 {
-    private readonly IAppStateProvider _appState;
-    private readonly IAppLockControl _appLock;
-    private readonly IUiThreadInvoker _uiThreadInvoker;
-    private readonly ILoggingService _log;
-    private readonly IIdleMonitorService _idleMonitor;
-    private readonly IConfigManagementContext? _configContext;
-    private readonly IpcLaunchHandler _launchHandler;
-    private readonly IpcOpenFolderHandler _openFolderHandler;
-    private readonly IpcAssociationHandler? _associationHandler;
-
-    public IpcMessageHandler(
-        IAppStateProvider appState,
-        IAppLockControl appLock,
-        IUiThreadInvoker uiThreadInvoker,
-        ILoggingService log,
-        IpcLaunchHandler launchHandler,
-        IpcOpenFolderHandler openFolderHandler,
-        IIdleMonitorService idleMonitor,
-        IConfigManagementContext? configContext = null,
-        IpcAssociationHandler? associationHandler = null)
-    {
-        _appState = appState;
-        _appLock = appLock;
-        _uiThreadInvoker = uiThreadInvoker;
-        _log = log;
-        _idleMonitor = idleMonitor;
-        _configContext = configContext;
-        _launchHandler = launchHandler;
-        _openFolderHandler = openFolderHandler;
-        _associationHandler = associationHandler;
-    }
-
-    public IpcResponse HandleIpcMessage(IpcMessage message, string? callerIdentity, string? callerSid, bool isAdmin)
+    public IpcResponse HandleIpcMessage(IpcMessage message, IpcCallerContext context)
     {
         try
         {
@@ -49,27 +27,27 @@ public class IpcMessageHandler : IIpcMessageHandler
                     return new IpcResponse { Success = true };
 
                 case IpcCommands.Shutdown:
-                    return HandleShutdown(callerIdentity, isAdmin);
+                    return HandleShutdown(context.CallerIdentity, context.IsAdmin);
 
                 case IpcCommands.Unlock:
-                    return HandleUnlock(callerIdentity, isAdmin);
+                    return HandleUnlock(context.CallerIdentity, context.IsAdmin);
 
                 case IpcCommands.LoadApps:
-                    return HandleLoadApps(callerIdentity, isAdmin, message);
+                    return HandleLoadApps(context.CallerIdentity, context.IsAdmin, message);
 
                 case IpcCommands.UnloadApps:
-                    return HandleUnloadApps(callerIdentity, isAdmin, message);
+                    return HandleUnloadApps(context.CallerIdentity, context.IsAdmin, message);
 
                 case IpcCommands.OpenFolder:
-                    return _openFolderHandler.HandleOpenFolder(message, callerIdentity, callerSid);
+                    return openFolderHandler.HandleOpenFolder(message, context.CallerIdentity, context.CallerSid);
 
                 case IpcCommands.Launch:
-                    return _launchHandler.HandleLaunch(message, callerIdentity, callerSid, isAdmin);
+                    return launchHandler.HandleLaunch(message, context);
 
                 case IpcCommands.HandleAssociation:
-                    if (_associationHandler == null)
+                    if (associationHandler == null)
                         return new IpcResponse { Success = false, ErrorMessage = "Association handling not available." };
-                    return _associationHandler.HandleAssociation(message, callerIdentity, callerSid);
+                    return associationHandler.HandleAssociation(message, context);
 
                 default:
                     return new IpcResponse { Success = false, ErrorMessage = $"Unknown command: {message.Command}" };
@@ -77,7 +55,7 @@ public class IpcMessageHandler : IIpcMessageHandler
         }
         catch (Exception ex)
         {
-            _log.Error("IPC handler error", ex);
+            log.Error("IPC handler error", ex);
             return new IpcResponse { Success = false, ErrorMessage = "Internal error." };
         }
     }
@@ -86,32 +64,27 @@ public class IpcMessageHandler : IIpcMessageHandler
     {
         if (!isAdmin)
         {
-            _log.Warn($"Shutdown rejected: caller '{callerIdentity}' is not admin");
+            log.Warn($"Shutdown rejected: caller '{callerIdentity}' is not admin");
             return new IpcResponse { Success = false, ErrorMessage = "Access denied. Admin required." };
         }
 
-        if (_appState.IsOperationInProgress)
+        if (appState.IsOperationInProgress)
         {
             return new IpcResponse { Success = false, ErrorMessage = "Operation in progress, try again later." };
         }
 
-        if (_appLock.IsUnlockPolling)
+        if (appLock.IsUnlockPolling)
         {
-            _log.Warn($"Shutdown rejected: unlock polling in progress (caller '{callerIdentity}')");
+            log.Warn($"Shutdown rejected: unlock polling in progress (caller '{callerIdentity}')");
             return new IpcResponse { Success = false, ErrorMessage = "Unlock in progress, try again." };
         }
 
-        _log.Info($"Shutdown requested by {callerIdentity}");
+        log.Info($"Shutdown requested by {callerIdentity}");
 
         // Use BeginInvoke (async post) to avoid deadlock: Invoke would block the pipe
-        // thread while Application.Exit triggers FormClosing which may wait for pipe task
-        try
-        {
-            _uiThreadInvoker.BeginInvoke(() => Application.Exit());
-        }
-        catch
-        {
-        } // best-effort; form may already be disposed
+        // thread while Application.Exit triggers FormClosing which may wait for pipe task.
+        // Ignore shutdown exceptions here — best-effort; form may already be disposed.
+        ipcUiInvoker.TryBeginInvoke(() => Application.Exit());
 
         return new IpcResponse { Success = true };
     }
@@ -120,24 +93,21 @@ public class IpcMessageHandler : IIpcMessageHandler
     {
         if (!isAdmin)
         {
-            _log.Warn($"Unlock rejected: caller '{callerIdentity}' is not admin");
+            log.Warn($"Unlock rejected: caller '{callerIdentity}' is not admin");
             return new IpcResponse { Success = false, ErrorMessage = "Access denied. Admin required." };
         }
 
-        _log.Info($"Unlock requested by {callerIdentity}");
+        log.Info($"Unlock requested by {callerIdentity}");
 
         bool unlocked = false;
         try
         {
-            _uiThreadInvoker.Invoke(() =>
-            {
-                _appLock.Unlock();
-                unlocked = !_appLock.IsLocked;
-            });
+            if (!ipcUiInvoker.TryInvoke(() => { appLock.Unlock(); unlocked = !appLock.IsLocked; }, out var shutdownResponse))
+                return shutdownResponse!;
         }
         catch (Exception ex)
         {
-            _log.Error("Unlock failed", ex);
+            log.Error("Unlock failed", ex);
             return new IpcResponse { Success = false, ErrorMessage = "Unlock failed." };
         }
 
@@ -149,14 +119,14 @@ public class IpcMessageHandler : IIpcMessageHandler
     private IpcResponse HandleLoadApps(string? callerIdentity, bool isAdmin, IpcMessage message)
         => HandleConfigOperation(callerIdentity, isAdmin, "LoadApps", message, path =>
         {
-            var (success, error) = _configContext!.LoadApps(path);
+            var (success, error) = configContext!.LoadApps(path);
             return (success, success ? null : error ?? "Failed to load apps.");
         });
 
     private IpcResponse HandleUnloadApps(string? callerIdentity, bool isAdmin, IpcMessage message)
         => HandleConfigOperation(callerIdentity, isAdmin, "UnloadApps", message, path =>
         {
-            var success = _configContext!.UnloadApps(path);
+            var success = configContext!.UnloadApps(path);
             return (success, success ? null : "Failed to unload apps.");
         });
 
@@ -165,52 +135,46 @@ public class IpcMessageHandler : IIpcMessageHandler
     {
         if (!isAdmin)
         {
-            _log.Warn($"{operationName} rejected: caller '{callerIdentity}' is not admin");
+            log.Warn($"{operationName} rejected: caller '{callerIdentity}' is not admin");
             return new IpcResponse { Success = false, ErrorMessage = "Access denied. Admin required." };
         }
 
-        if (_configContext == null)
+        if (configContext == null)
             return new IpcResponse { Success = false, ErrorMessage = "Config management not available." };
 
         var path = message.Arguments;
         if (string.IsNullOrEmpty(path))
             return new IpcResponse { Success = false, ErrorMessage = "Config path is required." };
 
-        if (_appState.IsShuttingDown)
-            return new IpcResponse { Success = false, ErrorMessage = "Application is shutting down." };
+        if (ipcUiInvoker.IsShuttingDown(out var shuttingDown))
+            return shuttingDown!;
 
-        if (_appState.IsModalOpen || _appState.IsOperationInProgress)
+        if (appState.IsModalOpen || appState.IsOperationInProgress)
             return new IpcResponse { Success = false, ErrorMessage = "Operation in progress, try again later." };
 
+        // If the app is locked, refuse immediately rather than blocking the pipe thread
+        // with a PIN prompt on the UI thread.
+        if (appLock.IsLocked)
+            return new IpcResponse { Success = false, ErrorMessage = "App is locked. Unlock first." };
+
         IpcResponse? result = null;
-        try
+        if (!ipcUiInvoker.TryInvoke(() =>
         {
-            _uiThreadInvoker.Invoke(() =>
+            // Re-check lock state on the UI thread; if it changed while we were crossing threads, abort.
+            if (appLock.IsLocked)
             {
-                // Auto-unlock before config operation; if unlock fails (e.g. PIN cancelled), abort
-                _appLock.Unlock();
-                if (_appLock.IsLocked)
-                {
-                    result = new IpcResponse { Success = false, ErrorMessage = "Unlock required." };
-                    return;
-                }
+                result = new IpcResponse { Success = false, ErrorMessage = "App is locked. Unlock first." };
+                return;
+            }
 
-                var (success, error) = operation(path);
-                result = success
-                    ? new IpcResponse { Success = true }
-                    : new IpcResponse { Success = false, ErrorMessage = error };
+            var (success, error) = operation(path);
+            result = success
+                ? new IpcResponse { Success = true }
+                : new IpcResponse { Success = false, ErrorMessage = error };
 
-                _idleMonitor.ResetIdleTimer();
-            });
-        }
-        catch (ObjectDisposedException)
-        {
-            return new IpcResponse { Success = false, ErrorMessage = "Application is shutting down." };
-        }
-        catch (InvalidOperationException)
-        {
-            return new IpcResponse { Success = false, ErrorMessage = "Application is shutting down." };
-        }
+            idleMonitor.ResetIdleTimer();
+        }, out var disposeResponse))
+            return disposeResponse!;
 
         return result ?? new IpcResponse { Success = false, ErrorMessage = "Internal error." };
     }

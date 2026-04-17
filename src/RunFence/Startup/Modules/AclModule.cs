@@ -1,5 +1,4 @@
 using Autofac;
-using RunFence.Account;
 using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.QuickAccess;
@@ -22,35 +21,44 @@ public class AclModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<AclAccessor>().As<IAclAccessor>().SingleInstance();
+        builder.RegisterType<AclPathIconProvider>().As<IAclPathIconProvider>().SingleInstance();
+        builder.RegisterType<TraverseAcl>().As<ITraverseAcl>().SingleInstance();
+        builder.RegisterType<ReparsePointPromptHelper>().As<IReparsePointPromptHelper>().SingleInstance();
         builder.RegisterType<FileSystemAclTraverser>().As<IFileSystemAclTraverser>().SingleInstance();
         builder.RegisterType<CachingLocalUserProvider>().AsSelf().As<ILocalUserProvider>().SingleInstance();
-        builder.RegisterType<AclDenyModeService>().AsSelf().SingleInstance();
-        builder.RegisterType<AclAllowModeService>().AsSelf().SingleInstance();
+        builder.RegisterType<AclDenyModeService>().As<IAclDenyModeService>().AsSelf().SingleInstance();
+        builder.RegisterType<AclAllowModeService>().As<IAclAllowModeService>().AsSelf().SingleInstance();
         builder.RegisterType<AclService>().As<IAclService>().SingleInstance();
         builder.RegisterType<AclPermissionService>().As<IAclPermissionService>().SingleInstance();
-        builder.RegisterType<UserTraverseService>().As<IUserTraverseService>().SingleInstance();
         builder.RegisterType<DefaultInteractiveUserResolver>().As<IInteractiveUserResolver>().SingleInstance();
-        builder.RegisterType<PermissionGrantService>().As<IPermissionGrantService>().SingleInstance();
         builder.RegisterType<AncestorTraverseGranter>().AsSelf().SingleInstance();
-        builder.RegisterType<GrantedPathAclService>().As<IGrantedPathAclService>().SingleInstance();
-        builder.RegisterType<LogonScriptIniManager>().AsSelf().SingleInstance();
         builder.RegisterType<LogonScriptTraverseGranter>().AsSelf().SingleInstance();
-        builder.RegisterType<GroupPolicyScriptHelper>().AsSelf().SingleInstance();
         builder.RegisterType<DriveAclReplacer>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantNtfsHelper>().As<IGrantNtfsHelper>().SingleInstance();
+        builder.RegisterType<GrantCoreOperations>().AsSelf().SingleInstance();
+        builder.RegisterType<TraverseCoreOperations>().AsSelf().SingleInstance();
+        builder.RegisterType<ContainerInteractiveUserSync>().AsSelf().SingleInstance();
+        builder.RegisterType<PathGrantSyncService>().AsSelf().SingleInstance();
+        builder.RegisterType<PathGrantService>()
+            .As<IPathGrantService>()
+            .As<IGrantMutatorService>()
+            .As<ITraverseService>()
+            .As<IGrantInspectionService>()
+            .As<IGrantSyncService>()
+            .SingleInstance();
         builder.RegisterType<AclManagerScanService>().As<IAclManagerScanService>().SingleInstance();
         builder.RegisterType<QuickAccessPinService>().As<IQuickAccessPinService>().SingleInstance();
 
         // AclManagerDialog handlers — InstancePerOwned<AclManagerDialog> so each dialog gets its own
         // set, with shared instances within the same dialog's owned lifetime scope.
+        builder.RegisterType<TraverseEntryResolver>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<TraverseAutoManager>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclManagerGrantRowRenderer>().AsSelf().InstancePerDependency();
         builder.RegisterType<AclManagerGrantsHelper>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerTraverseHelper>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerDragDropHandler>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerActionOrchestrator>().AsSelf().InstancePerOwned<AclManagerDialog>();
-        builder.RegisterType<GrantEntryNtfsOperations>().AsSelf().InstancePerOwned<AclManagerDialog>();
-        builder.RegisterType<AclManagerNtfsApplier>().AsSelf().InstancePerOwned<AclManagerDialog>();
-        builder.RegisterType<AclManagerDbCommitter>().AsSelf().InstancePerOwned<AclManagerDialog>();
-        builder.RegisterType<AclManagerInteractiveUserSync>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerApplyOrchestrator>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerExportImport>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerSelectionHandler>().AsSelf().InstancePerOwned<AclManagerDialog>();
@@ -58,6 +66,8 @@ public class AclModule : Module
         builder.RegisterType<AclManagerDialog>().AsSelf().InstancePerOwned<AclManagerDialog>();
 
         // AppEditDialog handlers — InstancePerDependency so each dialog gets its own set
+        builder.RegisterType<AclAllowListGridHandler>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AclConfigValidator>().AsSelf().InstancePerDependency();
         builder.RegisterType<AclConfigSection>().AsSelf().InstancePerDependency();
     }
 }
