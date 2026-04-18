@@ -97,5 +97,6 @@ public class ConfigAvailabilityMonitor(
 
         log.Info($"Auto-unloading {unavailable.Count} unavailable config path(s)");
         AutoUnloadRequired?.Invoke(this, unavailable);
+        ScheduleAvailabilityCheck();
     }
 }

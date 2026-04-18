@@ -149,10 +149,13 @@ public class AclManagerApplyOrchestrator(
                         await Task.Run(() => pathGrantService.UpdateGrant(_sid, entry.Path, mod.NewIsDeny, entry.SavedRights!, ownerSid));
                     }
 
-                    // Reset ownership when: (a) allow grant had Own=true, now Own!=true; (b) deny grant with Own=true
+                    // Reset ownership when: (a) allow grant had Own=true, now Own!=true;
+                    // (b) deny grant with Own=true; (c) allow+own switched to deny (SavedRights.Own
+                    // is already updated to deny defaults before this check, so we use mod.WasOwn)
                     var shouldResetOwner = !_isContainer && (
                         (!entry.IsDeny && mod.WasOwn && entry.SavedRights?.Own != true) ||
-                        (entry.IsDeny && entry.SavedRights?.Own == true));
+                        (entry.IsDeny && entry.SavedRights?.Own == true) ||
+                        (mod.WasIsDeny != mod.NewIsDeny && mod.WasOwn && !mod.WasIsDeny));
                     if (shouldResetOwner)
                         await Task.Run(() => pathGrantService.ResetOwner(entry.Path, recursive: false));
                 }

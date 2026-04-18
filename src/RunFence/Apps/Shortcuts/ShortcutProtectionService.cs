@@ -84,7 +84,8 @@ public class ShortcutProtectionService(ILoggingService log, IAclAccessor aclAcce
             var accountIdentity = new SecurityIdentifier(accountSid);
             // Include BuiltinUsersSid so any legacy ACEs from the old code get detected and removed.
             var legacyUsersSid = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
-            var managedSids = new HashSet<SecurityIdentifier> { systemSid, adminsSid, accountIdentity, legacyUsersSid };
+            var everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            var managedSids = new HashSet<SecurityIdentifier> { systemSid, adminsSid, accountIdentity, legacyUsersSid, everyoneSid };
 
             var desiredSet = new HashSet<(string sid, FileSystemRights rights, AccessControlType type)>
             {

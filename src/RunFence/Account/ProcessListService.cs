@@ -101,6 +101,7 @@ public class ProcessListService(ILoggingService log) : IProcessListService
 
         string? exePath = null;
         string? cmdLine = null;
+        Process? processHandle = null;
         try
         {
             if (!string.Equals(ProcessNative.GetTokenSid(hLimited, tokenInfoClass), sid, StringComparison.OrdinalIgnoreCase))
@@ -123,16 +124,16 @@ public class ProcessListService(ILoggingService log) : IProcessListService
             {
                 exePath = GetExePath(hLimited);
             }
+
+            // Open a Process handle while the SID-verified native handle is still open
+            // to eliminate PID recycling races on kill/close.
+            try { processHandle = System.Diagnostics.Process.GetProcessById(pid); }
+            catch { /* process exited between enumeration and handle open */ }
         }
         finally
         {
             ProcessNative.CloseHandle(hLimited);
         }
-
-        // Open a Process handle at enumeration time to eliminate PID recycling races on kill/close.
-        Process? processHandle = null;
-        try { processHandle = System.Diagnostics.Process.GetProcessById(pid); }
-        catch { /* process exited between enumeration and handle open */ }
 
         result.Add(new ProcessInfo(pid, exePath, cmdLine) { ProcessHandle = processHandle });
     }

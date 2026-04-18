@@ -9,8 +9,10 @@ public class IdleMonitorServiceTests
 {
     private readonly Mock<ILoggingService> _log = new();
 
-    private (IdleMonitorService service, Action invokeTimerTick, Action<long> setFakeTick)
-        CreateService()
+    private record struct IdleMonitorTestContext(
+        IdleMonitorService Service, Action InvokeTimerTick, Action<long> SetFakeTick);
+
+    private IdleMonitorTestContext CreateService()
     {
         long fakeTick = 0;
         Action? capturedCallback = null;
@@ -23,10 +25,10 @@ public class IdleMonitorServiceTests
             timeProvider: timeProvider,
             timerScheduler: timerScheduler);
 
-        return (
+        return new IdleMonitorTestContext(
             service,
-            invokeTimerTick: () => capturedCallback?.Invoke(),
-            setFakeTick: ms => fakeTick = ms);
+            InvokeTimerTick: () => capturedCallback?.Invoke(),
+            SetFakeTick: ms => fakeTick = ms);
     }
 
     private sealed class StubTimeProvider(Func<long> getTick) : ITimeProvider
@@ -181,5 +183,74 @@ public class IdleMonitorServiceTests
         invokeTimerTick();
 
         Assert.False(eventFired);
+    }
+
+    // ── BHV-21: Reschedule after IdleTimeoutReached fires ───────────────────
+
+    [Fact]
+    public void IdleTimeoutReached_ReschedulesAfterTimeoutFires()
+    {
+        // Arrange
+        int scheduleCallCount = 0;
+        Action? capturedCallback = null;
+        long fakeTick = 0;
+
+        var timeProvider = new StubTimeProvider(() => fakeTick);
+        var timerScheduler = new StubTimerScheduler((callback, _) =>
+        {
+            capturedCallback = callback;
+            scheduleCallCount++;
+        });
+
+        var service = new IdleMonitorService(_log.Object, timeProvider, timerScheduler);
+        bool eventFired = false;
+        service.IdleTimeoutReached += () => eventFired = true;
+
+        service.Configure(1); // 1 minute
+        fakeTick = 0;
+        service.Start();
+        var countAfterStart = scheduleCallCount;
+
+        // Act: advance past timeout and trigger callback
+        fakeTick = 120_000;
+        capturedCallback?.Invoke();
+
+        // Assert: event fired AND timer was rescheduled
+        Assert.True(eventFired);
+        Assert.True(scheduleCallCount > countAfterStart,
+            "ScheduleNextCheck should be called after IdleTimeoutReached fires");
+
+        service.Stop();
+    }
+
+    [Fact]
+    public void IdleTimeoutReached_ReschedulesAfterNonTimeoutTick()
+    {
+        // Arrange
+        int scheduleCallCount = 0;
+        Action? capturedCallback = null;
+        long fakeTick = 0;
+
+        var timeProvider = new StubTimeProvider(() => fakeTick);
+        var timerScheduler = new StubTimerScheduler((callback, _) =>
+        {
+            capturedCallback = callback;
+            scheduleCallCount++;
+        });
+
+        var service = new IdleMonitorService(_log.Object, timeProvider, timerScheduler);
+        service.Configure(5); // 5 minutes
+        fakeTick = 0;
+        service.Start();
+        var countAfterStart = scheduleCallCount;
+
+        // Act: tick without reaching timeout
+        fakeTick = 10_000;
+        capturedCallback?.Invoke();
+
+        // Assert: timer was rescheduled even when not timed out
+        Assert.True(scheduleCallCount > countAfterStart);
+
+        service.Stop();
     }
 }

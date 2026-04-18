@@ -231,10 +231,13 @@ public class AccountContextMenuHandler(
 
     public static void SetContainerItemsVisible(AccountContextMenuItems i, bool visible)
     {
+        i.ContainerSeparator.Visible = visible;
+        i.CreateContainer.Visible = visible;
         i.EditContainer.Visible = visible;
         i.DeleteContainer.Visible = visible;
         i.CopyContainerProfilePath.Visible = visible;
         i.OpenContainerProfileFolder.Visible = visible;
+        i.ContainerFolderBrowser.Visible = visible;
     }
 
     private static void SetProcessItemsVisible(AccountContextMenuItems i, bool visible)
