@@ -25,11 +25,13 @@ public class AppPathStep : WizardStepPage
     public AppPathStep(
         Action<string, string> setPathAndName,
         IShortcutDiscoveryService discoveryService,
-        string? description = null)
+        string? description = null,
+        string? initialPath = null,
+        string? initialName = null)
     {
         _setPathAndName = setPathAndName;
         _discoveryService = discoveryService;
-        BuildContent(description);
+        BuildContent(description, initialPath, initialName);
     }
 
     public override string StepTitle => "Application";
@@ -51,7 +53,7 @@ public class AppPathStep : WizardStepPage
         _setPathAndName(_pathTextBox.Text.Trim(), _appNameTextBox.Text.Trim());
     }
 
-    private void BuildContent(string? description)
+    private void BuildContent(string? description, string? initialPath, string? initialName)
     {
         SuspendLayout();
         Padding = new Padding(8);
@@ -144,6 +146,11 @@ public class AppPathStep : WizardStepPage
         if (hasDesc)
             Controls.Add(_descriptionLabel);
         ResumeLayout(false);
+
+        if (!string.IsNullOrEmpty(initialPath))
+            _pathTextBox.Text = initialPath;
+        if (!string.IsNullOrEmpty(initialName))
+            _appNameTextBox.Text = initialName;
     }
 
     private void OnBrowseClick(object? sender, EventArgs e)

@@ -184,7 +184,13 @@ public class FirewallComRuleApplier(
     private bool RefreshSingleRule(string sid, string targetName, string newAddress, FirewallRuleInfo? existingRule)
     {
         if (existingRule == null)
-            return false;
+        {
+            if (string.IsNullOrEmpty(newAddress))
+                return false;
+
+            ruleManager.AddRule(BuildRuleInfo(targetName, sid, newAddress));
+            return true;
+        }
 
         if (string.IsNullOrEmpty(newAddress))
         {

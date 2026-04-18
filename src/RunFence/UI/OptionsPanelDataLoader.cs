@@ -53,7 +53,7 @@ public class OptionsPanelDataLoader(IAutoStartService autoStartService, ILicense
             IdleTimeoutEnabled: idleEnabled,
             IdleTimeoutMinutes: idleEnabled ? settings.IdleTimeoutMinutes : 30,
             AutoLockEnabled: settings.AutoLockOnMinimize,
-            AutoLockTimeoutMinutes: settings.AutoLockTimeoutMinutes,
+            AutoLockTimeoutMinutes: Math.Clamp(settings.AutoLockTimeoutMinutes, 0, 999),
             FolderBrowserExePath: settings.FolderBrowserExePath,
             FolderBrowserArguments: settings.FolderBrowserArguments,
             DefaultDesktopSettingsPath: settings.DefaultDesktopSettingsPath,

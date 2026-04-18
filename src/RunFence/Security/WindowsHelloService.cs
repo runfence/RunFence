@@ -50,40 +50,61 @@ public class WindowsHelloService(ILoggingService log, IExplorerTokenProvider exp
 
     private async Task<HelloVerificationResult> TryVerifyInteractiveUserAsync(string message)
     {
+        // Get HWND on calling (UI) thread before entering Task.Run
+        var hwnd = WindowNative.GetForegroundWindow();
+        if (hwnd == IntPtr.Zero)
+        {
+            log.Warn("Windows Hello not available for interactive user: no foreground window handle");
+            return HelloVerificationResult.NotAvailable;
+        }
+
         try
         {
-            IntPtr hToken = IntPtr.Zero;
+            IntPtr hToken = explorerTokenProvider.TryGetExplorerToken();
+            if (hToken == IntPtr.Zero)
+            {
+                log.Warn("Could not obtain explorer token for interactive user");
+                return HelloVerificationResult.NotAvailable;
+            }
+
             try
             {
-                hToken = explorerTokenProvider.TryGetExplorerToken();
-                if (hToken == IntPtr.Zero)
+                // Perform impersonation, WinRT verification, and revert all on the same
+                // dedicated thread so impersonation never crosses thread boundaries.
+                return await Task.Run(() =>
                 {
-                    log.Warn("Could not obtain explorer token for interactive user");
-                    return HelloVerificationResult.NotAvailable;
-                }
-
-                if (!ProcessNative.ImpersonateLoggedOnUser(hToken))
-                {
-                    log.Warn("Failed to impersonate interactive user");
-                    return HelloVerificationResult.NotAvailable;
-                }
-
-                try
-                {
-                    return await VerifyAccountAsync(message, accountLabel: "interactive user");
-                }
-                finally
-                {
-                    if (!ProcessNative.RevertToSelf())
+                    if (!ProcessNative.ImpersonateLoggedOnUser(hToken))
                     {
-                        log.Error("Failed to revert impersonation after Windows Hello verification");
+                        log.Warn("Failed to impersonate interactive user");
+                        return HelloVerificationResult.NotAvailable;
                     }
-                }
+
+                    try
+                    {
+                        var result = WindowsHelloInterop.RequestAsync(hwnd, message).GetAwaiter().GetResult();
+
+                        if (result == HelloVerificationResult.NotAvailable)
+                            log.Warn("Windows Hello not available for interactive user");
+                        else if (result == HelloVerificationResult.Failed)
+                            log.Error("Windows Hello verification failed for interactive user");
+
+                        return result;
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Error($"Windows Hello verification failed for interactive user: {ex.Message}", ex);
+                        return HelloVerificationResult.Failed;
+                    }
+                    finally
+                    {
+                        if (!ProcessNative.RevertToSelf())
+                            log.Error("Failed to revert impersonation after Windows Hello verification");
+                    }
+                });
             }
             finally
             {
-                if (hToken != IntPtr.Zero)
-                    ProcessNative.CloseHandle(hToken);
+                ProcessNative.CloseHandle(hToken);
             }
         }
         catch (Exception ex)

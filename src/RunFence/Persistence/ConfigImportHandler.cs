@@ -113,6 +113,16 @@ public class ConfigImportHandler(
 
         database.Settings = importedDb.Settings ?? new AppSettings();
 
+        // Import AppContainers, skipping duplicates by name (case-insensitive).
+        // Without this, imported apps referencing containers have broken references.
+        var existingContainerNames = new HashSet<string>(
+            database.AppContainers.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+        foreach (var container in importedDb.AppContainers)
+        {
+            if (existingContainerNames.Add(container.Name))
+                database.AppContainers.Add(container);
+        }
+
         foreach (var (sid, name) in importedDb.SidNames)
             database.SidNames.TryAdd(sid, name);
 

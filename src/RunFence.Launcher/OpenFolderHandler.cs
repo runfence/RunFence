@@ -146,10 +146,41 @@ public static class OpenFolderHandler
 
             Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Folder\shell\open",
                 throwOnMissingSubKey: false);
-            Registry.CurrentUser.DeleteSubKeyTree(
-                @"Software\Classes\CLSID\{9BA05972-F6A8-11CF-A442-00A0C90A8F39}",
-                throwOnMissingSubKey: false);
+
+            // Only delete RunFence-registered subkeys under the CLSID, preserving
+            // other software's per-user CLSID overrides.
+            const string clsidPath = @"Software\Classes\CLSID\{9BA05972-F6A8-11CF-A442-00A0C90A8F39}";
+            try
+            {
+                Registry.CurrentUser.DeleteSubKeyTree(clsidPath + @"\shell\open\command",
+                    throwOnMissingSubKey: false);
+                DeleteEmptySubKey(clsidPath + @"\shell\open");
+                DeleteEmptySubKey(clsidPath + @"\shell");
+                Registry.CurrentUser.DeleteSubKeyTree(clsidPath + @"\LocalServer32",
+                    throwOnMissingSubKey: false);
+                DeleteEmptySubKey(clsidPath);
+            }
+            catch
+            {
+            }
+
             OpenFolderNative.SHChangeNotify(OpenFolderNative.SHCNE_ASSOCCHANGED, OpenFolderNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>
+    /// Deletes a registry key only if it has no subkeys, preserving other software's entries.
+    /// </summary>
+    private static void DeleteEmptySubKey(string subKeyPath)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(subKeyPath);
+            if (key != null && key.SubKeyCount == 0)
+                Registry.CurrentUser.DeleteSubKey(subKeyPath, throwOnMissingSubKey: false);
         }
         catch
         {

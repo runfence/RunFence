@@ -271,10 +271,7 @@ public class AccountContextMenuOrchestrator
         i.FirewallAllowlist.Visible = false;
         i.AppsSeparator.Visible = false;
         i.NewApp.Visible = false;
-        i.ContainerSeparator.Visible = false;
-        i.CreateContainer.Visible = false;
         AccountContextMenuHandler.SetContainerItemsVisible(i, false);
-        i.ContainerFolderBrowser.Visible = false;
 
         _processMenuHandler.ShowProcessMenu(processRow);
     }

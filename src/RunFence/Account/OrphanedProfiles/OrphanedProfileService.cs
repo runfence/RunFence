@@ -128,6 +128,9 @@ public class OrphanedProfileService(
 
             foreach (var sidName in key.GetSubKeyNames())
             {
+                // Skip .bak keys handled by ProfileRepairHelper
+                if (sidName.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 // Skip .deleted and .deleted.NNN keys left by profile repair
                 if (sidName.EndsWith(".deleted", StringComparison.OrdinalIgnoreCase))
                     continue;

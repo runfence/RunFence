@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Security;
 using RunFence.Account.UI.Forms;
 using RunFence.Core;
@@ -45,7 +46,7 @@ public class AccountEditHelper(
                     accountPassword.ChangeAccountPassword(accountRow.Sid, oldPwd, dlg.NewPasswordText);
                     return true;
                 }
-                catch
+                catch (Win32Exception)
                 {
                     // stored password failed — fall through to method dialog
                 }

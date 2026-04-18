@@ -33,6 +33,12 @@ public class PinService(
             generator.Init(parameters);
             var output = new byte[Constants.Argon2OutputBytes];
             generator.GenerateBytes(pinBytes, output);
+            // Argon2 allocates ~1.1GB of managed Block objects that get promoted to Gen2
+            // during the lengthy computation. In a desktop app, Gen2 rarely triggers naturally,
+            // so this dead memory would persist for hours. Force collection immediately.
+            generator = null!;
+            parameters = null!;
+            GC.Collect(2, GCCollectionMode.Aggressive, true, true);
             return output;
         }
         finally

@@ -72,7 +72,9 @@ public class UntrustedAppTemplate(
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
-                    }, discoveryService, appPathDesc)
+                    }, discoveryService, appPathDesc,
+                        initialPath: _data.AppPath,
+                        initialName: _data.AppName)
                 ]
                 :
                 [
@@ -83,14 +85,16 @@ public class UntrustedAppTemplate(
                             _data.AllowLan = allowLan;
                             _data.AllowLocalhost = allowLocalhost;
                         },
-                        defaultInternet: false,
-                        defaultLan: false,
-                        defaultLocalhost: false),
+                        defaultInternet: _data.AllowInternet,
+                        defaultLan: _data.AllowLan,
+                        defaultLocalhost: _data.AllowLocalhost),
                     new AppPathStep((path, name) =>
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
-                    }, discoveryService, appPathDesc)
+                    }, discoveryService, appPathDesc,
+                        initialPath: _data.AppPath,
+                        initialName: _data.AppName)
                 ]);
 
         // Initial step list: account mode is default (account radio is pre-checked).
@@ -104,14 +108,16 @@ public class UntrustedAppTemplate(
                     _data.AllowLan = allowLan;
                     _data.AllowLocalhost = allowLocalhost;
                 },
-                defaultInternet: false,
-                defaultLan: false,
-                defaultLocalhost: false),
+                defaultInternet: _data.AllowInternet,
+                defaultLan: _data.AllowLan,
+                defaultLocalhost: _data.AllowLocalhost),
             new AppPathStep((path, name) =>
             {
                 _data.AppPath = path;
                 _data.AppName = name;
-            }, discoveryService, appPathDesc)
+            }, discoveryService, appPathDesc,
+                initialPath: _data.AppPath,
+                initialName: _data.AppName)
         ];
     }
 

@@ -17,7 +17,7 @@ public class PinResetFlowRunner(
     : IPinResetFlowRunner
 {
     /// <inheritdoc/>
-    public (CredentialStore Store, byte[] Key)? RunResetFlow(Action<CredentialStore>? extraStoreInit = null)
+    public (CredentialStore Store, byte[] Key)? RunResetFlow()
     {
         var confirm = MessageBox.Show(
             "This will delete all stored passwords and app entries.\nContinue?",
@@ -40,7 +40,7 @@ public class PinResetFlowRunner(
 
                 var resetDb = new AppDatabase();
                 appInit.InitializeNewDatabase(resetDb);
-                extraStoreInit?.Invoke(newStore);
+                appInit.EnsureCurrentAccountCredential(newStore);
                 databaseService.SaveCredentialStoreAndConfig(newStore, resetDb, newKey);
                 return null;
             }

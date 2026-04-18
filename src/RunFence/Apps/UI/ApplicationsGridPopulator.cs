@@ -25,6 +25,7 @@ public class ApplicationsGridPopulator(
     private Func<IEnumerable<AppEntry>, Func<AppEntry, string>, IOrderedEnumerable<AppEntry>> _sortByActiveColumn = null!;
 
     private Font? _groupHeaderFont;
+    private readonly Dictionary<string, (Image Icon, string ExePath)> _iconCache = new(StringComparer.Ordinal);
 
     public void Initialize(DataGridView grid, IApplicationsPanelState state,
         Func<IEnumerable<AppEntry>, Func<AppEntry, string>, IOrderedEnumerable<AppEntry>> sortByActiveColumn)
@@ -46,6 +47,7 @@ public class ApplicationsGridPopulator(
 
         dragDropHandler.ClearDropTargetOnRowsClear();
         setIsRefreshing(true);
+        DisposeNonCachedIcons();
         _grid.Rows.Clear();
 
         bool hasAdditionalConfigs = appConfigService.HasLoadedConfigs;
@@ -77,6 +79,8 @@ public class ApplicationsGridPopulator(
             foreach (var app in group.Apps)
                 AddAppRow(app);
         }
+
+        PruneStaleCacheEntries(database.Apps);
 
         setIsRefreshing(false);
         reapplyGlyphIfActive();
@@ -161,6 +165,58 @@ public class ApplicationsGridPopulator(
     {
         _groupHeaderFont?.Dispose();
         _groupHeaderFont = null;
+        DisposeCachedIcons();
+    }
+
+    private Image GetOrCacheIcon(AppEntry app)
+    {
+        if (_iconCache.TryGetValue(app.Id, out var cached) &&
+            string.Equals(cached.ExePath, app.ExePath, StringComparison.OrdinalIgnoreCase))
+            return cached.Icon;
+
+        // Dispose the previous cached icon for this app (ExePath changed or first load).
+        if (cached.Icon is not null)
+        {
+            cached.Icon.Dispose();
+            _iconCache.Remove(app.Id);
+        }
+
+        var icon = iconService.GetOriginalAppIcon(app) ?? FallbackIcon;
+        if (icon != FallbackIcon)
+            _iconCache[app.Id] = (icon, app.ExePath);
+        return icon;
+    }
+
+    /// <summary>
+    /// Disposes row icon images that are not in the cache and not the shared fallback.
+    /// Called before clearing rows to prevent GDI handle leaks.
+    /// </summary>
+    private void DisposeNonCachedIcons()
+    {
+        var cachedImages = new HashSet<Image>(_iconCache.Values.Select(e => e.Icon)) { FallbackIcon };
+        foreach (DataGridViewRow row in _grid.Rows)
+        {
+            if (row.Cells[0].Value is Image img && !cachedImages.Contains(img))
+                img.Dispose();
+        }
+    }
+
+    private void DisposeCachedIcons()
+    {
+        foreach (var entry in _iconCache.Values)
+            entry.Icon.Dispose();
+        _iconCache.Clear();
+    }
+
+    private void PruneStaleCacheEntries(IReadOnlyList<AppEntry> currentApps)
+    {
+        var currentIds = currentApps.Select(a => a.Id).ToHashSet(StringComparer.Ordinal);
+        var staleIds = _iconCache.Keys.Where(id => !currentIds.Contains(id)).ToList();
+        foreach (var id in staleIds)
+        {
+            _iconCache[id].Icon.Dispose();
+            _iconCache.Remove(id);
+        }
     }
 
     private IEnumerable<AppEntry> SortApps(IEnumerable<AppEntry> apps)
@@ -189,7 +245,7 @@ public class ApplicationsGridPopulator(
             : $"Deny/{app.AclTarget}";
         var shortcutInfo = app.ManageShortcuts ? "Yes" : "No";
 
-        Image icon = iconService.GetOriginalAppIcon(app) ?? FallbackIcon;
+        Image icon = GetOrCacheIcon(app);
         var idx = _grid.Rows.Add(icon, app.Name, app.ExePath, accountName, aclInfo, shortcutInfo);
         _grid.Rows[idx].Tag = app;
     }

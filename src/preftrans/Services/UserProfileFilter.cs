@@ -35,7 +35,7 @@ public class UserProfileFilter : IUserProfileFilter
                     return true; // value ends with the profile path
 
                 char next = value[endIdx];
-                if (next == '\\' || next == '"' || char.IsWhiteSpace(next))
+                if (next == '\\' || next == '/' || next == '"' || char.IsWhiteSpace(next))
                     return true; // proper boundary
 
                 // Not a boundary match (e.g. C:\Users\foo inside C:\Users\foobar) — keep searching
