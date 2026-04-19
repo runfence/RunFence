@@ -24,11 +24,27 @@ public class RunAsFlowHandler(
 {
     private static readonly char[] PathSeparators = ['\\', '/'];
 
-    // Prevents concurrent RunAs operations (0=free, 1=in-progress; set atomically on pipe thread)
+    // Prevents concurrent RunAs operations (0=free, 1=in-progress; set atomically)
     private volatile int _runAsInProgress;
 
     /// <summary>Returns true if the AppId looks like a file path (contains path separators).</summary>
     public static bool IsRunAsRequest(string appId) => appId.IndexOfAny(PathSeparators) >= 0;
+
+    public void TriggerFromUI(string filePath)
+    {
+        if (appState.IsShuttingDown || appLock.IsUnlockPolling || appState.IsModalOpen || appState.IsOperationInProgress)
+            return;
+        if (Interlocked.CompareExchange(ref _runAsInProgress, 1, 0) != 0)
+            return;
+        if (dosProtection.IsBlocked())
+        {
+            Interlocked.Exchange(ref _runAsInProgress, 0);
+            return;
+        }
+        bool isFolder = Directory.Exists(filePath);
+        bool fileExists = isFolder || File.Exists(filePath);
+        _ = HandleRunAsOnUIThreadAsync(filePath, null, null, isAdmin: true, isFolder, fileExists);
+    }
 
     public IpcResponse HandleRunAs(IpcMessage message, IpcCallerContext context)
     {

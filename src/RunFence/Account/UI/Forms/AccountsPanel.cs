@@ -3,6 +3,7 @@ using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.RunAs;
 using RunFence.UI;
 using RunFence.UI.Forms;
 using RunFence.Wizard.UI;
@@ -16,6 +17,7 @@ public partial class AccountsPanel : DataPanel,
 {
     private readonly SessionPersistenceHelper _persistenceHelper;
     private readonly OperationGuard _operationGuard;
+    private readonly IRunAsFlowHandler _runAsFlowHandler;
     private bool _staleDone;
     private Form? _parentForm;
 
@@ -98,11 +100,13 @@ public partial class AccountsPanel : DataPanel,
         AccountImportUIHandler importUIHandler,
         AccountGridEditHandler gridEditHandler,
         AccountGridTypeAheadHandler typeAheadHandler,
+        IRunAsFlowHandler runAsFlowHandler,
         AccountBulkScanHandler? bulkScanHandler = null,
         WizardLauncher? wizardButtonHandler = null)
         : base(modalCoordinator)
     {
         _persistenceHelper = persistenceHelper;
+        _runAsFlowHandler = runAsFlowHandler;
         _containerHandler = containerHandler;
         _refreshOrchestrator = refreshOrchestrator;
         _contextMenuOrchestrator = contextMenuOrchestrator;
@@ -141,6 +145,7 @@ public partial class AccountsPanel : DataPanel,
         _openCmdButton.ToolTipText = "Open CMD (hold Shift to launch with full privileges)";
         _openFolderBrowserButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4C2", Color.FromArgb(0xCC, 0x88, 0x22), 42);
         _openFolderBrowserButton.ToolTipText = "Open Folder Browser (hold Shift to launch with full privileges)";
+        _runAsButton.Image = UiIconFactory.CreateToolbarIcon("\u26A1", Color.FromArgb(0xCC, 0x77, 0x00), 42);
         _copyPasswordButton.Image = UiIconFactory.CreateToolbarIcon("\u26BF", Color.FromArgb(0x66, 0x66, 0x99), 42);
         _importButton.Image = UiIconFactory.CreateToolbarIcon("\u2193", Color.FromArgb(0x33, 0x66, 0x99), 42);
         _accountsButton.Image = UiIconFactory.CreateToolbarIcon("\u2699", Color.FromArgb(0x33, 0x66, 0x99), 42);
@@ -708,6 +713,20 @@ public partial class AccountsPanel : DataPanel,
         _copyPasswordButton.Enabled = enabled;
         _accountsButton.Enabled = enabled;
         _refreshButton.Enabled = enabled;
+        _runAsButton.Enabled = enabled;
+    }
+
+    private void OnRunAsClick(object? sender, EventArgs e)
+    {
+        using var dlg = new OpenFileDialog
+        {
+            Title = "Run As - Select File",
+            Filter = "Programs (*.exe;*.cmd;*.bat;*.com;*.lnk)|*.exe;*.cmd;*.bat;*.com;*.lnk|All Files (*.*)|*.*"
+        };
+        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
+        if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
+            return;
+        _runAsFlowHandler.TriggerFromUI(dlg.FileName);
     }
 
     private void OnRefreshClick(object? sender, EventArgs e)
