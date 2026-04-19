@@ -23,9 +23,6 @@ public class IpcMessageHandler(
         {
             switch (message.Command)
             {
-                case IpcCommands.Ping:
-                    return new IpcResponse { Success = true };
-
                 case IpcCommands.Shutdown:
                     return HandleShutdown(context.CallerIdentity, context.IsAdmin);
 

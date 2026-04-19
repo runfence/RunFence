@@ -7,13 +7,14 @@ using RunFence.Core.Ipc;
 namespace RunFence.Ipc;
 
 /// <summary>
-/// Processes a single accepted named-pipe connection: extracts caller identity, applies per-caller
-/// rate limiting, assembles the message, deserializes it, suppresses ExecutionContext flow, dispatches
-/// to the handler, and writes the response.
+/// Processes a single accepted named-pipe connection: assembles the message, short-circuits for raw
+/// pings, extracts caller identity, applies per-caller rate limiting, deserializes, suppresses
+/// ExecutionContext flow, dispatches to the handler, and writes the response.
 /// </summary>
 public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor identityExtractor)
 {
     private readonly Dictionary<string, DateTime> _lastRequestByCaller = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly byte[] RateLimitedBytes = [IpcCommands.RateLimitedSignal];
 
     public async Task ProcessConnectionAsync(
         NamedPipeServerStream pipe,
@@ -21,6 +22,18 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
         CancellationToken ct)
     {
         var (messageBuffer, bytesRead) = await AssembleMessage(pipe, ct);
+
+        if (bytesRead == 0)
+            return;
+
+        // Ping bypasses identity extraction and rate limiting — PONG is cheaper than any rejection response.
+        if (bytesRead == IpcCommands.PingBytes.Length
+            && messageBuffer.AsSpan(0, bytesRead).SequenceEqual(IpcCommands.PingBytes))
+        {
+            await pipe.WriteAsync(IpcCommands.PongBytes, 0, IpcCommands.PongBytes.Length, ct);
+            await pipe.FlushAsync(ct);
+            return;
+        }
 
         var context = identityExtractor.Extract(pipe);
 
@@ -42,10 +55,7 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
             log.Warn($"IPC rate limit exceeded for caller '{rateLimitKey}'; dropping connection.");
             try
             {
-                var rateLimitResponse = new IpcResponse { Success = false, ErrorMessage = "Rate limited. Try again." };
-                var rateLimitJson = JsonSerializer.Serialize(rateLimitResponse, JsonDefaults.Options);
-                var rateLimitBytes = Encoding.UTF8.GetBytes(rateLimitJson);
-                await pipe.WriteAsync(rateLimitBytes, 0, rateLimitBytes.Length, ct);
+                await pipe.WriteAsync(RateLimitedBytes, 0, RateLimitedBytes.Length, ct);
                 await pipe.FlushAsync(ct);
             }
             catch (Exception)
@@ -56,9 +66,6 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
         }
 
         _lastRequestByCaller[rateLimitKey] = now;
-
-        if (bytesRead == 0)
-            return;
 
         var json = Encoding.UTF8.GetString(messageBuffer, 0, bytesRead);
         log.Info($"IPC received: {json.Length} bytes from {context.CallerIdentity ?? "unknown"}");

@@ -1,9 +1,13 @@
+using System.Text;
+
 namespace RunFence.Core.Ipc;
 
 public static class IpcCommands
 {
+    public static readonly byte[] PingBytes = Encoding.ASCII.GetBytes("PING");
+    public static readonly byte[] PongBytes = Encoding.ASCII.GetBytes("PONG");
+    public const byte RateLimitedSignal = 1;
     public const string Launch = "Launch";
-    public const string Ping = "Ping";
     public const string Shutdown = "Shutdown";
     public const string Unlock = "Unlock";
     public const string LoadApps = "LoadApps";
