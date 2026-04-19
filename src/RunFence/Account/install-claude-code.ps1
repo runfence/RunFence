@@ -10,6 +10,17 @@ if (-not (Test-Path $binDir)) {
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
 }
 
+$npmBin = "$env:APPDATA\npm"
+$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+if ($userPath -notlike "*$npmBin*") {
+    [Environment]::SetEnvironmentVariable('PATH', $userPath + ';' + $npmBin, 'User')
+    Write-Host "Added $npmBin to user PATH"
+}
+
+# Install codex
+Write-Host "Installing @openai/codex..."
+npm i -g @openai/codex
+
 # Install jq
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'amd64' }
 Write-Host "Fetching latest jq release for $arch..."
@@ -35,4 +46,4 @@ Copy-Item $rgExe.FullName "$binDir\rg.exe" -Force
 Remove-Item $rgZip, $rgExtract -Recurse -Force
 & "$binDir\rg.exe" --version
 
-Write-Host 'Claude Code + jq + rg installation complete!'
+Write-Host 'Claude Code + codex + jq + rg installation complete!'
