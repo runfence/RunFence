@@ -79,6 +79,8 @@ public class IpcConnectionProcessorTests
         }
         if (bytesRead == 0)
             return null;
+        if (bytesRead == 1 && buffer[0] == IpcCommands.RateLimitedSignal)
+            return new IpcResponse { Success = false, ErrorMessage = "Rate limited. Try again." };
         var json = Encoding.UTF8.GetString(buffer, 0, bytesRead);
         return JsonSerializer.Deserialize<IpcResponse>(json, JsonDefaults.Options);
     }
@@ -98,7 +100,6 @@ public class IpcConnectionProcessorTests
         {
             await ConnectPipeAsync(server, client);
 
-            // Run server and client concurrently so neither side blocks waiting for the other
             var serverTask = processor.ProcessConnectionAsync(server, dispatch, CancellationToken.None);
 
             await WriteMessageAsync(client, message);
@@ -114,10 +115,40 @@ public class IpcConnectionProcessorTests
         }
     }
 
+    /// <summary>
+    /// Sends the raw PING token and returns true if the server responded with PONG.
+    /// </summary>
+    private static async Task<bool> ExchangePingAsync(
+        IpcConnectionProcessor processor,
+        Func<IpcMessage, IpcCallerContext, IpcResponse> dispatch)
+    {
+        var (server, client) = CreateMessageModePipePair();
+        try
+        {
+            await ConnectPipeAsync(server, client);
+
+            var serverTask = processor.ProcessConnectionAsync(server, dispatch, CancellationToken.None);
+
+            await client.WriteAsync(IpcCommands.PingBytes, 0, IpcCommands.PingBytes.Length);
+            await client.FlushAsync();
+
+            var buffer = new byte[16];
+            int bytesRead = await client.ReadAsync(buffer, 0, buffer.Length);
+            await serverTask;
+
+            return buffer.AsSpan(0, bytesRead).SequenceEqual(IpcCommands.PongBytes);
+        }
+        finally
+        {
+            await client.DisposeAsync();
+            await server.DisposeAsync();
+        }
+    }
+
     // --- Rate limiting per caller ---
 
     [Fact]
-    public async Task SameCallerSid_ConsecutiveRequestsWithin100ms_SecondIsRateLimited()
+    public async Task SameCallerSid_ConsecutiveNonPingRequestsWithin100ms_SecondIsRateLimited()
     {
         // Arrange: both requests arrive from the same SID — use a shared processor instance
         var extractor = new FixedIpcIdentityExtractor(CallerContext1);
@@ -130,7 +161,7 @@ public class IpcConnectionProcessorTests
             return new IpcResponse { Success = true };
         }
 
-        var message = new IpcMessage { Command = IpcCommands.Ping };
+        var message = new IpcMessage { Command = IpcCommands.Launch, AppId = "app1" };
 
         var response1 = await ExchangeAsync(processor, message, Dispatch);
 
@@ -141,6 +172,31 @@ public class IpcConnectionProcessorTests
         Assert.Equal(1, dispatchCount);
         Assert.False(response2?.Success, "Second request from same SID within 100ms should be rate-limited");
         Assert.Contains("rate", response2?.ErrorMessage ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task PingFollowedByNonPingCommand_NonPingCommandIsNotRateLimited()
+    {
+        // Ping must not consume the rate-limit slot so that the immediately following real command
+        // (e.g. RunAs from the launcher's liveness-check + send sequence) is not blocked.
+        var extractor = new FixedIpcIdentityExtractor(CallerContext1);
+        var processor = CreateProcessor(extractor);
+
+        var dispatchCount = 0;
+        IpcResponse Dispatch(IpcMessage msg, IpcCallerContext ctx)
+        {
+            dispatchCount++;
+            return new IpcResponse { Success = true };
+        }
+
+        var realMessage = new IpcMessage { Command = IpcCommands.Launch, AppId = "app1" };
+
+        var pingOk = await ExchangePingAsync(processor, Dispatch);
+        var realResponse = await ExchangeAsync(processor, realMessage, Dispatch);
+
+        Assert.True(pingOk, "Ping should receive PONG");
+        Assert.True(realResponse?.Success, "Real command immediately after Ping should not be rate-limited");
+        Assert.Equal(1, dispatchCount);
     }
 
     [Fact]
@@ -157,7 +213,7 @@ public class IpcConnectionProcessorTests
             return new IpcResponse { Success = true };
         }
 
-        var message = new IpcMessage { Command = IpcCommands.Ping };
+        var message = new IpcMessage { Command = IpcCommands.Launch, AppId = "app1" };
 
         var response1 = await ExchangeAsync(processor, message, Dispatch);
         var response2 = await ExchangeAsync(processor, message, Dispatch);
@@ -185,7 +241,7 @@ public class IpcConnectionProcessorTests
             return new IpcResponse { Success = true };
         }
 
-        var message = new IpcMessage { Command = IpcCommands.Ping, CallerName = "SomeUser" };
+        var message = new IpcMessage { Command = IpcCommands.Launch, AppId = "app1", CallerName = "SomeUser" };
 
         await ExchangeAsync(processor, message, Dispatch);
 

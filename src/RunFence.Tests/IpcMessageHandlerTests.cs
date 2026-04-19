@@ -70,17 +70,6 @@ public class IpcMessageHandlerTests
     private IpcMessageHandler CreateHandlerWithConfig(Mock<IConfigManagementContext> configContext)
         => CreateHandler(configContext: configContext.Object);
 
-    [Fact]
-    public void Ping_ReturnsSuccess()
-    {
-        var message = new IpcMessage { Command = IpcCommands.Ping };
-
-        var result = _handler.HandleIpcMessage(message, new IpcCallerContext(@"DOMAIN\User", null, false, true));
-
-        Assert.True(result.Success);
-        Assert.Null(result.ErrorMessage);
-    }
-
     [Theory]
     [InlineData(null)]
     [InlineData("")]

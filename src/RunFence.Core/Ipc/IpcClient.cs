@@ -62,6 +62,9 @@ public static class IpcClient
                 return JsonSerializer.Deserialize<IpcResponse>(responseJson, JsonDefaults.Options);
             }
 
+            if (bytesRead == 1 && buffer[0] == IpcCommands.RateLimitedSignal)
+                return new IpcResponse { Success = false, ErrorMessage = "Rate limited. Try again." };
+
             if (bytesRead > 0)
             {
                 var responseJson = Encoding.UTF8.GetString(buffer, 0, bytesRead);
@@ -79,7 +82,24 @@ public static class IpcClient
 
     public static bool PingServer()
     {
-        var response = SendMessage(new IpcMessage { Command = IpcCommands.Ping });
-        return response?.Success == true;
+        try
+        {
+            using var client = new NamedPipeClientStream(".", Constants.PipeName, PipeDirection.InOut);
+            try { client.Connect(Constants.PipeConnectTimeoutMs); }
+            catch { return false; }
+
+            client.ReadMode = PipeTransmissionMode.Message;
+
+            client.Write(IpcCommands.PingBytes, 0, IpcCommands.PingBytes.Length);
+            client.Flush();
+
+            var buffer = new byte[16];
+            int bytesRead = client.Read(buffer, 0, buffer.Length);
+            return buffer.AsSpan(0, bytesRead).SequenceEqual(IpcCommands.PongBytes);
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
