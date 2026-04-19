@@ -104,6 +104,19 @@ public partial class CredentialEditDialog : Form
         _statusLabel.Location = new Point(15, yPos);
         yPos += 25;
 
+        const int formWidth = 360;
+        const int btnWidth = 75;
+        const int btnGap = 10;
+        const int btnRight = formWidth - btnGap - btnWidth;
+        const int btnMiddle = btnRight - btnGap - btnWidth;
+        const int btnLeft = btnMiddle - btnGap - btnWidth;
+
+        // Set ClientSize before anchors+positions so anchor distances are computed correctly.
+        ClientSize = new Size(formWidth, yPos + 43);
+
+        _okButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+        _cancelButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+
         if (_isEditMode)
         {
             _okButton.Location = new Point(185, yPos);
@@ -129,7 +142,6 @@ public partial class CredentialEditDialog : Form
             };
         }
 
-        ClientSize = new Size(360, yPos + 43);
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
 

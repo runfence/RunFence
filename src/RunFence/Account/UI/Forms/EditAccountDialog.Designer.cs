@@ -24,6 +24,7 @@ partial class EditAccountDialog
     private CheckBox _allowLocalhostCheckBox;
     private CheckBox _allowLanCheckBox;
     private CheckBox _ephemeralCheckBox;
+    private Label _allowLabel;
     private Label _privilegeLevelLabel;
     private ComboBox _privilegeLevelComboBox;
     private Label _installLabel;
@@ -67,6 +68,7 @@ partial class EditAccountDialog
         _allowLocalhostCheckBox = new CheckBox();
         _allowLanCheckBox = new CheckBox();
         _ephemeralCheckBox = new CheckBox();
+        _allowLabel = new Label();
         _toolTip = new ToolTip();
         _privilegeLevelLabel = new Label();
         _privilegeLevelComboBox = new ComboBox();
@@ -142,80 +144,85 @@ partial class EditAccountDialog
 
         // ── Right column (x=305, width=270) ────────────────────────────
 
+        // _allowLabel
+        _allowLabel.Text = "Allow:";
+        _allowLabel.Location = new Point(305, 15);
+        _allowLabel.AutoSize = true;
+
         // _logonCheckBox
         _logonCheckBox.Text = "Logon";
-        _logonCheckBox.Location = new Point(305, 15);
+        _logonCheckBox.Location = new Point(305, 37);
         _logonCheckBox.AutoSize = true;
 
         // _networkLoginCheckBox
         _networkLoginCheckBox.Text = "Network Login";
-        _networkLoginCheckBox.Location = new Point(305, 43);
+        _networkLoginCheckBox.Location = new Point(305, 65);
         _networkLoginCheckBox.AutoSize = true;
 
         // _bgAutorunCheckBox
         _bgAutorunCheckBox.Text = "Bg Autorun";
-        _bgAutorunCheckBox.Location = new Point(305, 71);
+        _bgAutorunCheckBox.Location = new Point(305, 93);
         _bgAutorunCheckBox.AutoSize = true;
 
         // _allowInternetCheckBox
         _allowInternetCheckBox.Text = "Internet";
-        _allowInternetCheckBox.Location = new Point(305, 99);
+        _allowInternetCheckBox.Location = new Point(305, 121);
         _allowInternetCheckBox.AutoSize = true;
 
         // _allowLanCheckBox
         _allowLanCheckBox.Text = "LAN";
-        _allowLanCheckBox.Location = new Point(305, 127);
+        _allowLanCheckBox.Location = new Point(305, 149);
         _allowLanCheckBox.AutoSize = true;
 
         // _allowLocalhostCheckBox
         _allowLocalhostCheckBox.Text = "Localhost";
-        _allowLocalhostCheckBox.Location = new Point(305, 155);
+        _allowLocalhostCheckBox.Location = new Point(305, 177);
         _allowLocalhostCheckBox.AutoSize = true;
 
         // _privilegeLevelLabel
         _privilegeLevelLabel.Text = "Default privilege level:";
-        _privilegeLevelLabel.Location = new Point(305, 183);
+        _privilegeLevelLabel.Location = new Point(305, 205);
         _privilegeLevelLabel.AutoSize = true;
 
         // _privilegeLevelComboBox
         _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _privilegeLevelComboBox.Location = new Point(305, 205);
+        _privilegeLevelComboBox.Location = new Point(305, 227);
         _privilegeLevelComboBox.Size = new Size(200, 23);
         _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Basic", "Low Integrity" });
 
         // _ephemeralCheckBox
         _ephemeralCheckBox.Text = "Ephemeral (auto-delete after 24h)";
-        _ephemeralCheckBox.Location = new Point(305, 239);
+        _ephemeralCheckBox.Location = new Point(305, 261);
         _ephemeralCheckBox.AutoSize = true;
         _ephemeralCheckBox.Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold);
 
         // _installLabel
         _installLabel.Text = "Install:";
-        _installLabel.Location = new Point(305, 280);
+        _installLabel.Location = new Point(305, 302);
         _installLabel.AutoSize = true;
 
         // _installListBox
-        _installListBox.Location = new Point(305, 302);
+        _installListBox.Location = new Point(305, 324);
         _installListBox.Size = new Size(270, 100);
         _installListBox.CheckOnClick = true;
 
         // ── Bottom (full width) ─────────────────────────────────────────
 
         // _statusLabel
-        _statusLabel.Location = new Point(15, 420);
+        _statusLabel.Location = new Point(15, 442);
         _statusLabel.Size = new Size(560, 20);
         _statusLabel.ForeColor = Color.Red;
 
         // _deleteButton
         _deleteButton.Text = "Delete Account";
-        _deleteButton.Location = new Point(15, 450);
+        _deleteButton.Location = new Point(15, 472);
         _deleteButton.Size = new Size(120, 28);
         _deleteButton.FlatStyle = FlatStyle.System;
         _deleteButton.Click += OnDeleteClick;
 
         // _okButton
         _okButton.Text = "OK";
-        _okButton.Location = new Point(415, 450);
+        _okButton.Location = new Point(415, 472);
         _okButton.Size = new Size(75, 28);
         _okButton.FlatStyle = FlatStyle.System;
         _okButton.Click += OnOkClick;
@@ -223,7 +230,7 @@ partial class EditAccountDialog
         // _cancelButton
         _cancelButton.Text = "Cancel";
         _cancelButton.DialogResult = DialogResult.Cancel;
-        _cancelButton.Location = new Point(500, 450);
+        _cancelButton.Location = new Point(500, 472);
         _cancelButton.Size = new Size(75, 28);
         _cancelButton.FlatStyle = FlatStyle.System;
 
@@ -235,7 +242,7 @@ partial class EditAccountDialog
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(590, 490);
+        ClientSize = new Size(590, 512);
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
         Controls.AddRange(new Control[]
@@ -244,7 +251,7 @@ partial class EditAccountDialog
             _confirmLabel, _confirmPasswordTextBox, _groupsLabel, _groupsListBox,
             _settingsLabel, _settingsPathTextBox, _browseButton,
             _logonCheckBox, _networkLoginCheckBox, _bgAutorunCheckBox,
-            _allowInternetCheckBox, _allowLocalhostCheckBox, _allowLanCheckBox,
+            _allowLabel, _allowInternetCheckBox, _allowLocalhostCheckBox, _allowLanCheckBox,
             _privilegeLevelLabel, _privilegeLevelComboBox, _ephemeralCheckBox,
             _installLabel, _installListBox,
             _statusLabel, _deleteButton, _okButton, _cancelButton
