@@ -27,6 +27,7 @@ partial class AccountsPanel
     private ToolStripButton _scanAclsButton;
     private ToolStripButton _firewallButton;
     private ToolStripButton _wizardButton;
+    private ToolStripButton _runAsButton;
     private ToolStripSeparator _toolStripSep1;
     private ToolStripSeparator _toolStripSep2;
     private ContextMenuStrip _contextMenu;
@@ -82,6 +83,7 @@ partial class AccountsPanel
         _scanAclsButton = new ToolStripButton();
         _firewallButton = new ToolStripButton();
         _wizardButton = new ToolStripButton();
+        _runAsButton = new ToolStripButton();
         _toolStripSep1 = new ToolStripSeparator();
         _toolStripSep2 = new ToolStripSeparator();
         _contextMenu = new ContextMenuStrip();
@@ -177,7 +179,7 @@ partial class AccountsPanel
         {
             _refreshButton, _wizardButton, _createUserButton, _createContainerButton, _addButton,
             _toolStripSep1, _openCmdButton, _openFolderBrowserButton, _aclManagerButton, _firewallButton, _toolStripSep2, _scanAclsButton,
-            _copyPasswordButton, _accountsButton, _deleteProfilesButton, _migrateSidsButton, _importButton
+            _runAsButton, _copyPasswordButton, _accountsButton, _deleteProfilesButton, _migrateSidsButton, _importButton
         });
 
         // _refreshButton
@@ -227,6 +229,12 @@ partial class AccountsPanel
         // _wizardButton
         _wizardButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _wizardButton.ToolTipText = "Setup Wizard";
+
+        // _runAsButton
+        _runAsButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+        _runAsButton.ToolTipText = "RunAs...";
+        _runAsButton.Alignment = ToolStripItemAlignment.Right;
+        _runAsButton.Click += OnRunAsClick;
 
         // _copyPasswordButton
         _copyPasswordButton.DisplayStyle = ToolStripItemDisplayStyle.Image;

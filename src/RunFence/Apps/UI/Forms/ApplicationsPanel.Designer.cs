@@ -37,6 +37,7 @@ partial class ApplicationsPanel
     private ToolStripMenuItem _hdrAdd;
     private ToolStripButton _associationsButton;
     private ToolStripButton _wizardButton;
+    private ToolStripButton _runAsButton;
     private DataGridViewImageColumn _iconCol;
 
     private ApplicationsPanel() { InitializeComponent(); }
@@ -81,6 +82,7 @@ partial class ApplicationsPanel
         _hdrAdd = new ToolStripMenuItem();
         _associationsButton = new ToolStripButton();
         _wizardButton = new ToolStripButton();
+        _runAsButton = new ToolStripButton();
 
         ((ISupportInitialize)_grid).BeginInit();
         _toolStrip.SuspendLayout();
@@ -121,7 +123,7 @@ partial class ApplicationsPanel
         {
             _wizardButton, _addButton, _editButton, _removeButton,
             _toolStripSep1,
-            _launchButton, _associationsButton, _refreshButton
+            _launchButton, _runAsButton, _associationsButton, _refreshButton
         });
 
         // _addButton
@@ -150,6 +152,12 @@ partial class ApplicationsPanel
         _launchButton.TextImageRelation = TextImageRelation.ImageBeforeText;
         _launchButton.Enabled = false;
         _launchButton.Click += OnLaunchClick;
+
+        // _runAsButton
+        _runAsButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+        _runAsButton.ToolTipText = "RunAs...";
+        _runAsButton.Alignment = ToolStripItemAlignment.Right;
+        _runAsButton.Click += OnRunAsClick;
 
         // _associationsButton
         _associationsButton.Text = "Associations";

@@ -7,6 +7,7 @@ using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Persistence;
+using RunFence.RunAs;
 using RunFence.UI;
 using RunFence.UI.Forms;
 
@@ -21,6 +22,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
 
     private readonly IAppConfigService _appConfigService;
     private readonly AppEntryLauncher _entryLauncher;
+    private readonly IRunAsFlowHandler _runAsFlowHandler;
     private readonly ISidNameCacheService _sidNameCache;
     private readonly ILoggingService _log;
     private readonly ApplicationsCrudOrchestrator _crudHandler;
@@ -77,6 +79,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         ISidNameCacheService sidNameCache,
         ILoggingService log,
         AppContextMenuOrchestrator contextMenuOrchestrator,
+        IRunAsFlowHandler runAsFlowHandler,
         ApplicationsHandlerSyncHelper? handlerSyncHelper = null)
         : base(modalCoordinator)
     {
@@ -85,6 +88,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         _dragDropHandler = dragDropHandler;
         _appConfigService = appConfigService;
         _entryLauncher = entryLauncher;
+        _runAsFlowHandler = runAsFlowHandler;
         _sidNameCache = sidNameCache;
         _log = log;
         _handlerSyncHelper = handlerSyncHelper;
@@ -111,6 +115,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         _hdrAdd.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 16);
         _associationsButton.Image = UiIconFactory.CreateToolbarIcon("\u21C4", Color.FromArgb(0x33, 0x66, 0x99), 42);
         _associationsButton.Visible = handlerSyncHelper != null;
+        _runAsButton.Image = UiIconFactory.CreateToolbarIcon("\u26A1", Color.FromArgb(0xCC, 0x77, 0x00), 42);
         _contextMenuHandler = contextMenuOrchestrator;
         _contextMenuHandler.AccountNavigationRequested += accountSid => AccountNavigationRequested?.Invoke(accountSid);
         _contextMenuHandler.DataSaveAndRefreshRequested += OnContextMenuDataSaveAndRefresh;
@@ -230,6 +235,19 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         if (_grid.SelectedRows[0].Tag is not AppEntry app)
             return;
         LaunchApp(app, null);
+    }
+
+    private void OnRunAsClick(object? sender, EventArgs e)
+    {
+        using var dlg = new OpenFileDialog
+        {
+            Title = "Run As - Select File",
+            Filter = "Programs (*.exe;*.cmd;*.bat;*.com;*.lnk)|*.exe;*.cmd;*.bat;*.com;*.lnk|All Files (*.*)|*.*"
+        };
+        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
+        if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
+            return;
+        _runAsFlowHandler.TriggerFromUI(dlg.FileName);
     }
 
     private void OnAssociationsClick(object? sender, EventArgs e)
