@@ -119,7 +119,7 @@ public partial class RunAsDialog : Form
         var y = 10;
 
         _pathHeaderLabel.Location = new Point(15, y);
-        y += 22;
+        y += _pathHeaderLabel.PreferredSize.Height + 7;
 
         _pathLabel.Text = _filePath;
         _pathLabel.Location = new Point(15, y);
@@ -133,42 +133,47 @@ public partial class RunAsDialog : Form
                 : $"(from shortcut: {lnkName})";
             _shortcutLabel.Location = new Point(15, y);
             _shortcutLabel.Visible = true;
-            y += 20;
+            y += _shortcutLabel.PreferredSize.Height + 5;
         }
 
         if (!string.IsNullOrEmpty(_arguments))
         {
             _argsLabel.Location = new Point(15, y);
             _argsLabel.Visible = true;
-            y += 20;
+            y += _argsLabel.PreferredSize.Height + 5;
 
             _argsTextBox.Text = _arguments;
             _argsTextBox.Location = new Point(15, y);
             _argsTextBox.Visible = true;
-            y += 30;
+            y += _argsTextBox.Height + 7;
         }
 
         _credLabel.Location = new Point(15, y);
-        y += 20;
+        y += _credLabel.PreferredSize.Height + 5;
 
         _showAllAccountsCheckBox.Location = new Point(15, y);
         _showAllAccountsCheckBox.Visible = true;
-        y += 22;
+        y += _showAllAccountsCheckBox.PreferredSize.Height + 5;
 
         _credentialListBox.Location = new Point(15, y);
         RepopulateCredentialList();
-        y += 217;
+        y += _credentialListBox.Height + 7;
 
         if (_shortcutContext is { IsAlreadyManaged: false })
         {
             _updateShortcutCheckBox.Location = new Point(15, y);
             _updateShortcutCheckBox.Visible = true;
-            y += 25;
+            y += _updateShortcutCheckBox.PreferredSize.Height + 8;
         }
 
+        var clientWidth = ClientSize.Width;
         _privilegeLevelLabel.Location = new Point(15, y + 5);
-        _privilegeLevelComboBox.Location = new Point(265, y);
-        y += 37;
+        _privilegeLevelComboBox.Location = new Point(clientWidth - 15 - _privilegeLevelComboBox.Width, y);
+        y += _privilegeLevelComboBox.Height + 14;
+
+        var cancelLeft = clientWidth - 15 - _cancelButton.Width;
+        var addAppLeft = cancelLeft - 5 - _addAppButton.Width;
+        var launchLeft = addAppLeft - 5 - _launchButton.Width;
 
         if (_shortcutContext is { IsAlreadyManaged: true, ManagedApp: not null })
         {
@@ -176,15 +181,15 @@ public partial class RunAsDialog : Form
             _revertButton.Visible = true;
         }
 
-        _launchButton.Location = new Point(155, y);
-        _addAppButton.Location = new Point(250, y);
-        _cancelButton.Location = new Point(375, y);
+        _launchButton.Location = new Point(launchLeft, y);
+        _addAppButton.Location = new Point(addAppLeft, y);
+        _cancelButton.Location = new Point(cancelLeft, y);
 
         // Enable/disable "Add App..." based on credential selection
         _credentialListBox.SelectedIndexChanged += (_, _) =>
             _addAppButton.Enabled = _credentialListBox.SelectedItem is CredentialDisplayItem or CreateAccountItem or AppContainerDisplayItem;
 
-        ClientSize = ClientSize with { Height = y + 45 };
+        ClientSize = ClientSize with { Height = y + _launchButton.Height + 17 };
 
         // Pre-select: managed app's account/container takes priority; otherwise last used or first non-current
         int initialSelection = _shortcutContext?.IsAlreadyManaged == true
