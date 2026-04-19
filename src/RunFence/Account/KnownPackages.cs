@@ -16,7 +16,7 @@ public static class KnownPackages
         DetectExeName: "wt.exe");
 
     public static readonly InstallablePackage ClaudeCode = new(
-        "Claude Code + jq + rg",
+        "Claude Code + codex + jq + rg",
         ReadEmbeddedScript("install-claude-code.ps1"),
         DetectProfileRelativePath: @".local\bin\claude.exe");
 

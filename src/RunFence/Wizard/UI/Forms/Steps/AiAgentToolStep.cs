@@ -17,7 +17,7 @@ public class AiAgentToolStep : WizardStepPage
     private readonly Func<IWizardProgressReporter, Task>? _commitAction;
     private readonly IShortcutDiscoveryService _discoveryService;
 
-    private RadioButton _claudeCodeRadio = null!;
+    private RadioButton _aiPackageRadio = null!;
     private RadioButton _otherToolRadio = null!;
     private Label _appPathLabel = null!;
     private TextBox _appPathTextBox = null!;
@@ -25,7 +25,7 @@ public class AiAgentToolStep : WizardStepPage
     private Button _discoverAppButton = null!;
     private Panel _appPathPanel = null!;
 
-    /// <param name="setOptions">Receives (isClaudeCode, appPath) on <see cref="Collect"/>.</param>
+    /// <param name="setOptions">Receives (useAiPackage, appPath) on <see cref="Collect"/>.</param>
     /// <param name="discoveryService">Used by the Discover button to find installed apps.</param>
     /// <param name="commitAction">
     /// Mid-wizard async action run after <see cref="Collect"/> and before the wizard advances.
@@ -50,11 +50,11 @@ public class AiAgentToolStep : WizardStepPage
 
     public override void Collect()
     {
-        var isClaudeCode = _claudeCodeRadio.Checked;
-        var appPath = !isClaudeCode && !string.IsNullOrWhiteSpace(_appPathTextBox.Text)
+        var useAiPackage = _aiPackageRadio.Checked;
+        var appPath = !useAiPackage && !string.IsNullOrWhiteSpace(_appPathTextBox.Text)
             ? _appPathTextBox.Text.Trim()
             : null;
-        _setOptions(isClaudeCode, appPath);
+        _setOptions(useAiPackage, appPath);
     }
 
     private void BuildContent()
@@ -62,15 +62,15 @@ public class AiAgentToolStep : WizardStepPage
         SuspendLayout();
         Padding = new Padding(8);
 
-        _claudeCodeRadio = new RadioButton
+        _aiPackageRadio = new RadioButton
         {
-            Text = $"Claude Code ({KnownPackages.ClaudeCode.DisplayName})",
+            Text = KnownPackages.ClaudeCode.DisplayName,
             Font = new Font("Segoe UI", 10),
             AutoSize = true,
             Dock = DockStyle.Top,
             Checked = true
         };
-        _claudeCodeRadio.CheckedChanged += (_, _) => UpdateOtherToolVisibility();
+        _aiPackageRadio.CheckedChanged += (_, _) => UpdateOtherToolVisibility();
 
         _otherToolRadio = new RadioButton
         {
@@ -140,13 +140,13 @@ public class AiAgentToolStep : WizardStepPage
         // Add in reverse order so Dock=Top stacks top-to-bottom
         Controls.Add(_appPathPanel);
         Controls.Add(_otherToolRadio);
-        Controls.Add(_claudeCodeRadio);
+        Controls.Add(_aiPackageRadio);
         ResumeLayout(false);
     }
 
     private void UpdateOtherToolVisibility()
     {
-        _appPathPanel.Visible = _otherToolRadio.Checked;
+        _appPathPanel.Visible = !_aiPackageRadio.Checked;
     }
 
     private async void OnDiscoverApp(object? sender, EventArgs e)

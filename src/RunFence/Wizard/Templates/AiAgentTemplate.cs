@@ -71,9 +71,9 @@ public class AiAgentTemplate(
             defaultLocalhost: false);
 
         var aiToolStep = new AiAgentToolStep(
-            (isClaudeCode, appPath) =>
+            (useAiPackage, appPath) =>
             {
-                _data.IsClaudeCode = isClaudeCode;
+                _data.UseAiPackage = useAiPackage;
                 _data.AppPath = appPath;
             },
             discoveryService,
@@ -147,7 +147,7 @@ public class AiAgentTemplate(
         // Install packages and wait for completion before advancing.
         // Firewall rules that block internet will be applied in ExecuteAsync — we must ensure
         // software is fully installed before internet access is cut off.
-        List<InstallablePackage> packages = _data.IsClaudeCode
+        List<InstallablePackage> packages = _data.UseAiPackage
             ? [KnownPackages.Winget, KnownPackages.WindowsTerminal, KnownPackages.ClaudeCode]
             : [KnownPackages.Winget, KnownPackages.WindowsTerminal];
 
@@ -247,7 +247,7 @@ public class AiAgentTemplate(
     private sealed class CommitData
     {
         public string Username { get; set; } = string.Empty;
-        public bool IsClaudeCode { get; set; } = true;
+        public bool UseAiPackage { get; set; } = true;
         public List<string> ProjectPaths { get; set; } = [];
         public string? AppPath { get; set; }
         public string? CreatedSid { get; set; }
@@ -259,7 +259,7 @@ public class AiAgentTemplate(
         public void Reset()
         {
             Username = string.Empty;
-            IsClaudeCode = true;
+            UseAiPackage = true;
             ProjectPaths = [];
             AppPath = null;
             CreatedSid = null;
