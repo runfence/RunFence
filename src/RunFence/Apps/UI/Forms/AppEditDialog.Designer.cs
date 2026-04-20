@@ -330,7 +330,7 @@ partial class AppEditDialog
 
         // _ipcContainer (IpcCallerSection added in code; placeholder position; set in code)
         _ipcContainer.Location = new Point(10, 32);
-        _ipcContainer.Size = new Size(480, 120);
+        _ipcContainer.Size = new Size(460, 120);
         _ipcContainer.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
         // Add IPC controls to _tabAccess (AclSection added in code below ipcContainer)
