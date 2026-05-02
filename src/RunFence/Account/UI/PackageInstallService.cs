@@ -1,7 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Launch;
 
 namespace RunFence.Account.UI;
@@ -64,9 +63,10 @@ public class PackageInstallService(ILaunchFacade launchFacade, AccountToolResolv
     /// <summary>
     /// Waits for the install script launched by <see cref="InstallPackages"/> to complete by polling
     /// for a sentinel marker file written at the end of the script. Deletes the marker on detection.
-    /// Returns when the marker is found or when <paramref name="timeout"/> elapses.
+    /// Returns when the marker is found, when <paramref name="timeout"/> elapses, or when
+    /// <paramref name="ct"/> is cancelled (user clicked Cancel on the progress form).
     /// </summary>
-    public async Task WaitForInstallCompletionAsync(string sid, TimeSpan timeout)
+    public async Task WaitForInstallCompletionAsync(string sid, TimeSpan timeout, CancellationToken ct = default)
     {
         if (!GetMarkerPath(sid, out var markerPath))
             return;
@@ -75,13 +75,15 @@ public class PackageInstallService(ILaunchFacade launchFacade, AccountToolResolv
 
         while (DateTime.UtcNow < deadline)
         {
+            ct.ThrowIfCancellationRequested();
+
             if (File.Exists(markerPath))
             {
                 TryDeleteFile(markerPath);
                 return;
             }
 
-            await Task.Delay(1000);
+            await Task.Delay(1000, ct);
         }
     }
 
@@ -98,12 +100,15 @@ public class PackageInstallService(ILaunchFacade launchFacade, AccountToolResolv
         return true;
     }
 
-    private string WriteInstallScript(string command, string userSid)
+    /// <summary>
+    /// Deletes install scripts older than 1 hour from the program data directory.
+    /// Called at startup to clean up scripts left behind by previous crashes.
+    /// </summary>
+    public void CleanupStaleScripts()
     {
-        var dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RunFence");
-        Directory.CreateDirectory(dir);
-
+        var dir = PathConstants.ProgramDataDir;
+        if (!Directory.Exists(dir))
+            return;
         foreach (var stale in Directory.GetFiles(dir, "install-*.ps1"))
             try
             {
@@ -113,6 +118,14 @@ public class PackageInstallService(ILaunchFacade launchFacade, AccountToolResolv
             catch
             {
             }
+    }
+
+    private string WriteInstallScript(string command, string userSid)
+    {
+        var dir = PathConstants.ProgramDataDir;
+        Directory.CreateDirectory(dir);
+
+        CleanupStaleScripts();
 
         var scriptPath = Path.Combine(dir, $"install-{Guid.NewGuid():N}.ps1");
         CreateScriptFileWithRestrictedAccess(scriptPath, command, userSid);

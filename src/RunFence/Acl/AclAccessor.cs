@@ -2,7 +2,6 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
-using RunFence.Acl.Traverse;
 using RunFence.Infrastructure;
 
 namespace RunFence.Acl;
@@ -10,8 +9,10 @@ namespace RunFence.Acl;
 public interface IAclAccessor
 {
     FileSystemSecurity GetSecurity(string path);
-    void ApplyExplicitAce(string path, string sid, AccessControlType type, FileSystemRights rights);
-    void RemoveExplicitAces(string path, string sid, AccessControlType type);
+    void ApplyExplicitAce(string path, string sid, AccessControlType type, FileSystemRights rights,
+        Func<FileSystemAccessRule, bool>? shouldSkip = null);
+    void RemoveExplicitAces(string path, string sid, AccessControlType type,
+        Func<FileSystemAccessRule, bool>? shouldSkip = null);
 
     /// <summary>
     /// Returns true if the path exists. When <see cref="GetFileAttributes"/> fails with an
@@ -21,6 +22,15 @@ public interface IAclAccessor
     /// Sets <paramref name="isFolder"/> when the path is a directory.
     /// </summary>
     bool PathExists(string path, out bool isFolder);
+
+    /// <summary>
+    /// Reads, modifies, and writes the DACL for <paramref name="path"/>.
+    /// Tries the standard <c>GetAccessControl</c>/<c>SetAccessControl</c> path first;
+    /// on <see cref="UnauthorizedAccessException"/>, falls back to
+    /// <c>FILE_FLAG_BACKUP_SEMANTICS</c> via backup/restore privilege.
+    /// Returns true when <paramref name="modify"/> returns true (changes were made).
+    /// </summary>
+    bool ModifyAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify);
 }
 
 /// <summary>
@@ -101,10 +111,12 @@ public class AclAccessor : IAclAccessor
     }
 
     /// <summary>
-    /// Removes the existing explicit ACE for this SID+type and adds a new one with the given rights.
-    /// If rights is zero, only removes.
+    /// Removes the existing explicit ACE for this SID+type (passing <paramref name="shouldSkip"/>
+    /// to preserve any ACE the caller wants to keep) and adds a new one with the given rights.
+    /// If rights is zero, only removes. Other callers can omit <paramref name="shouldSkip"/>.
     /// </summary>
-    public void ApplyExplicitAce(string path, string sid, AccessControlType type, FileSystemRights rights)
+    public void ApplyExplicitAce(string path, string sid, AccessControlType type, FileSystemRights rights,
+        Func<FileSystemAccessRule, bool>? shouldSkip = null)
     {
         var identity = new SecurityIdentifier(sid);
         bool isDir = Directory.Exists(path);
@@ -114,7 +126,7 @@ public class AclAccessor : IAclAccessor
             {
                 var dirInfo = new DirectoryInfo(path);
                 var security = dirInfo.GetAccessControl();
-                RemoveExplicitAce(security, identity, type);
+                RemoveExplicitAce(security, identity, type, shouldSkip);
                 if (rights != 0)
                     security.AddAccessRule(new FileSystemAccessRule(
                         identity, rights,
@@ -126,7 +138,7 @@ public class AclAccessor : IAclAccessor
             {
                 var fileInfo = new FileInfo(path);
                 var security = fileInfo.GetAccessControl();
-                RemoveExplicitAce(security, identity, type);
+                RemoveExplicitAce(security, identity, type, shouldSkip);
                 if (rights != 0)
                     security.AddAccessRule(new FileSystemAccessRule(identity, rights, type));
                 fileInfo.SetAccessControl(security);
@@ -136,7 +148,7 @@ public class AclAccessor : IAclAccessor
         {
             ModifyDaclViaBackupPrivilege(path, isDir, security =>
             {
-                RemoveExplicitAce(security, identity, type);
+                RemoveExplicitAce(security, identity, type, shouldSkip);
                 if (rights != 0)
                     security.AddAccessRule(new FileSystemAccessRule(
                         identity, rights,
@@ -146,7 +158,8 @@ public class AclAccessor : IAclAccessor
         }
     }
 
-    public void RemoveExplicitAces(string path, string sid, AccessControlType type)
+    public void RemoveExplicitAces(string path, string sid, AccessControlType type,
+        Func<FileSystemAccessRule, bool>? shouldSkip = null)
     {
         var identity = new SecurityIdentifier(sid);
         bool isDir = Directory.Exists(path);
@@ -156,20 +169,51 @@ public class AclAccessor : IAclAccessor
             {
                 var dirInfo = new DirectoryInfo(path);
                 var security = dirInfo.GetAccessControl();
-                if (RemoveExplicitAce(security, identity, type))
+                if (RemoveExplicitAce(security, identity, type, shouldSkip))
                     dirInfo.SetAccessControl(security);
             }
             else if (File.Exists(path))
             {
                 var fileInfo = new FileInfo(path);
                 var security = fileInfo.GetAccessControl();
-                if (RemoveExplicitAce(security, identity, type))
+                if (RemoveExplicitAce(security, identity, type, shouldSkip))
                     fileInfo.SetAccessControl(security);
             }
         }
         catch (UnauthorizedAccessException)
         {
-            ModifyDaclViaBackupPrivilege(path, isDir, security => RemoveExplicitAce(security, identity, type));
+            ModifyDaclViaBackupPrivilege(path, isDir, security => RemoveExplicitAce(security, identity, type, shouldSkip));
+        }
+    }
+
+    public bool ModifyAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify)
+    {
+        try
+        {
+            if (isFolder)
+            {
+                var dirInfo = new DirectoryInfo(path);
+                var security = dirInfo.GetAccessControl();
+                if (!modify(security))
+                    return false;
+                dirInfo.SetAccessControl(security);
+            }
+            else
+            {
+                var fileInfo = new FileInfo(path);
+                var security = fileInfo.GetAccessControl();
+                if (!modify(security))
+                    return false;
+                fileInfo.SetAccessControl(security);
+            }
+
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            bool changed = false;
+            ModifyDaclViaBackupPrivilege(path, isFolder, security => changed = modify(security));
+            return changed;
         }
     }
 
@@ -260,7 +304,11 @@ public class AclAccessor : IAclAccessor
         }
     }
 
-    private static bool RemoveExplicitAce(FileSystemSecurity security, SecurityIdentifier identity, AccessControlType type)
+    private static bool RemoveExplicitAce(
+        FileSystemSecurity security,
+        SecurityIdentifier identity,
+        AccessControlType type,
+        Func<FileSystemAccessRule, bool>? shouldSkip = null)
     {
         var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
         bool removed = false;
@@ -270,11 +318,7 @@ public class AclAccessor : IAclAccessor
                 rule.IdentityReference is SecurityIdentifier ruleSid &&
                 ruleSid.Equals(identity))
             {
-                // Preserve traverse-only ACEs — managed by the traverse system, not the grant system.
-                // Removing them here would wipe traverse access co-located with a grant entry.
-                if (type == AccessControlType.Allow &&
-                    rule.FileSystemRights == TraverseRightsHelper.TraverseRights &&
-                    rule.InheritanceFlags == InheritanceFlags.None)
+                if (shouldSkip != null && shouldSkip(rule))
                     continue;
 
                 security.RemoveAccessRuleSpecific(rule);

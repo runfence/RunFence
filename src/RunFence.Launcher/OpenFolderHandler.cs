@@ -38,7 +38,8 @@ public static class OpenFolderHandler
             Command = IpcCommands.OpenFolder,
             Arguments = folderPath
         };
-        var response = LauncherIpcHelper.SendWithAutoStart(message);
+        var helper = new LauncherIpcHelper(new LauncherIpcClient(), new LauncherGuiController(), new LauncherWaitDelay());
+        var response = helper.SendWithAutoStart(message);
         if (response == null)
             return 1;
         if (!response.Success)
@@ -179,7 +180,7 @@ public static class OpenFolderHandler
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(subKeyPath);
-            if (key != null && key.SubKeyCount == 0)
+            if (key is { SubKeyCount: 0 })
                 Registry.CurrentUser.DeleteSubKey(subKeyPath, throwOnMissingSubKey: false);
         }
         catch

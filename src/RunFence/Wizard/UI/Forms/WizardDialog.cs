@@ -127,7 +127,6 @@ public partial class WizardDialog : Form, IWizardExecutionContext
     void IWizardExecutionContext.SetTitleText(string text) => _titleLabel.Text = text;
     void IWizardExecutionContext.SetNextText(string text) => _nextButton.Text = text;
     void IWizardExecutionContext.InvalidateStepIndicator() => _stepIndicatorPanel.Invalidate();
-    void IWizardExecutionContext.Close() => Close();
     void IWizardExecutionContext.BeginInvokeOnUI(Action action) => BeginInvoke(action);
 
     void IWizardExecutionContext.UnsubscribeAndDispose(IEnumerable<WizardStepPage> steps)

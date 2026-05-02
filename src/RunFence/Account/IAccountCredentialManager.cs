@@ -1,4 +1,3 @@
-using System.Security;
 using RunFence.Core;
 using RunFence.Core.Models;
 
@@ -14,7 +13,7 @@ public interface IAccountCredentialManager
     /// or null if a credential with the same SID already exists (duplicate guard).
     /// </summary>
     Guid? StoreCreatedUserCredential(
-        string sid, SecureString password,
+        string sid, ProtectedString password,
         CredentialStore credStore, ProtectedBuffer pinKey);
 
     /// <summary>
@@ -22,22 +21,23 @@ public interface IAccountCredentialManager
     /// Returns (success, credentialId, errorMessage). errorMessage is non-null on duplicate.
     /// </summary>
     (bool Success, Guid? CredentialId, string? Error) AddNewCredential(
-        string sid, SecureString? password,
+        string sid, ProtectedString? password,
         CredentialStore credStore, ProtectedBuffer pinKey);
 
-    void UpdateCredentialPassword(CredentialEntry credEntry, SecureString password, ProtectedBuffer pinKey);
+    void UpdateCredentialPassword(CredentialEntry credEntry, ProtectedString password, ProtectedBuffer pinKey);
 
     void RemoveCredential(Guid credentialId, CredentialStore credStore);
 
     void RemoveCredentialsBySid(string sid, CredentialStore credStore);
 
-    CredentialLookupStatus DecryptCredential(
-        string accountSid, CredentialStore credStore, ProtectedBuffer pinKey,
-        out SecureString? password);
-
     /// <summary>
-    /// Checks whether valid credentials exist for the account without decrypting the password.
-    /// Use this when only the lookup status is needed.
+    /// Decrypts the stored password for the given account SID, bypassing launch-identity checks
+    /// (current account, interactive user). Returns true and sets <paramref name="password"/> when
+    /// a non-empty encrypted password exists; returns false with null when none is stored.
+    /// Use when the actual password value is needed regardless of account type
+    /// (e.g. Task Scheduler registration).
     /// </summary>
-    CredentialLookupStatus CheckCredential(string accountSid, CredentialStore credStore);
+    bool TryDecryptStoredPassword(
+        string accountSid, CredentialStore credStore, ProtectedBuffer pinKey,
+        out ProtectedString? password);
 }

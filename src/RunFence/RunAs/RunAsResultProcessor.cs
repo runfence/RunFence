@@ -1,7 +1,6 @@
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 using RunFence.RunAs.UI;
 
 namespace RunFence.RunAs;
@@ -12,7 +11,7 @@ namespace RunFence.RunAs;
 /// </summary>
 public class RunAsResultProcessor(
     RunAsPermissionApplier permissionApplier,
-    RunAsLaunchDispatcher launchDispatcher,
+    IRunAsLaunchDispatcher launchDispatcher,
     RunAsCredentialPersister credentialPersister,
     RunAsDosProtection dosProtection,
     IShortcutService shortcutService,

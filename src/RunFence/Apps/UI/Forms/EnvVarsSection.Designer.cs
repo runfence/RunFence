@@ -14,8 +14,8 @@ partial class EnvVarsSection
     private ToolStripButton _addButton;
     private ToolStripButton _removeButton;
     private StyledDataGridView _dataGrid;
-    private DataGridViewTextBoxColumn _nameColumn;
-    private DataGridViewTextBoxColumn _valueColumn;
+    private DataGridViewTextBoxColumn EnvName;
+    private DataGridViewTextBoxColumn EnvValue;
     private ContextMenuStrip _contextMenu;
     private ToolStripMenuItem _ctxAdd;
     private ToolStripMenuItem _ctxRemove;
@@ -34,8 +34,8 @@ partial class EnvVarsSection
         _addButton = new ToolStripButton();
         _removeButton = new ToolStripButton();
         _dataGrid = new StyledDataGridView();
-        _nameColumn = new DataGridViewTextBoxColumn();
-        _valueColumn = new DataGridViewTextBoxColumn();
+        EnvName = new DataGridViewTextBoxColumn();
+        EnvValue = new DataGridViewTextBoxColumn();
         _contextMenu = new ContextMenuStrip();
         _ctxAdd = new ToolStripMenuItem();
         _ctxRemove = new ToolStripMenuItem();
@@ -74,23 +74,24 @@ partial class EnvVarsSection
         // _dataGrid
         _dataGrid.Dock = DockStyle.Fill;
         _dataGrid.AllowUserToAddRows = true;
-        _dataGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        _dataGrid.MultiSelect = false;
+        _dataGrid.AllowUserToDeleteRows = true;
         _dataGrid.AutoGenerateColumns = false;
-        _dataGrid.Columns.AddRange(new DataGridViewColumn[] { _nameColumn, _valueColumn });
+        _dataGrid.Columns.AddRange(new DataGridViewColumn[] { EnvName, EnvValue });
         _dataGrid.ContextMenuStrip = _contextMenu;
         _dataGrid.CurrentCellChanged += OnCurrentCellChanged;
         _dataGrid.MouseDown += OnGridMouseDown;
         _dataGrid.KeyDown += OnGridKeyDown;
 
-        // _nameColumn
-        _nameColumn.HeaderText = "Name";
-        _nameColumn.Width = 150;
-        _nameColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+        // EnvName
+        EnvName.Name = "EnvName";
+        EnvName.HeaderText = "Name";
+        EnvName.Width = 150;
+        EnvName.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
 
-        // _valueColumn
-        _valueColumn.HeaderText = "Value";
-        _valueColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        // EnvValue
+        EnvValue.Name = "EnvValue";
+        EnvValue.HeaderText = "Value";
+        EnvValue.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
         // _contextMenu
         _contextMenu.Items.AddRange(new ToolStripItem[] { _ctxAdd, _ctxRemove });
@@ -106,7 +107,6 @@ partial class EnvVarsSection
 
         // EnvVarsSection
         AutoScaleMode = AutoScaleMode.Inherit;
-        Dock = DockStyle.Fill;
         Margin = Padding.Empty;
         Controls.Add(_contentGroup);
 

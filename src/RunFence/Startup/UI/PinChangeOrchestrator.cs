@@ -15,6 +15,7 @@ namespace RunFence.Startup.UI;
 public class PinChangeOrchestrator(
     IPinService pinService,
     IAppConfigService appConfigService,
+    IRememberPinService rememberPinService,
     ILoggingService log,
     IModalCoordinator modalCoordinator)
 {
@@ -30,13 +31,13 @@ public class PinChangeOrchestrator(
         byte[]? newKey = null;
         DialogResult dlgResult = DialogResult.Cancel;
 
-        using var pinnedKey = ExtractPinDerivedKey(session.PinDerivedKey);
+        using var pinnedKey = PinnedKeyBuffer.FromProtected(session.PinDerivedKey);
         var store = session.CredentialStore;
 
         modalCoordinator.RunOnSecureDesktop(() =>
         {
             using var dlg = new PinDialog(PinDialogMode.Set);
-            dlg.ProcessingCallback = async (newPin, _) =>
+            dlg.ProcessingCallback = async (ProtectedString newPin, string? _) =>
             {
                 try
                 {
@@ -57,31 +58,83 @@ public class PinChangeOrchestrator(
 
         if (dlgResult == DialogResult.OK)
         {
-            ApplyPinChange(session, newStore!, newKey!, onPinChanged);
+            ProtectedBuffer? newKeyBuffer = null;
+            try
+            {
+                newKeyBuffer = new ProtectedBuffer(newKey!);
+                newKey = null;
+                ApplyKeyRotation(session, newStore!, newKeyBuffer, onPinChanged, updateRememberPin: true);
+                newKeyBuffer = null;
+            }
+            finally
+            {
+                newKeyBuffer?.Dispose();
+                if (newKey != null)
+                    CryptographicOperations.ZeroMemory(newKey);
+            }
+
             MessageBox.Show("PIN changed successfully.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        else if (newKey != null)
+        {
+            CryptographicOperations.ZeroMemory(newKey);
         }
     }
 
-    private void ApplyPinChange(
+    public void ApplyKeyRotation(
         SessionContext session,
         CredentialStore newStore,
-        byte[] newKey,
-        Action<ProtectedBuffer, CredentialStore, ProtectedBuffer> onPinChanged)
+        ProtectedBuffer newKey,
+        Action<ProtectedBuffer, CredentialStore, ProtectedBuffer> onKeyRotated,
+        bool updateRememberPin = true)
     {
-        // Save to disk before updating in-memory state so a failed save
-        // doesn't leave the session pointing at a new key while disk has old data.
-        appConfigService.ReencryptAndSaveAll(newStore, session.Database, newKey);
+        ProtectedBuffer? ownedNewKey = newKey;
+        try
+        {
+            // Save to disk before updating in-memory state so a failed save
+            // doesn't leave the session pointing at a new key while disk has old data.
+            using (var scope = ownedNewKey.Unprotect())
+            {
+                appConfigService.ReencryptAndSaveAll(newStore, session.Database, scope.Data);
+            }
 
-        var oldBuffer = session.PinDerivedKey;
-        session.CredentialStore = newStore;
-        session.PinDerivedKey = new ProtectedBuffer(newKey);
-        CryptographicOperations.ZeroMemory(newKey);
-        onPinChanged(oldBuffer, session.CredentialStore, session.PinDerivedKey);
+            var oldBuffer = session.PinDerivedKey;
+            session.CredentialStore = newStore;
+            session.PinDerivedKey = ownedNewKey;
+            ownedNewKey = null;
+            onKeyRotated(oldBuffer, session.CredentialStore, session.PinDerivedKey);
+
+            if (updateRememberPin)
+                TryRefreshRememberPin(session.PinDerivedKey);
+        }
+        finally
+        {
+            ownedNewKey?.Dispose();
+        }
     }
 
-    private static PinnedKeyBuffer ExtractPinDerivedKey(ProtectedBuffer pinDerivedKey)
+    private void TryRefreshRememberPin(ProtectedBuffer pinDerivedKey)
     {
-        using var scope = pinDerivedKey.Unprotect();
-        return new PinnedKeyBuffer(scope.Data.ToArray());
+        try
+        {
+            rememberPinService.UpdateForPinChange(pinDerivedKey);
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"Failed to refresh Remember PIN key after PIN rotation; disabling feature: {ex.Message}");
+            TryDisableRememberPinAfterFailure();
+        }
+    }
+
+    private void TryDisableRememberPinAfterFailure()
+    {
+        try
+        {
+            rememberPinService.Disable();
+        }
+        catch (Exception cleanupEx)
+        {
+            log.Warn($"Failed to clean up Remember PIN key material after PIN rotation error: {cleanupEx.Message}");
+        }
     }
 }

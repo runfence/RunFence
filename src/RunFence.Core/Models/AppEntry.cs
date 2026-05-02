@@ -80,4 +80,11 @@ public class AppEntry
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ArgumentsTemplate { get; set; }
+
+    /// <summary>
+    /// Default path prefix constraint for all associations. Null/empty = catch-all.
+    /// Per-association overrides add to (union) or replace this list.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? PathPrefixes { get; set; }
 }

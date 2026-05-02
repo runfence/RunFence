@@ -17,9 +17,7 @@ public class OptionsSettingsHandler(IConfigRepository configRepository, ISession
     /// </summary>
     public void SaveSettings(Action onSettingsChanged)
     {
-        var session = sessionProvider.GetSession();
-        using var scope = session.PinDerivedKey.Unprotect();
-        configRepository.SaveConfig(session.Database, scope.Data, session.CredentialStore.ArgonSalt);
+        Save();
         onSettingsChanged();
     }
 
@@ -28,11 +26,16 @@ public class OptionsSettingsHandler(IConfigRepository configRepository, ISession
     /// </summary>
     public void SaveCallerChanges(Action refreshCallerList, Action onDataChanged)
     {
+        Save();
+        refreshCallerList();
+        onDataChanged();
+    }
+
+    private void Save()
+    {
         var session = sessionProvider.GetSession();
         using var scope = session.PinDerivedKey.Unprotect();
         configRepository.SaveConfig(session.Database, scope.Data, session.CredentialStore.ArgonSalt);
-        refreshCallerList();
-        onDataChanged();
     }
 
     /// <summary>
@@ -52,6 +55,17 @@ public class OptionsSettingsHandler(IConfigRepository configRepository, ISession
 
         _saveDebounceTimer.Stop();
         _saveDebounceTimer.Start();
+    }
+
+    /// <summary>
+    /// Cancels any pending debounced save without flushing.
+    /// Used before data deletion to prevent Dispose from re-creating deleted files.
+    /// </summary>
+    public void CancelPendingSave()
+    {
+        _saveDebounceTimer?.Stop();
+        _saveDebounceTimer?.Dispose();
+        _saveDebounceTimer = null;
     }
 
     /// <summary>

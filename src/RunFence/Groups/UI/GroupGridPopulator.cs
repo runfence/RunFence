@@ -1,5 +1,6 @@
 using RunFence.Account;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.UI;
@@ -23,6 +24,10 @@ public class GroupGridPopulator(
 
     public List<LocalUserAccount> LastGroups { get; private set; } = [];
 
+    private string? _preferredSelectSid;
+
+    public void SetPreferredSelection(string? sid) => _preferredSelectSid = sid;
+
     public void Initialize(DataGridView groupsGrid, DataGridView membersGrid, Label membersHeaderLabel)
     {
         _groupsGrid = groupsGrid;
@@ -33,6 +38,8 @@ public class GroupGridPopulator(
     public async Task PopulateGroups()
     {
         var selectedSid = GetSelectedGroupSid();
+        var preferredSid = _preferredSelectSid;
+        _preferredSelectSid = null;
 
         var groupsTask = Task.Run(() =>
             GroupFilterHelper.FilterForGroupsPanel(groupMembership.GetLocalGroups()).ToList());
@@ -58,7 +65,7 @@ public class GroupGridPopulator(
             return;
 
         // Re-read current selection after the async load — user may have changed it during the wait
-        var targetSid = GetSelectedGroupSid() ?? selectedSid;
+        var targetSid = preferredSid ?? GetSelectedGroupSid() ?? selectedSid;
 
         LastGroups = groups;
         _groupsGrid.SuspendLayout();
@@ -67,6 +74,7 @@ public class GroupGridPopulator(
         {
             foreach (var group in LastGroups)
             {
+                // By design: timer stops when panel is hidden (GroupRefreshController/GroupsPanel.OnVisibleChanged)
                 sidNameCache.ResolveAndCache(group.Sid, group.Username);
 
                 var row = new DataGridViewRow();
@@ -81,7 +89,7 @@ public class GroupGridPopulator(
             {
                 foreach (DataGridViewRow row in _groupsGrid.Rows)
                 {
-                    if (string.Equals(row.Tag as string, targetSid, StringComparison.OrdinalIgnoreCase))
+                    if (SidComparer.SidEquals(row.Tag as string, targetSid))
                     {
                         row.Selected = true;
                         _groupsGrid.CurrentCell = row.Cells[0];
@@ -109,7 +117,7 @@ public class GroupGridPopulator(
     public async Task PopulateMembers(string groupSid)
     {
         var groupName = LastGroups.FirstOrDefault(g =>
-            string.Equals(g.Sid, groupSid, StringComparison.OrdinalIgnoreCase))?.Username ?? groupSid;
+            SidComparer.SidEquals(g.Sid, groupSid))?.Username ?? groupSid;
 
         _membersHeaderLabel.Text = $"Members of {groupName}:";
 
@@ -154,7 +162,7 @@ public class GroupGridPopulator(
             {
                 foreach (DataGridViewRow row in _membersGrid.Rows)
                 {
-                    if (string.Equals(row.Tag as string, selectedMemberSid, StringComparison.OrdinalIgnoreCase))
+                    if (SidComparer.SidEquals(row.Tag as string, selectedMemberSid))
                     {
                         row.Selected = true;
                         _membersGrid.CurrentCell = row.Cells[0];

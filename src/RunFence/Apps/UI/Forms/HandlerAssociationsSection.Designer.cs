@@ -11,12 +11,14 @@ partial class HandlerAssociationsSection
 
     private ToolStrip _toolStrip;
     private ToolStripButton _addButton;
+    private ToolStripButton _editButton;
     private ToolStripButton _removeButton;
     private StyledDataGridView _dataGrid;
-    private DataGridViewTextBoxColumn _keyColumn;
-    private DataGridViewTextBoxColumn _argsTemplateColumn;
+    private DataGridViewTextBoxColumn colKey;
+    private DataGridViewTextBoxColumn colArgsTemplate;
     private ContextMenuStrip _contextMenu;
     private ToolStripMenuItem _ctxAdd;
+    private ToolStripMenuItem _ctxEdit;
     private ToolStripMenuItem _ctxRemove;
 
     protected override void Dispose(bool disposing)
@@ -30,12 +32,14 @@ partial class HandlerAssociationsSection
     {
         _toolStrip = new ToolStrip();
         _addButton = new ToolStripButton();
+        _editButton = new ToolStripButton();
         _removeButton = new ToolStripButton();
         _dataGrid = new StyledDataGridView();
-        _keyColumn = new DataGridViewTextBoxColumn();
-        _argsTemplateColumn = new DataGridViewTextBoxColumn();
+        colKey = new DataGridViewTextBoxColumn();
+        colArgsTemplate = new DataGridViewTextBoxColumn();
         _contextMenu = new ContextMenuStrip();
         _ctxAdd = new ToolStripMenuItem();
+        _ctxEdit = new ToolStripMenuItem();
         _ctxRemove = new ToolStripMenuItem();
 
         _toolStrip.SuspendLayout();
@@ -48,12 +52,18 @@ partial class HandlerAssociationsSection
         _toolStrip.GripStyle = ToolStripGripStyle.Hidden;
         _toolStrip.RenderMode = ToolStripRenderMode.System;
         _toolStrip.ImageScalingSize = new Size(24, 24);
-        _toolStrip.Items.AddRange(new ToolStripItem[] { _addButton, _removeButton });
+        _toolStrip.Items.AddRange(new ToolStripItem[] { _addButton, _editButton, _removeButton });
 
         // _addButton
         _addButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _addButton.ToolTipText = "Add association...";
         _addButton.Click += OnAddClick;
+
+        // _editButton
+        _editButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+        _editButton.ToolTipText = "Edit association\u2026";
+        _editButton.Enabled = false;
+        _editButton.Click += OnEditClick;
 
         // _removeButton
         _removeButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
@@ -63,35 +73,36 @@ partial class HandlerAssociationsSection
 
         // _dataGrid
         _dataGrid.Dock = DockStyle.Fill;
-        _dataGrid.AllowUserToAddRows = false;
-        _dataGrid.AllowUserToDeleteRows = false;
-        _dataGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        _dataGrid.MultiSelect = false;
         _dataGrid.ContextMenuStrip = _contextMenu;
-        _dataGrid.Columns.AddRange(new DataGridViewColumn[] { _keyColumn, _argsTemplateColumn });
+        _dataGrid.Columns.AddRange(new DataGridViewColumn[] { colKey, colArgsTemplate });
         _dataGrid.SelectionChanged += OnSelectionChanged;
         _dataGrid.KeyDown += OnKeyDown;
         _dataGrid.MouseDown += OnMouseDown;
 
-        // _keyColumn
-        _keyColumn.HeaderText = "Association";
-        _keyColumn.Name = "colKey";
-        _keyColumn.ReadOnly = true;
-        _keyColumn.Width = 130;
-        _keyColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+        // colKey
+        colKey.HeaderText = "Association";
+        colKey.Name = "colKey";
+        colKey.ReadOnly = true;
+        colKey.Width = 130;
+        colKey.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
 
-        // _argsTemplateColumn
-        _argsTemplateColumn.HeaderText = "Args Template";
-        _argsTemplateColumn.Name = "colArgsTemplate";
-        _argsTemplateColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        // colArgsTemplate
+        colArgsTemplate.HeaderText = "Args Template";
+        colArgsTemplate.Name = "colArgsTemplate";
+        colArgsTemplate.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        colArgsTemplate.ReadOnly = true;
 
         // _contextMenu
-        _contextMenu.Items.AddRange(new ToolStripItem[] { _ctxAdd, _ctxRemove });
+        _contextMenu.Items.AddRange(new ToolStripItem[] { _ctxAdd, _ctxEdit, _ctxRemove });
         _contextMenu.Opening += OnContextMenuOpening;
 
         // _ctxAdd
         _ctxAdd.Text = "Add...";
         _ctxAdd.Click += OnAddClick;
+
+        // _ctxEdit
+        _ctxEdit.Text = "Edit\u2026";
+        _ctxEdit.Click += OnEditClick;
 
         // _ctxRemove
         _ctxRemove.Text = "Remove";
@@ -99,7 +110,6 @@ partial class HandlerAssociationsSection
 
         // HandlerAssociationsSection
         AutoScaleMode = AutoScaleMode.Inherit;
-        Dock = DockStyle.Fill;
         Margin = Padding.Empty;
         Controls.Add(_dataGrid);
         Controls.Add(_toolStrip);

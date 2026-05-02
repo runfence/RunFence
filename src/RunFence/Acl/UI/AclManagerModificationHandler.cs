@@ -1,3 +1,4 @@
+using RunFence.Acl;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -7,22 +8,19 @@ using RunFence.Persistence;
 namespace RunFence.Acl.UI;
 
 /// <summary>
-/// Handles add/remove operations, scan, untrack, fix-ACLs, drag-drop, and shell file-drop
-/// events for <see cref="AclManagerDialog"/>.
+/// Handles add/remove operations, scan, untrack, and fix-ACLs for <see cref="AclManagerDialog"/>.
+/// Mouse drag-drop and shell file-drop events are handled by <see cref="AclManagerMouseEventHandler"/>,
+/// and shell path actions by <see cref="AclManagerPathActionHelper"/>, both injected directly into
+/// <see cref="AclManagerDialog"/>.
 /// </summary>
 public class AclManagerModificationHandler(
-    IAppConfigService appConfigService,
     ILoggingService log,
     IAclManagerScanService scanService,
     IDatabaseProvider databaseProvider,
-    AclManagerTraverseHelper traverseHelper,
-    AclManagerDragDropHandler dragDropHandler,
+    AclManagerTraverseOperations traverseOperations,
     AclManagerActionOrchestrator actionHandler,
     IReparsePointPromptHelper reparsePointHelper)
 {
-    private readonly AclManagerTraverseHelper _traverseHelper = traverseHelper;
-    private readonly AclManagerDragDropHandler _dragDropHandler = dragDropHandler;
-    private readonly AclManagerActionOrchestrator _actionHandler = actionHandler;
     private IAclManagerDialogHost _dialogHost = null!;
     private string _sid = null!;
     private AclManagerPendingChanges _pending = null!;
@@ -151,7 +149,7 @@ public class AclManagerModificationHandler(
     {
         if (isTraverse)
         {
-            var error = _traverseHelper.AddTraversePath(isFolder, _dialogHost);
+            var error = traverseOperations.AddTraversePath(isFolder, _dialogHost);
             if (error != null)
                 MessageBox.Show(error, "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
             _refreshTraverseGrid();
@@ -192,7 +190,7 @@ public class AclManagerModificationHandler(
         var pathsToAdd = reparsePointHelper.ResolveForAdd(selectedPath, _dialogHost);
         foreach (var p in pathsToAdd)
         {
-            var error = _actionHandler.AddGrantPathDirect(p, isDeny: false);
+            var error = actionHandler.AddGrantPathDirect(p, isDeny: false);
             if (error != null)
                 MessageBox.Show(error, "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
@@ -210,7 +208,7 @@ public class AclManagerModificationHandler(
                 .ToList();
             if (entries.Count > 0)
             {
-                _traverseHelper.RemoveTraversePaths(entries);
+                traverseOperations.RemoveTraversePaths(entries);
                 _refreshTraverseGrid();
                 _updateActionButtons();
             }
@@ -226,7 +224,7 @@ public class AclManagerModificationHandler(
 
         int traverseBefore = _pending.PendingTraverseAdds.Count + _pending.PendingTraverseRemoves.Count;
         foreach (var entry in selectedEntries)
-            _actionHandler.RemoveGrantPathDeferred(entry);
+            actionHandler.RemoveGrantPathDeferred(entry);
         int traverseAfter = _pending.PendingTraverseAdds.Count + _pending.PendingTraverseRemoves.Count;
 
         _refreshGrantsGrid();
@@ -245,7 +243,7 @@ public class AclManagerModificationHandler(
 
         int traverseBefore = _pending.PendingTraverseAdds.Count + _pending.PendingTraverseRemoves.Count;
         foreach (var entry in selectedEntries)
-            _actionHandler.UntrackGrantPath(entry);
+            actionHandler.UntrackGrantPath(entry);
         int traverseAfter = _pending.PendingTraverseAdds.Count + _pending.PendingTraverseRemoves.Count;
 
         _refreshGrantsGrid();
@@ -264,7 +262,7 @@ public class AclManagerModificationHandler(
             return;
 
         foreach (var entry in entries)
-            _actionHandler.UntrackTraversePath(entry);
+            actionHandler.UntrackTraversePath(entry);
 
         _refreshTraverseGrid();
         _updateActionButtons();
@@ -276,73 +274,11 @@ public class AclManagerModificationHandler(
         var expandedRows = isTraverseTab
             ? AclManagerSectionHeader.ExpandSectionSelection(_controls.TraverseGrid)
             : AclManagerSectionHeader.ExpandSectionSelection(_controls.GrantsGrid);
-        _actionHandler.FixAcls(expandedRows, isTraverseTab);
+        actionHandler.FixAcls(expandedRows, isTraverseTab);
         if (isTraverseTab)
             _refreshTraverseGrid();
         else
             _refreshGrantsGrid();
-        _updateActionButtons();
-    }
-
-    // --- Mouse drag ---
-
-    public void HandleGrantsMouseDown(MouseEventArgs e)
-        => _dragDropHandler.HandleMouseDown(e, _controls.GrantsGrid);
-
-    public void HandleGrantsMouseMove(MouseEventArgs e)
-        => _dragDropHandler.HandleMouseMove(e, _controls.GrantsGrid);
-
-    public void HandleTraverseMouseDown(MouseEventArgs e)
-        => _dragDropHandler.HandleMouseDown(e, _controls.TraverseGrid);
-
-    public void HandleTraverseMouseMove(MouseEventArgs e)
-        => _dragDropHandler.HandleMouseMove(e, _controls.TraverseGrid);
-
-    public void HandleGrantsMouseUp(MouseEventArgs e)
-    {
-        if (_dragDropHandler.HandleMouseUp(e, _controls.GrantsGrid))
-        {
-            _refreshGrantsGrid();
-            _updateActionButtons();
-        }
-    }
-
-    public void HandleTraverseMouseUp(MouseEventArgs e)
-    {
-        if (_dragDropHandler.HandleMouseUp(e, _controls.TraverseGrid))
-        {
-            _refreshTraverseGrid();
-            _updateActionButtons();
-        }
-    }
-
-    // --- Shell file drop ---
-
-    public void HandleGrantsFileDrop(string[] paths)
-    {
-        string? targetConfigPath = null;
-        if (appConfigService.HasLoadedConfigs)
-        {
-            var cursorClient = _controls.GrantsGrid.PointToClient(Cursor.Position);
-            var hitTest = _controls.GrantsGrid.HitTest(cursorClient.X, cursorClient.Y);
-            if (hitTest.RowIndex >= 0)
-                targetConfigPath = AclManagerSectionHeader.GetSectionConfigPath(_controls.GrantsGrid, hitTest.RowIndex);
-        }
-
-        var error = _actionHandler.HandleShellDropOnGrants(paths, targetConfigPath);
-        if (error != null)
-            MessageBox.Show(error, "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        _updateActionButtons();
-    }
-
-    public void HandleTraverseFileDrop(string[] paths)
-    {
-        string pathText = paths.Length == 1 ? paths[0] : $"{paths.Length} paths";
-        var confirm = MessageBox.Show(
-            $"Add traverse access for:\n{pathText}",
-            "Add Traverse", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-        if (confirm == DialogResult.Yes)
-            _actionHandler.HandleShellDropOnTraverse(paths);
         _updateActionButtons();
     }
 }

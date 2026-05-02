@@ -1,6 +1,5 @@
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.InteropServices;
 using RunFence.Core;
 
 namespace RunFence.Firewall.Wfp;
@@ -29,17 +28,16 @@ public sealed class WfpGlobalIcmpBlocker(ILoggingService log, IWfpFilterHelper f
         lock (_lock)
         {
             bool removing = ipv4CidrRanges.Count == 0 && ipv6CidrRanges.Count == 0;
-            if (removing)
-                log.Info("WfpGlobalIcmpBlocker: removing global ICMP block filters");
-            else
-                log.Info($"WfpGlobalIcmpBlocker: applying global ICMP block ({ipv4CidrRanges.Count} IPv4 + {ipv6CidrRanges.Count} IPv6 CIDR ranges)");
+            log.Info(removing
+                ? "WfpGlobalIcmpBlocker: removing global ICMP block filters"
+                : $"WfpGlobalIcmpBlocker: applying global ICMP block ({ipv4CidrRanges.Count} IPv4 + {ipv6CidrRanges.Count} IPv6 CIDR ranges)");
 
             _txHelper.ExecuteInTransaction("WfpGlobalIcmpBlocker", handle =>
             {
                 var v4Key = V4FilterKey;
                 var v6Key = V6FilterKey;
-                DeleteFilter(handle, ref v4Key);
-                DeleteFilter(handle, ref v6Key);
+                filterHelper.DeleteFilter(handle, ref v4Key, "WfpGlobalIcmpBlocker");
+                filterHelper.DeleteFilter(handle, ref v6Key, "WfpGlobalIcmpBlocker");
 
                 if (ipv4CidrRanges.Count > 0)
                     AddGlobalFilter(handle, V4FilterKey, isIPv6: false, WfpNative.IPPROTO_ICMP, ipv4CidrRanges);
@@ -49,67 +47,42 @@ public sealed class WfpGlobalIcmpBlocker(ILoggingService log, IWfpFilterHelper f
         }
     }
 
-    private void DeleteFilter(IntPtr handle, ref Guid key) =>
-        filterHelper.DeleteFilter(handle, ref key, "WfpGlobalIcmpBlocker");
-
     private void AddGlobalFilter(IntPtr handle, Guid filterKey, bool isIPv6, uint protocol,
         IReadOnlyList<string> cidrRanges)
     {
-        var marshalAllocs = new List<IntPtr>();
-        try
-        {
-            // Pre-allocate condition array: 1 protocol condition + up to N address conditions.
-            // Unused trailing slots remain zeroed; WFP reads only actualCondCount entries.
-            int maxConds = 1 + cidrRanges.Count;
-            var condArrayPtr = Marshal.AllocHGlobal(maxConds * 40);
-            marshalAllocs.Add(condArrayPtr);
-            WfpFilterStructHelper.ZeroMemory(condArrayPtr, maxConds * 40);
+        // Pre-allocate condition slots: 1 protocol condition + up to N address conditions.
+        // Unused trailing slots remain zeroed; WFP reads only actualCondCount entries.
+        int maxConds = 1 + cidrRanges.Count;
 
-            // Condition 0: IP_PROTOCOL = ICMP or ICMPv6 (different field → ANDed with address conditions)
-            WfpFilterStructHelper.WriteConditionInline(condArrayPtr, 0,
-                WfpNative.ConditionIpProtocol,
-                WfpNative.FWP_MATCH_EQUAL,
-                WfpNative.FWP_UINT8, protocol);
-
-            // Conditions 1..N: remote address CIDRs (same field → ORed by WFP)
-            int condIdx = 1;
-            foreach (var cidr in cidrRanges)
+        filterHelper.AddFilterGlobal(handle, maxConds, filterKey, isIPv6,
+            "RunFence Global ICMP Block", "WfpGlobalIcmpBlocker",
+            (condArrayPtr, marshalAllocs) =>
             {
-                if (isIPv6)
+                // Condition 0: IP_PROTOCOL = ICMP or ICMPv6 (different field → ANDed with address conditions)
+                WfpFilterStructHelper.WriteConditionInline(condArrayPtr, 0,
+                    WfpNative.ConditionIpProtocol,
+                    WfpNative.FWP_MATCH_EQUAL,
+                    WfpNative.FWP_UINT8, protocol);
+
+                // Conditions 1..N: remote address CIDRs (same field → ORed by WFP)
+                int condIdx = 1;
+                foreach (var cidr in cidrRanges)
                 {
-                    if (TryParseIPv6Cidr(cidr, out var addrBytes, out var prefix))
-                        WfpFilterStructHelper.WriteConditionV6Subnet(condArrayPtr, condIdx++, addrBytes, prefix, marshalAllocs);
+                    if (isIPv6)
+                    {
+                        if (TryParseIPv6Cidr(cidr, out var addrBytes, out var prefix))
+                            WfpFilterStructHelper.WriteConditionV6Subnet(condArrayPtr, condIdx++, addrBytes, prefix, marshalAllocs);
+                    }
+                    else
+                    {
+                        if (TryParseIPv4Cidr(cidr, out var addrBe, out var maskBe))
+                            WfpFilterStructHelper.WriteConditionV4Subnet(condArrayPtr, condIdx++, addrBe, maskBe, marshalAllocs);
+                    }
                 }
-                else
-                {
-                    if (TryParseIPv4Cidr(cidr, out var addrBe, out var maskBe))
-                        WfpFilterStructHelper.WriteConditionV4Subnet(condArrayPtr, condIdx++, addrBe, maskBe, marshalAllocs);
-                }
-            }
 
-            if (condIdx == 1)
-                return; // All CIDRs were invalid; skip filter
-
-            var filterPtr = Marshal.AllocHGlobal(200);
-            marshalAllocs.Add(filterPtr);
-            WfpFilterStructHelper.ZeroMemory(filterPtr, 200);
-            var namePtr = Marshal.StringToHGlobalUni("RunFence Global ICMP Block");
-            marshalAllocs.Add(namePtr);
-            WfpFilterStructHelper.WriteFilter(filterPtr, filterKey, isIPv6, condArrayPtr,
-                (uint)condIdx, namePtr, WfpNative.FWP_ACTION_BLOCK);
-
-            var addRc = WfpNative.FwpmFilterAdd0(handle, filterPtr, IntPtr.Zero, out _);
-            if (addRc != WfpNative.ERROR_SUCCESS)
-                log.Warn($"WfpGlobalIcmpBlocker: FwpmFilterAdd0 failed (0x{addRc:X8})");
-        }
-        finally
-        {
-            foreach (var ptr in marshalAllocs)
-            {
-                if (ptr != IntPtr.Zero)
-                    Marshal.FreeHGlobal(ptr);
-            }
-        }
+                // Return 0 when no valid CIDRs were written (protocol-only filter would block all ICMP, not just to specific ranges)
+                return condIdx > 1 ? condIdx : 0;
+            });
     }
 
     private static bool TryParseIPv4Cidr(string cidr, out uint addrBe, out uint maskBe)

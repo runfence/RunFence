@@ -21,6 +21,12 @@ public interface IModalCoordinator
     DialogResult ShowModal(Form dialog, IWin32Window? owner);
 
     /// <summary>
+    /// Runs <paramref name="action"/> as a modal dialog, wrapped with <see cref="BeginModal"/>/<see cref="EndModal"/> tracking,
+    /// without switching to the secure desktop.
+    /// </summary>
+    void RunModal(Action action);
+
+    /// <summary>
     /// Runs <paramref name="action"/> on the secure desktop, wrapped with <see cref="BeginModal"/>/<see cref="EndModal"/> tracking.
     /// Use for dialogs that accept sensitive input (passwords, credentials).
     /// </summary>

@@ -14,39 +14,33 @@ public class PrefTransLauncher(ILaunchFacade facade, ILoggingService log) : IPre
         string accountSid, int timeoutMs, Action? pollCallback)
     {
         var logFilePath = MakeLogFilePath(accountSid);
+        ProcessInfo process;
         try
         {
-            ProcessInfo process;
-            try
-            {
-                var identity = new AccountLaunchIdentity(accountSid);
-                var target = new ProcessLaunchTarget(prefTransPath,
-                    [command, filePath, "--logfile", logFilePath], HideWindow: true);
-                process = facade.LaunchFile(target, identity)!;
-            }
-            catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
-            {
-                log.Error($"Settings operation credential failure for {accountSid}", ex);
-                return new SettingsTransferResult(false, "Stored credentials are incorrect.");
-            }
-            catch (Exception ex)
-            {
-                log.Error("Operation failed to launch", ex);
-                return new SettingsTransferResult(false, $"Operation failed: {ex.Message}");
-            }
-
-            return HandleProcess(process, timeoutMs, logFilePath, pollCallback);
+            var identity = new AccountLaunchIdentity(accountSid);
+            var target = new ProcessLaunchTarget(prefTransPath,
+                [command, filePath, "--logfile", logFilePath], HideWindow: true);
+            process = facade.LaunchFile(target, identity)!;
         }
-        finally
+        catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
         {
-            try
-            {
-                File.Delete(logFilePath);
-            }
-            catch
-            {
-            }
+            log.Error($"Settings operation credential failure for {accountSid}", ex);
+            TryDeleteLogFile(logFilePath);
+            return new SettingsTransferResult(false, "Stored credentials are incorrect.");
         }
+        catch (Exception ex)
+        {
+            log.Error("Operation failed to launch", ex);
+            TryDeleteLogFile(logFilePath);
+            return new SettingsTransferResult(false, $"Operation failed: {ex.Message}");
+        }
+
+        var result = HandleProcess(process, timeoutMs, logFilePath, pollCallback);
+        if (result.Success)
+            TryDeleteLogFile(logFilePath);
+        else
+            log.Info($"PrefTrans: log file retained for troubleshooting at {logFilePath}");
+        return result;
     }
 
     private SettingsTransferResult HandleProcess(ProcessInfo process, int timeoutMs, string logFilePath, Action? pollCallback)
@@ -127,6 +121,17 @@ public class PrefTransLauncher(ILaunchFacade facade, ILoggingService log) : IPre
         catch (Exception ex)
         {
             log.Warn($"PrefTransLauncher: Failed to set restrictive ACL on log file: {ex.Message}");
+        }
+    }
+
+    private void TryDeleteLogFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch
+        {
         }
     }
 

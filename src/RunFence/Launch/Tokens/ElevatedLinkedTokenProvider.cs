@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using RunFence.Core;
 using RunFence.Infrastructure;
@@ -12,7 +11,7 @@ namespace RunFence.Launch.Tokens;
 /// GetTokenInformation(TOKEN_LINKED_TOKEN) to return a usable PRIMARY elevated token instead
 /// of a SecurityIdentification impersonation token.
 /// </summary>
-public class ElevatedLinkedTokenProvider(ILoggingService log)
+public class ElevatedLinkedTokenProvider(ILoggingService log) : IElevatedLinkedTokenProvider
 {
     /// <summary>
     /// Acquires the elevated linked token for <paramref name="hFilteredToken"/>.
@@ -35,31 +34,9 @@ public class ElevatedLinkedTokenProvider(ILoggingService log)
         IntPtr hSystemToken = IntPtr.Zero;
         IntPtr hImpToken = IntPtr.Zero;
 
-        log.Debug("ElevatedLinkedTokenProvider: locating winlogon.exe in current session");
-        var currentSessionId = Process.GetCurrentProcess().SessionId;
-        var winlogonProcesses = Process.GetProcessesByName("winlogon");
-        int winlogonId;
         try
         {
-            var winlogon = winlogonProcesses.FirstOrDefault(p => p.SessionId == currentSessionId);
-            if (winlogon == null)
-                throw new InvalidOperationException("winlogon.exe not found in current session");
-            winlogonId = winlogon.Id;
-        }
-        finally
-        {
-            foreach (var p in winlogonProcesses)
-                p.Dispose();
-        }
-
-        log.Debug($"ElevatedLinkedTokenProvider: winlogon PID={winlogonId}");
-
-        try
-        {
-            hProcess = ProcessLaunchNative.OpenProcess(
-                ProcessLaunchNative.PROCESS_QUERY_INFORMATION, false, (uint)winlogonId);
-            if (hProcess == IntPtr.Zero)
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcess(winlogon) failed");
+            hProcess = NativeTokenHelper.OpenWinlogonProcess();
 
             log.Debug("ElevatedLinkedTokenProvider: opening SYSTEM token");
             if (!ProcessNative.OpenProcessToken(hProcess,

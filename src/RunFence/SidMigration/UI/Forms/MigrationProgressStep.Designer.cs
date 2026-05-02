@@ -46,7 +46,6 @@ partial class MigrationProgressStep
         Controls.Add(CancelButton);
 
         AutoScaleMode = AutoScaleMode.Font;
-        Size = new Size(595, 140);
         ResumeLayout(false);
     }
 }

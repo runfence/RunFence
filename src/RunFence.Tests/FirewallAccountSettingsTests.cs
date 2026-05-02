@@ -80,4 +80,35 @@ public class FirewallAccountSettingsTests
         Assert.Equal("8080", clone.LocalhostPortExemptions[1]);
         Assert.Equal("3000-3010", clone.LocalhostPortExemptions[2]);
     }
+
+    // --- F-84: Clone with true values (preserve true→true) ---
+
+    [Fact]
+    public void Clone_PreservesAllScalarFieldsWhenTrue()
+    {
+        // Verify that true values are preserved in the clone (distinct from the existing false test)
+        var settings = new FirewallAccountSettings
+        {
+            AllowInternet = true,
+            AllowLocalhost = true,
+            AllowLan = true,
+            FilterEphemeralLoopback = true
+        };
+
+        var clone = settings.Clone();
+
+        Assert.True(clone.AllowInternet);
+        Assert.True(clone.AllowLocalhost);
+        Assert.True(clone.AllowLan);
+        Assert.True(clone.FilterEphemeralLoopback);
+        // Mutating original does not affect clone (these are value types)
+        settings.AllowInternet = false;
+        settings.AllowLocalhost = false;
+        settings.AllowLan = false;
+        settings.FilterEphemeralLoopback = false;
+        Assert.True(clone.AllowInternet);
+        Assert.True(clone.AllowLocalhost);
+        Assert.True(clone.AllowLan);
+        Assert.True(clone.FilterEphemeralLoopback);
+    }
 }

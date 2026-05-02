@@ -30,6 +30,7 @@ public class AccountContextMenuOrchestrator
     public event Action<string>? NewAppRequested;
     public event Action? DataChangedAndRefresh;
     public event EventHandler? EditCredentialRequested;
+    public event Action? ShowSystemInRunAsToggleRequested;
 
     public AccountContextMenuOrchestrator(
         AccountContextMenuHandler accountHandler,
@@ -55,7 +56,7 @@ public class AccountContextMenuOrchestrator
     }
 
     public void Initialize(DataGridView grid, ContextMenuStrip contextMenu,
-        IAccountsPanelContext panelContext,
+        IAccountsPanelOperationContext panelContext,
         ToolStripMenuItem hdrCreateContainer, AccountProcessDisplayManager? processDisplayManager = null)
     {
         _grid = grid;
@@ -97,18 +98,19 @@ public class AccountContextMenuOrchestrator
             if (GetSelectedAccountRow() is { } ar)
                 _firewallHandler.OpenFirewallAllowlist(ar);
         };
+        Items.ShowInRunAs.Click += (_, _) => ShowSystemInRunAsToggleRequested?.Invoke();
 
         Items.CreateContainer.Click += (_, _) => _containerHandler.CreateContainer();
         hdrCreateContainer.Click += (_, _) => _containerHandler.CreateContainer();
-        Items.EditContainer.Click += (_, _) =>
+        Items.EditContainer.Click += async (_, _) =>
         {
             if (GetSelectedContainerRow() is { } cr)
-                _containerHandler.EditContainer(cr);
+                await _containerHandler.EditContainer(cr);
         };
-        Items.DeleteContainer.Click += (_, _) =>
+        Items.DeleteContainer.Click += async (_, _) =>
         {
             if (GetSelectedContainerRow() is { } cr)
-                _containerHandler.DeleteContainer(cr);
+                await _containerHandler.DeleteContainer(cr);
         };
         Items.CopyContainerProfilePath.Click += (_, _) =>
         {
@@ -120,7 +122,6 @@ public class AccountContextMenuOrchestrator
             if (GetSelectedContainerRow() is { } cr)
                 _containerHandler.OpenContainerProfileFolder(cr);
         };
-        Items.ContainerFolderBrowser.Click += (_, _) => OpenFolderBrowser();
 
         foreach (var (package, item) in Items.InstallItems)
         {
@@ -208,6 +209,13 @@ public class AccountContextMenuOrchestrator
         if (GetSelectedAccountRow() is not { } ar || string.IsNullOrEmpty(ar.Sid))
             return;
         _trayToggleService.ToggleManageAssociations(ar.Sid, () => DataChangedAndRefresh?.Invoke());
+    }
+
+    public void ToggleReceiveInjectedInput()
+    {
+        if (GetSelectedAccountRow() is not { } ar || string.IsNullOrEmpty(ar.Sid))
+            return;
+        _trayToggleService.ToggleReceiveInjectedInput(ar.Sid, () => DataChangedAndRefresh?.Invoke());
     }
 
     private AccountRow? GetSelectedAccountRow()

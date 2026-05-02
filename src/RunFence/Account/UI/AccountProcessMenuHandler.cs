@@ -7,13 +7,15 @@ namespace RunFence.Account.UI;
 /// Handles context menu interactions for process rows in the accounts grid,
 /// including visibility setup and click actions (copy path, close, kill, properties).
 /// </summary>
-public class AccountProcessMenuHandler(ShellHelper shellHelper)
+public class AccountProcessMenuHandler(
+    IShellHelper shellHelper,
+    ProcessCommandLineFormatter commandLineFormatter)
 {
     private DataGridView _grid = null!;
-    private IAccountsPanelContext _context = null!;
+    private IAccountsPanelOperationContext _context = null!;
     private AccountContextMenuItems _items = null!;
 
-    public void Initialize(DataGridView grid, AccountContextMenuItems items, IAccountsPanelContext context)
+    public void Initialize(DataGridView grid, AccountContextMenuItems items, IAccountsPanelOperationContext context)
     {
         _grid = grid;
         _items = items;
@@ -33,7 +35,7 @@ public class AccountProcessMenuHandler(ShellHelper shellHelper)
         SetProcessItemsVisible(true);
 
         bool hasPath = !string.IsNullOrEmpty(processRow.Process.ExecutablePath);
-        var args = AccountGridProcessExpander.StripExeFromCommandLine(processRow.Process.CommandLine);
+        var args = commandLineFormatter.StripExecutable(processRow.Process.CommandLine);
         i.CopyProcessPath.Enabled = hasPath;
         i.CopyProcessPid.Enabled = true;
         i.CopyProcessArgs.Enabled = args != null;
@@ -92,7 +94,7 @@ public class AccountProcessMenuHandler(ShellHelper shellHelper)
     {
         if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not ProcessRow pr)
             return;
-        var args = AccountGridProcessExpander.StripExeFromCommandLine(pr.Process.CommandLine);
+        var args = commandLineFormatter.StripExecutable(pr.Process.CommandLine);
         if (args != null)
             Clipboard.SetText(args);
     }
@@ -108,16 +110,8 @@ public class AccountProcessMenuHandler(ShellHelper shellHelper)
     {
         try
         {
-            var p = pr.Process.ProcessHandle;
-            if (p != null)
-            {
-                p.CloseMainWindow();
-            }
-            else
-            {
-                using var byPid = DiagProcess.GetProcessById(pr.Process.Pid);
-                byPid.CloseMainWindow();
-            }
+            using var process = DiagProcess.GetProcessById(pr.Process.Pid);
+            process.CloseMainWindow();
         }
         catch (ArgumentException)
         {
@@ -151,16 +145,8 @@ public class AccountProcessMenuHandler(ShellHelper shellHelper)
 
         try
         {
-            var p = pr.Process.ProcessHandle;
-            if (p != null)
-            {
-                p.Kill();
-            }
-            else
-            {
-                using var byPid = DiagProcess.GetProcessById(pr.Process.Pid);
-                byPid.Kill();
-            }
+            using var process = DiagProcess.GetProcessById(pr.Process.Pid);
+            process.Kill();
         }
         catch (ArgumentException)
         {

@@ -1,32 +1,26 @@
 using System.ComponentModel;
-using RunFence.Account;
-using RunFence.Acl.UI;
-using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch;
-using RunFence.Persistence;
-using RunFence.RunAs;
 using RunFence.UI;
 using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI.Forms;
 
-public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, IApplicationsPanelState
+public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, IApplicationsPanelState, IWizardRequestSource
 {
     private readonly AppGridDragDropHandler _dragDropHandler;
 
     /// <summary>Tag type used on group header rows to distinguish them from app rows.</summary>
     public record struct ConfigGroupHeaderTag(string? ConfigPath);
 
-    private readonly IAppConfigService _appConfigService;
-    private readonly AppEntryLauncher _entryLauncher;
-    private readonly IRunAsFlowHandler _runAsFlowHandler;
-    private readonly ISidNameCacheService _sidNameCache;
-    private readonly ILoggingService _log;
+    private readonly ApplicationsPanelLaunchHandler _launchHandler;
+    private readonly ApplicationsPanelSaveHelper _saveHelper;
     private readonly ApplicationsCrudOrchestrator _crudHandler;
     private readonly ApplicationsGridPopulator _gridPopulator;
+    private readonly AppContextMenuOrchestrator _contextMenuHandler;
+    private readonly ApplicationsHandlerSyncHelper? _handlerSyncHelper;
+    private DropFilesInterceptor? _dropFilesInterceptor;
 
     // IApplicationsPanelContext explicit implementations
     AppDatabase IApplicationsPanelContext.Database => Database;
@@ -45,9 +39,6 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
     CredentialStore IApplicationsPanelState.CredentialStore => CredentialStore;
     bool IApplicationsPanelState.IsSortActive => IsSortActive;
     int IApplicationsPanelState.SortColumnIndex => SortColumnIndex;
-
-    private readonly AppContextMenuOrchestrator _contextMenuHandler;
-    private readonly ApplicationsHandlerSyncHelper? _handlerSyncHelper;
 
     public event Action? DataChanged;
     public event Action? EnforcementRequested;
@@ -74,31 +65,30 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         ApplicationsCrudOrchestrator crudOrchestrator,
         ApplicationsGridPopulator gridPopulator,
         AppGridDragDropHandler dragDropHandler,
-        IAppConfigService appConfigService,
-        AppEntryLauncher entryLauncher,
-        ISidNameCacheService sidNameCache,
-        ILoggingService log,
+        ApplicationsPanelLaunchHandler launchHandler,
+        ApplicationsPanelSaveHelper saveHelper,
         AppContextMenuOrchestrator contextMenuOrchestrator,
-        IRunAsFlowHandler runAsFlowHandler,
         ApplicationsHandlerSyncHelper? handlerSyncHelper = null)
         : base(modalCoordinator)
     {
         _crudHandler = crudOrchestrator;
         _gridPopulator = gridPopulator;
         _dragDropHandler = dragDropHandler;
-        _appConfigService = appConfigService;
-        _entryLauncher = entryLauncher;
-        _runAsFlowHandler = runAsFlowHandler;
-        _sidNameCache = sidNameCache;
-        _log = log;
+        _launchHandler = launchHandler;
+        _saveHelper = saveHelper;
         _handlerSyncHelper = handlerSyncHelper;
         InitializeComponent();
         _gridPopulator.Initialize(_grid, this, (items, key) => SortByActiveColumn(items, key));
         _crudHandler.Initialize(this);
         _dragDropHandler.Initialize(_grid, this, appId => SaveAndRefresh(appId));
         _grid.HandleCreated += (_, _) =>
-            new DropFilesInterceptor(_grid.Handle, OnGridFileDrop);
-        ConfigureReadOnlyGrid(_grid);
+        {
+            var old = _dropFilesInterceptor;
+            _dropFilesInterceptor = new DropFilesInterceptor(_grid.Handle, OnGridFileDrop);
+            old?.Dispose();
+        };
+        Disposed += (_, _) => _dropFilesInterceptor?.Dispose();
+        DataGridViewGroupHeaderHelper.SuppressGroupHeaderTooltips<ConfigGroupHeaderTag>(_grid);
         EnableThreeStateSorting(_grid, RefreshGrid, sectioned: true);
         _addButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 42);
         _wizardButton.Image = UiIconFactory.CreateToolbarIcon("\u2728", Color.FromArgb(0x33, 0x66, 0x99), 42);
@@ -146,9 +136,9 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
     private void OnGridCellMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
     {
         if (e is { Button: MouseButtons.Right, RowIndex: >= 0 } && _grid.Rows[e.RowIndex].Tag is ConfigGroupHeaderTag)
-            HandleRightClickRowSelect(_grid, e, _headerContextMenu);
+            GridSetupHelper.HandleRightClickRowSelect(_grid, e, _headerContextMenu);
         else
-            HandleRightClickRowSelect(_grid, e, _contextMenu);
+            GridSetupHelper.HandleRightClickRowSelect(_grid, e, _contextMenu);
     }
 
     private void OnGridKeyDown(object? sender, KeyEventArgs e)
@@ -170,11 +160,11 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
                 OnLaunchClick(sender, e);
                 break;
             case Keys.Apps:
-                ShowContextMenuAtRow(_grid, _contextMenu);
+                GridSetupHelper.ShowContextMenuAtRow(_grid, _contextMenu);
                 e.Handled = true;
                 break;
             case Keys.F10 when e.Shift:
-                ShowContextMenuAtRow(_grid, _contextMenu);
+                GridSetupHelper.ShowContextMenuAtRow(_grid, _contextMenu);
                 e.Handled = true;
                 break;
         }
@@ -225,8 +215,8 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
     private void OnEditClick(object? sender, EventArgs e)
         => _crudHandler.EditSelected();
 
-    private void OnRemoveClick(object? sender, EventArgs e)
-        => _crudHandler.RemoveSelected();
+    private async void OnRemoveClick(object? sender, EventArgs e)
+        => await _crudHandler.RemoveSelected();
 
     private void OnLaunchClick(object? sender, EventArgs e)
     {
@@ -247,7 +237,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
         if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
             return;
-        _runAsFlowHandler.TriggerFromUI(dlg.FileName);
+        _launchHandler.TriggerRunAs(dlg.FileName);
     }
 
     private void OnAssociationsClick(object? sender, EventArgs e)
@@ -262,8 +252,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
 
     private void OnContextMenuDataSaveAndRefresh()
     {
-        using var scope = PinDerivedKey.Unprotect();
-        _appConfigService.SaveAllConfigs(Database, scope.Data, CredentialStore.ArgonSalt);
+        _saveHelper.SaveAll();
         RefreshGrid();
         DataChanged?.Invoke();
     }
@@ -310,7 +299,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         if (_handlerSyncHelper != null && app is { IsFolder: false, IsUrlScheme: false })
         {
             _ctxSetDefaultBrowser.Visible = true;
-            _ctxSetDefaultBrowser.Checked = AppEntryHelper.IsDefaultBrowser(app.Id, _handlerSyncHelper.GetAllMappings());
+            _ctxSetDefaultBrowser.Checked = _handlerSyncHelper.IsDefaultBrowser(app.Id);
         }
         else
             _ctxSetDefaultBrowser.Visible = false;
@@ -356,45 +345,18 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         => _grid.SelectedRows.Count > 0 ? _grid.SelectedRows[0].Tag as AppEntry : null;
 
     public void LaunchApp(AppEntry app, string? launcherArguments)
-    {
-        try
-        {
-            _entryLauncher.Launch(app, launcherArguments,
-                permissionPrompt: AclPermissionDialogHelper.CreateLaunchPermissionPrompt(_sidNameCache, FindForm()));
-        }
-        catch (CredentialNotFoundException ex)
-        {
-            MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        catch (MissingPasswordException ex)
-        {
-            MessageBox.Show(ex.Message, "Missing Password", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-        catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
-        {
-            MessageBox.Show("Stored credentials are incorrect. Please update the password in RunFence.",
-                "Launch Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception ex)
-        {
-            _log.Error($"Launch failed for {app.Name}", ex);
-            MessageBox.Show($"Failed to launch: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
+        => _launchHandler.LaunchApp(app, launcherArguments, FindForm());
 
     private void SaveAndRefresh(string? selectAppId = null, int fallbackIndex = -1, bool targetedSave = false)
     {
         // Remove handler mappings for deleted apps before saving
         _handlerSyncHelper?.CleanupOrphanedMappings();
 
-        using var scope = PinDerivedKey.Unprotect();
         if (targetedSave && selectAppId != null)
-            _appConfigService.SaveConfigForApp(selectAppId, Database, scope.Data, CredentialStore.ArgonSalt);
+            _saveHelper.SaveForApp(selectAppId);
         else
-            _appConfigService.SaveAllConfigs(Database, scope.Data, CredentialStore.ArgonSalt);
+            _saveHelper.SaveAll();
+
         RefreshGrid();
         if (selectAppId != null)
             SelectAppById(selectAppId);

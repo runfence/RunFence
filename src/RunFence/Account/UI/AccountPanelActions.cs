@@ -7,12 +7,12 @@ namespace RunFence.Account.UI;
 /// Handles simple account panel actions: rename account, copy SID, copy profile path,
 /// open profile folder, and copy random password.
 /// </summary>
-public class AccountPanelActions(IWindowsAccountService windowsAccountService, ILocalUserProvider localUserProvider, ILoggingService log, ISidNameCacheService sidNameCache, ShellHelper shellHelper, ISystemDialogLauncher systemDialogLauncher)
+public class AccountPanelActions(IWindowsAccountService windowsAccountService, ILocalUserProvider localUserProvider, ILoggingService log, ISidNameCacheService sidNameCache, IShellHelper shellHelper, ISystemDialogLauncher systemDialogLauncher)
 {
     private DataGridView _grid = null!;
-    private IAccountsPanelContext _context = null!;
+    private IAccountsPanelOperationContext _context = null!;
 
-    public void Initialize(DataGridView grid, IAccountsPanelContext context)
+    public void Initialize(DataGridView grid, IAccountsPanelOperationContext context)
     {
         _grid = grid;
         _context = context;

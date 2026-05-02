@@ -12,9 +12,9 @@ partial class FirewallAllowlistDialog
 
     private Label _warningLabel;
     private StyledDataGridView _grid;
-    private DataGridViewTextBoxColumn _typeCol;
-    private DataGridViewTextBoxColumn _valueCol;
-    private DataGridViewTextBoxColumn _resolvedCol;
+    private DataGridViewTextBoxColumn Type;
+    private DataGridViewTextBoxColumn Value;
+    private DataGridViewTextBoxColumn Resolved;
     private ToolStrip _toolStrip;
     private ToolStripButton _addButton;
     private ToolStripButton _removeButton;
@@ -46,11 +46,12 @@ partial class FirewallAllowlistDialog
     private Panel _portsPanel;
     private Label _portsWarningLabel;
     private StyledDataGridView _portsGrid;
-    private DataGridViewTextBoxColumn _portCol;
+    private DataGridViewTextBoxColumn Port;
     private ContextMenuStrip _portsContextMenu;
     private ToolStripMenuItem _portsCtxAdd;
     private ToolStripMenuItem _portsCtxRemove;
     private ToolStripMenuItem _portsCtxExport;
+    private ToolTip _tooltip;
 
     private FirewallAllowlistDialog() { InitializeComponent(); }
 
@@ -66,9 +67,9 @@ partial class FirewallAllowlistDialog
         components = new Container();
         _warningLabel = new Label();
         _grid = new StyledDataGridView();
-        _typeCol = new DataGridViewTextBoxColumn();
-        _valueCol = new DataGridViewTextBoxColumn();
-        _resolvedCol = new DataGridViewTextBoxColumn();
+        Type = new DataGridViewTextBoxColumn();
+        Value = new DataGridViewTextBoxColumn();
+        Resolved = new DataGridViewTextBoxColumn();
         _toolStrip = new ToolStrip();
         _addButton = new ToolStripButton();
         _removeButton = new ToolStripButton();
@@ -100,11 +101,12 @@ partial class FirewallAllowlistDialog
         _portsPanel = new Panel();
         _portsWarningLabel = new Label();
         _portsGrid = new StyledDataGridView();
-        _portCol = new DataGridViewTextBoxColumn();
+        Port = new DataGridViewTextBoxColumn();
         _portsContextMenu = new ContextMenuStrip(components);
         _portsCtxAdd = new ToolStripMenuItem();
         _portsCtxRemove = new ToolStripMenuItem();
         _portsCtxExport = new ToolStripMenuItem();
+        _tooltip = new ToolTip(components);
 
         ((ISupportInitialize)_grid).BeginInit();
         _toolStrip.SuspendLayout();
@@ -128,32 +130,29 @@ partial class FirewallAllowlistDialog
         _warningLabel.ForeColor = Color.FromArgb(0x60, 0x40, 0x00);
         _warningLabel.Visible = false;
 
-        // _typeCol
-        _typeCol.Name = "Type";
-        _typeCol.HeaderText = "Type";
-        _typeCol.FillWeight = 15;
-        _typeCol.ReadOnly = true;
+        // Type
+        Type.Name = "Type";
+        Type.HeaderText = "Type";
+        Type.FillWeight = 15;
+        Type.ReadOnly = true;
 
-        // _valueCol
-        _valueCol.Name = "Value";
-        _valueCol.HeaderText = "Address / Domain";
-        _valueCol.FillWeight = 55;
-        _valueCol.ReadOnly = false;
+        // Value
+        Value.Name = "Value";
+        Value.HeaderText = "Address / Domain";
+        Value.FillWeight = 55;
+        Value.ReadOnly = false;
 
-        // _resolvedCol
-        _resolvedCol.Name = "Resolved";
-        _resolvedCol.HeaderText = "Resolved IPs";
-        _resolvedCol.FillWeight = 30;
-        _resolvedCol.ReadOnly = true;
+        // Resolved
+        Resolved.Name = "Resolved";
+        Resolved.HeaderText = "Resolved IPs";
+        Resolved.FillWeight = 30;
+        Resolved.ReadOnly = true;
 
         // _grid
-        _grid.AllowUserToAddRows = false;
-        _grid.AllowUserToDeleteRows = false;
-        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _grid.MultiSelect = true;
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.Dock = DockStyle.Fill;
-        _grid.Columns.AddRange(new DataGridViewColumn[] { _typeCol, _valueCol, _resolvedCol });
+        _grid.Columns.AddRange(new DataGridViewColumn[] { Type, Value, Resolved });
         _grid.SelectionChanged += OnGridSelectionChanged;
         _grid.CellEndEdit += OnGridCellEndEdit;
         _grid.KeyDown += OnGridKeyDown;
@@ -252,20 +251,17 @@ partial class FirewallAllowlistDialog
         _portsWarningLabel.ForeColor = Color.FromArgb(0x60, 0x40, 0x00);
         _portsWarningLabel.Visible = false;
 
-        // _portCol
-        _portCol.Name = "Port";
-        _portCol.HeaderText = "Port";
-        _portCol.FillWeight = 100;
-        _portCol.ReadOnly = false;
+        // Port
+        Port.Name = "Port";
+        Port.HeaderText = "Port";
+        Port.FillWeight = 100;
+        Port.ReadOnly = false;
 
         // _portsGrid
-        _portsGrid.AllowUserToAddRows = false;
-        _portsGrid.AllowUserToDeleteRows = false;
-        _portsGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _portsGrid.MultiSelect = true;
         _portsGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _portsGrid.Dock = DockStyle.Fill;
-        _portsGrid.Columns.AddRange(new DataGridViewColumn[] { _portCol });
+        _portsGrid.Columns.AddRange(new DataGridViewColumn[] { Port });
         _portsGrid.SelectionChanged += OnPortsGridSelectionChanged;
         _portsGrid.KeyDown += OnPortsGridKeyDown;
         _portsGrid.CellEndEdit += OnPortsGridCellEndEdit;
@@ -334,7 +330,7 @@ partial class FirewallAllowlistDialog
         _allowLocalhostCheckBox.CheckedChanged += OnFirewallSettingsChanged;
 
         // _filterEphemeralCheckBox
-        _filterEphemeralCheckBox.Text = "Filter loopback 49152-65535";
+        _filterEphemeralCheckBox.Text = "Filter cross-user loopback services";
         _filterEphemeralCheckBox.AutoSize = true;
         _filterEphemeralCheckBox.Margin = new Padding(16, 3, 0, 0);
         _filterEphemeralCheckBox.CheckedChanged += OnFirewallSettingsChanged;

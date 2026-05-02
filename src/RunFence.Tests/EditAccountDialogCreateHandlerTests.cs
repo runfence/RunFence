@@ -1,6 +1,7 @@
 using Moq;
 using RunFence.Account;
 using RunFence.Account.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
@@ -23,7 +24,7 @@ public class EditAccountDialogCreateHandlerTests
 
     public EditAccountDialogCreateHandlerTests()
     {
-        _account.Setup(a => a.CreateLocalUser(It.IsAny<string>(), It.IsAny<string>())).Returns(CreatedSid);
+        _account.Setup(a => a.CreateLocalUser(It.IsAny<string>(), It.IsAny<ProtectedString>())).Returns(CreatedSid);
         _licenseService.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(true);
         _handler = new EditAccountDialogCreateHandler(
             _account.Object, _groupMembership.Object, _loginRestriction.Object, _lsaRestriction.Object, _licenseService.Object);
@@ -34,8 +35,8 @@ public class EditAccountDialogCreateHandlerTests
     {
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: "newuser",
-            PasswordText: "P@ssw0rd",
-            ConfirmPasswordText: "P@ssw0rd",
+            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
+            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
             IsEphemeral: false,
             CheckedGroups: [(AdminGroupSid, "Administrators")],
             UncheckedGroups: [],
@@ -53,8 +54,8 @@ public class EditAccountDialogCreateHandlerTests
     {
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: "newuser",
-            PasswordText: "P@ssw0rd",
-            ConfirmPasswordText: "P@ssw0rd",
+            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
+            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
             IsEphemeral: false,
             CheckedGroups: [],
             UncheckedGroups: [(UserGroupSid, "Users")],
@@ -72,8 +73,8 @@ public class EditAccountDialogCreateHandlerTests
     {
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: "newuser",
-            PasswordText: "P@ssw0rd",
-            ConfirmPasswordText: "P@ssw0rd",
+            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
+            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
             IsEphemeral: false,
             CheckedGroups: [(AdminGroupSid, "Administrators")],
             UncheckedGroups: [(UserGroupSid, "Users")],
@@ -99,8 +100,8 @@ public class EditAccountDialogCreateHandlerTests
         // Arrange — empty password is allowed at the handler level; UI enforces non-empty via EditAccountDialog
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: "newuser",
-            PasswordText: "",
-            ConfirmPasswordText: "",
+            Password: ProtectedString.CreateEmpty(),
+            ConfirmPassword: ProtectedString.CreateEmpty(),
             IsEphemeral: false,
             CheckedGroups: [],
             UncheckedGroups: [],
@@ -113,7 +114,7 @@ public class EditAccountDialogCreateHandlerTests
         // Assert
         Assert.NotNull(result);
         Assert.Equal(CreatedSid, result.Sid);
-        _account.Verify(a => a.CreateLocalUser("newuser", ""), Times.Once);
+        _account.Verify(a => a.CreateLocalUser("newuser", It.Is<ProtectedString>(ps => ps.Length == 0)), Times.Once);
     }
 
     [Theory]
@@ -125,8 +126,8 @@ public class EditAccountDialogCreateHandlerTests
     {
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: name,
-            PasswordText: pwd,
-            ConfirmPasswordText: confirm,
+            Password: ProtectedString.FromChars(pwd.AsSpan()),
+            ConfirmPassword: ProtectedString.FromChars(confirm.AsSpan()),
             IsEphemeral: false,
             CheckedGroups: [],
             UncheckedGroups: [],
@@ -137,7 +138,7 @@ public class EditAccountDialogCreateHandlerTests
 
         Assert.Null(result);
         Assert.Contains(expectedError, _handler.LastValidationError);
-        _account.Verify(a => a.CreateLocalUser(It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+        _account.Verify(a => a.CreateLocalUser(It.IsAny<string>(), It.IsAny<ProtectedString>()), Times.Never);
     }
 
     // ── Restriction path tests ────────────────────────────────────────────
@@ -145,7 +146,9 @@ public class EditAccountDialogCreateHandlerTests
     private EditAccountDialogCreateHandler.CreateAccountRequest MakeRequest(
         bool allowNetworkLogin = true, bool allowLogon = true, bool allowBgAutorun = true,
         int currentHiddenCount = 0) =>
-        new(Username: "newuser", PasswordText: "P@ssw0rd", ConfirmPasswordText: "P@ssw0rd",
+        new(Username: "newuser",
+            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
+            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
             IsEphemeral: false, CheckedGroups: [], UncheckedGroups: [],
             AllowLogon: allowLogon, AllowNetworkLogin: allowNetworkLogin,
             AllowBgAutorun: allowBgAutorun, CurrentHiddenCount: currentHiddenCount);
@@ -240,7 +243,9 @@ public class EditAccountDialogCreateHandlerTests
             .Throws(new Exception("Group not found"));
 
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: "newuser", PasswordText: "P@ssw0rd", ConfirmPasswordText: "P@ssw0rd",
+            Username: "newuser",
+            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
+            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
             IsEphemeral: false,
             CheckedGroups: [("S-1-5-32-544", "Administrators")],
             UncheckedGroups: [],

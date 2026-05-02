@@ -28,8 +28,9 @@ public class ComFirewallRuleManager(ILoggingService log) : IFirewallRuleManager
                     continue;
                 results.Add(RuleToInfo(rule));
             }
-            catch (COMException)
+            catch (COMException ex)
             {
+                log.Debug($"COM error reading rule in GetRulesByGroup: {ex.Message}");
             }
         }
 
@@ -59,8 +60,9 @@ public class ComFirewallRuleManager(ILoggingService log) : IFirewallRuleManager
                     return;
                 }
             }
-            catch (COMException)
+            catch (COMException ex)
             {
+                log.Debug($"COM error reading rule in UpdateRule: {ex.Message}");
             }
         }
 

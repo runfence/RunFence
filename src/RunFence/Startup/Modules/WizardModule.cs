@@ -1,5 +1,7 @@
 using Autofac;
 using RunFence.Apps.UI;
+using RunFence.Infrastructure;
+using RunFence.Startup;
 using RunFence.Wizard;
 using RunFence.Wizard.Templates;
 using RunFence.Wizard.UI;
@@ -12,6 +14,7 @@ public class WizardModule : Module
     protected override void Load(ContainerBuilder builder)
     {
         builder.RegisterType<WizardLauncher>()
+            .As<IWizardLauncher>()
             .AsSelf()
             .SingleInstance();
 
@@ -55,6 +58,10 @@ public class WizardModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<WizardAccountPickerStepFactory>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<AppEntryBuilder>()
             .AsSelf()
             .SingleInstance();
@@ -72,6 +79,10 @@ public class WizardModule : Module
             .SingleInstance();
 
         builder.RegisterType<AiAgentFirewallOrchestrator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<GamingLogonBlockHelper>()
             .AsSelf()
             .SingleInstance();
 

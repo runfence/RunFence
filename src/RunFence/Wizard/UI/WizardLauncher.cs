@@ -1,3 +1,4 @@
+using RunFence.Infrastructure;
 using RunFence.Wizard.UI.Forms;
 
 namespace RunFence.Wizard.UI;
@@ -9,7 +10,7 @@ namespace RunFence.Wizard.UI;
 /// Post-wizard actions queued by individual templates (e.g., opening the firewall allowlist dialog
 /// for AI Agent) are executed sequentially after the dialog closes, before <see cref="WizardCompleted"/>.
 /// </summary>
-public class WizardLauncher(Func<WizardDialog> dialogFactory, IEnumerable<IWizardTemplate> templates)
+public class WizardLauncher(Func<WizardDialog> dialogFactory, IEnumerable<IWizardTemplate> templates) : IWizardLauncher
 {
     /// <summary>
     /// Fired after the wizard dialog closes and all post-wizard actions have executed,
@@ -29,7 +30,7 @@ public class WizardLauncher(Func<WizardDialog> dialogFactory, IEnumerable<IWizar
         await Task.WhenAll(templates.Select(t => t.WarmCacheAsync()));
 
         using var dlg = dialogFactory();
-        dlg.ShowDialog(owner);
+        await dlg.ShowDialogAsync(owner);
 
         foreach (var action in dlg.PostWizardActions)
             action(owner);

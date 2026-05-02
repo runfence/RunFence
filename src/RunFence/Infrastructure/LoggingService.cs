@@ -1,43 +1,53 @@
+using System.Diagnostics;
 using RunFence.Core;
+using RunFence.Core.Models;
 
 namespace RunFence.Infrastructure;
 
 public class LoggingService(string? logFilePath = null, long? maxFileSizeBytes = null) : ILoggingService, IDisposable
 {
-    private readonly object _lock = new();
-    private readonly long _maxFileSizeBytes = maxFileSizeBytes ?? Constants.MaxLogFileSize;
+    private readonly Lock _lock = new();
+    private readonly long _maxFileSizeBytes = maxFileSizeBytes ?? PathConstants.MaxLogFileSize;
 
-    private volatile bool _enabled = true;
+    private volatile LogVerbosity _verbosity = LogVerbosity.Info;
     private StreamWriter? _writer;
     private bool _disposed;
 
-    public string LogFilePath { get; } = logFilePath ?? Constants.LogFilePath;
+    public string LogFilePath { get; } = logFilePath ?? PathConstants.LogFilePath;
 
     public bool Enabled
     {
-        get => _enabled;
-        set => _enabled = value;
+        get => Verbosity != LogVerbosity.Off;
+        set => Verbosity = value
+            ? Verbosity == LogVerbosity.Off ? LogVerbosity.Info : Verbosity
+            : LogVerbosity.Off;
     }
 
-    public void Debug(string message) => Log("DEBUG", message);
-    public void Info(string message) => Log("INFO", message);
-    public void Warn(string message) => Log("WARN", message);
+    public LogVerbosity Verbosity
+    {
+        get => _verbosity;
+        set => _verbosity = value;
+    }
+
+    public void Debug(string message) => Log(LogVerbosity.Debug, "DEBUG", message);
+    public void Info(string message) => Log(LogVerbosity.Info, "INFO", message);
+    public void Warn(string message) => Log(LogVerbosity.Warning, "WARN", message);
 
     public void Error(string message, Exception? ex = null)
     {
         var logMessage = ex != null ? $"{message} | {ex.GetType().Name}: {ex.Message}" : message;
-        Log("ERROR", logMessage);
+        Log(LogVerbosity.Error, "ERROR", logMessage);
     }
 
     public void Fatal(string message, Exception? ex = null)
     {
         var logMessage = ex != null ? $"{message} | {ex}" : message;
-        Log("FATAL", logMessage, force: true);
+        Log(LogVerbosity.Error, "FATAL", logMessage, force: true);
     }
 
-    private void Log(string level, string message, bool force = false)
+    private void Log(LogVerbosity messageVerbosity, string level, string message, bool force = false)
     {
-        if (!force && !Enabled)
+        if (!force && (Verbosity == LogVerbosity.Off || messageVerbosity > Verbosity))
             return;
         if (_disposed)
             return;
@@ -87,12 +97,24 @@ public class LoggingService(string? logFilePath = null, long? maxFileSizeBytes =
 
             var backup = LogFilePath + ".bak";
             if (File.Exists(backup))
-                File.Delete(backup);
+            {
+                try { File.Delete(backup); }
+                catch { /* best effort — still attempt move */ }
+            }
             File.Move(LogFilePath, backup);
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort rotation
+            try
+            {
+                EventLog.WriteEntry("Application",
+                    $"RunFence: log rotation failed for '{LogFilePath}': {ex.Message}",
+                    EventLogEntryType.Warning);
+            }
+            catch
+            {
+                // Event Log write also failed — nothing more we can do
+            }
         }
     }
 

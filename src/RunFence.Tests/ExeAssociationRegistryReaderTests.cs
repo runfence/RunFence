@@ -1,9 +1,7 @@
-using Microsoft.Win32;
 using Moq;
 using RunFence.Acl.Permissions;
 using RunFence.Apps;
 using RunFence.Core;
-using RunFence.Infrastructure;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -120,7 +118,7 @@ public class ExeAssociationRegistryReaderTests : IDisposable
     public void GetHandledAssociations_RunFenceProgIdAsDefault_ExcludesKey()
     {
         using var extKey = _registry.HkuRoot.CreateSubKey($@"{TestSid}\Software\Classes\.pdf");
-        extKey.SetValue(null, $"{Constants.HandlerProgIdPrefix}.pdf");
+        extKey.SetValue(null, $"{PathConstants.HandlerProgIdPrefix}.pdf");
 
         var reader = CreateReader();
         var keys = reader.GetHandledAssociations(AppExe);

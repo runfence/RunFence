@@ -16,6 +16,7 @@ public partial class ConfigManagerSection
     private ToolStripButton _configUnloadButton;
     private ToolStripButton _configExportButton;
     private ToolStripButton _configImportButton;
+    private ToolStripSeparator _configToolStripSep;
     private ListBox _configListBox;
     private ContextMenuStrip _configContextMenu;
     private ToolStripMenuItem _ctxConfigUnload;
@@ -42,6 +43,7 @@ public partial class ConfigManagerSection
         _configUnloadButton = new ToolStripButton();
         _configExportButton = new ToolStripButton();
         _configImportButton = new ToolStripButton();
+        _configToolStripSep = new ToolStripSeparator();
         _configListBox = new ListBox();
         _configContextMenu = new ContextMenuStrip();
         _ctxConfigUnload = new ToolStripMenuItem();
@@ -64,7 +66,7 @@ public partial class ConfigManagerSection
         _configsGroup.Controls.Add(_configDesc);
 
         // _configDesc
-        _configDesc.Text = "Main config and loaded additional configs. Loaded configs are not persisted across restarts. Exported config contains app entries without credentials. The main config export also includes account SID-to-name mappings (account usernames).";
+        _configDesc.Text = "Additional configs are not persisted across restarts";
         _configDesc.Dock = DockStyle.Top;
         _configDesc.AutoSize = false;
         _configDesc.Resize += OnConfigDescResize;
@@ -77,7 +79,7 @@ public partial class ConfigManagerSection
         _configToolStrip.Items.AddRange(new ToolStripItem[]
         {
             _configNewButton, _configLoadButton, _configUnloadButton,
-            new ToolStripSeparator(),
+            _configToolStripSep,
             _configExportButton, _configImportButton
         });
 
@@ -138,7 +140,6 @@ public partial class ConfigManagerSection
 
         // ConfigManagerSection
         AutoScaleMode = AutoScaleMode.Inherit;
-        Dock = DockStyle.Fill;
         Margin = Padding.Empty;
         Controls.Add(_configsGroup);
 

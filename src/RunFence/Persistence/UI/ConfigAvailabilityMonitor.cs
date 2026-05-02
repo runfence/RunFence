@@ -1,6 +1,5 @@
 using RunFence.Core;
 using RunFence.Infrastructure;
-using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Persistence.UI;
 
@@ -14,10 +13,11 @@ public class ConfigAvailabilityMonitor(
     ILoggingService log,
     IAppStateProvider appStateProvider,
     IUiThreadInvoker uiThreadInvoker,
-    OperationGuard enforcementGuard)
+    OperationGuard enforcementGuard,
+    IUiTimerFactory uiTimerFactory)
     : IDisposable
 {
-    private Timer? _timer;
+    private IUiTimer? _timer;
 
     /// <summary>
     /// Raised on the UI thread when one or more loaded configs become unavailable and should be auto-unloaded.
@@ -41,7 +41,8 @@ public class ConfigAvailabilityMonitor(
 
         if (_timer == null)
         {
-            _timer = new Timer { Interval = 1000 };
+            _timer = uiTimerFactory.Create();
+            _timer.Interval = 1000;
             _timer.Tick += (_, _) => OnAvailabilityCheckTick();
         }
 

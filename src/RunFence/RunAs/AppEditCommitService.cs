@@ -15,6 +15,7 @@ public class AppEditCommitService(
     ILoggingService log,
     SessionContext session,
     RunAsAppEntryManager appEntryManager,
+    AppEntryPersistenceOrchestrator persistenceOrchestrator,
     IAppStateProvider appState) : IAppEditCommitService
 {
     public bool Commit(AppEntry newApp, AppEntry? previousApp, string? configPath)
@@ -36,7 +37,7 @@ public class AppEditCommitService(
                     appEntryManager.ApplyAppChanges(newApp);
                     SaveAllConfigsCore();
                 }
-                catch
+                catch (Exception applyEx)
                 {
                     appState.Database.Apps[index] = previousApp;
                     appConfigService.AssignApp(previousApp.Id, originalConfigPath);
@@ -47,6 +48,7 @@ public class AppEditCommitService(
                     catch (Exception restoreEx)
                     {
                         log.Error("AppEditCommitService: failed to restore ACL after edit failure", restoreEx);
+                        throw new AggregateException("Edit failed and ACL restore also failed.", applyEx, restoreEx);
                     }
 
                     throw;
@@ -54,7 +56,7 @@ public class AppEditCommitService(
             }
             else
             {
-                if (!appEntryManager.PersistNewAppEntry(newApp, configPath))
+                if (!persistenceOrchestrator.PersistNewAppEntry(newApp, configPath))
                     return false;
             }
 
@@ -73,19 +75,6 @@ public class AppEditCommitService(
         {
             log.Error("AppEditCommitService: commit failed", ex);
             return false;
-        }
-    }
-
-    public void Rollback(AppEntry originalApp, string? configPath)
-    {
-        try
-        {
-            appConfigService.AssignApp(originalApp.Id, configPath);
-            appEntryManager.ApplyAppChanges(originalApp);
-        }
-        catch (Exception ex)
-        {
-            log.Error("AppEditCommitService: rollback failed", ex);
         }
     }
 

@@ -1,4 +1,3 @@
-using RunFence.Core;
 using RunFence.Core.Ipc;
 using RunFence.Infrastructure;
 
@@ -9,7 +8,7 @@ namespace RunFence.Ipc;
 /// Translates <see cref="ObjectDisposedException"/> and <see cref="InvalidOperationException"/>
 /// (thrown when the UI form is being disposed during shutdown) into a structured IPC shutdown response.
 /// </summary>
-public class IpcUiInvoker(IUiThreadInvoker uiThreadInvoker, IAppStateProvider appState)
+public class IpcUiInvoker(IUiThreadInvoker uiThreadInvoker, IAppStateProvider appState) : IIpcUiInvoker
 {
     private static readonly IpcResponse ShuttingDownResponse =
         new() { Success = false, ErrorMessage = "Application is shutting down." };

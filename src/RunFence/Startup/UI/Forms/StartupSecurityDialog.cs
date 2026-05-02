@@ -1,6 +1,5 @@
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
-using RunFence.Startup;
 
 namespace RunFence.Startup.UI.Forms;
 
@@ -14,6 +13,16 @@ public partial class StartupSecurityDialog : Form
         _findings = findings;
         _findingLocationHelper = findingLocationHelper;
         InitializeComponent();
+        _listView.Groups.Add(new ListViewGroup("Startup Folders", HorizontalAlignment.Left) { Name = "StartupFolder" });
+        _listView.Groups.Add(new ListViewGroup("Registry Autorun Keys", HorizontalAlignment.Left) { Name = "RegistryRunKey" });
+        _listView.Groups.Add(new ListViewGroup("Autorun Executables", HorizontalAlignment.Left) { Name = "AutorunExecutable" });
+        _listView.Groups.Add(new ListViewGroup("Task Scheduler", HorizontalAlignment.Left) { Name = "TaskScheduler" });
+        _listView.Groups.Add(new ListViewGroup("Logon Scripts", HorizontalAlignment.Left) { Name = "LogonScript" });
+        _listView.Groups.Add(new ListViewGroup("Auto-Start Services", HorizontalAlignment.Left) { Name = "AutoStartService" });
+        _listView.Groups.Add(new ListViewGroup("Disk Root ACLs", HorizontalAlignment.Left) { Name = "DiskRootAcl" });
+        _listView.Groups.Add(new ListViewGroup("Account Policy", HorizontalAlignment.Left) { Name = "AccountPolicy" });
+        _listView.Groups.Add(new ListViewGroup("Windows Firewall", HorizontalAlignment.Left) { Name = "FirewallPolicy" });
+        _listView.Groups.Add(new ListViewGroup("Other", HorizontalAlignment.Left) { Name = "Other" });
         Icon = AppIcons.GetAppIcon();
         PopulateFindings();
         _listView.SelectedIndexChanged += (_, _) =>

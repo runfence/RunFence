@@ -1,5 +1,5 @@
-using System.Security;
-using RunFence.Account.UI.Forms;
+using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
@@ -7,7 +7,7 @@ namespace RunFence.Wizard;
 
 public class WizardCredentialCollector(
     ISecureDesktopRunner secureDesktopRunner,
-    Func<CredentialEditDialog> credentialEditDialogFactory)
+    ICredentialDialogRunner credentialDialogRunner)
 {
     /// <summary>
     /// Checks if the account already has a stored credential. If not, shows the
@@ -15,14 +15,14 @@ public class WizardCredentialCollector(
     /// Returns the collected password, or null if credential already exists.
     /// Throws OperationCanceledException if collection fails or user cancels.
     /// </summary>
-    public SecureString? CollectIfNeeded(string sid, SessionContext session, IWizardProgressReporter progress)
+    public ProtectedString? CollectIfNeeded(string sid, SessionContext session, IWizardProgressReporter progress)
     {
         bool alreadyHasCredential = session.CredentialStore.Credentials
-            .Any(c => string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase));
+            .Any(c => SidComparer.SidEquals(c.Sid, sid));
         if (alreadyHasCredential)
             return null;
 
-        SecureString? collected = null;
+        ProtectedString? collected = null;
         Exception? dialogException = null;
         var credEntry = new CredentialEntry { Id = Guid.NewGuid(), Sid = sid };
 
@@ -30,11 +30,9 @@ public class WizardCredentialCollector(
         {
             secureDesktopRunner.Run(() =>
             {
-                using var dlg = credentialEditDialogFactory();
-                dlg.Initialize(existing: credEntry,
-                    sidNames: session.Database.SidNames);
-                if (dlg.ShowDialog() == DialogResult.OK)
-                    collected = dlg.Password;
+                var result = credentialDialogRunner.ShowCredentialDialog(credEntry, session.Database.SidNames);
+                if (result.Accepted)
+                    collected = result.Password;
             });
         }
         catch (Exception ex) { dialogException = ex; }

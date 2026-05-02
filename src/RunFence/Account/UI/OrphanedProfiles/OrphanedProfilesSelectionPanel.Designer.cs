@@ -33,6 +33,7 @@ partial class OrphanedProfilesSelectionPanel
         _deselectAllButton = new Button();
 
         SuspendLayout();
+        Size = new Size(900, 630);
 
         // _descLabel
         _descLabel.Location = new Point(15, 15);

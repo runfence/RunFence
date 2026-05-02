@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Firewall;
 using RunFence.Infrastructure;
 using RunFence.Ipc;
@@ -15,6 +16,7 @@ public class StartupIpcBootstrapper(
     IIpcServerService ipcServer,
     IIpcMessageHandler ipcHandler,
     IFirewallEnforcementOrchestrator firewallEnforcementOrchestrator,
+    DynamicPortRangeChecker portRangeChecker,
     ISessionProvider sessionProvider,
     ILoggingService log)
 {
@@ -42,6 +44,12 @@ public class StartupIpcBootstrapper(
                 try
                 {
                     firewallEnforcementOrchestrator.EnforceAll(enforcementSnapshot);
+
+                    bool hasLocalhostBlocking = enforcementSnapshot.Accounts.Any(a =>
+                        a.Firewall is { AllowLocalhost: false, FilterEphemeralLoopback: true });
+                    if (hasLocalhostBlocking)
+                        mainForm.BeginInvoke(() => _ = portRangeChecker.CheckIfNeededAsync(
+                            new FirewallAccountSettings { AllowLocalhost = false }));
                 }
                 catch (Exception ex)
                 {

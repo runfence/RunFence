@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using RunFence.Acl;
 using RunFence.Acl.QuickAccess;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -156,8 +157,7 @@ public class PrepareSystemTemplate(
 
     private static string GetAclBackupPath()
     {
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        return Path.Combine(appData, "RunFence", "drive-acl-backup.txt");
+        return Path.Combine(PathConstants.LocalAppDataDir, "drive-acl-backup.txt");
     }
 
     private sealed class CommitData

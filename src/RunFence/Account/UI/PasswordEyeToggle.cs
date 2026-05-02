@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Runtime.CompilerServices;
 
 namespace RunFence.Account.UI;
 
@@ -12,6 +13,15 @@ public static class PasswordEyeToggle
     private const int EC_RIGHTMARGIN = 2;
     private const int WM_COPY = 0x0301;
     private const int WM_CUT = 0x0300;
+    private const uint WDA_NONE = 0x00000000;
+    private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+
+    // Per-form reference count of currently-revealed password controls.
+    // Only the first reveal sets the affinity; only the last un-reveal restores it.
+    // Weak keys ensure forms are not kept alive by this table.
+    private static readonly ConditionalWeakTable<Form, RevealCounter> _formRevealCounts = new();
+
+    private sealed class RevealCounter { public int Count; }
 
     /// <summary>
     /// Adds an eye toggle button inside the given password TextBox.
@@ -46,10 +56,25 @@ public static class PasswordEyeToggle
         btn.FlatAppearance.MouseOverBackColor = Color.FromArgb(0xE8, 0xE8, 0xE8);
         btn.FlatAppearance.MouseDownBackColor = Color.FromArgb(0xD8, 0xD8, 0xD8);
 
+        bool isRevealed = false;
+        Form? cachedForm = null;
+
+        void CacheForm()
+        {
+            cachedForm = textBox.FindForm();
+        }
+
+        if (textBox.IsHandleCreated)
+            CacheForm();
+        else
+            textBox.HandleCreated += (_, _) => CacheForm();
+
         btn.Click += (_, _) =>
         {
             textBox.UseSystemPasswordChar = !textBox.UseSystemPasswordChar;
+            isRevealed = !textBox.UseSystemPasswordChar;
             btn.Image = textBox.UseSystemPasswordChar ? eyeOpen : eyeSlashed;
+            ApplyRevealAffinity(textBox, isRevealed);
             textBox.Focus();
         };
 
@@ -57,6 +82,12 @@ public static class PasswordEyeToggle
         {
             eyeOpen.Dispose();
             eyeSlashed.Dispose();
+        };
+
+        textBox.Disposed += (_, _) =>
+        {
+            if (isRevealed)
+                ApplyRevealAffinity(cachedForm, false);
         };
 
         textBox.Controls.Add(btn);
@@ -73,7 +104,39 @@ public static class PasswordEyeToggle
             textBox.HandleCreated += (_, _) => ApplyRightMargin(textBox, btnWidth);
     }
 
-    private static void UpdateButtonForEnabledState(Button btn, bool enabled)
+    /// <summary>
+    /// Applies or removes WDA_EXCLUDEFROMCAPTURE on the form that owns <paramref name="control"/>.
+    /// Reference-counted so multiple password boxes on the same form cooperate correctly.
+    /// </summary>
+    public static void ApplyRevealAffinity(Control control, bool reveal)
+        => ApplyRevealAffinity(control.FindForm(), reveal);
+
+    /// <summary>
+    /// Applies or removes WDA_EXCLUDEFROMCAPTURE on <paramref name="form"/>.
+    /// Accepts a cached form reference so that callers on the disposal path (where
+    /// <c>control.FindForm()</c> returns null) can still decrement the counter correctly.
+    /// </summary>
+    public static void ApplyRevealAffinity(Form? form, bool reveal)
+    {
+        if (form is null || !form.IsHandleCreated)
+            return;
+
+        var counter = _formRevealCounts.GetOrCreateValue(form);
+        if (reveal)
+        {
+            counter.Count++;
+            if (counter.Count == 1)
+                PasswordEyeToggleNative.SetWindowDisplayAffinity(form.Handle, WDA_EXCLUDEFROMCAPTURE);
+        }
+        else
+        {
+            counter.Count = Math.Max(0, counter.Count - 1);
+            if (counter.Count == 0)
+                PasswordEyeToggleNative.SetWindowDisplayAffinity(form.Handle, WDA_NONE);
+        }
+    }
+
+    internal static void UpdateButtonForEnabledState(Button btn, bool enabled)
     {
         btn.Enabled = enabled;
         btn.BackColor = enabled ? SystemColors.Window : SystemColors.Control;
@@ -87,7 +150,7 @@ public static class PasswordEyeToggle
 
     private static void ApplyRightMargin(TextBox textBox, int margin)
     {
-        PasswordEyeToggleNative.SendMessage(textBox.Handle, EM_SETMARGINS, EC_RIGHTMARGIN, (IntPtr)(margin << 16));
+        PasswordEyeToggleNative.SendMessage(textBox.Handle, EM_SETMARGINS, EC_RIGHTMARGIN, margin << 16);
     }
 
     private sealed class ClipboardInterceptor : NativeWindow
@@ -129,7 +192,7 @@ public static class PasswordEyeToggle
         }
     }
 
-    private static Image CreateEyeImage(int size, bool slashed)
+    internal static Image CreateEyeImage(int size, bool slashed)
     {
         if (size < 8)
             size = 12;

@@ -3,7 +3,6 @@ using System.Security.Principal;
 using Microsoft.Win32;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
-using RunFence.Infrastructure;
 
 namespace RunFence.Launch.Container;
 
@@ -163,10 +162,7 @@ public class AppContainerEnvironmentSetup(ILoggingService log, IShortcutComHelpe
             var dataPath = AppContainerPaths.GetContainerDataPath(containerName);
 
             var keyPath = $@"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{sidStr}\User Shell Folders";
-            using var key = Registry.CurrentUser.CreateSubKey(keyPath);
-            if (key == null)
-                return;
-
+            using RegistryKey key = Registry.CurrentUser.CreateSubKey(keyPath);
             key.SetValue("AppData", Path.Combine(dataPath, "Roaming"), RegistryValueKind.ExpandString);
             key.SetValue("Local AppData", Path.Combine(dataPath, "Local"), RegistryValueKind.ExpandString);
             key.SetValue("Cache", Path.Combine(dataPath, "Temp"), RegistryValueKind.ExpandString);

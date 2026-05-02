@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using System.Text;
-using Microsoft.Win32;
 using RunFence.Core.Models;
 
 namespace RunFence.Core;
@@ -207,73 +206,9 @@ public class SidResolver : ISidResolver
         return true;
     }
 
-    public string? TryResolveNameFromRegistry(string sid)
-    {
-        var path = TryGetProfilePath(sid);
-        if (path == null)
-            return null;
-        var leaf = Path.GetFileName(path);
-        return string.IsNullOrEmpty(leaf) ? null : leaf;
-    }
-
-    public string? TryGetProfilePath(string sid)
-    {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                $@"{Constants.ProfileListRegistryKey}\{sid}");
-            var raw = key?.GetValue("ProfileImagePath") as string;
-            return string.IsNullOrEmpty(raw) ? null : Environment.ExpandEnvironmentVariables(raw);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
     public string GetCurrentUserSid() => SidResolutionHelper.GetCurrentUserSid();
 
-    public string? TryGetDesktopPath(string sid, bool isCurrentAccount)
-    {
-        if (isCurrentAccount)
-            return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-
-        var profilePath = TryGetProfilePath(sid);
-        return profilePath == null ? null : Path.Combine(profilePath, "Desktop");
-    }
-
-    public string? TryGetStartMenuProgramsPath(string sid, bool isCurrentAccount)
-    {
-        if (isCurrentAccount)
-        {
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                @"Microsoft\Windows\Start Menu\Programs");
-        }
-
-        var profilePath = TryGetProfilePath(sid);
-        if (profilePath == null)
-            return null;
-        return Path.Combine(profilePath, @"AppData\Roaming\Microsoft\Windows\Start Menu\Programs");
-    }
-
-    public string? TryGetTaskBarPath(string sid, bool isCurrentAccount)
-    {
-        if (isCurrentAccount)
-        {
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                @"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
-        }
-
-        var profilePath = TryGetProfilePath(sid);
-        if (profilePath == null)
-            return null;
-        return Path.Combine(profilePath,
-            @"AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
-    }
-
-    public string? ResolveSidFromName(string accountName, List<LocalUserAccount>? localUsers)
+    public string? ResolveSidFromName(string accountName, IReadOnlyList<LocalUserAccount>? localUsers)
     {
         var match = localUsers?.FirstOrDefault(u =>
             string.Equals(u.Username, accountName, StringComparison.OrdinalIgnoreCase));

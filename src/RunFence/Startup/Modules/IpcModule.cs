@@ -9,9 +9,17 @@ public class IpcModule : Module
     {
         builder.RegisterType<WindowsIpcIdentityExtractor>()
             .As<IIpcIdentityExtractor>()
-            .InstancePerDependency();
+            .SingleInstance();
 
         builder.RegisterType<IpcConnectionProcessor>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<CurrentProcessSidProvider>()
+            .As<ICurrentProcessSidProvider>()
+            .SingleInstance();
+
+        builder.RegisterType<IpcPipeSecurityFactory>()
             .AsSelf()
             .SingleInstance();
 
@@ -20,6 +28,14 @@ public class IpcModule : Module
             .SingleInstance();
 
         builder.RegisterType<IpcUiInvoker>()
+            .As<IIpcUiInvoker>()
+            .SingleInstance();
+
+        builder.RegisterType<IpcConfigHandler>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<IpcLifecycleHandler>()
             .AsSelf()
             .SingleInstance();
 

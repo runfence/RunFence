@@ -11,19 +11,20 @@ public class AccountsPanelGridInteraction
 
     public GridClickAction HandleCellContentClick(DataGridViewRow row, string colName)
     {
-        if (row.Tag is AccountRow accountRow)
+        switch (row.Tag)
         {
-            switch (colName)
-            {
-                case "Logon" when !row.Cells[colName].ReadOnly:
-                    return GridClickAction.ToggleLogon(accountRow);
-                case "colAllowInternet" when !row.Cells[colName].ReadOnly:
-                    return GridClickAction.ToggleInternet(accountRow);
-            }
-        }
-        else if (row.Tag is ContainerRow containerRow && colName == "colAllowInternet" && !row.Cells[colName].ReadOnly)
-        {
-            return GridClickAction.ToggleContainerInternet(containerRow);
+            case AccountRow accountRow:
+                switch (colName)
+                {
+                    case "Logon" when !row.Cells[colName].ReadOnly:
+                        return GridClickAction.ToggleLogon(accountRow);
+                    case "colAllowInternet" when !row.Cells[colName].ReadOnly:
+                        return GridClickAction.ToggleInternet(accountRow);
+                }
+
+                break;
+            case ContainerRow containerRow when colName == "colAllowInternet" && !row.Cells[colName].ReadOnly:
+                return GridClickAction.ToggleContainerInternet(containerRow);
         }
 
         return GridClickAction.None;

@@ -200,7 +200,7 @@ public class NativePolicyDataAccess
             using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\MpsSvc");
             if (key == null)
                 return null;
-            bool isDisabled = key.GetValue("Start") is int and 4;
+            bool isDisabled = key.GetValue("Start") is 4;
 
             bool isStopped = false;
             var scm = OpenSCManager(null, null, SC_MANAGER_CONNECT);
@@ -373,7 +373,7 @@ public class NativePolicyDataAccess
             {
                 int status = LsaLookupSids(policy, validEntries.Count, sidPtrs,
                     out nint domains, out nint names);
-                if (status == STATUS_SUCCESS || status == STATUS_SOME_NOT_MAPPED)
+                if (status is STATUS_SUCCESS or STATUS_SOME_NOT_MAPPED)
                 {
                     try
                     {
@@ -381,8 +381,7 @@ public class NativePolicyDataAccess
                         for (int i = 0; i < validEntries.Count; i++)
                         {
                             var entry = Marshal.PtrToStructure<LSA_TRANSLATED_NAME>(names + i * stride);
-                            if (entry.Use == SID_TYPE_ALIAS
-                                && entry.Name.Length > 0
+                            if (entry is { Use: SID_TYPE_ALIAS, Name.Length: > 0 }
                                 && entry.Name.Buffer != nint.Zero)
                             {
                                 var name = Marshal.PtrToStringUni(entry.Name.Buffer,

@@ -21,8 +21,8 @@ public class DatabaseServiceTests : IDisposable
         var log = new Mock<ILoggingService>();
         _tempDir = new TempDirectory("RunFence_DbTest");
         var paths = new TestConfigPaths(_tempDir.Path);
-        _service = new DatabaseService(log.Object, paths);
-        _plaintextService = new DatabaseService(log.Object, paths, allowPlaintextConfig: true);
+        _service = new DatabaseService(log.Object, paths, appFilter: null, allowPlaintextConfig: false);
+        _plaintextService = new DatabaseService(log.Object, paths, appFilter: null, allowPlaintextConfig: true);
         _pinDerivedKey = new byte[32];
         new Random(42).NextBytes(_pinDerivedKey);
         _argonSalt = new byte[32];
@@ -40,6 +40,24 @@ public class DatabaseServiceTests : IDisposable
         var db = _service.LoadConfig(_pinDerivedKey);
         Assert.NotNull(db);
         Assert.Empty(db.Apps);
+    }
+
+    [Theory]
+    [InlineData(true)]  // file exists, loaded from disk
+    [InlineData(false)] // file missing, returns empty database
+    public void LoadConfig_SystemAccount_HasHighestAllowed(bool fileExists)
+    {
+        // Arrange
+        if (fileExists)
+            _service.SaveConfig(new AppDatabase(), _pinDerivedKey, _argonSalt);
+
+        // Act
+        var db = _service.LoadConfig(_pinDerivedKey);
+
+        // Assert: SYSTEM account is present with HighestAllowed regardless of whether the file existed
+        var system = db.GetAccount(SidConstants.SystemSid);
+        Assert.NotNull(system);
+        Assert.Equal(PrivilegeLevel.HighestAllowed, system.PrivilegeLevel);
     }
 
     [Fact]
@@ -353,7 +371,7 @@ public class DatabaseServiceTests : IDisposable
 
         var dir = Path.Combine(_tempDir.Path, "filter_test");
         Directory.CreateDirectory(dir);
-        var serviceWithFilter = new DatabaseService(log.Object, new TestConfigPaths(dir), appFilter: filter);
+        var serviceWithFilter = new DatabaseService(log.Object, new TestConfigPaths(dir), appFilter: filter, allowPlaintextConfig: false);
 
         var database = new AppDatabase();
         database.Apps.Add(mainApp);
@@ -551,6 +569,7 @@ public class DatabaseServiceTests : IDisposable
     {
         public string ConfigFilePath => Path.Combine(dir, "config.dat");
         public string CredentialsFilePath => Path.Combine(dir, "credentials.dat");
+        public string RememberPinFilePath => Path.Combine(dir, "startkey.dat");
         public string LocalDataDir => dir;
     }
 }

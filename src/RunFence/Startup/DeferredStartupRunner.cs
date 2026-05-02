@@ -1,21 +1,23 @@
+using RunFence.Account.UI;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Launch;
-using RunFence.Persistence;
 using RunFence.UI.Forms;
 
 namespace RunFence.Startup;
 
 /// <summary>
 /// Runs all deferred startup work after the main form handle is created.
-/// Orchestrates three parallel work streams: stale registration cleanup,
-/// feature activation, and startup enforcement with post-enforcement steps.
+/// Orchestrates three parallel work streams: cleanup (stale folder registrations + install scripts),
+/// feature activation, and startup enforcement.
 /// </summary>
 public class DeferredStartupRunner(
     IFolderHandlerService folderHandlerService,
     StartupFeatureActivator featureActivator,
     StartupEnforcementRunner enforcementRunner,
     ISessionProvider sessionProvider,
+    PackageInstallService packageInstallService,
+    StartupOptions startupOptions,
     ILoggingService log)
 {
     /// <summary>
@@ -34,45 +36,39 @@ public class DeferredStartupRunner(
         var snapshot = sessionProvider.GetSession().Database.CreateSnapshot();
 
         // Stream 1: fire-and-forget stale folder handler cleanup (registry enumeration/deletion)
-        Task.Run(() =>
+        // and stale install script cleanup.
+        var stream1 = Task.Run(() =>
         {
-            try
-            {
-                folderHandlerService.CleanupStaleRegistrations();
-            }
-            catch (Exception ex)
-            {
-                log.Warn($"Stale folder handler cleanup failed: {ex.Message}");
-            }
+            folderHandlerService.CleanupStaleRegistrations();
+            packageInstallService.CleanupStaleScripts();
         });
+        stream1.ContinueWith(t => log.Error("DeferredStartupRunner: stream 1 (cleanup) faulted", t.Exception!.InnerException ?? t.Exception),
+            TaskContinuationOptions.OnlyOnFaulted);
 
         // Stream 2: fire-and-forget context menu and handler registration sync (registry reads/writes).
         // Sequential within the task to avoid concurrent registry access from the same service.
-        Task.Run(() =>
+        var stream2 = Task.Run(() =>
         {
-            try
-            {
-                featureActivator.ActivateContextMenus(snapshot);
-                featureActivator.SyncHandlerRegistrations(snapshot);
-            }
-            catch (Exception ex)
-            {
-                log.Error("Background startup registration failed", ex);
-            }
+            featureActivator.ActivateContextMenus(snapshot);
+            featureActivator.SyncHandlerRegistrations(snapshot);
         });
+        stream2.ContinueWith(t => log.Error("DeferredStartupRunner: background startup registration faulted", t.Exception!.InnerException ?? t.Exception),
+            TaskContinuationOptions.OnlyOnFaulted);
 
         // Stream 3: enforcement chain — background I/O then UI-thread result application.
-        Task.Run(() =>
+        var stream3 = Task.Run(() =>
         {
             try
             {
                 var result = enforcementRunner.EnforceOnSnapshot(snapshot);
-                mainForm.BeginInvoke(async () =>
+                if (mainForm.IsDisposed)
+                    return;
+                mainForm.BeginInvoke(async void () =>
                 {
                     try
                     {
                         await enforcementRunner.ApplyEnforcementResult(result);
-                        enforcementRunner.ProcessExpiredContainersAtStartup();
+                        await enforcementRunner.ProcessExpiredContainersAtStartup();
                         enforcementRunner.ProcessExpiredAccounts();
                         enforcementRunner.GrantUnlockDirAccess();
                     }
@@ -85,11 +81,26 @@ public class DeferredStartupRunner(
             catch (Exception ex)
             {
                 log.Warn($"Deferred startup enforcement failed: {ex.Message}");
+                if (mainForm.IsDisposed)
+                    return;
                 mainForm.BeginInvoke(() => MessageBox.Show(
                     $"Startup enforcement failed:\n{ex.Message}\n\nACL rules may not be fully applied.",
                     "RunFence — Enforcement Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning));
             }
         });
 
+        Task.WhenAll(stream1, stream2, stream3).ContinueWith(_ =>
+            ShowBalloon(mainForm, "Some background startup tasks failed. Check logs for details."),
+            TaskContinuationOptions.OnlyOnFaulted);
+
+        if (startupOptions.PinBypassed && !startupOptions.IsBackground)
+            ShowBalloon(mainForm, "RunFence started in tray. Click here to unlock.");
+    }
+
+    private static void ShowBalloon(MainForm mainForm, string text)
+    {
+        if (mainForm.IsDisposed)
+            return;
+        mainForm.BeginInvoke(() => mainForm.ShowTrayBalloon(text));
     }
 }

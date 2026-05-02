@@ -1,14 +1,12 @@
 using Microsoft.Win32;
 using RunFence.Core;
-using RunFence.Persistence;
 
 namespace RunFence.Apps.Shortcuts;
 
-internal sealed class ShortcutTraversalScanner(IShortcutComHelper shortcutHelper, IDatabaseProvider databaseProvider) : IShortcutTraversalScanner
+internal sealed class ShortcutTraversalScanner(IShortcutComHelper shortcutHelper) : IShortcutTraversalScanner
 {
-    public IEnumerable<ShortcutTraversalEntry> ScanShortcuts()
+    public IEnumerable<ShortcutTraversalEntry> ScanShortcuts(HashSet<string>? managedSids)
     {
-        HashSet<string>? managedSids = TryGetManagedSids();
         var searchDirs = GetShortcutSearchDirectories(managedSids);
 
         foreach (var dir in searchDirs)
@@ -28,46 +26,18 @@ internal sealed class ShortcutTraversalScanner(IShortcutComHelper shortcutHelper
 
             foreach (var lnk in files)
             {
-                string? target;
-                string? args;
+                ShortcutInfo info;
                 try
                 {
-                    (target, args) = shortcutHelper.GetShortcutTargetAndArgs(lnk);
+                    info = shortcutHelper.GetShortcutTargetAndArgs(lnk);
                 }
                 catch
                 {
                     continue;
                 }
 
-                yield return new ShortcutTraversalEntry(lnk, target, args);
+                yield return new ShortcutTraversalEntry(lnk, info.Target, info.Arguments);
             }
-        }
-    }
-
-    private HashSet<string>? TryGetManagedSids()
-    {
-        try
-        {
-            var database = databaseProvider.GetDatabase();
-            var sids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var account in database.Accounts)
-                if (!string.IsNullOrEmpty(account.Sid))
-                    sids.Add(account.Sid);
-            foreach (var app in database.Apps)
-                if (!string.IsNullOrEmpty(app.AccountSid))
-                    sids.Add(app.AccountSid);
-
-            // Include the interactive user's SID so their profile shortcuts are discovered
-            // even when no account entry has been created for them yet.
-            var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-            if (interactiveSid != null)
-                sids.Add(interactiveSid);
-
-            return sids;
-        }
-        catch
-        {
-            return null;
         }
     }
 
@@ -84,7 +54,7 @@ internal sealed class ShortcutTraversalScanner(IShortcutComHelper shortcutHelper
 
         try
         {
-            using var profileListKey = Registry.LocalMachine.OpenSubKey(Constants.ProfileListRegistryKey);
+            using var profileListKey = Registry.LocalMachine.OpenSubKey(PathConstants.ProfileListRegistryKey);
 
             if (profileListKey != null)
             {

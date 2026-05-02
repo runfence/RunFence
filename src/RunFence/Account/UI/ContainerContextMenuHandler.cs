@@ -20,14 +20,14 @@ public class ContainerContextMenuHandler(AccountContainerOrchestrator containerH
         containerHandler.CreateContainer(_grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
     }
 
-    public void EditContainer(ContainerRow containerRow)
+    public async Task EditContainer(ContainerRow containerRow)
     {
-        containerHandler.EditContainer(containerRow, _grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
+        await containerHandler.EditContainer(containerRow, _grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
     }
 
-    public void DeleteContainer(ContainerRow containerRow)
+    public async Task DeleteContainer(ContainerRow containerRow)
     {
-        containerHandler.DeleteContainer(containerRow, () => DataChangedAndRefresh?.Invoke());
+        await containerHandler.DeleteContainer(containerRow, () => DataChangedAndRefresh?.Invoke());
     }
 
     public void CopyContainerProfilePath(ContainerRow containerRow)

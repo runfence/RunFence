@@ -1,4 +1,3 @@
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 

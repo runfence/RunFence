@@ -14,10 +14,10 @@ partial class AclBulkScanResultDialog
     private Button _okButton;
     private Button _cancelButton;
     private Label _infoLabel;
-    private DataGridViewCheckBoxColumn _selectCol;
-    private DataGridViewTextBoxColumn _accountCol;
-    private DataGridViewTextBoxColumn _grantsCol;
-    private DataGridViewTextBoxColumn _traverseCol;
+    private DataGridViewCheckBoxColumn colSelect;
+    private DataGridViewTextBoxColumn Account;
+    private DataGridViewTextBoxColumn Grants;
+    private DataGridViewTextBoxColumn Traverse;
 
     private AclBulkScanResultDialog() { InitializeComponent(); }
 
@@ -35,49 +35,44 @@ partial class AclBulkScanResultDialog
         _okButton = new Button();
         _cancelButton = new Button();
         _infoLabel = new Label();
-        _selectCol = new DataGridViewCheckBoxColumn();
-        _grantsCol = new DataGridViewTextBoxColumn();
-        _traverseCol = new DataGridViewTextBoxColumn();
-        _accountCol = new DataGridViewTextBoxColumn();
+        colSelect = new DataGridViewCheckBoxColumn();
+        Grants = new DataGridViewTextBoxColumn();
+        Traverse = new DataGridViewTextBoxColumn();
+        Account = new DataGridViewTextBoxColumn();
 
         ((ISupportInitialize)_grid).BeginInit();
         _buttonPanel.SuspendLayout();
         SuspendLayout();
 
         // _grid
-        _grid.AllowUserToAddRows = false;
-        _grid.AllowUserToDeleteRows = false;
-        _grid.ReadOnly = false;
-        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        _grid.MultiSelect = false;
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.Dock = DockStyle.Fill;
 
-        // _selectCol
-        _selectCol.Name = "Select";
-        _selectCol.HeaderText = "Add";
-        _selectCol.FillWeight = 8;
-        _selectCol.SortMode = DataGridViewColumnSortMode.NotSortable;
+        // colSelect
+        colSelect.Name = "colSelect";
+        colSelect.HeaderText = "Add";
+        colSelect.FillWeight = 8;
+        colSelect.SortMode = DataGridViewColumnSortMode.NotSortable;
 
-        // _accountCol
-        _accountCol.Name = "Account";
-        _accountCol.HeaderText = "Account Name";
-        _accountCol.FillWeight = 40;
-        _accountCol.ReadOnly = true;
+        // Account
+        Account.Name = "Account";
+        Account.HeaderText = "Account Name";
+        Account.FillWeight = 40;
+        Account.ReadOnly = true;
 
-        // _grantsCol
-        _grantsCol.Name = "Grants";
-        _grantsCol.HeaderText = "Grants Found";
-        _grantsCol.FillWeight = 26;
-        _grantsCol.ReadOnly = true;
+        // Grants
+        Grants.Name = "Grants";
+        Grants.HeaderText = "Grants Found";
+        Grants.FillWeight = 26;
+        Grants.ReadOnly = true;
 
-        // _traverseCol
-        _traverseCol.Name = "Traverse";
-        _traverseCol.HeaderText = "Traverse Found";
-        _traverseCol.FillWeight = 26;
-        _traverseCol.ReadOnly = true;
+        // Traverse
+        Traverse.Name = "Traverse";
+        Traverse.HeaderText = "Traverse Found";
+        Traverse.FillWeight = 26;
+        Traverse.ReadOnly = true;
 
-        _grid.Columns.AddRange(new DataGridViewColumn[] { _accountCol, _grantsCol, _traverseCol, _selectCol });
+        _grid.Columns.AddRange(new DataGridViewColumn[] { Account, Grants, Traverse, colSelect });
         _grid.CellContentClick += OnGridCellContentClick;
 
         // _infoLabel

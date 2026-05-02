@@ -31,6 +31,12 @@ public class FolderHandlerService(
             return;
         }
 
+        if (SidResolutionHelper.IsSystemSid(accountSid))
+        {
+            log.Info($"FolderHandlerService: skipping registration for SYSTEM account");
+            return;
+        }
+
         if (string.Equals(accountSid, SidResolutionHelper.GetInteractiveUserSid(),
                 StringComparison.OrdinalIgnoreCase))
         {
@@ -50,7 +56,7 @@ public class FolderHandlerService(
         // Restricting registration to IPC-authorized accounts would silently break the "Show in Folder"
         // feature for accounts not explicitly listed as IPC callers.
         var launcherPath = launcherPathOverride
-                           ?? Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+                           ?? Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
             log.Warn($"FolderHandlerService: launcher not found at {launcherPath}, skipping registration");
@@ -68,19 +74,32 @@ public class FolderHandlerService(
             // a NULL verb (used by Firefox's fallback after SHOpenFolderAndSelectItems fails)
             // resolves to our handler instead of falling through to Windows internal Explorer.
             // (HKLM sets Directory\shell default to "none" with no matching subkey.)
-            SetCommandValue(accountSid, @"Directory\shell\open\command", commandValue);
-            SetCommandValue(accountSid, @"Directory\shell\explore\command", commandValue);
-            SetDirectoryShellDefaultVerb(accountSid, "open");
-            SetFolderCommandValue(accountSid, commandValue);
+            try
+            {
+                SetCommandValue(accountSid, @"Directory\shell\open\command", commandValue);
+                SetCommandValue(accountSid, @"Directory\shell\explore\command", commandValue);
+                SetDirectoryShellDefaultVerb(accountSid, "open");
+                SetFolderCommandValue(accountSid, commandValue);
 
-            // Ensure the RunAs account can execute the launcher.
-            var launcherDir = Path.GetDirectoryName(launcherPath);
-            if (!string.IsNullOrEmpty(launcherDir))
-                pathGrantService.EnsureAccess(accountSid, launcherDir, FileSystemRights.ReadAndExecute, confirm: null);
+                // Ensure the RunAs account can execute the launcher.
+                var launcherDir = Path.GetDirectoryName(launcherPath);
+                if (!string.IsNullOrEmpty(launcherDir))
+                {
+                    pathGrantService.EnsureAccess(accountSid, launcherDir,
+                        FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
+                    pathGrantService.EnsureAccess(AclHelper.LowIntegritySid, launcherDir,
+                        FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
+                }
 
-            // Schedule cleanup via RunOnce so if the account ever logs in interactively,
-            // it removes the handler from its own HKCU on first logon.
-            SetRunOnce(accountSid, launcherPath);
+                // Schedule cleanup via RunOnce so if the account ever logs in interactively,
+                // it removes the handler from its own HKCU on first logon.
+                SetRunOnce(accountSid, launcherPath);
+            }
+            catch
+            {
+                Unregister(accountSid);
+                throw;
+            }
 
             ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST,
                 IntPtr.Zero, IntPtr.Zero);
@@ -134,9 +153,9 @@ public class FolderHandlerService(
         try
         {
             var launcherExeName = Path.GetFileName(
-                launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName));
+                launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName));
             var shellServerExeName = Path.GetFileName(
-                shellServerPathOverride ?? Path.Combine(AppContext.BaseDirectory, Constants.ShellServerExeName));
+                shellServerPathOverride ?? Path.Combine(AppContext.BaseDirectory, PathConstants.ShellServerExeName));
 
             foreach (var sidName in _hku.GetSubKeyNames())
                 CleanupStaleForSid(sidName, launcherExeName, shellServerExeName);
@@ -253,7 +272,7 @@ public class FolderHandlerService(
 
     private void SetRunOnce(string accountSid, string launcherPath)
     {
-        var scriptPath = Path.Combine(Path.GetDirectoryName(launcherPath)!, Constants.FolderHandlerUnregisterScriptName);
+        var scriptPath = Path.Combine(Path.GetDirectoryName(launcherPath)!, PathConstants.FolderHandlerUnregisterScriptName);
         if (!File.Exists(scriptPath))
         {
             log.Warn($"FolderHandlerService: unregister script not found at {scriptPath}, skipping RunOnce");
@@ -264,7 +283,7 @@ public class FolderHandlerService(
         using var key = _hku.CreateSubKey(fullPath)
                         ?? throw new InvalidOperationException($"Failed to create registry key: {fullPath}");
         // cmd /c ""path"" — outer quotes required by cmd.exe when the argument starts with a quote
-        key.SetValue(Constants.FolderHandlerRunOnceValueName, $"cmd /c \"\"{scriptPath}\"\"");
+        key.SetValue(PathConstants.FolderHandlerRunOnceValueName, $"cmd /c \"\"{scriptPath}\"\"");
     }
 
     private void RemoveRunOnce(string accountSid)
@@ -273,7 +292,7 @@ public class FolderHandlerService(
         {
             using var key = _hku.OpenSubKey(
                 $@"{accountSid}\Software\Microsoft\Windows\CurrentVersion\RunOnce", writable: true);
-            key?.DeleteValue(Constants.FolderHandlerRunOnceValueName, throwOnMissingValue: false);
+            key?.DeleteValue(PathConstants.FolderHandlerRunOnceValueName, throwOnMissingValue: false);
         }
         catch (Exception ex)
         {

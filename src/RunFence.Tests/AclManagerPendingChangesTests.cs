@@ -514,4 +514,86 @@ public class AclManagerPendingChangesTests
 
         Assert.Null(result);
     }
+
+    // --- ExistsTraverseInDbOrPending ---
+
+    private static AppDatabase MakeDbWithTraverse(string sid, string path)
+    {
+        var db = new AppDatabase();
+        db.GetOrCreateAccount(sid).Grants.Add(new GrantedPathEntry { Path = path, IsTraverseOnly = true });
+        return db;
+    }
+
+    [Fact]
+    public void ExistsTraverseInDbOrPending_NonTraverseEntryInDb_ReturnsFalse()
+    {
+        // Non-traverse (IsTraverseOnly=false) entries must NOT match traverse lookup
+        const string sid = "S-1-5-21-1";
+        var db = MakeDbWithGrant(sid, @"C:\Foo", isDeny: false, isTraverseOnly: false);
+
+        Assert.False(_pending.ExistsTraverseInDbOrPending(db, sid, @"C:\Foo"));
+    }
+
+    [Fact]
+    public void ExistsTraverseInDbOrPending_PendingUntrackWithCheckUntrackTrue_ReturnsFalse()
+    {
+        // When checkUntrack=true (default), pending untrack causes the traverse to be treated as absent
+        const string sid = "S-1-5-21-1";
+        var db = MakeDbWithTraverse(sid, @"C:\Foo");
+        _pending.PendingUntrackTraverse[@"C:\Foo"] = MakeTraverseEntry(@"C:\Foo");
+
+        Assert.False(_pending.ExistsTraverseInDbOrPending(db, sid, @"C:\Foo", checkUntrack: true));
+    }
+
+    [Fact]
+    public void ExistsTraverseInDbOrPending_PendingUntrackWithCheckUntrackFalse_ReturnsTrue()
+    {
+        // When checkUntrack=false, pending untrack is ignored — traverse is still considered present
+        const string sid = "S-1-5-21-1";
+        var db = MakeDbWithTraverse(sid, @"C:\Foo");
+        _pending.PendingUntrackTraverse[@"C:\Foo"] = MakeTraverseEntry(@"C:\Foo");
+
+        Assert.True(_pending.ExistsTraverseInDbOrPending(db, sid, @"C:\Foo", checkUntrack: false));
+    }
+
+    [Fact]
+    public void ExistsTraverseInDbOrPending_TraverseInDbNotPending_ReturnsTrue()
+    {
+        // Traverse committed to DB (not pending add/remove/untrack) → present
+        const string sid = "S-1-5-21-1";
+        var db = MakeDbWithTraverse(sid, @"C:\Foo");
+
+        Assert.True(_pending.ExistsTraverseInDbOrPending(db, sid, @"C:\Foo"));
+    }
+
+    [Fact]
+    public void ExistsTraverseInDbOrPending_SpecificContainerSharedTraverse_ReturnsTrue()
+    {
+        const string containerSid = "S-1-15-2-99-1-2-3-4-5-6";
+        var db = new AppDatabase();
+        db.SharedContainerTraverseGrants.Add(MakeTraverseEntry(@"C:\Foo"));
+
+        Assert.True(_pending.ExistsTraverseInDbOrPending(db, containerSid, @"C:\Foo"));
+    }
+
+    [Fact]
+    public void ExistsTraverseInDbOrPending_SpecificContainerSharedTraversePendingUntrack_ReturnsFalse()
+    {
+        const string containerSid = "S-1-15-2-99-1-2-3-4-5-6";
+        var db = new AppDatabase();
+        db.SharedContainerTraverseGrants.Add(MakeTraverseEntry(@"C:\Foo"));
+        _pending.PendingUntrackTraverse[@"C:\Foo"] = MakeTraverseEntry(@"C:\Foo");
+
+        Assert.False(_pending.ExistsTraverseInDbOrPending(db, containerSid, @"C:\Foo"));
+    }
+
+    [Fact]
+    public void ExistsTraverseInDbOrPending_PendingTraverseAddNotInDb_ReturnsTrue()
+    {
+        // Traverse not in DB yet but pending add → considered present
+        var db = new AppDatabase();
+        _pending.PendingTraverseAdds[@"C:\Foo"] = MakeTraverseEntry(@"C:\Foo");
+
+        Assert.True(_pending.ExistsTraverseInDbOrPending(db, "S-1-5-21-1", @"C:\Foo"));
+    }
 }

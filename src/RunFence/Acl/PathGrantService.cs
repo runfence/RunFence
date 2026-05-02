@@ -14,14 +14,19 @@ namespace RunFence.Acl;
 /// Task.Run when non-blocking behavior is needed.
 /// </summary>
 public class PathGrantService(
-    GrantCoreOperations grantCore,
-    TraverseCoreOperations traverseCore,
-    IGrantNtfsHelper ntfs,
+    IGrantCoreOperations grantCore,
+    ITraverseCoreOperations traverseCore,
+    IGrantAceService grantAceService,
+    IFileOwnerService fileOwnerService,
+    IPathExistenceService pathExistenceService,
+    IMandatoryLabelService mandatoryLabelService,
     IInteractiveUserResolver interactiveUserResolver,
     IAclPermissionService aclPermission,
     UiThreadDatabaseAccessor dbAccessor,
     ContainerInteractiveUserSync containerIuSync,
-    PathGrantSyncService syncService) : IPathGrantService
+    LowIntegrityGrantSync lowIntegrityGrantSync,
+    IGrantSyncService syncService,
+    IFileSystemPathInfo pathInfo) : IPathGrantService
 {
     // --- Grants ---
 
@@ -36,7 +41,7 @@ public class PathGrantService(
         bool traverseAdded = false;
         if (!isDeny && !coreResult.AlreadyExisted)
         {
-            bool isFolder = Directory.Exists(normalized);
+            bool isFolder = pathInfo.DirectoryExists(normalized);
             var traverseDir = isFolder ? normalized : Path.GetDirectoryName(normalized);
             if (!string.IsNullOrEmpty(traverseDir))
             {
@@ -49,6 +54,49 @@ public class PathGrantService(
                 var iuResult = containerIuSync.SyncAllowGrantToInteractiveUser(sid, normalized, rights);
                 traverseAdded |= iuResult.TraverseAdded;
             }
+
+            if (AclHelper.IsLowIntegritySid(sid))
+            {
+                var sources = dbAccessor.Read(db =>
+                    db.Accounts
+                        .Where(a => !AclHelper.IsLowIntegritySid(a.Sid) && !AclHelper.IsContainerSid(a.Sid))
+                        .Where(a => a.Grants.Any(g => !g.IsTraverseOnly && !g.IsDeny &&
+                            string.Equals(g.Path, normalized, StringComparison.OrdinalIgnoreCase)))
+                        .Select(a => a.Sid)
+                        .ToList());
+                if (sources.Count > 0)
+                {
+                    dbAccessor.Write(db =>
+                    {
+                        var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                        if (entry != null) entry.SourceSids = sources;
+                    });
+                }
+            }
+
+            if (!AclHelper.IsLowIntegritySid(sid) && !AclHelper.IsContainerSid(sid))
+            {
+                dbAccessor.Write(db =>
+                {
+                    var lowIlEntry = GrantCoreOperations.FindGrantEntryInDb(
+                        db, AclHelper.LowIntegritySid, normalized, isDeny: false);
+                    if (lowIlEntry?.SourceSids != null &&
+                        !lowIlEntry.SourceSids.Contains(sid, StringComparer.OrdinalIgnoreCase))
+                        lowIlEntry.SourceSids.Add(sid);
+                });
+            }
+        }
+
+        if (!isDeny && AclHelper.IsLowIntegritySid(sid) && rights.Write)
+        {
+            var previousLabel = mandatoryLabelService.ReadMandatoryLabel(normalized);
+            dbAccessor.Write(db =>
+            {
+                var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                if (entry != null && entry.PreviousSaclLabel == null)
+                    entry.PreviousSaclLabel = previousLabel;
+            });
+            mandatoryLabelService.ApplyLowIntegrityLabel(normalized);
         }
 
         return new GrantOperationResult(
@@ -61,12 +109,12 @@ public class PathGrantService(
         Func<string, string, bool>? confirm = null, bool unelevated = false)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = Directory.Exists(normalized);
-        bool pathExists = isFolder || File.Exists(normalized);
+        bool isFolder = pathInfo.DirectoryExists(normalized);
+        bool pathExists = isFolder || pathInfo.FileExists(normalized);
 
         // For paths inaccessible to standard APIs (explicit deny on admins) but reachable via
         // backup/restore privilege, fall back to IAclAccessor which uses FILE_FLAG_BACKUP_SEMANTICS.
-        if (!pathExists && ntfs.PathExists(normalized, out bool aclIsFolder))
+        if (!pathExists && pathExistenceService.PathExists(normalized, out bool aclIsFolder))
         {
             pathExists = true;
             if (aclIsFolder)
@@ -74,6 +122,13 @@ public class PathGrantService(
         }
 
         var requiredRights = GrantRightsMapper.MapAllowRights(savedRights, isFolder);
+
+        if (pathExists &&
+            AclHelper.IsSpecificContainerSid(sid) &&
+            !aclPermission.NeedsPermissionGrant(normalized, AclHelper.AllApplicationPackagesSid, requiredRights, unelevated))
+        {
+            return new GrantOperationResult(GrantAdded: false, TraverseAdded: false, DatabaseModified: false);
+        }
 
         ResolveDenyConflict(sid, normalized, savedRights, isFolder, confirm);
 
@@ -100,7 +155,7 @@ public class PathGrantService(
         if (dbState.HasExisting && pathExists)
         {
             var groupSids = aclPermission.ResolveAccountGroupSids(sid);
-            var state = ntfs.ReadGrantState(normalized, sid, groupSids);
+            var state = grantAceService.ReadGrantState(normalized, sid, groupSids);
             if (state.DirectAllowAceCount == 0)
             {
                 needsFix = true;
@@ -116,7 +171,7 @@ public class PathGrantService(
             if (!string.IsNullOrEmpty(traverseDir))
             {
                 if (dbState.HasTraverseEntry &&
-                    !TraverseRightsHelper.HasEffectiveTraverse(traverseDir, sid, groupSids, aclPermission))
+                    !TraverseRightsHelper.HasEffectiveTraverseForGrantSid(traverseDir, sid, groupSids, aclPermission, pathInfo))
                     traverseNeedsFix = true;
             }
         }
@@ -171,7 +226,7 @@ public class PathGrantService(
         Func<string, string, bool>? confirm = null, bool unelevated = false)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = Directory.Exists(normalized);
+        bool isFolder = pathInfo.DirectoryExists(normalized);
         var savedRights = GrantRightsMapper.FromRights(rights, isFolder, isDeny: false);
         return EnsureAccess(sid, normalized, savedRights, confirm, unelevated);
     }
@@ -179,6 +234,18 @@ public class PathGrantService(
     public bool RemoveGrant(string sid, string path, bool isDeny, bool updateFileSystem)
     {
         var normalized = Path.GetFullPath(path);
+
+        bool hadWrite = false;
+        string? previousSaclLabel = null;
+        if (!isDeny && AclHelper.IsLowIntegritySid(sid))
+        {
+            dbAccessor.Read(db =>
+            {
+                var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                hadWrite = entry?.SavedRights?.Write == true;
+                previousSaclLabel = entry?.PreviousSaclLabel;
+            });
+        }
 
         var coreResult = grantCore.RemoveGrant(sid, normalized, isDeny, updateFileSystem);
         if (!coreResult.Found)
@@ -189,7 +256,14 @@ public class PathGrantService(
             traverseCore.CleanupOrphanedTraverse(sid, normalized);
 
             if (AclHelper.IsContainerSid(sid))
-                containerIuSync.RevertInteractiveUserGrant(sid, normalized, coreResult.SavedRights);
+                containerIuSync.RevertInteractiveUserGrant(sid, normalized);
+            else if (AclHelper.IsLowIntegritySid(sid))
+            {
+                if (updateFileSystem && hadWrite)
+                    mandatoryLabelService.RestoreMandatoryLabel(normalized, previousSaclLabel);
+            }
+            else
+                lowIntegrityGrantSync.RevertSource(sid, normalized, updateFileSystem);
         }
 
         return true;
@@ -198,7 +272,47 @@ public class PathGrantService(
     public GrantOperationResult UpdateGrant(string sid, string path, bool isDeny,
         SavedRightsState savedRights, string? ownerSid = null)
     {
-        grantCore.UpdateGrant(sid, path, isDeny, savedRights, ownerSid);
+        var normalized = Path.GetFullPath(path);
+
+        bool oldHadWrite = false;
+        string? oldPreviousSaclLabel = null;
+        if (!isDeny && AclHelper.IsLowIntegritySid(sid))
+        {
+            dbAccessor.Read(db =>
+            {
+                var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                oldHadWrite = entry?.SavedRights?.Write == true;
+                oldPreviousSaclLabel = entry?.PreviousSaclLabel;
+            });
+        }
+
+        grantCore.UpdateGrant(sid, normalized, isDeny, savedRights, ownerSid);
+
+        if (!isDeny && AclHelper.IsLowIntegritySid(sid))
+        {
+            bool newHasWrite = savedRights.Write;
+            if (!oldHadWrite && newHasWrite)
+            {
+                var previousLabel = mandatoryLabelService.ReadMandatoryLabel(normalized);
+                dbAccessor.Write(db =>
+                {
+                    var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                    if (entry != null && entry.PreviousSaclLabel == null)
+                        entry.PreviousSaclLabel = previousLabel;
+                });
+                mandatoryLabelService.ApplyLowIntegrityLabel(normalized);
+            }
+            else if (oldHadWrite && !newHasWrite)
+            {
+                dbAccessor.Write(db =>
+                {
+                    var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                    if (entry != null) entry.PreviousSaclLabel = null;
+                });
+                mandatoryLabelService.RestoreMandatoryLabel(normalized, oldPreviousSaclLabel);
+            }
+        }
+
         return new GrantOperationResult(GrantAdded: false, TraverseAdded: false, DatabaseModified: true);
     }
 
@@ -257,10 +371,30 @@ public class PathGrantService(
         var removedGrants = grantCore.RemoveAllGrants(sid, updateFileSystem);
 
         if (updateFileSystem)
-            traverseCore.RevertAllTraverseAces(sid, allGrants);
+        {
+            if (AclHelper.IsSpecificContainerSid(sid))
+            {
+                foreach (var grant in removedGrants.Where(e => !e.IsDeny && !e.IsTraverseOnly))
+                    traverseCore.CleanupOrphanedTraverse(sid, grant.Path);
+            }
+            else
+            {
+                traverseCore.RevertAllTraverseAces(sid, allGrants);
+            }
+        }
 
         if (AclHelper.IsContainerSid(sid))
             containerIuSync.RevertAllInteractiveUserGrants(sid, removedGrants, updateFileSystem);
+        else if (AclHelper.IsLowIntegritySid(sid))
+        {
+            if (updateFileSystem)
+            {
+                foreach (var grant in allGrants.Where(e => !e.IsDeny && e.SavedRights?.Write == true))
+                    mandatoryLabelService.RestoreMandatoryLabel(grant.Path, grant.PreviousSaclLabel);
+            }
+        }
+        else
+            lowIntegrityGrantSync.RevertAllSources(sid, updateFileSystem);
 
         dbAccessor.Write(db => db.GetAccount(sid)?.Grants.Clear());
     }
@@ -269,44 +403,21 @@ public class PathGrantService(
         => grantCore.FixGrant(sid, path, isDeny);
 
     public GrantRightsState ReadGrantState(string path, string sid, IReadOnlyList<string> groupSids)
-        => ntfs.ReadGrantState(path, sid, groupSids);
+        => grantAceService.ReadGrantState(path, sid, groupSids);
 
     public PathAclStatus CheckGrantStatus(string path, string sid, bool isDeny)
-        => ntfs.CheckGrantStatus(path, sid, isDeny);
+        => grantAceService.CheckGrantStatus(path, sid, isDeny);
 
     public void ValidateGrant(string sid, string path, bool isDeny)
-    {
-        var normalized = Path.GetFullPath(path);
-
-        dbAccessor.Write(database =>
-        {
-            var account = database.GetAccount(sid);
-            if (account == null) return;
-
-            foreach (var entry in account.Grants)
-            {
-                if (!string.Equals(entry.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
-                    entry.IsTraverseOnly)
-                    continue;
-
-                if (entry.IsDeny == isDeny)
-                    throw new InvalidOperationException(
-                        $"A {(isDeny ? "deny" : "allow")} grant for '{normalized}' already exists for SID '{sid}'.");
-
-                throw new InvalidOperationException(
-                    $"An opposite-mode grant for '{normalized}' already exists for SID '{sid}'. " +
-                    $"Remove the existing {(entry.IsDeny ? "deny" : "allow")} grant first.");
-            }
-        });
-    }
+        => grantCore.ValidateGrant(sid, path, isDeny);
 
     // --- Ownership ---
 
     public void ChangeOwner(string path, string sid, bool recursive)
-        => ntfs.ChangeOwner(path, sid, recursive);
+        => fileOwnerService.ChangeOwner(path, sid, recursive);
 
     public void ResetOwner(string path, bool recursive)
-        => ntfs.ResetOwner(path, recursive);
+        => fileOwnerService.ResetOwner(path, recursive);
 
     // --- Private helpers ---
 
@@ -318,15 +429,14 @@ public class PathGrantService(
             var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: true);
             return entry != null
                 ? entry.SavedRights ?? SavedRightsState.DefaultForMode(isDeny: true)
-                : (SavedRightsState?)null;
+                : null;
         });
 
         if (denyState == null)
             return;
 
-        var existingDeny = denyState;
         var requestedFsRights = GrantRightsMapper.MapAllowRights(requestedAllow, isFolder);
-        var denyFsRights = GrantRightsMapper.MapDenyRights(existingDeny, isFolder);
+        var denyFsRights = GrantRightsMapper.MapDenyRights(denyState, isFolder);
 
         if ((denyFsRights & requestedFsRights) == 0)
             return;
@@ -339,8 +449,8 @@ public class PathGrantService(
         if (!proceed)
             throw new OperationCanceledException($"User declined to resolve deny conflict on '{normalized}'.");
 
-        bool newDenyRead = existingDeny.Read && !requestedAllow.Read;
-        bool newDenyExecute = existingDeny.Execute && !requestedAllow.Execute;
+        bool newDenyRead = denyState.Read && !requestedAllow.Read;
+        bool newDenyExecute = denyState.Execute && !requestedAllow.Execute;
 
         if (!newDenyRead && !newDenyExecute)
         {
@@ -349,7 +459,7 @@ public class PathGrantService(
         else
         {
             UpdateGrant(sid, normalized, isDeny: true,
-                existingDeny with { Read = newDenyRead, Execute = newDenyExecute });
+                denyState with { Read = newDenyRead, Execute = newDenyExecute });
         }
     }
 

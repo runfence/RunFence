@@ -64,6 +64,12 @@ partial class AppContainerEditDialog
         _deleteButton = new Button();
         _toolTip = new ToolTip(components);
 
+        _layout.SuspendLayout();
+        _capGroupBox.SuspendLayout();
+        _clsidPanel.SuspendLayout();
+        _comGroupBox.SuspendLayout();
+        _buttonPanel.SuspendLayout();
+        _buttonStrip.SuspendLayout();
         SuspendLayout();
 
         // _layout
@@ -239,6 +245,15 @@ partial class AppContainerEditDialog
         Controls.Add(_layout);
         Controls.Add(_buttonStrip);
 
+        _layout.ResumeLayout(false);
+        _layout.PerformLayout();
+        _capGroupBox.ResumeLayout(false);
+        _capGroupBox.PerformLayout();
+        _clsidPanel.ResumeLayout(false);
+        _comGroupBox.ResumeLayout(false);
+        _buttonPanel.ResumeLayout(false);
+        _buttonPanel.PerformLayout();
+        _buttonStrip.ResumeLayout(false);
         ResumeLayout(false);
         PerformLayout();
     }

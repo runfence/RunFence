@@ -9,46 +9,49 @@ namespace RunFence.Tests;
 /// </summary>
 public static class RestrictionMockVerifyExtensions
 {
-    /// <summary>
-    /// Verifies that <see cref="IAccountLsaRestrictionService.SetLocalOnlyBySid"/> was called
-    /// exactly once with the expected SID and value.
-    /// </summary>
-    public static void VerifySetLocalOnly(
-        this Mock<IAccountLsaRestrictionService> mock, string expectedSid, bool expectedValue)
-        => mock.Verify(r => r.SetLocalOnlyBySid(expectedSid, expectedValue), Times.Once);
+    extension(Mock<IAccountLsaRestrictionService> mock)
+    {
+        /// <summary>
+        /// Verifies that <see cref="IAccountLsaRestrictionService.SetLocalOnlyBySid"/> was called
+        /// exactly once with the expected SID and value.
+        /// </summary>
+        public void VerifySetLocalOnly(string expectedSid, bool expectedValue)
+            => mock.Verify(r => r.SetLocalOnlyBySid(expectedSid, expectedValue), Times.Once);
 
-    /// <summary>
-    /// Verifies that <see cref="IAccountLsaRestrictionService.SetLocalOnlyBySid"/> was never called.
-    /// </summary>
-    public static void VerifySetLocalOnlyNeverCalled(this Mock<IAccountLsaRestrictionService> mock)
-        => mock.Verify(r => r.SetLocalOnlyBySid(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        /// <summary>
+        /// Verifies that <see cref="IAccountLsaRestrictionService.SetLocalOnlyBySid"/> was never called.
+        /// </summary>
+        public void VerifySetLocalOnlyNeverCalled()
+            => mock.Verify(r => r.SetLocalOnlyBySid(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
 
-    /// <summary>
-    /// Verifies that <see cref="IAccountLoginRestrictionService.SetLoginBlockedBySid"/> was called
-    /// exactly once with the expected SID, username, and value.
-    /// </summary>
-    public static void VerifySetLoginBlocked(
-        this Mock<IAccountLoginRestrictionService> mock, string expectedSid, string expectedUsername, bool expectedValue)
-        => mock.Verify(r => r.SetLoginBlockedBySid(expectedSid, expectedUsername, expectedValue), Times.Once);
+        /// <summary>
+        /// Verifies that <see cref="IAccountLsaRestrictionService.SetNoBgAutostartBySid"/> was called
+        /// exactly once with the expected SID and value.
+        /// </summary>
+        public void VerifySetNoBgAutostart(string expectedSid, bool expectedValue)
+            => mock.Verify(r => r.SetNoBgAutostartBySid(expectedSid, expectedValue), Times.Once);
 
-    /// <summary>
-    /// Verifies that <see cref="IAccountLoginRestrictionService.SetLoginBlockedBySid"/> was never called.
-    /// </summary>
-    public static void VerifySetLoginBlockedNeverCalled(this Mock<IAccountLoginRestrictionService> mock)
-        => mock.Verify(r => r.SetLoginBlockedBySid(
-            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        /// <summary>
+        /// Verifies that <see cref="IAccountLsaRestrictionService.SetNoBgAutostartBySid"/> was never called.
+        /// </summary>
+        public void VerifySetNoBgAutostartNeverCalled()
+            => mock.Verify(r => r.SetNoBgAutostartBySid(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+    }
 
-    /// <summary>
-    /// Verifies that <see cref="IAccountLsaRestrictionService.SetNoBgAutostartBySid"/> was called
-    /// exactly once with the expected SID and value.
-    /// </summary>
-    public static void VerifySetNoBgAutostart(
-        this Mock<IAccountLsaRestrictionService> mock, string expectedSid, bool expectedValue)
-        => mock.Verify(r => r.SetNoBgAutostartBySid(expectedSid, expectedValue), Times.Once);
+    extension(Mock<IAccountLoginRestrictionService> mock)
+    {
+        /// <summary>
+        /// Verifies that <see cref="IAccountLoginRestrictionService.SetLoginBlockedBySid"/> was called
+        /// exactly once with the expected SID, username, and value.
+        /// </summary>
+        public void VerifySetLoginBlocked(string expectedSid, string expectedUsername, bool expectedValue)
+            => mock.Verify(r => r.SetLoginBlockedBySid(expectedSid, expectedUsername, expectedValue), Times.Once);
 
-    /// <summary>
-    /// Verifies that <see cref="IAccountLsaRestrictionService.SetNoBgAutostartBySid"/> was never called.
-    /// </summary>
-    public static void VerifySetNoBgAutostartNeverCalled(this Mock<IAccountLsaRestrictionService> mock)
-        => mock.Verify(r => r.SetNoBgAutostartBySid(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        /// <summary>
+        /// Verifies that <see cref="IAccountLoginRestrictionService.SetLoginBlockedBySid"/> was never called.
+        /// </summary>
+        public void VerifySetLoginBlockedNeverCalled()
+            => mock.Verify(r => r.SetLoginBlockedBySid(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+    }
 }

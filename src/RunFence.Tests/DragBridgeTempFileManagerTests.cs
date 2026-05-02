@@ -3,7 +3,6 @@ using RunFence.Acl;
 using RunFence.Core;
 using RunFence.DragBridge;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -150,7 +149,7 @@ public class DragBridgeTempFileManagerTests : IDisposable
     [Fact]
     public void CreateTempFolder_TraverseGrantModified_SavesConfig()
     {
-        var (sessionSaver, _) = CreateManagerWithTraverseResult(traverseModified: true);
+        var sessionSaver = CreateManagerWithTraverseResult(traverseModified: true);
 
         sessionSaver.Verify(s => s.SaveConfig(), Times.AtLeastOnce);
     }
@@ -158,7 +157,7 @@ public class DragBridgeTempFileManagerTests : IDisposable
     [Fact]
     public void CreateTempFolder_TraverseNotModified_DoesNotSaveConfig()
     {
-        var (sessionSaver, _) = CreateManagerWithTraverseResult(traverseModified: false);
+        var sessionSaver = CreateManagerWithTraverseResult(traverseModified: false);
 
         sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
     }
@@ -169,8 +168,7 @@ public class DragBridgeTempFileManagerTests : IDisposable
     /// <see cref="DragBridgeTempFileManager.CreateTempFolder"/> once, and returns the
     /// <see cref="ISessionSaver"/> mock for verification.
     /// </summary>
-    private (Mock<ISessionSaver> SessionSaver, DragBridgeTempFileManager Manager)
-        CreateManagerWithTraverseResult(bool traverseModified)
+    private Mock<ISessionSaver> CreateManagerWithTraverseResult(bool traverseModified)
     {
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
         _pathGrantService.Setup(s => s.AddTraverse(It.IsAny<string>(), It.IsAny<string>()))
@@ -185,6 +183,6 @@ public class DragBridgeTempFileManagerTests : IDisposable
             sessionSaver.Object, uiThreadInvoker.Object, _aclHelper.Object, _testBase);
 
         manager.CreateTempFolder(currentSid);
-        return (sessionSaver, manager);
+        return sessionSaver;
     }
 }

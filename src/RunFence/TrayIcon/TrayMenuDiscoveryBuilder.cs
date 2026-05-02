@@ -3,7 +3,7 @@ using RunFence.Core;
 
 namespace RunFence.TrayIcon;
 
-public class TrayMenuDiscoveryBuilder(ILoggingService log)
+public class TrayMenuDiscoveryBuilder(IShortcutIconHelper iconHelper)
 {
     public List<ToolStripItem> BuildMenuItems(
         List<StartMenuEntry> entries,
@@ -94,7 +94,7 @@ public class TrayMenuDiscoveryBuilder(ILoggingService log)
         if (iconCache.TryGetValue(exePath, out var cached))
             return (Image?)cached?.Clone();
 
-        var icon = ShortcutIconHelper.ExtractIcon(exePath, log: log);
+        var icon = iconHelper.ExtractIcon(exePath);
         iconCache[exePath] = icon;
         return (Image?)icon?.Clone();
     }

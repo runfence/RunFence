@@ -118,11 +118,6 @@ public class OptionsFolderBrowserSection
             _defaultSettingsPathTextBox.Text = path;
     }
 
-    /// <summary>
-    /// Simulates a click on the export settings button (for external callers).
-    /// </summary>
-    public void PerformExportSettings() => _exportSettingsButton.PerformClick();
-
     public async void ExportDesktopSettingsAsync()
     {
         using var dlg = new SaveFileDialog();
@@ -132,8 +127,8 @@ public class OptionsFolderBrowserSection
         dlg.Title = "Export Desktop Settings";
         try
         {
-            Directory.CreateDirectory(Constants.ProgramDataDir);
-            dlg.InitialDirectory = Constants.ProgramDataDir;
+            Directory.CreateDirectory(PathConstants.ProgramDataDir);
+            dlg.InitialDirectory = PathConstants.ProgramDataDir;
         }
         catch
         {
@@ -160,7 +155,12 @@ public class OptionsFolderBrowserSection
             var openForEdit = MessageBox.Show("Desktop settings exported successfully.\n\nOpen file for editing?",
                 "Success", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
             if (openForEdit == DialogResult.Yes)
-                _launchFacade.LaunchFile(outputPath, AccountLaunchIdentity.InteractiveUser);
+                _launchFacade.LaunchFile(
+                    outputPath,
+                    AccountLaunchIdentity.InteractiveUser with
+                    {
+                        AssociationResolutionPolicy = AssociationResolutionPolicy.AllowAccountRedirection
+                    });
         }
         catch (Exception ex)
         {

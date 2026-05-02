@@ -9,7 +9,8 @@ public interface IDragBridgeLauncher
         PrivilegeLevel privilegeLevel = PrivilegeLevel.HighestAllowed);
 
     /// <summary>Returns the <see cref="ProcessInfo"/> of the launched process.</summary>
-    ProcessInfo LaunchManaged(string exePath, string accountSid, IReadOnlyList<string> args);
+    ProcessInfo LaunchManaged(string exePath, string accountSid, IReadOnlyList<string> args,
+        PrivilegeLevel privilegeLevel);
 
     /// <summary>Returns the <see cref="ProcessInfo"/> of the launched process, or null on failure.</summary>
     ProcessInfo? LaunchDeElevated(string exePath, IReadOnlyList<string> args,

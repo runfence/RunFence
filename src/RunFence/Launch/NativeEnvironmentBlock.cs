@@ -1,5 +1,5 @@
 using System.Runtime.InteropServices;
-using System.Text;
+using RunFence.Launching.Environment;
 
 namespace RunFence.Launch;
 
@@ -53,50 +53,14 @@ public class NativeEnvironmentBlock : IDisposable
     /// Keys starting with '=' (per-drive CWD entries like "=C:=C:\path") are intentionally skipped.
     /// </summary>
     public static Dictionary<string, string> Read(IntPtr env)
-    {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var offset = 0;
-        while (true)
-        {
-            var entry = Marshal.PtrToStringUni(IntPtr.Add(env, offset));
-            if (string.IsNullOrEmpty(entry))
-                break;
-
-            var eq = entry.IndexOf('=');
-            // eq > 0 (not >= 0) intentionally skips per-drive CWD entries of the form "=C:=C:\path"
-            // where '=' is the first character. These are internal Win32 environment block entries
-            // and are not regular environment variables.
-            if (eq > 0)
-                result[entry[..eq]] = entry[(eq + 1)..];
-
-            offset += (entry.Length + 1) * 2; // Unicode chars
-        }
-
-        return result;
-    }
+        => NativeEnvironmentBlockReader.Read(env);
 
     /// <summary>
     /// Allocates a new native Unicode environment block from the given dictionary.
     /// The caller is responsible for freeing the returned pointer via <see cref="Marshal.FreeHGlobal"/>.
     /// </summary>
     public static IntPtr Build(Dictionary<string, string> vars)
-    {
-        var sb = new StringBuilder();
-        foreach (var kvp in vars)
-        {
-            sb.Append(kvp.Key);
-            sb.Append('=');
-            sb.Append(kvp.Value);
-            sb.Append('\0');
-        }
-
-        sb.Append('\0'); // terminating null
-
-        var bytes = Encoding.Unicode.GetBytes(sb.ToString());
-        var ptr = Marshal.AllocHGlobal(bytes.Length);
-        Marshal.Copy(bytes, 0, ptr, bytes.Length);
-        return ptr;
-    }
+        => EnvironmentBlockBuilder.Build(vars);
 
     /// <summary>
     /// Merges extra environment variables into this block in-place.

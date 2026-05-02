@@ -7,7 +7,7 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Account;
 
-public class ProcessListService(ILoggingService log) : IProcessListService
+public class ProcessListService(ILoggingService log, IProcessJobManager processJobManager) : IProcessListService
 {
     private const uint ProcessQueryInformation = 0x0400;
     private const uint ProcessVmRead = 0x0010;
@@ -16,6 +16,11 @@ public class ProcessListService(ILoggingService log) : IProcessListService
     {
         var result = new List<ProcessInfo>();
         int tokenInfoClass = ProcessNative.GetTokenInfoClass(sid);
+        // null = no filter (regular accounts); non-null = only show job members (SYSTEM / interactive user).
+        // ?? [] means no job exists yet (no launches for this SID) → show nothing.
+        HashSet<int>? allowedPids = SidResolutionHelper.NeedsProcessJobTracking(sid)
+            ? (processJobManager.GetJobMembers(sid) ?? [])
+            : null;
 
         foreach (var proc in Process.GetProcesses())
         {
@@ -25,7 +30,7 @@ public class ProcessListService(ILoggingService log) : IProcessListService
                     continue;
                 try
                 {
-                    CollectProcess(proc.Id, sid, tokenInfoClass, result);
+                    CollectProcess(proc.Id, sid, tokenInfoClass, allowedPids, result);
                 }
                 catch (Exception ex)
                 {
@@ -48,12 +53,26 @@ public class ProcessListService(ILoggingService log) : IProcessListService
             .Where(s => AclHelper.IsContainerSid(s))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var regularSids = sidSet
-            .Where(s => !AclHelper.IsContainerSid(s))
+            .Where(s => !AclHelper.IsContainerSid(s) && !AclHelper.IsLowIntegritySid(s))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var proc in Process.GetProcesses())
+        var parentFilteredSids = regularSids
+            .Where(SidResolutionHelper.NeedsProcessJobTracking)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Build job member sets once for all parent-filtered SIDs before the process loop.
+        Dictionary<string, HashSet<int>>? jobMembersBySid = null;
+        if (parentFilteredSids.Count > 0)
         {
-            using (proc)
+            jobMembersBySid = new Dictionary<string, HashSet<int>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var s in parentFilteredSids)
+                jobMembersBySid[s] = processJobManager.GetJobMembers(s) ?? [];
+        }
+
+        var processes = Process.GetProcesses();
+        try
+        {
+            foreach (var proc in processes)
             {
                 if (proc.Id <= 4)
                     continue;
@@ -69,7 +88,14 @@ public class ProcessListService(ILoggingService log) : IProcessListService
                     {
                         string? s = ProcessNative.GetTokenSid(hProcess, ProcessNative.TokenUser);
                         if (s != null && regularSids.Contains(s))
-                            found.Add(s);
+                        {
+                            bool allowed = !parentFilteredSids.Contains(s) ||
+                                (jobMembersBySid != null &&
+                                 jobMembersBySid.TryGetValue(s, out var members) &&
+                                 members.Contains(proc.Id));
+                            if (allowed)
+                                found.Add(s);
+                        }
                     }
 
                     if (containerSids.Count > 0)
@@ -89,53 +115,44 @@ public class ProcessListService(ILoggingService log) : IProcessListService
                 }
             }
         }
+        finally
+        {
+            foreach (var proc in processes)
+                proc.Dispose();
+        }
 
         return found;
     }
 
-    private static void CollectProcess(int pid, string sid, int tokenInfoClass, List<ProcessInfo> result)
+    private static void CollectProcess(int pid, string sid, int tokenInfoClass, HashSet<int>? allowedPids, List<ProcessInfo> result)
     {
-        IntPtr hLimited = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, pid);
-        if (hLimited == IntPtr.Zero)
+        if (allowedPids != null && !allowedPids.Contains(pid))
             return;
 
-        string? exePath = null;
+        using var hLimited = new ProcessNative.SafeNativeProcessHandle(
+            ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, pid));
+        if (hLimited.IsInvalid)
+            return;
+
+        if (!string.Equals(ProcessNative.GetTokenSid(hLimited.DangerousGetHandle(), tokenInfoClass), sid, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        string? exePath;
         string? cmdLine = null;
-        Process? processHandle = null;
-        try
+
+        using var hFull = new ProcessNative.SafeNativeProcessHandle(
+            ProcessNative.OpenProcess(ProcessQueryInformation | ProcessVmRead, false, pid));
+        if (!hFull.IsInvalid)
         {
-            if (!string.Equals(ProcessNative.GetTokenSid(hLimited, tokenInfoClass), sid, StringComparison.OrdinalIgnoreCase))
-                return;
-
-            IntPtr hFull = ProcessNative.OpenProcess(ProcessQueryInformation | ProcessVmRead, false, pid);
-            if (hFull != IntPtr.Zero)
-            {
-                try
-                {
-                    exePath = GetExePath(hFull);
-                    cmdLine = GetCommandLine(hFull);
-                }
-                finally
-                {
-                    ProcessNative.CloseHandle(hFull);
-                }
-            }
-            else
-            {
-                exePath = GetExePath(hLimited);
-            }
-
-            // Open a Process handle while the SID-verified native handle is still open
-            // to eliminate PID recycling races on kill/close.
-            try { processHandle = System.Diagnostics.Process.GetProcessById(pid); }
-            catch { /* process exited between enumeration and handle open */ }
+            exePath = GetExePath(hFull.DangerousGetHandle());
+            cmdLine = GetCommandLine(hFull.DangerousGetHandle());
         }
-        finally
+        else
         {
-            ProcessNative.CloseHandle(hLimited);
+            exePath = GetExePath(hLimited.DangerousGetHandle());
         }
 
-        result.Add(new ProcessInfo(pid, exePath, cmdLine) { ProcessHandle = processHandle });
+        result.Add(new ProcessInfo(pid, exePath, cmdLine));
     }
 
     private static string? GetExePath(IntPtr hProcess)

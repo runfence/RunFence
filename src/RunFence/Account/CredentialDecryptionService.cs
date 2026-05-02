@@ -1,5 +1,5 @@
-using System.Security;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Launch;
 using RunFence.Security;
@@ -28,6 +28,7 @@ public class CredentialDecryptionService(
         {
             CredentialLookupStatus.CurrentAccount => LaunchTokenSource.CurrentProcess,
             CredentialLookupStatus.InteractiveUser => LaunchTokenSource.InteractiveUser,
+            CredentialLookupStatus.SystemAccount => LaunchTokenSource.SystemAccount,
             _ => LaunchTokenSource.Credentials
         };
 
@@ -47,7 +48,7 @@ public class CredentialDecryptionService(
         CredentialStore credentialStore,
         byte[] pinDerivedKey,
         out CredentialEntry? credEntry,
-        out SecureString? password)
+        out ProtectedString? password)
     {
         var preDecryptStatus = ResolvePreDecryptStatus(accountSid, credentialStore, out credEntry);
         password = null;
@@ -70,8 +71,14 @@ public class CredentialDecryptionService(
     private CredentialLookupStatus? ResolvePreDecryptStatus(
         string accountSid, CredentialStore credentialStore, out CredentialEntry? credEntry)
     {
+        if (SidResolutionHelper.IsSystemSid(accountSid))
+        {
+            credEntry = null;
+            return CredentialLookupStatus.SystemAccount;
+        }
+
         credEntry = credentialStore.Credentials.FirstOrDefault(c =>
-            string.Equals(c.Sid, accountSid, StringComparison.OrdinalIgnoreCase));
+            SidComparer.SidEquals(c.Sid, accountSid));
 
         if (credEntry == null)
         {
@@ -79,7 +86,7 @@ public class CredentialDecryptionService(
             // The explorer token is used for launch; no password is needed.
             var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
             if (interactiveSid != null &&
-                string.Equals(accountSid, interactiveSid, StringComparison.OrdinalIgnoreCase))
+                SidComparer.SidEquals(accountSid, interactiveSid))
                 return CredentialLookupStatus.InteractiveUser;
 
             return CredentialLookupStatus.NotFound;

@@ -12,7 +12,7 @@ namespace RunFence.Core;
 /// an <see cref="ISidResolver"/>. Classes that already hold an <see cref="ISidResolver"/>
 /// should call the corresponding static overloads on <see cref="SidNameResolver"/> directly.</para>
 /// </summary>
-public class SidDisplayNameResolver(ISidResolver sidResolver)
+public class SidDisplayNameResolver(ISidResolver sidResolver, IProfilePathResolver profilePathResolver)
 {
     /// <summary>
     /// Resolves a display name for an arbitrary SID using the standard fallback chain:
@@ -20,13 +20,13 @@ public class SidDisplayNameResolver(ISidResolver sidResolver)
     /// </summary>
     public string GetDisplayName(string sid, string? preResolvedName,
         IReadOnlyDictionary<string, string>? sidNames)
-        => SidNameResolver.GetDisplayName(sid, preResolvedName, sidResolver, sidNames);
+        => SidNameResolver.GetDisplayName(sid, preResolvedName, sidResolver, sidNames, profilePathResolver);
 
     /// <summary>
     /// Resolves a display name for a credential entry (includes "(current)" / "(interactive)" suffixes).
     /// </summary>
     public string GetDisplayName(CredentialEntry cred, IReadOnlyDictionary<string, string>? sidNames)
-        => SidNameResolver.GetDisplayName(cred, sidResolver, sidNames);
+        => SidNameResolver.GetDisplayName(cred, sidResolver, sidNames, profilePathResolver);
 
     /// <summary>
     /// Resolves a SID to a bare username string using the standard fallback chain.

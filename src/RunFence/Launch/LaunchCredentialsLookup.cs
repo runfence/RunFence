@@ -1,12 +1,7 @@
 using RunFence.Account;
-using RunFence.Core;
 using RunFence.Infrastructure;
 
 namespace RunFence.Launch;
-
-public class CredentialNotFoundException(string message) : Exception(message);
-
-public class MissingPasswordException(string message) : Exception(message);
 
 public class LaunchCredentialsLookup(
     ISessionProvider sessionProvider,

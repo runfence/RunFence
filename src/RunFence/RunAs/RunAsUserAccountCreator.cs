@@ -1,87 +1,67 @@
-using RunFence.Account;
 using RunFence.Account.UI.Forms;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
-using RunFence.Security;
 
 namespace RunFence.RunAs;
 
 /// <summary>
 /// Handles the "Create New Account" flow from the RunAs dialog.
-/// Creates the account, encrypts the password, stores credentials, and optionally prompts
-/// for permission grant.
+/// Creates the account, persists credentials, and optionally prompts for permission grant.
 /// </summary>
 public class RunAsUserAccountCreator(
     IAppStateProvider appState,
     IDataChangeNotifier dataChangeNotifier,
-    SessionContext session,
-    ICredentialEncryptionService encryptionService,
-    IDatabaseService databaseService,
-    ILocalUserProvider localUserProvider,
     ILoggingService log,
+    RunAsCredentialCreator credentialCreator,
     RunAsAccountSettingsApplier settingsApplier,
     RunAsAccountCreationUI creationUi,
-    ISidNameCacheService sidNameCache,
     RunAsPermissionPromptHelper permissionPromptHelper,
-    IModalCoordinator modalCoordinator)
+    RunAsDosProtection dosProtection,
+    IModalCoordinator modalCoordinator) : IRunAsUserAccountCreator
 {
     /// <summary>
     /// Creates the account, encrypts the password, stores credentials, and optionally prompts
     /// for permission grant. Returns the new credential on success, or null if cancelled/failed.
     /// </summary>
-    public CredentialEntry? CreateNewAccount(string filePath, RunAsDosProtection dosProtection,
-        out AncestorPermissionResult? permissionGrant)
+    public CredentialEntry? CreateNewAccount(string filePath, out AncestorPermissionResult? permissionGrant)
     {
         permissionGrant = null;
 
-        var createResult = creationUi.ShowCreateAccountDialog(filePath, dosProtection);
+        var createResult = creationUi.ShowCreateAccountDialog(filePath);
         if (createResult.WasCancelled)
+        {
+            dosProtection.RecordDecline();
             return null;
+        }
 
         EditAccountDialog createDlg = createResult.Dialog!;
         try
         {
             CredentialEntry newCredential;
+            try
             {
-                using var scope = session.PinDerivedKey.Unprotect();
-                var encryptedPassword = encryptionService.Encrypt(
-                    createDlg.CreatedPassword!, scope.Data);
-
-                newCredential = new CredentialEntry
-                {
-                    Id = Guid.NewGuid(),
-                    Sid = createDlg.CreatedSid!,
-                    EncryptedPassword = encryptedPassword
-                };
-                sidNameCache.ResolveAndCache(createDlg.CreatedSid!, createDlg.NewUsername!);
-
-                session.CredentialStore.Credentials.Add(newCredential);
-                localUserProvider.InvalidateCache();
-                try
-                {
-                    databaseService.SaveCredentialStore(session.CredentialStore);
-                }
-                catch (Exception saveEx)
-                {
-                    log.Error("RunAsUserAccountCreator: failed to save credential store — scheduling ephemeral cleanup", saveEx);
-                    appState.Database.GetOrCreateAccount(createDlg.CreatedSid!).DeleteAfterUtc = DateTime.UtcNow.AddHours(1);
-                    throw;
-                }
-
-                if (createDlg.IsEphemeral)
-                    appState.Database.GetOrCreateAccount(createDlg.CreatedSid!).DeleteAfterUtc = DateTime.UtcNow.AddHours(24);
-
-                // Apply privilege level default and firewall DB settings
-                settingsApplier.ApplyLaunchDefaults(createDlg.CreatedSid!,
-                    createDlg.SelectedPrivilegeLevel);
-
-                if (createDlg.FirewallSettingsChanged)
-                    settingsApplier.ApplyFirewallDbSettings(createDlg.CreatedSid!,
-                        createDlg.AllowInternet, createDlg.AllowLocalhost, createDlg.AllowLan);
+                newCredential = credentialCreator.PersistCredential(
+                    createDlg.CreatedPassword!, createDlg.CreatedSid!, createDlg.NewUsername!);
             }
+            catch (Exception saveEx)
+            {
+                log.Error("RunAsUserAccountCreator: failed to save credential store — scheduling ephemeral cleanup", saveEx);
+                appState.Database.GetOrCreateAccount(createDlg.CreatedSid!).DeleteAfterUtc = DateTime.UtcNow.AddHours(1);
+                throw;
+            }
+
+            if (createDlg.IsEphemeral)
+                appState.Database.GetOrCreateAccount(createDlg.CreatedSid!).DeleteAfterUtc = DateTime.UtcNow.AddHours(24);
+
+            // Apply privilege level default and firewall DB settings
+            settingsApplier.ApplyLaunchDefaults(createDlg.CreatedSid!,
+                createDlg.SelectedPrivilegeLevel);
+
+            if (createDlg.FirewallSettingsChanged)
+                settingsApplier.ApplyFirewallDbSettings(createDlg.CreatedSid!,
+                    createDlg.AllowInternet, createDlg.AllowLocalhost, createDlg.AllowLan);
 
             settingsApplier.RunPostCreationTasks(
                 createDlg.CreatedSid!, createDlg.NewUsername!,

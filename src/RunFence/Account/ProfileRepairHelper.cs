@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using RunFence.Core;
 using RunFence.Launch;
@@ -81,7 +80,7 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
     {
         try
         {
-            using var profileList = Registry.LocalMachine.OpenSubKey(Constants.ProfileListRegistryKey);
+            using var profileList = Registry.LocalMachine.OpenSubKey(PathConstants.ProfileListRegistryKey);
             if (profileList == null)
                 return null;
 
@@ -126,7 +125,7 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
     {
         try
         {
-            var profileListPath = @"HKEY_LOCAL_MACHINE\" + Constants.ProfileListRegistryKey;
+            var profileListPath = @"HKEY_LOCAL_MACHINE\" + PathConstants.ProfileListRegistryKey;
 
             // Step 1: Rename the TEMP key to .deleted (preserves ACLs)
             var deletedKeyName = FindAvailableDeletedKeyName(profile.Sid);
@@ -159,7 +158,7 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
             // Step 3: Delete the .deleted key and reset State on the restored key
             log.Info($"ProfileRepair: Deleting '{deletedKeyName}' and resetting State to 0");
             using (var profileList = Registry.LocalMachine.OpenSubKey(
-                       Constants.ProfileListRegistryKey, writable: true))
+                       PathConstants.ProfileListRegistryKey, writable: true))
             {
                 profileList?.DeleteSubKeyTree(deletedKeyName, throwOnMissingSubKey: false);
 
@@ -184,7 +183,7 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
 
     private string FindAvailableDeletedKeyName(string sid)
     {
-        using var profileList = Registry.LocalMachine.OpenSubKey(Constants.ProfileListRegistryKey);
+        using var profileList = Registry.LocalMachine.OpenSubKey(PathConstants.ProfileListRegistryKey);
         if (profileList == null)
             return sid + ".deleted";
 
@@ -212,14 +211,14 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
         if (key == null)
             throw new InvalidOperationException($"Registry key not found: {fullKeyPath}");
 
-        var unicodeName = new UNICODE_STRING
+        var unicodeName = new ProfileRepairNative.UNICODE_STRING
         {
             Buffer = newName,
             Length = (ushort)(newName.Length * 2),
             MaximumLength = (ushort)(newName.Length * 2 + 2)
         };
 
-        var status = NtRenameKey(key.Handle.DangerousGetHandle(), ref unicodeName);
+        var status = ProfileRepairNative.NtRenameKey(key.Handle.DangerousGetHandle(), ref unicodeName);
         if (status != 0)
             throw new InvalidOperationException(
                 $"NtRenameKey failed for '{fullKeyPath}' → '{newName}': NTSTATUS 0x{status:X8}");
@@ -306,14 +305,4 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
         }
     }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct UNICODE_STRING
-    {
-        public ushort Length;
-        public ushort MaximumLength;
-        public string Buffer;
-    }
-
-    [DllImport("ntdll.dll", CharSet = CharSet.Unicode)]
-    private static extern int NtRenameKey(IntPtr KeyHandle, ref UNICODE_STRING NewName);
 }

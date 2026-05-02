@@ -13,10 +13,10 @@ namespace RunFence.Startup;
 public class AppLifecycleStarter(
     IOrderedEnumerable<IRequiresInitialization> initServices,
     IOrderedEnumerable<IBackgroundService> backgroundServices,
+    IOrderedEnumerable<IStartupEventWirer> startupEventWirers,
     MainForm mainForm,
     ISessionProvider sessionProvider,
     ConfigManagementOrchestrator configManagementOrchestrator,
-    AppLifecycleEventWirer eventWirer,
     StartupIpcBootstrapper ipcBootstrapper,
     StartupFeatureActivator featureActivator,
     IDragBridgeService dragBridgeService,
@@ -40,7 +40,8 @@ public class AppLifecycleStarter(
         dragBridgeService.ApplySettings(session.Database.Settings);
 
         // 3. Wire all event subscriptions before starting background services
-        eventWirer.WireEvents();
+        foreach (var eventWirer in startupEventWirers)
+            eventWirer.WireEvents();
 
         // 4. Start background services in guaranteed order
         //    (EphemeralAccountService → EphemeralContainerService → FirewallDnsRefreshService)

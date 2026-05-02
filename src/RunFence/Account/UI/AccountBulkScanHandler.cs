@@ -1,4 +1,3 @@
-using RunFence.Account.UI.Forms;
 using RunFence.Acl;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
@@ -21,8 +20,7 @@ public class AccountBulkScanHandler(
 {
     public async Task ScanAcls(
         IAccountsPanelContext context,
-        ToolStripButton scanButton,
-        Label statusLabel)
+        IScanProgressReporter progressReporter)
     {
         using var folderDialog = new FolderBrowserDialog();
         folderDialog.Description = "Select a root folder to scan for ACLs";
@@ -45,13 +43,13 @@ public class AccountBulkScanHandler(
             return;
         }
 
-        statusLabel.Text = "Scanning ACLs...";
-        scanButton.Enabled = false;
+        progressReporter.SetStatus("Scanning ACLs...");
+        progressReporter.SetScanEnabled(false);
 
         Dictionary<string, AccountScanResult> scanResults;
         try
         {
-            var progress = new Progress<long>(count => statusLabel.Text = $"Scanning ACLs... {count} items");
+            var progress = new Progress<long>(count => progressReporter.SetStatus($"Scanning ACLs... {count} items"));
             using var cts = new CancellationTokenSource();
             scanResults = await bulkScan.ScanAllAccountsAsync(rootPath, knownSids, progress, cts.Token);
         }
@@ -63,8 +61,8 @@ public class AccountBulkScanHandler(
         }
         finally
         {
-            scanButton.Enabled = true;
-            statusLabel.Text = "Ready";
+            progressReporter.SetScanEnabled(true);
+            progressReporter.SetStatus("Ready");
         }
 
         scanResults = FilterManagedPaths(scanResults, context.Database.Apps, aclService);

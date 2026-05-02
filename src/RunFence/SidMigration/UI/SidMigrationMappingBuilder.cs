@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Security.Principal;
 using RunFence.Account.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -12,9 +11,11 @@ namespace RunFence.SidMigration.UI;
 /// Builds and manages the SID mapping grid for <see cref="MigrationMappingStep"/>.
 /// Handles grid population, combo box formatting, and collecting migration/delete selections.
 /// Data/SID resolution is delegated to <see cref="SidMigrationMappingLogic"/>.
+/// Validation logic is delegated to <see cref="SidMigrationMappingValidator"/>.
 /// </summary>
 public class SidMigrationMappingBuilder(
     SidMigrationMappingLogic logic,
+    SidMigrationMappingValidator validator,
     ILoggingService log,
     IEnumerable<OrphanedSid> orphanedSids)
 {
@@ -74,8 +75,7 @@ public class SidMigrationMappingBuilder(
 
         MappingGrid = new DataGridView
         {
-            Location = new Point(15, 10),
-            Size = new Size(560, 180),
+            Dock = DockStyle.Fill,
             AllowUserToAddRows = false,
             AllowUserToDeleteRows = false,
             SelectionMode = DataGridViewSelectionMode.CellSelect,
@@ -123,23 +123,19 @@ public class SidMigrationMappingBuilder(
             var action = newSid != null ? "Migrate" : "Skip";
             var displayName = name;
             if (name == "(unknown)")
-                displayName = logic.ResolveDisplayNameForUnknown(oldSid);
+                displayName = validator.ResolveSidName(oldSid) ?? "(unknown)";
             var idx = MappingGrid.Rows.Add(action, displayName, oldSid, newSid ?? "");
             MappingGrid.Rows[idx].Cells["Name"].ReadOnly = true;
             MappingGrid.Rows[idx].Cells["OldSid"].ReadOnly = true;
             MappingGrid.Rows[idx].Cells["NewSid"].ReadOnly = action != "Migrate";
         }
 
-        panel.Controls.Add(MappingGrid);
-
         var pathsDetail = new ListBox
         {
-            Location = new Point(15, 198),
-            Size = new Size(560, 100),
+            Dock = DockStyle.Fill,
             SelectionMode = SelectionMode.None,
             Font = new Font(panel.Font.FontFamily, 8f)
         };
-        panel.Controls.Add(pathsDetail);
 
         MappingGrid.SelectionChanged += (_, _) =>
         {
@@ -163,73 +159,107 @@ public class SidMigrationMappingBuilder(
             }
         };
 
-        var addButton = new Button
+        var addButton = new ToolStripButton
         {
-            Text = "Add manually...",
-            Location = new Point(15, 306),
-            Size = new Size(120, 28),
-            FlatStyle = FlatStyle.System
+            DisplayStyle = ToolStripItemDisplayStyle.Image,
+            Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 42),
+            ToolTipText = "Add manually..."
         };
         addButton.Click += (_, _) =>
         {
             var idx = MappingGrid.Rows.Add("Migrate", "(manual)", "", "");
             MappingGrid.Rows[idx].Cells["NewSid"].ReadOnly = false;
         };
-        panel.Controls.Add(addButton);
+        var toolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden };
+        toolStrip.Items.Add(addButton);
 
-        panel.Controls.Add(new Label
-        {
-            Text = "Action: Skip = ignore, Migrate = change SID to New SID, Delete = remove from all references.",
-            Location = new Point(15, 346),
-            Size = new Size(560, 40)
-        });
+        var pathsPanel = new Panel { Dock = DockStyle.Bottom, Height = 100 };
+        pathsPanel.Controls.Add(pathsDetail);
+
+        panel.Controls.Add(MappingGrid);     // Fill: index 0
+        panel.Controls.Add(pathsPanel);      // Bottom: index 1
+        panel.Controls.Add(toolStrip);       // Top: index 2 (last added = topmost)
     }
 
-    public List<SidMigrationMapping> CollectMappingsFromGrid()
+    public bool TryCollectMappingsFromGrid(out List<SidMigrationMapping> mappings)
     {
         var result = new List<SidMigrationMapping>();
+        mappings = result;
         if (MappingGrid == null)
-            return result;
+            return true;
+
+        var rowsByNewSid = new Dictionary<string, List<DataGridViewRow>>(StringComparer.OrdinalIgnoreCase);
+        var validationErrors = new List<string>();
 
         foreach (DataGridViewRow row in MappingGrid.Rows)
         {
             if (row.Cells["Action"].Value?.ToString() != "Migrate")
                 continue;
             var oldSid = row.Cells["OldSid"].Value?.ToString()?.Trim() ?? "";
-            var newSid = row.Cells["NewSid"].Value?.ToString()?.Trim() ?? "";
+            var newSidInput = row.Cells["NewSid"].Value?.ToString()?.Trim() ?? "";
             var name = row.Cells["Name"].Value?.ToString() ?? "";
-            if (string.IsNullOrEmpty(oldSid) || string.IsNullOrEmpty(newSid))
+            if (string.IsNullOrEmpty(oldSid) || string.IsNullOrEmpty(newSidInput))
                 continue;
 
             // Validate SID format for manually-entered old SIDs
-            if (name == "(manual)")
+            if (name == "(manual)" && !SidMigrationMappingValidator.TryParseSid(oldSid, out _))
             {
-                try
-                {
-                    _ = new SecurityIdentifier(oldSid);
-                }
-                catch
-                {
-                    row.ErrorText = $"'{oldSid}' is not a valid SID.";
-                    continue;
-                }
+                var error = $"'{oldSid}' is not a valid SID.";
+                row.ErrorText = error;
+                validationErrors.Add(error);
+                continue;
             }
 
             // Validate new SID format (user may type a free-form value in the combo)
-            try
+            if (!SidMigrationMappingValidator.TryResolveSidInput(newSidInput, _sidDisplayNames, out var newSid))
             {
-                _ = new SecurityIdentifier(newSid);
-            }
-            catch
-            {
-                row.ErrorText = $"'{newSid}' is not a valid SID.";
+                var error = $"'{newSidInput}' is not a valid SID.";
+                row.ErrorText = error;
+                validationErrors.Add(error);
                 continue;
             }
+
+            row.Cells["NewSid"].Value = newSid;
+            if (!rowsByNewSid.TryGetValue(newSid, out var rowList))
+            {
+                rowList = [];
+                rowsByNewSid[newSid] = rowList;
+            }
+            rowList.Add(row);
 
             result.Add(new SidMigrationMapping(oldSid, newSid, name));
         }
 
-        return result;
+        // Check for duplicate NewSid values across rows
+        var duplicateNewSids = validator.FindDuplicateNewSids(result);
+        if (duplicateNewSids.Count > 0)
+        {
+            foreach (var (newSid, rows) in rowsByNewSid)
+            {
+                if (duplicateNewSids.Contains(newSid))
+                {
+                    const string error = "Duplicate target SID — each old SID must map to a unique new SID.";
+                    foreach (var row in rows)
+                        row.ErrorText = error;
+                    validationErrors.Add($"Duplicate target SID: {newSid}");
+                }
+            }
+        }
+
+        if (validationErrors.Count > 0)
+        {
+            MessageBox.Show(
+                "Please fix the following validation errors before proceeding:\n\n" +
+                string.Join("\n", validationErrors),
+                "Validation Errors",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            mappings = [];
+            return false;
+        }
+
+        mappings = result;
+        return true;
     }
 
     public List<string> CollectDeleteSidsFromGrid()
@@ -310,7 +340,7 @@ public class SidMigrationMappingBuilder(
 
     private void OnNewSidComboTextChanged(object? sender, EventArgs e)
     {
-        if (sender is not ComboBox combo || combo.SelectedItem is not string rawSid)
+        if (sender is not ComboBox { SelectedItem: string rawSid } combo)
             return;
         var expectedDisplay = _sidDisplayNames.GetValueOrDefault(rawSid, rawSid);
         if (!string.Equals(combo.Text, rawSid, StringComparison.OrdinalIgnoreCase) &&
@@ -326,17 +356,15 @@ public class SidMigrationMappingBuilder(
         if (combo.SelectedItem is string selectedRaw && combo.Items.Contains(selectedRaw))
             return;
 
-        var text = combo.Text.Trim() ?? "";
+        var text = combo.Text.Trim();
         if (string.IsNullOrEmpty(text) || combo.Items.Contains(text))
             return;
 
         if (combo.Items.Cast<object?>().Any(item => string.Equals(item?.ToString(), text, StringComparison.OrdinalIgnoreCase)))
             return;
 
-        try
+        if (SidMigrationMappingValidator.TryResolveSidInput(text, _sidDisplayNames, out var sidStr))
         {
-            var sid = new SecurityIdentifier(text);
-            var sidStr = sid.Value;
             if (!combo.Items.Contains(sidStr))
             {
                 combo.Items.Add(sidStr);
@@ -345,9 +373,10 @@ public class SidMigrationMappingBuilder(
                     col.Items.Add(sidStr);
             }
 
+            combo.SelectedItem = sidStr;
             combo.Text = sidStr;
         }
-        catch
+        else
         {
             e.Cancel = true;
             if (MappingGrid?.CurrentCell != null)

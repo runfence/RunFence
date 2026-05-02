@@ -1,6 +1,5 @@
 using System.Runtime.InteropServices;
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Firewall.Wfp;
 using RunFence.Infrastructure;
 using Timer = System.Threading.Timer;
@@ -16,7 +15,7 @@ public class WfpEphemeralPortScanner(
     IWfpLocalhostBlocker wfpBlocker,
     UiThreadDatabaseAccessor db,
     ILoggingService log,
-    bool startTimer = true)
+    bool startTimer)
     : IBackgroundService, IDisposable
 {
     private const int EphemeralPortRangeStart = 49152;
@@ -64,7 +63,7 @@ public class WfpEphemeralPortScanner(
         var snapshot = db.CreateSnapshot();
 
         var blockedAccounts = snapshot.Accounts
-            .Where(a => !a.Firewall.IsDefault && !a.Firewall.AllowLocalhost)
+            .Where(a => a.Firewall is { IsDefault: false, AllowLocalhost: false })
             .Select(a => new BlockedAccount(
                 Sid: a.Sid,
                 ExemptedRanges: a.Firewall.LocalhostPortExemptions
@@ -189,6 +188,7 @@ public class WfpEphemeralPortScanner(
             {
                 // Table grew between calls — retry once with larger buffer
                 Marshal.FreeHGlobal(buf);
+                buf = IntPtr.Zero; // prevent double-free if re-allocation throws OOM
                 buf = Marshal.AllocHGlobal(size);
 
                 if (isTcp)
@@ -222,10 +222,21 @@ public class WfpEphemeralPortScanner(
         // IPv6 TCP (MIB_TCP6ROW_OWNER_PID): stride=56, portOff=20, pidOff=52
         // IPv6 UDP (MIB_UDP6ROW_OWNER_PID): stride=28, portOff=20, pidOff=24
         int stride, portOff, pidOff;
-        if (isTcp && !isIPv6)      { stride = 24; portOff = 8;  pidOff = 20; }
-        else if (!isTcp && !isIPv6){ stride = 12; portOff = 4;  pidOff = 8;  }
-        else if (isTcp)            { stride = 56; portOff = 20; pidOff = 52; }
-        else                       { stride = 28; portOff = 20; pidOff = 24; }
+        switch (isTcp)
+        {
+            case true when !isIPv6:
+                stride = 24; portOff = 8;  pidOff = 20;
+                break;
+            case false when !isIPv6:
+                stride = 12; portOff = 4;  pidOff = 8;
+                break;
+            case true:
+                stride = 56; portOff = 20; pidOff = 52;
+                break;
+            default:
+                stride = 28; portOff = 20; pidOff = 24;
+                break;
+        }
 
         var numEntries = Marshal.ReadInt32(buf, 0);
         var result = new List<(int, int)>(numEntries);

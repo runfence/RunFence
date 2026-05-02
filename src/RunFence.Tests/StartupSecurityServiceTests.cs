@@ -27,16 +27,18 @@ public class StartupSecurityServiceTests
         Assert.Equal(StartupSecurityCategory.RegistryRunKey, findings[1].Category);
     }
 
-    [Fact]
-    public void ParseFindings_MalformedLine_Skipped()
+    [Theory]
+    [InlineData("", 0)]
+    [InlineData("StartupFolder\tC:\\Path\tS-1\n" + // too few fields — skipped
+                "StartupFolder\tC:\\Path\tS-1-5-21-123\tUser\tWriteData\n", 1)]
+    [InlineData("\n\n  \nStartupFolder\tC:\\Path\tS-1-5\tUser\tWriteData\n\n", 1)]
+    public void ParseFindings_ReturnsExpectedCount(string input, int expectedCount)
     {
-        var input = "StartupFolder\tC:\\Path\tS-1\n" + // too few fields
-                    "StartupFolder\tC:\\Path\tS-1-5-21-123\tUser\tWriteData\n";
         using var reader = new StringReader(input);
 
         var findings = StartupSecurityService.ParseFindings(reader);
 
-        Assert.Single(findings);
+        Assert.Equal(expectedCount, findings.Count);
     }
 
     [Fact]
@@ -50,16 +52,6 @@ public class StartupSecurityServiceTests
 
         Assert.Single(findings);
         Assert.Equal(StartupSecurityCategory.StartupFolder, findings[0].Category);
-    }
-
-    [Fact]
-    public void ParseFindings_EmptyInput_ReturnsEmpty()
-    {
-        using var reader = new StringReader("");
-
-        var findings = StartupSecurityService.ParseFindings(reader);
-
-        Assert.Empty(findings);
     }
 
     [Fact]
@@ -120,17 +112,6 @@ public class StartupSecurityServiceTests
 
         Assert.Single(findings);
         Assert.Equal(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", findings[0].NavigationTarget);
-    }
-
-    [Fact]
-    public void ParseFindings_BlankLines_Skipped()
-    {
-        var input = "\n\n  \nStartupFolder\tC:\\Path\tS-1-5\tUser\tWriteData\n\n";
-        using var reader = new StringReader(input);
-
-        var findings = StartupSecurityService.ParseFindings(reader);
-
-        Assert.Single(findings);
     }
 
     [Fact]

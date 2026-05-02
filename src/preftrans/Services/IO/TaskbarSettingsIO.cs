@@ -2,7 +2,6 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
 using PrefTrans.Native;
-using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
@@ -325,7 +324,7 @@ public class TaskbarSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast, I
         if (data == null || data.Length < 2 || string.IsNullOrEmpty(path))
             return false;
         var text = Encoding.Unicode.GetString(data);
-        return text.IndexOf(path, StringComparison.OrdinalIgnoreCase) >= 0;
+        return text.Contains(path, StringComparison.OrdinalIgnoreCase);
     }
 
     void ISettingsIO.ReadInto(UserSettings s) => s.Taskbar = Read();

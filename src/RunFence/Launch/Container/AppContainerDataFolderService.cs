@@ -11,7 +11,7 @@ namespace RunFence.Launch.Container;
 /// the interactive user access). Separated from AppContainerService to keep profile lifecycle
 /// logic distinct from data folder lifecycle logic.
 /// </summary>
-public class AppContainerDataFolderService(ILoggingService log, IPathGrantService pathGrantService)
+public class AppContainerDataFolderService(ILoggingService log, IPathGrantService pathGrantService) : IAppContainerDataFolderService
 {
     /// <summary>
     /// Creates the container's data folder subtree (Temp/Roaming/Local/ProgramData) if missing,
@@ -28,8 +28,7 @@ public class AppContainerDataFolderService(ILoggingService log, IPathGrantServic
 
         try
         {
-            var identity = new SecurityIdentifier(containerSid);
-            GrantFullControlRecursive(dataRoot, identity);
+            EnsureContainerDataRootGrant(containerSid, dataRoot);
 
             // Grant traverse on intermediate directories so the AppContainer token can
             // reach its data folder. AppContainer dual-check requires an ACE on every
@@ -56,6 +55,7 @@ public class AppContainerDataFolderService(ILoggingService log, IPathGrantServic
             if (!Directory.Exists(dataPath))
                 return;
 
+            EnsureContainerDataRootGrant(containerSid, dataPath);
             pathGrantService.AddTraverse(containerSid, dataPath);
         }
         catch (Exception ex)
@@ -88,13 +88,29 @@ public class AppContainerDataFolderService(ILoggingService log, IPathGrantServic
             if (!Directory.Exists(dataRoot))
                 return;
 
-            GrantFullControlRecursive(dataRoot, interactiveSid);
+            pathGrantService.AddGrant(
+                interactiveSid.Value,
+                dataRoot,
+                isDeny: false,
+                ContainerDataRootRights,
+                ownerSid: null);
         }
         catch (Exception ex)
         {
             log.Warn($"EnsureInteractiveUserAccess failed for '{entry.Name}': {ex.Message}");
         }
     }
+
+    private void EnsureContainerDataRootGrant(string containerSid, string dataPath) =>
+        pathGrantService.AddGrant(
+            containerSid,
+            dataPath,
+            isDeny: false,
+            ContainerDataRootRights,
+            ownerSid: null);
+
+    private static readonly SavedRightsState ContainerDataRootRights =
+        new(Execute: true, Write: true, Read: true, Special: true, Own: false);
 
     private void EnsureContainersRootAcl()
     {
@@ -130,16 +146,4 @@ public class AppContainerDataFolderService(ILoggingService log, IPathGrantServic
         }
     }
 
-    private static void GrantFullControlRecursive(string path, IdentityReference identity)
-    {
-        var dirInfo = new DirectoryInfo(path);
-        var security = dirInfo.GetAccessControl();
-        security.AddAccessRule(new FileSystemAccessRule(
-            identity,
-            FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None,
-            AccessControlType.Allow));
-        dirInfo.SetAccessControl(security);
-    }
 }

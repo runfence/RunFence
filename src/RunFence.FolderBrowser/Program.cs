@@ -12,11 +12,11 @@ static class Program
         string rawPath;
         if (args.Length > 0)
         {
-            // Reconstruct the original path from shell-split arguments: the shell splits on spaces,
-            // so a path like "C:\My Folder" arrives as ["C:\\My", "Folder"]. Joining with a space
-            // restores the original. Multiple unrelated arguments would produce an invalid path,
-            // which falls back gracefully to empty string via the Directory.Exists check below.
-            rawPath = string.Join(" ", args);
+            // Use SkipArgs on the raw command line to extract the path verbatim, preserving
+            // original quoting and any trailing backslash. string.Join(" ", args) would corrupt
+            // paths like "C:\My Folder\" (trailing backslash + closing quote is MSVC-escaped).
+            var tail = CommandLineHelper.SkipArgs(Environment.CommandLine, 1);
+            rawPath = tail ?? string.Empty;
             if (rawPath is ['"', _, ..] && rawPath[^1] == '"')
                 rawPath = rawPath[1..^1];
         }

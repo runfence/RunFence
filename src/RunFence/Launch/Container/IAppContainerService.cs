@@ -12,7 +12,7 @@ public interface IAppContainerService : IAppContainerProfileService
     /// Enables or disables the loopback exemption for the named container.
     /// Returns true if the operation succeeded, false if it failed or was a no-op.
     /// </summary>
-    bool SetLoopbackExemption(string name, bool enable);
+    Task<bool> SetLoopbackExemption(string name, bool enable);
 
     /// <summary>
     /// Grants the container SID COM launch and access permissions for the given AppID/CLSID.
@@ -41,9 +41,4 @@ public interface IAppContainerService : IAppContainerProfileService
     /// </summary>
     void RevertTraverseAccess(AppContainerEntry entry, AppDatabase database);
 
-    /// <summary>
-    /// Reverts traverse ACEs for the given entry, preserving those still needed by remaining paths.
-    /// Uses <see cref="GrantedPathEntry.AllAppliedPaths"/> when available for reliable cleanup.
-    /// </summary>
-    void RevertTraverseAccessForPath(AppContainerEntry entry, GrantedPathEntry grantedEntry, AppDatabase database);
 }

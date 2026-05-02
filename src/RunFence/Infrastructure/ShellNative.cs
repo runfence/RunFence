@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 
 namespace RunFence.Infrastructure;
@@ -11,10 +10,6 @@ namespace RunFence.Infrastructure;
 public static class ShellNative
 {
     // ── Shell32 ────────────────────────────────────────────────────────────────
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    public static extern IntPtr ShellExecute(IntPtr hwnd, string? lpVerb, string lpFile,
-        string? lpParameters, string? lpDirectory, int nShowCmd);
 
     [DllImport("shell32.dll")]
     public static extern void SHChangeNotify(int wEventId, int uFlags, IntPtr dwItem1, IntPtr dwItem2);

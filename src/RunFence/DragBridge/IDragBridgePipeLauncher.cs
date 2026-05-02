@@ -1,6 +1,5 @@
 using System.IO.Pipes;
 using System.Security.Principal;
-using RunFence.Core.Models;
 using RunFence.Launch.Tokens;
 
 namespace RunFence.DragBridge;
@@ -11,7 +10,10 @@ namespace RunFence.DragBridge;
 /// </summary>
 public interface IDragBridgePipeLauncher
 {
-    NamedPipeServerStream CreatePipeServer(string pipeName, SecurityIdentifier targetUserSid);
+    NamedPipeServerStream CreatePipeServer(
+        string pipeName,
+        SecurityIdentifier targetUserSid,
+        bool allowLowIntegrityClient);
     ProcessInfo? LaunchForSid(WindowOwnerInfo ownerInfo, IReadOnlyList<string> args, INotificationService notifications);
     void SignalReady(NamedPipeServerStream pipe);
     bool VerifyClientProcess(NamedPipeServerStream pipe, ProcessInfo? expectedProcess);

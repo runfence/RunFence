@@ -1,4 +1,3 @@
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
@@ -15,7 +14,7 @@ public class RunAsContainerCreator(
     SessionContext session,
     IDatabaseService databaseService,
     RunAsAccountCreationUI creationUi,
-    ILicenseService licenseService)
+    ILicenseService licenseService) : IRunAsContainerCreator
 {
     /// <summary>
     /// Opens AppContainerEditDialog for inline container creation from the RunAs flow.

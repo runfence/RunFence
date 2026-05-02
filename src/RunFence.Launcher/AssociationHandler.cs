@@ -27,20 +27,25 @@ public static class AssociationHandler
             WorkingDirectory = string.Equals(cwd, launcherDir, StringComparison.OrdinalIgnoreCase) ? null : Environment.CurrentDirectory
         };
 
-        var response = LauncherIpcHelper.SendWithAutoStart(message);
+        var helper = new LauncherIpcHelper(new LauncherIpcClient(), new LauncherGuiController(), new LauncherWaitDelay());
+        var response = helper.SendWithAutoStart(message);
         if (response == null)
             return 1;
 
         if (!response.Success)
         {
-            if (response.ErrorCode == IpcErrorCode.AccessDenied)
-                return AssociationFallbackHelper.LaunchFallback(association, rawArguments, ipcAccessDenied: true);
-
-            if (response.ErrorCode == IpcErrorCode.UnknownAssociation)
-                return AssociationFallbackHelper.CleanupAndLaunchFallback(association, rawArguments);
-
-            LauncherIpcHelper.ShowError(response.ErrorMessage ?? "Unknown error.");
-            return 1;
+            switch (response.ErrorCode)
+            {
+                case IpcErrorCode.AccessDenied:
+                    return AssociationFallbackHelper.CleanupAndLaunchFallback(association, rawArguments);
+                case IpcErrorCode.PathPrefixMismatch:
+                    return AssociationFallbackHelper.LaunchFallback(association, rawArguments);
+                case IpcErrorCode.UnknownAssociation:
+                    return AssociationFallbackHelper.CleanupAndLaunchFallback(association, rawArguments);
+                default:
+                    LauncherIpcHelper.ShowError(response.ErrorMessage ?? "Unknown error.");
+                    return 1;
+            }
         }
 
         return 0;

@@ -22,6 +22,7 @@ public class GlobalHotkeyServiceTests : IDisposable
     {
         _log = new Mock<ILoggingService>();
         _service = new GlobalHotkeyService(_log.Object);
+        _service.ResetState();
     }
 
     public void Dispose() => _service.Dispose();

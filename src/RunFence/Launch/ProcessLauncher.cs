@@ -1,7 +1,5 @@
 using RunFence.Apps;
 using RunFence.Core;
-using RunFence.Core.Models;
-using RunFence.Infrastructure;
 using RunFence.Launch.Container;
 using RunFence.Launch.Tokens;
 using IProfileRepairHelper = RunFence.Account.IProfileRepairHelper;
@@ -21,7 +19,7 @@ public class ProcessLauncher(
     public ProcessInfo? Launch(LaunchIdentity identity, ProcessLaunchTarget target)
         => identity.Visit(this, target);
 
-    public ProcessInfo? Accept(AccountLaunchIdentity identity, ProcessLaunchTarget? target)
+    public ProcessInfo Accept(AccountLaunchIdentity identity, ProcessLaunchTarget? target)
     {
         ArgumentNullException.ThrowIfNull(target);
         var creds = identity.Credentials ?? credentialsLookup.GetBySid(identity.Sid);
@@ -42,7 +40,7 @@ public class ProcessLauncher(
         }
     }
 
-    public ProcessInfo? Accept(AppContainerLaunchIdentity identity, ProcessLaunchTarget? target)
+    public ProcessInfo Accept(AppContainerLaunchIdentity identity, ProcessLaunchTarget? target)
     {
         ArgumentNullException.ThrowIfNull(target);
         return appContainerLauncher.LaunchFile(target, identity);

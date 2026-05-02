@@ -18,7 +18,7 @@ public class FirewallRuleCleanupServiceTests
     private readonly Mock<IWfpLocalhostBlocker> _wfpBlocker = new();
     private readonly Mock<IWfpIcmpBlocker> _wfpIcmpBlocker = new();
     private readonly Mock<IGlobalIcmpPolicyService> _globalIcmpPolicy = new();
-    private readonly FirewallResolvedDomainCache _domainCache = new();
+    private readonly FirewallResolvedDomainCache _domainCache = new(new FirewallDomainDirtyTracker());
     private readonly FirewallEnforcementRetryState _retryState = new();
 
     private FirewallRuleCleanupService BuildService() =>

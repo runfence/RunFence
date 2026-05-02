@@ -1,11 +1,7 @@
-using System.Runtime.InteropServices;
-using System.Security;
-using System.Security.Cryptography;
 using RunFence.Account;
 using RunFence.Account.UI;
-using RunFence.Apps.Shortcuts;
-using RunFence.Infrastructure;
 using RunFence.Account.UI.Forms;
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -26,11 +22,6 @@ namespace RunFence.Wizard.Templates;
 /// In both cases, grants full ownership of game install folders, creates denied-execute app entries
 /// for game launchers, and skips items that already exist (without removing previously added ones).
 /// </summary>
-/// <remarks>Deps above threshold: CreateSteps exclusively uses groupMembership, localUserProvider, sidResolver,
-/// credentialCollectorFactory, discoveryService; setupHelperFactory is shared with ExecuteForNewAccountAsync.
-/// ExecuteForNewAccountAsync and ExecuteForExistingAccountAsync share session, licenseChecker, executor,
-/// folderGrantHelper, windowsAccountService (via BuildLauncherOptions) — session is also used in CreateSteps.
-/// No split boundary exists without duplicating these shared deps. Reviewed 2026-04-15.</remarks>
 public class GamingAccountTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
@@ -38,13 +29,11 @@ public class GamingAccountTemplate(
     SessionContext session,
     WizardLicenseChecker licenseChecker,
     IWindowsAccountService windowsAccountService,
-    ILocalGroupMembershipService groupMembership,
-    ILocalUserProvider localUserProvider,
-    ISidResolver sidResolver,
-    CredentialFilterHelper credentialFilterHelper,
+    WizardAccountPickerStepFactory pickerStepFactory,
     IAccountCredentialManager credentialManager,
-    Func<WizardCredentialCollector> credentialCollectorFactory,
-    IShortcutDiscoveryService discoveryService)
+    IShortcutDiscoveryService discoveryService,
+    IShortcutIconHelper iconHelper,
+    GamingLogonBlockHelper logonBlockHelper)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -67,16 +56,12 @@ public class GamingAccountTemplate(
         string? interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
         var data = _data;
 
-        var pickerStep = new AccountPickerStep(
+        var pickerStep = pickerStepFactory.CreatePickerStep(
             setSelection: (sid, isCreate) =>
             {
                 data.ExistingAccountSid = sid;
                 data.IsExistingAccount = !isCreate;
             },
-            groupMembership: groupMembership,
-            localUserProvider: localUserProvider,
-            sidResolver: sidResolver,
-            credentialFilterHelper: credentialFilterHelper,
             options: new AccountPickerStepOptions(
                 Credentials: session.CredentialStore.Credentials,
                 SidNames: session.Database.SidNames,
@@ -95,6 +80,7 @@ public class GamingAccountTemplate(
                 var launchersStep = new GamingLaunchersStep(
                     launchers => data.GameLaunchers = launchers,
                     discoveryService,
+                    iconHelper,
                     getSid: () => data.IsExistingAccount ? data.ExistingAccountSid : null);
 
                 if (isCreate)
@@ -104,11 +90,7 @@ public class GamingAccountTemplate(
                         {
                             data.Username = name;
                             data.Password?.Dispose();
-                            var ss = new SecureString();
-                            foreach (var c in password)
-                                ss.AppendChar(c);
-                            ss.MakeReadOnly();
-                            data.Password = ss;
+                            data.Password = password;
                         },
                         showPassword: true,
                         requirePassword: true,
@@ -124,7 +106,7 @@ public class GamingAccountTemplate(
             {
                 if (!_data.IsExistingAccount || string.IsNullOrEmpty(_data.ExistingAccountSid))
                     return Task.CompletedTask;
-                var pw = credentialCollectorFactory().CollectIfNeeded(_data.ExistingAccountSid, session, progress);
+                var pw = pickerStepFactory.CreateCredentialCollector().CollectIfNeeded(_data.ExistingAccountSid, session, progress);
                 if (pw != null) _data.CollectedPassword = pw;
                 return Task.CompletedTask;
             });
@@ -153,38 +135,11 @@ public class GamingAccountTemplate(
             return;
 
         progress.ReportStatus($"Creating account '{_data.Username}'...");
-        var passwordPtr = _data.Password != null
-            ? Marshal.SecureStringToGlobalAllocUnicode(_data.Password)
-            : IntPtr.Zero;
-        string passwordText;
-        try
-        {
-            if (passwordPtr != IntPtr.Zero)
-            {
-                var length = _data.Password!.Length;
-                var passwordChars = new char[length];
-                Marshal.Copy(passwordPtr, passwordChars, 0, length);
-                passwordText = new string(passwordChars);
-                // Zero the char array immediately. The resulting .NET string (passwordText) is
-                // immutable and persists on the managed heap until GC — inherent limitation,
-                // same as AccountCreationDefaults. The char[] is zeroed here to minimise exposure.
-                CryptographicOperations.ZeroMemory(MemoryMarshal.AsBytes(passwordChars.AsSpan()));
-            }
-            else
-            {
-                passwordText = string.Empty;
-            }
-        }
-        finally
-        {
-            if (passwordPtr != IntPtr.Zero)
-                Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
-        }
 
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: _data.Username,
-            PasswordText: passwordText,
-            ConfirmPasswordText: passwordText,
+            Password: _data.Password?.Copy() ?? ProtectedString.CreateEmpty(),
+            ConfirmPassword: _data.Password?.Copy() ?? ProtectedString.CreateEmpty(),
             IsEphemeral: false,
             CheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
             UncheckedGroups: [],
@@ -193,7 +148,7 @@ public class GamingAccountTemplate(
             AllowBgAutorun: false,
             CurrentHiddenCount: 0);
 
-        var defaults = setupHelperFactory.CreateAccountDefaults();
+        using var defaults = setupHelperFactory.CreateAccountDefaults();
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
             IsEphemeral: false,
@@ -206,21 +161,29 @@ public class GamingAccountTemplate(
         var gameFolders = _data.GameFolders;
         var gameLaunchers = _data.GameLaunchers;
 
-        await executor.ExecuteAsync(new WizardStandardFlowParams(
-            Request: request,
-            SetupOptions: setupOptions,
-            BuildOptionsFactory: sid => BuildLauncherOptions(sid, gameLaunchers, session),
-            PreEnforcementAction: async (sess, sid) =>
-            {
-                var newFolders = FilterNewFolders(gameFolders, sess, sid);
-                if (newFolders.Count == 0)
-                    return;
-                await folderGrantHelper.GrantFolderAccessAsync(
-                    newFolders, sid,
-                    new SavedRightsState(Execute: true, Write: true, Read: true, Special: true, Own: true),
-                    progress);
-            },
-            CreateDesktopShortcut: true), progress);
+        try
+        {
+            await executor.ExecuteAsync(new WizardStandardFlowParams(
+                Request: request,
+                SetupOptions: setupOptions,
+                BuildOptionsFactory: sid => BuildLauncherOptions(sid, gameLaunchers, session),
+                PreEnforcementAction: async (sess, sid) =>
+                {
+                    var newFolders = FilterNewFolders(gameFolders, sess, sid);
+                    if (newFolders.Count == 0)
+                        return;
+                    await folderGrantHelper.GrantFolderAccessAsync(
+                        newFolders, sid,
+                        new SavedRightsState(Execute: true, Write: true, Read: true, Special: true, Own: true),
+                        progress);
+                },
+                CreateDesktopShortcut: true), progress);
+        }
+        finally
+        {
+            request.Password.Dispose();
+            request.ConfirmPassword.Dispose();
+        }
     }
 
     private async Task ExecuteForExistingAccountAsync(IWizardProgressReporter progress)
@@ -232,6 +195,10 @@ public class GamingAccountTemplate(
         }
 
         var sid = _data.ExistingAccountSid;
+
+        var resolvedName = session.Database.SidNames.GetValueOrDefault(sid) ?? pickerStepFactory.TryResolveName(sid) ?? sid;
+        var username = SidNameResolver.ExtractUsername(resolvedName);
+        logonBlockHelper.CheckAndPromptLogonUnblock(sid, username, null, progress);
 
         // Pre-flight: only count launchers without an existing app entry for this account
         var existingExePaths = session.Database.Apps
@@ -307,7 +274,7 @@ public class GamingAccountTemplate(
                     manageShortcuts: true,
                     aclTarget: AclTarget.Folder);
             })
-            .ToList<AppEntryBuildOptions>();
+            .ToList();
     }
 
     private static bool IsPathInsideFolder(string path, string folder)
@@ -362,9 +329,9 @@ public class GamingAccountTemplate(
     {
         public bool IsExistingAccount { get; set; }
         public string? ExistingAccountSid { get; set; }
-        public SecureString? CollectedPassword { get; set; }
+        public ProtectedString? CollectedPassword { get; set; }
         public string Username { get; set; } = string.Empty;
-        public SecureString? Password { get; set; }
+        public ProtectedString? Password { get; set; }
         public List<string> GameFolders { get; set; } = [];
         public List<string> GameLaunchers { get; set; } = [];
 

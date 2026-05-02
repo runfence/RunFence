@@ -6,8 +6,7 @@ namespace RunFence.Infrastructure;
 /// </summary>
 public class LambdaUiThreadInvoker(
     Action<Action> invoke,
-    Action<Action>? beginInvoke = null,
-    Action<Action>? runOnUiThread = null) : IUiThreadInvoker
+    Action<Action>? beginInvoke = null) : IUiThreadInvoker
 {
     public T Invoke<T>(Func<T> func)
     {
@@ -18,5 +17,4 @@ public class LambdaUiThreadInvoker(
 
     // void Invoke(Action) — uses default interface impl (forwards to Invoke<T> via VoidStruct)
     public void BeginInvoke(Action action) => (beginInvoke ?? invoke)(action);
-    public void RunOnUiThread(Action action) => (runOnUiThread ?? invoke)(action);
 }

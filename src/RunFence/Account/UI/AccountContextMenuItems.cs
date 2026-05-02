@@ -31,7 +31,10 @@ public class AccountContextMenuItems
     public required ToolStripMenuItem PinFolderBrowserToTray { get; init; }
     public required ToolStripMenuItem PinDiscoveryToTray { get; init; }
     public required ToolStripMenuItem PinTerminalToTray { get; init; }
+    /// <summary>Checkbox item visible only for the SYSTEM account row. Opts SYSTEM into the RunAs dropdown.</summary>
+    public required ToolStripMenuItem ShowInRunAs { get; init; }
     public required ToolStripMenuItem ManageAssociations { get; init; }
+    public required ToolStripMenuItem ReceiveInjectedInput { get; init; }
     public required ToolStripMenuItem CopySid { get; init; }
     public required ToolStripMenuItem CopyProfilePath { get; init; }
     public required ToolStripMenuItem OpenProfileFolder { get; init; }
@@ -67,7 +70,6 @@ public class AccountContextMenuItems
     public required ToolStripMenuItem DeleteContainer { get; init; }
     public required ToolStripMenuItem CopyContainerProfilePath { get; init; }
     public required ToolStripMenuItem OpenContainerProfileFolder { get; init; }
-    public required ToolStripMenuItem ContainerFolderBrowser { get; init; }
 
     // Process row items (created in code)
     public required ToolStripSeparator ProcessSeparator { get; init; }

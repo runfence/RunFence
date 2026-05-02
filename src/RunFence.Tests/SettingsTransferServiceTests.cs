@@ -1,8 +1,8 @@
 using System.Security.AccessControl;
 using Moq;
 using RunFence.Acl;
+using RunFence.Acl.Permissions;
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.PrefTrans;
 using Xunit;
 
@@ -10,6 +10,8 @@ namespace RunFence.Tests;
 
 public class SettingsTransferServiceTests
 {
+    private const string FakeInteractiveSid = "S-1-5-21-1000-2000-3000-1001";
+
     private readonly SettingsTransferService _service;
     private readonly Mock<IPrefTransLauncher> _launcher;
 
@@ -18,14 +20,15 @@ public class SettingsTransferServiceTests
         var log = new Mock<ILoggingService>();
         _launcher = new Mock<IPrefTransLauncher>();
         var pathGrantService = new Mock<IPathGrantService>();
-        _service = new SettingsTransferService(log.Object, _launcher.Object, pathGrantService.Object);
+        var interactiveUserResolver = new Mock<IInteractiveUserResolver>();
+        interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns(FakeInteractiveSid);
+        _service = new SettingsTransferService(log.Object, _launcher.Object, pathGrantService.Object,
+            interactiveUserResolver.Object, AppContext.BaseDirectory);
     }
 
     private sealed record FakePrefTransFixture(
         TempDirectory TempDir,
         string FakePrefTransPath,
-        Mock<IPrefTransLauncher> Launcher,
-        Mock<IPathGrantService> PathGrantService,
         SettingsTransferService Service) : IDisposable
     {
         public void Dispose() => TempDir.Dispose();
@@ -33,7 +36,8 @@ public class SettingsTransferServiceTests
 
     private static FakePrefTransFixture CreateServiceWithFakePrefTrans(
         Mock<IPrefTransLauncher>? launcher = null,
-        Mock<IPathGrantService>? pathGrantService = null)
+        Mock<IPathGrantService>? pathGrantService = null,
+        Mock<IInteractiveUserResolver>? interactiveUserResolver = null)
     {
         var tempDir = new TempDirectory("SettingsTransfer");
         var fakePrefTrans = Path.Combine(tempDir.Path, "preftrans.exe");
@@ -42,13 +46,15 @@ public class SettingsTransferServiceTests
         launcher ??= new Mock<IPrefTransLauncher>();
         pathGrantService ??= new Mock<IPathGrantService>();
 
-        var log = new Mock<ILoggingService>();
-        var service = new SettingsTransferService(log.Object, launcher.Object, pathGrantService.Object)
-        {
-            BaseDirectory = tempDir.Path
-        };
+        var resolver = interactiveUserResolver ?? new Mock<IInteractiveUserResolver>();
+        if (interactiveUserResolver == null)
+            resolver.Setup(r => r.GetInteractiveUserSid()).Returns(FakeInteractiveSid);
 
-        return new FakePrefTransFixture(tempDir, fakePrefTrans, launcher, pathGrantService, service);
+        var log = new Mock<ILoggingService>();
+        var service = new SettingsTransferService(log.Object, launcher.Object, pathGrantService.Object,
+            resolver.Object, tempDir.Path);
+
+        return new FakePrefTransFixture(tempDir, fakePrefTrans, service);
     }
 
     // --- ValidatePrefTransExists tests ---
@@ -71,10 +77,9 @@ public class SettingsTransferServiceTests
         var log = new Mock<ILoggingService>();
         var launcher = new Mock<IPrefTransLauncher>();
         var pathGrantService = new Mock<IPathGrantService>();
-        var service = new SettingsTransferService(log.Object, launcher.Object, pathGrantService.Object)
-        {
-            BaseDirectory = tempDir.Path
-        };
+        var resolver = new Mock<IInteractiveUserResolver>();
+        var service = new SettingsTransferService(log.Object, launcher.Object, pathGrantService.Object,
+            resolver.Object, tempDir.Path);
 
         var result = service.ValidatePrefTransExists(out _);
 
@@ -131,7 +136,7 @@ public class SettingsTransferServiceTests
         launcher.Setup(l => l.RunAndWait(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<string>(), It.IsAny<int>(), It.IsAny<Action?>()))
-            .Callback<string, string, string, string, int, Action?>((exe, mode, file, sid, _, _) =>
+            .Callback<string, string, string, string, int, Action?>((exe, mode, file, _, _, _) =>
             {
                 capturedPrefTrans = exe;
                 capturedMode = mode;

@@ -1,9 +1,7 @@
-using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
-using RunFence.Startup;
 
 namespace RunFence.Account.Lifecycle;
 
@@ -18,7 +16,7 @@ public class EphemeralContainerService(
     ISessionProvider sessionProvider,
     IUiThreadInvoker uiThreadInvoker,
     IProcessListService processListService)
-    : IDisposable, IBackgroundService
+    : IDisposable, IBackgroundService, IEphemeralContainerChangeSource
 {
     private EphemeralTimerHelper? _timer;
 
@@ -32,15 +30,15 @@ public class EphemeralContainerService(
         log.Info("EphemeralContainerService: started.");
     }
 
-    public void ProcessExpiredContainers()
+    public async Task ProcessExpiredContainers()
     {
         var session = sessionProvider.GetSession();
         var database = session.Database;
         bool changed = false;
 
         var (orphaned, expired) = ClassifyEntries(database.AppContainers);
-        changed |= ProcessOrphanedEntries(orphaned, containerDeletion);
-        changed |= ProcessExpiredEntries(expired, containerDeletion, log, processListService);
+        changed |= await ProcessOrphanedEntries(orphaned, containerDeletion);
+        changed |= await ProcessExpiredEntries(expired, containerDeletion, log, processListService);
 
         if (changed)
         {
@@ -54,7 +52,7 @@ public class EphemeralContainerService(
     /// Processes expired ephemeral containers at startup before the timer service starts.
     /// Returns true if any changes were made.
     /// </summary>
-    public static bool ProcessExpiredAtStartup(
+    public static async Task<bool> ProcessExpiredAtStartup(
         AppDatabase database,
         IContainerDeletionService containerDeletion, ILoggingService log,
         IProcessListService processListService)
@@ -64,8 +62,8 @@ public class EphemeralContainerService(
 
         log.Info($"EphemeralContainerService: processing expired containers at startup ({orphaned.Count} orphaned, {expired.Count} expired).");
 
-        changed |= ProcessOrphanedEntries(orphaned, containerDeletion);
-        changed |= ProcessExpiredEntries(expired, containerDeletion, log, processListService);
+        changed |= await ProcessOrphanedEntries(orphaned, containerDeletion);
+        changed |= await ProcessExpiredEntries(expired, containerDeletion, log, processListService);
 
         log.Info("EphemeralContainerService: startup container processing complete.");
         return changed;
@@ -76,23 +74,23 @@ public class EphemeralContainerService(
     /// at startup and saves the database via the injected <see cref="IDatabaseService"/> if any
     /// containers were removed.
     /// </summary>
-    public void ProcessExpiredContainersAtStartup()
+    public async Task ProcessExpiredContainersAtStartup()
     {
         var session = sessionProvider.GetSession();
-        if (ProcessExpiredAtStartup(session.Database, containerDeletion, log, processListService))
+        if (await ProcessExpiredAtStartup(session.Database, containerDeletion, log, processListService))
         {
             using var scope = session.PinDerivedKey.Unprotect();
             databaseService.SaveConfig(session.Database, scope.Data, session.CredentialStore.ArgonSalt);
         }
     }
 
-    private static bool ProcessOrphanedEntries(List<AppContainerEntry> orphaned,
+    private static async Task<bool> ProcessOrphanedEntries(List<AppContainerEntry> orphaned,
         IContainerDeletionService containerDeletion)
     {
         bool anyRemoved = false;
         foreach (var entry in orphaned)
         {
-            if (!RunDeletion(entry, containerDeletion))
+            if (!await RunDeletion(entry, containerDeletion))
                 continue; // preserve entry — skip DB cleanup so it can be retried next time
             anyRemoved = true;
         }
@@ -100,7 +98,7 @@ public class EphemeralContainerService(
         return anyRemoved;
     }
 
-    private static bool ProcessExpiredEntries(List<AppContainerEntry> expired,
+    private static async Task<bool> ProcessExpiredEntries(List<AppContainerEntry> expired,
         IContainerDeletionService containerDeletion, ILoggingService log,
         IProcessListService processListService)
     {
@@ -108,7 +106,7 @@ public class EphemeralContainerService(
 
         var expiredSids = expired
             .Where(e => !string.IsNullOrEmpty(e.Sid))
-            .Select(e => e.Sid!)
+            .Select(e => e.Sid)
             .ToList();
         var sidsWithProcesses = expiredSids.Count > 0
             ? processListService.GetSidsWithProcesses(expiredSids)
@@ -124,7 +122,7 @@ public class EphemeralContainerService(
                 continue;
             }
 
-            if (!RunDeletion(entry, containerDeletion))
+            if (!await RunDeletion(entry, containerDeletion))
                 continue;
             changed = true;
         }
@@ -132,7 +130,7 @@ public class EphemeralContainerService(
         return changed;
     }
 
-    private static bool RunDeletion(AppContainerEntry entry, IContainerDeletionService containerDeletion)
+    private static Task<bool> RunDeletion(AppContainerEntry entry, IContainerDeletionService containerDeletion)
     {
         var containerSid = string.IsNullOrEmpty(entry.Sid) ? null : entry.Sid;
         return containerDeletion.DeleteContainer(entry, containerSid);

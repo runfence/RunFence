@@ -9,7 +9,6 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
-using RunFence.Security;
 using Xunit;
 
 #endregion
@@ -53,8 +52,10 @@ public class EphemeralAccountServiceTests
         var lsaRestriction = new Mock<IAccountLsaRestrictionService>();
         var accountValidationForLifecycle = new Mock<IAccountValidationService>();
         var lifecycleManager = new AccountLifecycleManager(
-            windowsService.Object, loginRestriction.Object, lsaRestriction.Object, orphanedProfiles.Object,
-            aclCleanup.Object, log.Object, accountValidationForLifecycle.Object, sidResolver.Object);
+            windowsService.Object, loginRestriction.Object, lsaRestriction.Object,
+            new Mock<IGroupPolicyScriptHelper>().Object, orphanedProfiles.Object,
+            aclCleanup.Object, log.Object, accountValidationForLifecycle.Object, new Mock<IProfilePathResolver>().Object,
+            new ValidationRunner(log.Object));
 
         bool customDeletion = accountDeletion != null;
         accountDeletion ??= new Mock<IAccountDeletionService>();
@@ -276,6 +277,83 @@ public class EphemeralAccountServiceTests
         Assert.Single(store.Credentials);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
             It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<byte[]>()), Times.Never);
+    }
+
+    // ── TC-17: profile deletion failure logging ──────────────────────────────
+
+    [Fact]
+    public void ProcessExpiredAccounts_ProfileDeletionFails_LogsWarningAndContinues()
+    {
+        // Arrange — expired account whose DeleteAccount succeeds but DeleteProfileAsync throws.
+        // The profile deletion is fire-and-forget: failure must be logged as Warn, but the
+        // overall ProcessExpiredAccounts call must succeed (account removed, save called).
+        var database = new AppDatabase();
+        var store = new CredentialStore();
+        const string sid = "S-1-5-21-0-0-0-9920";
+        const string username = "testeph_profile";
+        database.SidNames[sid] = username;
+        store.Credentials.Add(new CredentialEntry { Sid = sid, EncryptedPassword = [1] });
+        database.GetOrCreateAccount(sid).DeleteAfterUtc = DateTime.UtcNow.AddHours(-1);
+
+        // Signal set when the fire-and-forget Warn callback executes — eliminates timing dependency.
+        using var warnSignal = new ManualResetEventSlim(false);
+
+        var log = new Mock<ILoggingService>();
+        log.Setup(l => l.Warn(It.Is<string>(m => m.Contains(sid) && m.Contains("profile"))))
+            .Callback(() => warnSignal.Set());
+
+        var credRepo = new Mock<ICredentialRepository>();
+        var configRepo = new Mock<IConfigRepository>();
+        var localUserProvider = new Mock<ILocalUserProvider>();
+        var sidNameCache = new Mock<ISidNameCacheService>();
+        var sidResolver = new Mock<ISidResolver>();
+        sidResolver.Setup(r => r.TryResolveName(sid)).Returns(username);
+        var persistenceHelper = new SessionPersistenceHelper(
+            credRepo.Object, configRepo.Object, sidNameCache.Object, log.Object);
+
+        // Use a mock IAccountLifecycleManager so DeleteProfileAsync can be controlled directly.
+        var lifecycleManager = new Mock<IAccountLifecycleManager>();
+        lifecycleManager.Setup(m => m.DeleteProfileAsync(sid))
+            .Returns(Task.FromException<string?>(new InvalidOperationException("Simulated profile deletion failure")));
+
+        var accountDeletion = new Mock<IAccountDeletionService>();
+        accountDeletion.Setup(d => d.DeleteAccount(
+                sid, username, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
+            .Callback<string, string, CredentialStore, bool>((s, _, cs, _) =>
+            {
+                var entry = database.GetAccount(s);
+                if (entry != null) database.Accounts.Remove(entry);
+                cs.Credentials.RemoveAll(c => string.Equals(c.Sid, s, StringComparison.OrdinalIgnoreCase));
+            });
+
+        var defaultValidation = new Mock<IAccountValidationService>();
+        defaultValidation.Setup(v => v.GetProcessesRunningAsSid(It.IsAny<string>())).Returns([]);
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        var session = new SessionContext { Database = database, CredentialStore = store, PinDerivedKey = pinKey };
+
+        using var service = new EphemeralAccountService(
+            lifecycleManager.Object, accountDeletion.Object, persistenceHelper, localUserProvider.Object,
+            log.Object, defaultValidation.Object, new LambdaSessionProvider(() => session),
+            new InlineUiThreadInvoker(a => a()), sidResolver.Object, pathGrantService.Object);
+        service.Start();
+
+        // Act
+        service.ProcessExpiredAccounts();
+
+        // Wait for the fire-and-forget continuation to log its warning (deterministic — no sleep).
+        Assert.True(warnSignal.Wait(TimeSpan.FromSeconds(5)), "Profile deletion warning was not logged within timeout.");
+
+        // Assert — account was deleted (main path succeeded)
+        Assert.Null(database.GetAccount(sid));
+        Assert.Empty(store.Credentials);
+
+        // Confirm Warn was called with the expected message (already guaranteed by warnSignal above).
+        log.Verify(l => l.Warn(It.Is<string>(m =>
+            m.Contains(sid) && m.Contains("profile"))), Times.AtLeastOnce);
+
+        pinKey.Dispose();
     }
 
     [Fact]

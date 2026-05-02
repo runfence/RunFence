@@ -19,7 +19,7 @@ public class ContainerDeletionServiceTests
     public ContainerDeletionServiceTests()
     {
         _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()));
-        _containerService.Setup(s => s.DeleteProfile(It.IsAny<string>(), It.IsAny<bool>()));
+        _containerService.Setup(s => s.DeleteProfile(It.IsAny<string>(), It.IsAny<bool>())).Returns(Task.CompletedTask);
         _sidCleanup.Setup(s => s.CleanupContainerFromAppData(
             It.IsAny<string>(), It.IsAny<string?>()));
     }
@@ -34,34 +34,34 @@ public class ContainerDeletionServiceTests
     // ── Grant cleanup ───────────────────────────────────────────────────────
 
     [Fact]
-    public void DeleteContainer_CallsRevertTraverseAccess()
+    public async Task DeleteContainer_CallsRevertTraverseAccess()
     {
         // RevertTraverseAccess delegates to pathGrantService.RemoveAll internally via AppContainerService.
         var db = new AppDatabase();
 
-        CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
+        await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
         _containerService.Verify(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), db), Times.Once);
     }
 
     [Fact]
-    public void DeleteContainer_NullContainerSid_SkipsVirtualStoreRevoke()
+    public async Task DeleteContainer_NullContainerSid_SkipsVirtualStoreRevoke()
     {
         var db = new AppDatabase();
 
-        CreateService(db).DeleteContainer(MakeEntry(), containerSid: null);
+        await CreateService(db).DeleteContainer(MakeEntry(), containerSid: null);
 
         _environmentSetup.Verify(s => s.TryRevokeVirtualStoreAccess(
             It.IsAny<string>(), It.IsAny<string>()), Times.Never);
     }
 
     [Fact]
-    public void DeleteContainer_WithContainerSid_RevokesVirtualStoreAccess()
+    public async Task DeleteContainer_WithContainerSid_RevokesVirtualStoreAccess()
     {
         const string containerSid = "S-1-15-2-99-1-2-3-4-5-6";
         var db = new AppDatabase();
 
-        CreateService(db).DeleteContainer(MakeEntry(), containerSid);
+        await CreateService(db).DeleteContainer(MakeEntry(), containerSid);
 
         _environmentSetup.Verify(s => s.TryRevokeVirtualStoreAccess(containerSid, It.IsAny<string>()), Times.Once);
     }
@@ -69,7 +69,7 @@ public class ContainerDeletionServiceTests
     // ── Pipeline ordering ──────────────────────────────────────────────────
 
     [Fact]
-    public void DeleteContainer_PipelineOrdering_RevertTraverseThenDeleteProfileThenCleanup()
+    public async Task DeleteContainer_PipelineOrdering_RevertTraverseThenDeleteProfileThenCleanup()
     {
         var db = new AppDatabase();
         var callOrder = new List<string>();
@@ -77,12 +77,13 @@ public class ContainerDeletionServiceTests
         _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()))
             .Callback(() => callOrder.Add("RevertTraverseAccess"));
         _containerService.Setup(s => s.DeleteProfile(It.IsAny<string>(), It.IsAny<bool>()))
-            .Callback(() => callOrder.Add("DeleteProfile"));
+            .Callback(() => callOrder.Add("DeleteProfile"))
+            .Returns(Task.CompletedTask);
         _sidCleanup.Setup(s => s.CleanupContainerFromAppData(
                 It.IsAny<string>(), It.IsAny<string?>()))
             .Callback(() => callOrder.Add("CleanupContainerFromAppData"));
 
-        CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
+        await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
         Assert.Equal(3, callOrder.Count);
         Assert.Equal("RevertTraverseAccess", callOrder[0]);
@@ -91,13 +92,13 @@ public class ContainerDeletionServiceTests
     }
 
     [Fact]
-    public void DeleteContainer_RevertTraverseThrows_LogsWarningAndContinues()
+    public async Task DeleteContainer_RevertTraverseThrows_LogsWarningAndContinues()
     {
         var db = new AppDatabase();
         _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()))
             .Throws(new InvalidOperationException("ACL revert failed"));
 
-        var result = CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
+        var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
         _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("rfn_test"))), Times.Once);
         _sidCleanup.Verify(s => s.CleanupContainerFromAppData(It.IsAny<string>(), It.IsAny<string?>()), Times.Once);
@@ -105,13 +106,13 @@ public class ContainerDeletionServiceTests
     }
 
     [Fact]
-    public void DeleteContainer_DeleteProfileFails_ReturnsFalse()
+    public async Task DeleteContainer_DeleteProfileFails_ReturnsFalse()
     {
         var db = new AppDatabase();
         _containerService.Setup(s => s.DeleteProfile(It.IsAny<string>(), It.IsAny<bool>()))
-            .Throws(new InvalidOperationException("Profile deletion failed"));
+            .ThrowsAsync(new InvalidOperationException("Profile deletion failed"));
 
-        var result = CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
+        var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
         Assert.False(result);
         _sidCleanup.Verify(s => s.CleanupContainerFromAppData(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);

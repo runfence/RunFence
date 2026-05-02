@@ -16,7 +16,7 @@ public class FirewallDnsRefreshService(
     FirewallEnforcementRetryState retryState,
     ILoggingService log,
     UiThreadDatabaseAccessor db,
-    IFirewallNetworkInfo firewallNetworkInfo)
+    FirewallDomainBatchResolver batchResolver)
     : IDisposable, IBackgroundService, IFirewallDomainRefreshRequester
 {
     private Timer? _timer;
@@ -81,15 +81,12 @@ public class FirewallDnsRefreshService(
         Interlocked.Exchange(ref _refreshRequested, 0);
         try
         {
-            try
-            {
-                var database = db.CreateSnapshot();
-                StartDnsRefreshCycle(database);
-            }
-            catch (Exception ex)
-            {
-                log.Error("FirewallDnsRefreshService: DNS refresh cycle failed", ex);
-            }
+            var database = db.CreateSnapshot();
+            StartDnsRefreshCycle(database);
+        }
+        catch (Exception ex)
+        {
+            log.Error("FirewallDnsRefreshService: DNS refresh cycle failed", ex);
         }
         finally
         {
@@ -177,7 +174,7 @@ public class FirewallDnsRefreshService(
             var database = db.CreateSnapshot();
             domainCache.Prune(database);
             retryState.Prune(database);
-            retryState.UpdateDnsServersAndReturnChanged(firewallNetworkInfo.GetDnsServerAddresses());
+            retryState.UpdateDnsServersAndReturnChanged(batchResolver.GetDnsServerAddresses());
         }
         catch (Exception ex)
         {
@@ -187,7 +184,7 @@ public class FirewallDnsRefreshService(
 
     private bool UpdateDnsServerState(IReadOnlyList<AllowlistRefreshItem> allowlistItems)
     {
-        var currentServers = firewallNetworkInfo.GetDnsServerAddresses();
+        var currentServers = batchResolver.GetDnsServerAddresses();
         bool dnsServersChanged = retryState.UpdateDnsServersAndReturnChanged(currentServers);
         if (!dnsServersChanged)
             return false;
@@ -209,7 +206,7 @@ public class FirewallDnsRefreshService(
         var requestedDomains = distinctDomainEntries
             .Select(entry => entry.Value)
             .ToList();
-        var freshResolved = ResolveDistinctDomainEntries(distinctDomainEntries);
+        var freshResolved = batchResolver.ResolveBatch(distinctDomainEntries);
         var changedDomains = domainCache.UpdateResolvedDomainsAndGetChangedDomains(requestedDomains, freshResolved);
         var changedDomainSet = changedDomains.ToHashSet(StringComparer.OrdinalIgnoreCase);
         domainCache.MarkDirtyForChangedDomains(database, changedDomains);
@@ -256,54 +253,6 @@ public class FirewallDnsRefreshService(
         }
 
         return new RefreshCycleResult(accountRefreshSucceeded, dirtyStateConsumed);
-    }
-
-    private Dictionary<string, List<string>> ResolveDistinctDomainEntries(IReadOnlyList<FirewallAllowlistEntry> domainEntries)
-    {
-        if (domainEntries.Count == 0)
-            return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-
-        var freshResolved = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, List<string>> resolved;
-        try
-        {
-            resolved = firewallNetworkInfo.ResolveDomainEntriesAsync(domainEntries)
-                .GetAwaiter()
-                .GetResult();
-        }
-        catch (Exception)
-        {
-            foreach (var entry in domainEntries)
-            {
-                try
-                {
-                    var single = firewallNetworkInfo.ResolveDomainEntriesAsync([entry])
-                        .GetAwaiter().GetResult();
-                    if (single.TryGetValue(entry.Value, out var addrs)
-                        && addrs.Any(a => !string.IsNullOrWhiteSpace(a)))
-                        freshResolved[entry.Value] = addrs.ToList();
-                }
-                catch (Exception perEx)
-                {
-                    log.Warn($"FirewallDnsRefreshService: DNS resolution failed for {entry.Value}: {perEx.Message}");
-                }
-            }
-            return freshResolved;
-        }
-
-        foreach (var entry in domainEntries)
-        {
-            if (!resolved.TryGetValue(entry.Value, out var addresses)
-                || !addresses.Any(address => !string.IsNullOrWhiteSpace(address)))
-            {
-                log.Warn($"FirewallDnsRefreshService: DNS returned no addresses for {entry.Value}");
-                continue;
-            }
-
-            freshResolved[entry.Value] = addresses.ToList();
-        }
-
-        return freshResolved;
     }
 
     private void RefreshLocalAddressItems(IReadOnlyList<LocalAddressRefreshItem> items)
@@ -357,6 +306,21 @@ public class FirewallDnsRefreshService(
         return items;
     }
 
+    private static List<LocalAddressRefreshItem> SnapshotLocalAddressItems(AppDatabase database)
+    {
+        var items = new List<LocalAddressRefreshItem>();
+        foreach (var account in database.Accounts)
+        {
+            if (account.Firewall.IsDefault || account.Firewall.AllowLocalhost)
+                continue;
+
+            var username = database.SidNames.TryGetValue(account.Sid, out var name) ? name : account.Sid;
+            items.Add(new LocalAddressRefreshItem(account.Sid, username, account.Firewall));
+        }
+
+        return items;
+    }
+
     private static List<FirewallAllowlistEntry> GetDistinctDomainEntries(IReadOnlyList<AllowlistRefreshItem> items)
     {
         var entries = new List<FirewallAllowlistEntry>();
@@ -373,33 +337,12 @@ public class FirewallDnsRefreshService(
         return entries;
     }
 
-    private static List<LocalAddressRefreshItem> SnapshotLocalAddressItems(AppDatabase database)
-    {
-        var items = new List<LocalAddressRefreshItem>();
-        foreach (var account in database.Accounts)
-        {
-            if (account.Firewall.IsDefault || account.Firewall.AllowLocalhost)
-                continue;
-
-            var username = database.SidNames.TryGetValue(account.Sid, out var name) ? name : account.Sid;
-            items.Add(new LocalAddressRefreshItem(account.Sid, username, account.Firewall));
-        }
-
-        return items;
-    }
-
     public void Dispose()
     {
         _disposed = true;
         _timer?.Dispose();
         _timer = null;
     }
-
-    private record AllowlistRefreshItem(
-        string Sid,
-        string Username,
-        FirewallAccountSettings Settings,
-        IReadOnlyList<FirewallAllowlistEntry> DomainEntries);
 
     private record LocalAddressRefreshItem(string Sid, string Username, FirewallAccountSettings Settings);
 

@@ -6,9 +6,10 @@ public class AppSettings
 {
     public bool AutoStartOnLogin { get; set; }
     public int IdleTimeoutMinutes { get; set; }
-    public bool AutoLockOnMinimize { get; set; }
+    [JsonPropertyName("AutoLockOnMinimize")]
+    public bool AutoLockInBackground { get; set; }
     public int AutoLockTimeoutMinutes { get; set; }
-    public string FolderBrowserExePath { get; set; } = Constants.FolderBrowserExeName;
+    public string FolderBrowserExePath { get; set; } = PathConstants.FolderBrowserExeName;
     public string FolderBrowserArguments { get; set; } = "\"%1\"";
     public string DefaultDesktopSettingsPath { get; set; } = "";
 
@@ -16,7 +17,7 @@ public class AppSettings
     public UnlockMode UnlockMode { get; set; } = UnlockMode.Admin;
 
     public bool EnableRunAsContextMenu { get; set; }
-    public bool EnableLogging { get; set; } = true;
+    public LogVerbosity LogVerbosity { get; set; } = LogVerbosity.Info;
     public string LastSecurityFindingsHash { get; set; } = "";
 
     /// <summary>
@@ -84,6 +85,9 @@ public class AppSettings
     // Firewall
     public bool BlockIcmpWhenInternetBlocked { get; set; } = true;
 
+    // Input injection blocking
+    public bool BlockInputInjection { get; set; } = true;
+
     /// <summary>
     /// Returns a shallow copy of this settings object. Primitive and string properties
     /// are value-copied; <see cref="SeenDiskRootAclKeys"/> is list-cloned so the snapshot
@@ -93,14 +97,14 @@ public class AppSettings
     {
         AutoStartOnLogin = AutoStartOnLogin,
         IdleTimeoutMinutes = IdleTimeoutMinutes,
-        AutoLockOnMinimize = AutoLockOnMinimize,
+        AutoLockInBackground = AutoLockInBackground,
         AutoLockTimeoutMinutes = AutoLockTimeoutMinutes,
         FolderBrowserExePath = FolderBrowserExePath,
         FolderBrowserArguments = FolderBrowserArguments,
         DefaultDesktopSettingsPath = DefaultDesktopSettingsPath,
         UnlockMode = UnlockMode,
         EnableRunAsContextMenu = EnableRunAsContextMenu,
-        EnableLogging = EnableLogging,
+        LogVerbosity = LogVerbosity,
         LastSecurityFindingsHash = LastSecurityFindingsHash,
         SeenDiskRootAclKeys = SeenDiskRootAclKeys.ToList(),
         HasShownFirstAccountWarning = HasShownFirstAccountWarning,
@@ -112,6 +116,7 @@ public class AppSettings
         EnableDragBridge = EnableDragBridge,
         DragBridgeCopyHotkey = DragBridgeCopyHotkey,
         BlockIcmpWhenInternetBlocked = BlockIcmpWhenInternetBlocked,
+        BlockInputInjection = BlockInputInjection,
         HandlerMappings = HandlerMappings != null
             ? new Dictionary<string, HandlerMappingEntry>(HandlerMappings, StringComparer.OrdinalIgnoreCase)
             : null,

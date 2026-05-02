@@ -9,7 +9,6 @@ namespace RunFence.Persistence;
 public interface IGrantConfigTracker
 {
     void AssignGrant(string sid, GrantedPathEntry entry, string? configPath);
-    void RemoveGrant(string sid, GrantedPathEntry entry);
     string? GetGrantConfigPath(string sid, GrantedPathEntry entry);
 
     /// <summary>
@@ -23,6 +22,12 @@ public interface IGrantConfigTracker
     /// Returns null if there are no matching entries.
     /// </summary>
     List<AppConfigAccountEntry>? FilterGrantsForConfig(List<AccountEntry> accounts, string configPath);
+
+    /// <summary>
+    /// Returns filtered grant entries for the supplied owner SID and config path.
+    /// Returns null if there are no matching entries.
+    /// </summary>
+    List<GrantedPathEntry>? FilterGrantsForConfig(string sid, List<GrantedPathEntry> grants, string configPath);
 
     /// <summary>
     /// Removes all grant entries that belong to <paramref name="configPath"/> from the tracker.

@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Persistence;
 using RunFence.Security;
@@ -19,6 +21,12 @@ public class PinResetFlowRunner(
     /// <inheritdoc/>
     public (CredentialStore Store, byte[] Key)? RunResetFlow()
     {
+        // Defense-in-depth: this method shows interactive dialogs and must run inside a secure desktop
+        // context (ISecureDesktopRunner.Run callback) to prevent UI spoofing attacks.
+        // A runtime check is not feasible without a secure desktop detection API.
+        Debug.Assert(Thread.CurrentThread.GetApartmentState() == ApartmentState.STA,
+            "RunResetFlow must be called on an STA thread inside ISecureDesktopRunner.Run context.");
+
         var confirm = MessageBox.Show(
             "This will delete all stored passwords and app entries.\nContinue?",
             "Reset PIN",
@@ -32,7 +40,7 @@ public class PinResetFlowRunner(
         byte[]? newKey = null;
 
         using var setDlg = new PinDialog(PinDialogMode.Set);
-        setDlg.ProcessingCallback = async (newPin, _) =>
+        setDlg.ProcessingCallback = async (ProtectedString newPin, string? _) =>
         {
             try
             {

@@ -17,7 +17,8 @@ public class TraverseCoreOperations(
     AncestorTraverseGranter ancestorTraverseGranter,
     IAclPermissionService aclPermission,
     UiThreadDatabaseAccessor dbAccessor,
-    ILoggingService log)
+    ILoggingService log,
+    IFileSystemPathInfo pathInfo) : ITraverseCoreOperations
 {
     /// <summary>
     /// Grants Traverse | ReadAttributes | Synchronize (no inheritance) on <paramref name="path"/>
@@ -29,18 +30,27 @@ public class TraverseCoreOperations(
     public (bool Modified, List<string> VisitedPaths) AddTraverse(string sid, string path)
     {
         var normalized = Path.GetFullPath(path);
-        var identity = new SecurityIdentifier(sid);
-        var groupSids = aclPermission.ResolveAccountGroupSids(sid);
+        var aclSid = ResolveTraverseAclSid(sid);
+        var identity = new SecurityIdentifier(aclSid);
+        var groupSids = aclPermission.ResolveAccountGroupSids(aclSid);
+        var effectiveGroupSids = string.Equals(aclSid, sid, StringComparison.OrdinalIgnoreCase)
+            ? groupSids
+            : aclPermission.ResolveAccountGroupSids(sid);
 
         var (appliedPaths, anyAceAdded) =
-            ancestorTraverseGranter.GrantOnPathAndAncestors(normalized, identity, groupSids);
+            ancestorTraverseGranter.GrantOnPathAndAncestors(
+                normalized,
+                identity,
+                groupSids,
+                effectiveSid: sid,
+                effectiveGroupSids: effectiveGroupSids);
 
         bool dbEntryIsNew = false;
         if (appliedPaths.Count > 0)
         {
             dbEntryIsNew = dbAccessor.Write(database =>
             {
-                var grants = database.GetOrCreateAccount(sid).Grants;
+                var grants = GetTraverseStore(database, sid);
                 var existing = grants.FirstOrDefault(e =>
                     string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase) &&
                     e.IsTraverseOnly);
@@ -80,18 +90,19 @@ public class TraverseCoreOperations(
             var entry = FindTraverseEntryInDb(db, sid, normalized);
             if (entry == null) return default;
 
-            var acct = db.GetAccount(sid);
-            var remaining = acct?.Grants
+            var traverseStore = GetTraverseStoreOrEmpty(db, sid);
+            var remaining = traverseStore
                 .Where(e => e.IsTraverseOnly &&
                             !string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase))
-                .ToList() ?? [];
+                .ToList();
 
             var grantPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (acct != null)
+            var grantOwners = GetGrantOwnersForTraverseCleanup(db, sid);
+            foreach (var acct in grantOwners)
             {
-                foreach (var g in acct.Grants.Where(g => !g.IsTraverseOnly && !g.IsDeny))
+                foreach (var g in acct.Grants.Where(g => g is { IsTraverseOnly: false, IsDeny: false }))
                 {
-                    var dir = Directory.Exists(g.Path) ? g.Path : Path.GetDirectoryName(g.Path);
+                    var dir = pathInfo.DirectoryExists(g.Path) ? g.Path : Path.GetDirectoryName(g.Path);
                     if (!string.IsNullOrEmpty(dir))
                         grantPaths.Add(dir);
                 }
@@ -103,11 +114,11 @@ public class TraverseCoreOperations(
         if (!readResult.Found)
             return false;
 
-        bool pathIsStale = !AclHelper.PathExists(normalized);
+        bool pathIsStale = !pathInfo.DirectoryExists(normalized) && !pathInfo.FileExists(normalized);
 
         if (updateFileSystem)
         {
-            var identity = new SecurityIdentifier(sid);
+            var identity = new SecurityIdentifier(ResolveTraverseAclSid(sid));
             var syntheticEntry = new GrantedPathEntry
             {
                 Path = normalized, IsTraverseOnly = true, AllAppliedPaths = readResult.AppliedPaths
@@ -118,10 +129,10 @@ public class TraverseCoreOperations(
 
         dbAccessor.Write(db =>
         {
-            var acct = db.GetAccount(sid);
-            var e = acct != null ? FindTraverseEntryInDb(db, sid, normalized) : null;
+            var store = GetTraverseStoreOrEmpty(db, sid);
+            var e = FindTraverseEntryInList(store, normalized);
             if (e != null)
-                acct!.Grants.Remove(e);
+                store.Remove(e);
         });
 
         if (pathIsStale)
@@ -136,18 +147,26 @@ public class TraverseCoreOperations(
     public List<string> FixTraverse(string sid, string path)
     {
         var normalized = Path.GetFullPath(path);
-        var identity = new SecurityIdentifier(sid);
-        var groupSids = aclPermission.ResolveAccountGroupSids(sid);
+        var aclSid = ResolveTraverseAclSid(sid);
+        var identity = new SecurityIdentifier(aclSid);
+        var groupSids = aclPermission.ResolveAccountGroupSids(aclSid);
+        var effectiveGroupSids = string.Equals(aclSid, sid, StringComparison.OrdinalIgnoreCase)
+            ? groupSids
+            : aclPermission.ResolveAccountGroupSids(sid);
         var (appliedPaths, _) =
-            ancestorTraverseGranter.GrantOnPathAndAncestors(normalized, identity, groupSids);
+            ancestorTraverseGranter.GrantOnPathAndAncestors(
+                normalized,
+                identity,
+                groupSids,
+                effectiveSid: sid,
+                effectiveGroupSids: effectiveGroupSids);
 
         if (appliedPaths.Count > 0)
         {
             dbAccessor.Write(db =>
             {
                 var entry = FindTraverseEntryInDb(db, sid, normalized);
-                if (entry != null)
-                    entry.AllAppliedPaths = appliedPaths;
+                entry?.AllAppliedPaths = appliedPaths;
             });
         }
 
@@ -163,21 +182,22 @@ public class TraverseCoreOperations(
         var (needsRemoval, traverseDir) = dbAccessor.Read(db =>
         {
             var account = db.GetAccount(sid);
-            if (account == null) return (false, (string?)null);
+            if (account == null && !UsesSharedContainerTraverse(sid)) return (false, (string?)null);
 
-            var tDir = Directory.Exists(normalizedGrantPath)
+            var tDir = pathInfo.DirectoryExists(normalizedGrantPath)
                 ? normalizedGrantPath
                 : Path.GetDirectoryName(normalizedGrantPath);
 
-            if (string.IsNullOrEmpty(tDir)) return (false, null);
-            if (FindTraverseEntryInDb(db, sid, tDir) == null) return (false, null);
+            if (string.IsNullOrEmpty(tDir) || FindTraverseEntryInDb(db, sid, tDir) == null) return (false, null);
 
-            bool stillNeeded = account.Grants
-                .Where(e => !e.IsTraverseOnly && !e.IsDeny &&
-                            !string.Equals(e.Path, normalizedGrantPath, StringComparison.OrdinalIgnoreCase))
+            bool stillNeeded = GetGrantOwnersForTraverseCleanup(db, sid)
+                .SelectMany(a => a.Grants.Select(g => (OwnerSid: a.Sid, Grant: g)))
+                .Where(e => e.Grant is { IsTraverseOnly: false, IsDeny: false })
+                .Where(e => !string.Equals(e.OwnerSid, sid, StringComparison.OrdinalIgnoreCase) ||
+                            !string.Equals(e.Grant.Path, normalizedGrantPath, StringComparison.OrdinalIgnoreCase))
                 .Any(e =>
                 {
-                    var dir = Directory.Exists(e.Path) ? e.Path : Path.GetDirectoryName(e.Path);
+                    var dir = pathInfo.DirectoryExists(e.Grant.Path) ? e.Grant.Path : Path.GetDirectoryName(e.Grant.Path);
                     return string.Equals(dir, tDir, StringComparison.OrdinalIgnoreCase);
                 });
 
@@ -195,8 +215,10 @@ public class TraverseCoreOperations(
     /// </summary>
     public void RevertAllTraverseAces(string sid, IReadOnlyList<GrantedPathEntry> allGrantsSnapshot)
     {
-        var identity = new SecurityIdentifier(sid);
-        var traverseEntries = allGrantsSnapshot.Where(e => e.IsTraverseOnly).ToList();
+        var identity = new SecurityIdentifier(ResolveTraverseAclSid(sid));
+        var traverseEntries = UsesSharedContainerTraverse(sid)
+            ? dbAccessor.Read(db => db.SharedContainerTraverseGrants.Select(e => e.Clone()).ToList())
+            : allGrantsSnapshot.Where(e => e.IsTraverseOnly).ToList();
 
         foreach (var entry in traverseEntries)
         {
@@ -225,10 +247,7 @@ public class TraverseCoreOperations(
     public static GrantedPathEntry? FindTraverseEntryInDb(AppDatabase database, string sid,
         string normalized)
     {
-        var account = database.GetAccount(sid);
-        return account?.Grants.FirstOrDefault(e =>
-            string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase) &&
-            e.IsTraverseOnly);
+        return FindTraverseEntryInList(GetTraverseStoreOrEmpty(database, sid), normalized);
     }
 
     private void PromoteNearestAncestor(string sid, List<string>? appliedPaths)
@@ -236,14 +255,14 @@ public class TraverseCoreOperations(
         if (appliedPaths == null || appliedPaths.Count == 0)
             return;
 
-        var sidIdentity = new SecurityIdentifier(sid);
+        var sidIdentity = new SecurityIdentifier(ResolveTraverseAclSid(sid));
         string? promotedPath = null;
         List<string>? remaining = null;
 
         for (int i = 0; i < appliedPaths.Count; i++)
         {
             var candidate = appliedPaths[i];
-            if (!AclHelper.PathExists(candidate))
+            if (!pathInfo.DirectoryExists(candidate) && !pathInfo.FileExists(candidate))
                 continue;
             if (!traverseAcl.HasExplicitTraverseAce(candidate, sidIdentity))
                 continue;
@@ -257,11 +276,41 @@ public class TraverseCoreOperations(
         if (promotedPath == null)
             return;
 
-        dbAccessor.Write(db => db.GetOrCreateAccount(sid).Grants.Add(new GrantedPathEntry
+        dbAccessor.Write(db => GetTraverseStore(db, sid).Add(new GrantedPathEntry
         {
             Path = promotedPath,
             IsTraverseOnly = true,
             AllAppliedPaths = remaining ?? new List<string>()
         }));
     }
+
+    private static bool UsesSharedContainerTraverse(string sid) => AclHelper.IsSpecificContainerSid(sid);
+
+    private static string ResolveTraverseAclSid(string sid)
+    {
+        // Specific AppContainer package SID ACEs make ordinary Low Integrity processes lose access
+        // to that directory. Container traverse ACEs are shared through ALL APPLICATION PACKAGES
+        // so container paths remain reachable without breaking non-container Low IL launches.
+        return UsesSharedContainerTraverse(sid) ? AclHelper.AllApplicationPackagesSid : sid;
+    }
+
+    private static List<GrantedPathEntry> GetTraverseStore(AppDatabase database, string sid) =>
+        UsesSharedContainerTraverse(sid)
+            ? database.SharedContainerTraverseGrants
+            : database.GetOrCreateAccount(sid).Grants;
+
+    private static List<GrantedPathEntry> GetTraverseStoreOrEmpty(AppDatabase database, string sid) =>
+        UsesSharedContainerTraverse(sid)
+            ? database.SharedContainerTraverseGrants
+            : database.GetAccount(sid)?.Grants ?? [];
+
+    private static IEnumerable<AccountEntry> GetGrantOwnersForTraverseCleanup(AppDatabase database, string sid) =>
+        UsesSharedContainerTraverse(sid)
+            ? database.Accounts.Where(a => AclHelper.IsSpecificContainerSid(a.Sid))
+            : database.GetAccount(sid) is { } account ? [account] : [];
+
+    private static GrantedPathEntry? FindTraverseEntryInList(IEnumerable<GrantedPathEntry> entries, string normalized) =>
+        entries.FirstOrDefault(e =>
+            string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase) &&
+            e.IsTraverseOnly);
 }

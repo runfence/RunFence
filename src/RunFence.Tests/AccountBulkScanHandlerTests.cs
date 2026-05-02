@@ -10,19 +10,23 @@ using Xunit;
 namespace RunFence.Tests;
 
 /// <summary>
-/// Tests for <see cref="AccountBulkScanHandler.FilterManagedPaths"/>.
+/// Tests for <see cref="AccountBulkScanHandler.FilterManagedPaths"/> and
+/// <see cref="AccountBulkScanHandler.ApplyScanResults"/>.
 /// </summary>
 public class AccountBulkScanHandlerTests
 {
     private const string Sid1 = "S-1-5-21-1234567890-1234567890-1234567890-1001";
     private const string Sid2 = "S-1-5-21-1234567890-1234567890-1234567890-1002";
 
-    private static AccountBulkScanHandler CreateHandler() => new(
+    private static AccountBulkScanHandler CreateHandler(IDatabaseProvider? databaseProvider = null) => new(
         new Mock<IAccountAclBulkScanService>().Object,
         new Mock<IAclService>().Object,
         new Mock<ILoggingService>().Object,
         new Mock<ISidNameCacheService>().Object,
-        new Mock<IDatabaseProvider>().Object);
+        databaseProvider ?? new Mock<IDatabaseProvider>().Object);
+
+    private static AccountBulkScanHandler CreateHandlerWithDatabase(AppDatabase database) =>
+        CreateHandler(new LambdaDatabaseProvider(() => database));
 
     private static DiscoveredGrant MakeGrant(string path, bool isDeny = false) =>
         new(Path: path, IsDeny: isDeny, Execute: false, Write: false, Read: true, Special: false, IsOwner: false);
@@ -197,5 +201,245 @@ public class AccountBulkScanHandlerTests
         Assert.Equal(@"C:\data\shared", filtered[Sid1].Grants[0].Path);
         Assert.Single(filtered[Sid1].TraversePaths);
         Assert.Equal(@"C:\other\traverse", filtered[Sid1].TraversePaths[0]);
+    }
+
+    // ── ApplyScanResults ─────────────────────────────────────────────────────
+
+    private static DiscoveredGrant MakeAllow(string path, bool execute = false, bool write = false,
+        bool read = true, bool special = false, bool isOwner = false)
+        => new(path, IsDeny: false, Execute: execute, Write: write, Read: read, Special: special, IsOwner: isOwner);
+
+    private static DiscoveredGrant MakeDeny(string path, bool execute = false, bool read = false)
+        => new(path, IsDeny: true, Execute: execute, Write: false, Read: read, Special: false, IsOwner: false);
+
+    [Fact]
+    public void ApplyScanResults_AddsGrantToDatabase()
+    {
+        // Arrange
+        var database = new AppDatabase();
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([MakeAllow(@"C:\data\shared")], [])
+        };
+        bool saveInvoked = false;
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => saveInvoked = true);
+
+        // Assert
+        Assert.True(saveInvoked);
+        var grants = database.GetAccount(Sid1)?.Grants;
+        Assert.NotNull(grants);
+        Assert.Single(grants);
+        Assert.Equal(AclHelper.NormalizePath(@"C:\data\shared"), grants[0].Path);
+        Assert.False(grants[0].IsDeny);
+        Assert.False(grants[0].IsTraverseOnly);
+    }
+
+    [Fact]
+    public void ApplyScanResults_AddsDenyGrantToDatabase()
+    {
+        // Arrange
+        var database = new AppDatabase();
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([MakeDeny(@"C:\restricted")], [])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert
+        var grants = database.GetAccount(Sid1)?.Grants;
+        Assert.NotNull(grants);
+        Assert.Single(grants);
+        Assert.True(grants[0].IsDeny);
+        Assert.False(grants[0].IsTraverseOnly);
+    }
+
+    [Fact]
+    public void ApplyScanResults_DeduplicatesGrant_WhenSamePathAndSameIsDeny()
+    {
+        // Arrange: an Allow grant for the same path already exists — the scan must NOT add a duplicate.
+        var database = new AppDatabase();
+        var normalizedPath = AclHelper.NormalizePath(@"C:\data\shared");
+        database.GetOrCreateAccount(Sid1).Grants.Add(new GrantedPathEntry
+        {
+            Path = normalizedPath,
+            IsDeny = false,
+            IsTraverseOnly = false
+        });
+
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([MakeAllow(@"C:\data\shared")], [])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert: still only one grant — no duplicate
+        Assert.Single(database.GetAccount(Sid1)!.Grants);
+    }
+
+    [Fact]
+    public void ApplyScanResults_AllowAndDenyForSamePath_BothAdded_DifferentIsDeny()
+    {
+        // Arrange: existing Allow grant; scanning discovers a Deny for the same path.
+        // These are distinct entries (different IsDeny) so both should be present.
+        var database = new AppDatabase();
+        var normalizedPath = AclHelper.NormalizePath(@"C:\data\shared");
+        database.GetOrCreateAccount(Sid1).Grants.Add(new GrantedPathEntry
+        {
+            Path = normalizedPath,
+            IsDeny = false,
+            IsTraverseOnly = false
+        });
+
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([MakeDeny(@"C:\data\shared")], [])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert: two grants (one allow, one deny)
+        Assert.Equal(2, database.GetAccount(Sid1)!.Grants.Count);
+    }
+
+    [Fact]
+    public void ApplyScanResults_AddsTraversePathEntry()
+    {
+        // Arrange
+        var database = new AppDatabase();
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([], [@"C:\parent\traverse"])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert: traverse-only entry added
+        var grants = database.GetAccount(Sid1)?.Grants;
+        Assert.NotNull(grants);
+        Assert.Single(grants);
+        Assert.True(grants[0].IsTraverseOnly);
+        Assert.Equal(AclHelper.NormalizePath(@"C:\parent\traverse"), grants[0].Path);
+    }
+
+    [Fact]
+    public void ApplyScanResults_DeduplicatesTraversePath()
+    {
+        // Arrange: traverse path already exists in database
+        var database = new AppDatabase();
+        var normalizedPath = AclHelper.NormalizePath(@"C:\parent");
+        database.GetOrCreateAccount(Sid1).Grants.Add(new GrantedPathEntry
+        {
+            Path = normalizedPath,
+            IsTraverseOnly = true
+        });
+
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([], [@"C:\parent"])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert: still only one entry
+        Assert.Single(database.GetAccount(Sid1)!.Grants);
+    }
+
+    [Fact]
+    public void ApplyScanResults_AllowGrant_RightsMapFromDiscoveredGrant()
+    {
+        // Arrange: discovered grant with Execute=true, Write=true, IsOwner=true
+        var database = new AppDatabase();
+        var grant = MakeAllow(@"C:\tools\util.exe", execute: true, write: true, read: true, isOwner: true);
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([grant], [])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert: SavedRights reflects discovered rights; Own=true because IsOwner=true
+        var savedRights = database.GetAccount(Sid1)!.Grants[0].SavedRights;
+        Assert.NotNull(savedRights);
+        Assert.True(savedRights.Execute);
+        Assert.True(savedRights.Write);
+        Assert.True(savedRights.Own);
+    }
+
+    [Fact]
+    public void ApplyScanResults_DenyGrant_RightsMapFromDiscoveredGrant()
+    {
+        // Arrange: discovered deny grant with Execute=true, Read=true
+        var database = new AppDatabase();
+        var grant = MakeDeny(@"C:\restricted", execute: true, read: true);
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([grant], [])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert: SavedRights has Execute and Read from scan; Own=false for deny by convention
+        var savedRights = database.GetAccount(Sid1)!.Grants[0].SavedRights;
+        Assert.NotNull(savedRights);
+        Assert.True(savedRights.Execute);
+        Assert.True(savedRights.Read);
+        Assert.False(savedRights.Own);
+    }
+
+    [Fact]
+    public void ApplyScanResults_MultipleSids_EachGetsSeparateGrants()
+    {
+        // Arrange
+        var database = new AppDatabase();
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([MakeAllow(@"C:\data\path1")], []),
+            [Sid2] = new([MakeAllow(@"C:\data\path2")], [])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert: each SID has its own grant
+        Assert.Single(database.GetAccount(Sid1)!.Grants);
+        Assert.Equal(AclHelper.NormalizePath(@"C:\data\path1"), database.GetAccount(Sid1)!.Grants[0].Path);
+        Assert.Single(database.GetAccount(Sid2)!.Grants);
+        Assert.Equal(AclHelper.NormalizePath(@"C:\data\path2"), database.GetAccount(Sid2)!.Grants[0].Path);
+    }
+
+    [Fact]
+    public void ApplyScanResults_NormalizesPathCaseInsensitive()
+    {
+        // Arrange: path already in database with different casing — must be treated as duplicate
+        var database = new AppDatabase();
+        var normalizedPath = AclHelper.NormalizePath(@"C:\Data\Shared");
+        database.GetOrCreateAccount(Sid1).Grants.Add(new GrantedPathEntry
+        {
+            Path = normalizedPath,
+            IsDeny = false,
+            IsTraverseOnly = false
+        });
+
+        var selected = new Dictionary<string, AccountScanResult>
+        {
+            [Sid1] = new([MakeAllow(@"C:\data\shared")], [])
+        };
+
+        // Act
+        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+
+        // Assert: case-insensitive dedup — still only one entry
+        Assert.Single(database.GetAccount(Sid1)!.Grants);
     }
 }

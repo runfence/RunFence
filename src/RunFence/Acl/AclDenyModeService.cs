@@ -4,7 +4,6 @@ using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
 
 namespace RunFence.Acl;
 
@@ -15,8 +14,9 @@ namespace RunFence.Acl;
 public class AclDenyModeService(
     ILoggingService log,
     ILocalUserProvider localUserProvider,
-    IDatabaseProvider databaseProvider,
-    IInteractiveUserResolver interactiveUserResolver)
+    ContainerLookupHelper containerLookup,
+    IInteractiveUserResolver interactiveUserResolver,
+    IAclAccessor aclAccessor)
     : IAclDenyModeService
 {
     /// <summary>
@@ -85,7 +85,7 @@ public class AclDenyModeService(
 
                 // Also allow the container package SID so the sandboxed process can reach its exe
                 {
-                    var containerSid = AclHelper.ResolveContainerSid(databaseProvider.GetDatabase(), app.AppContainerName);
+                    var containerSid = containerLookup.ResolveContainerSid(app.AppContainerName);
                     if (containerSid != null)
                         allowed.Add(containerSid);
                     else
@@ -149,7 +149,7 @@ public class AclDenyModeService(
         if (!exists)
             return false;
 
-        return AclHelper.ModifyAclIf(path, isFolder, security =>
+        return aclAccessor.ModifyAclWithFallback(path, isFolder, security =>
             ApplyDenyRules(security, localUserProvider.GetLocalUserAccounts(), allowedSids, isFolder, deniedRights));
     }
 
@@ -158,7 +158,9 @@ public class AclDenyModeService(
         if (!Directory.Exists(folderPath))
             return false;
 
+        // Build SecurityIdentifier objects once and reuse them in both desiredRules and managedSidObjects.
         var desiredRules = new List<FileSystemAccessRule>();
+        var deniedSidObjects = new List<SecurityIdentifier>();
         foreach (var (sidString, rights) in deniedRightsPerSid)
         {
             try
@@ -170,6 +172,7 @@ public class AclDenyModeService(
                     InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
                     PropagationFlags.None,
                     AccessControlType.Deny));
+                deniedSidObjects.Add(sid);
             }
             catch (Exception ex)
             {
@@ -179,25 +182,17 @@ public class AclDenyModeService(
 
         var localUsers = localUserProvider.GetLocalUserAccounts();
         var managedSidObjects = AclHelper.BuildLocalUserSidSet(localUsers);
-        foreach (var s in deniedRightsPerSid.Keys)
-        {
-            try
-            {
-                managedSidObjects.Add(new SecurityIdentifier(s));
-            }
-            catch (ArgumentException)
-            {
-            }
-        }
+        foreach (var sid in deniedSidObjects)
+            managedSidObjects.Add(sid);
 
-        return AclHelper.ModifyAclIf(folderPath, isFolder: true, security =>
+        return aclAccessor.ModifyAclWithFallback(folderPath, isFolder: true, security =>
             AclHelper.ApplyAclDiff(security, desiredRules, rule =>
                 rule is { AccessControlType: AccessControlType.Deny, IdentityReference: SecurityIdentifier sid } &&
                 managedSidObjects.Contains(sid) &&
-                (rule.FileSystemRights & AclRightsHelper.ManagedDenyRightsMask) != 0));
+                (rule.FileSystemRights & ~AclRightsHelper.ManagedDenyRightsMask) == 0));
     }
 
-    private bool ApplyDenyRules(FileSystemSecurity security, List<LocalUserAccount> localUsers,
+    private bool ApplyDenyRules(FileSystemSecurity security, IReadOnlyList<LocalUserAccount> localUsers,
         HashSet<string> allowedSids, bool isFolder, DeniedRights deniedRights)
     {
         var fileRights = AclRightsHelper.MapDeniedRights(deniedRights);
@@ -230,7 +225,7 @@ public class AclDenyModeService(
         return AclHelper.ApplyAclDiff(security, desiredRules, rule =>
             rule is { AccessControlType: AccessControlType.Deny, IdentityReference: SecurityIdentifier sid } &&
             knownSids.Contains(sid) &&
-            (rule.FileSystemRights & AclRightsHelper.ManagedDenyRightsMask) != 0);
+            (rule.FileSystemRights & ~AclRightsHelper.ManagedDenyRightsMask) == 0);
     }
 
     public void RemoveManagedDenyAces(string path, bool isFolder)
@@ -243,7 +238,7 @@ public class AclDenyModeService(
             if (!exists)
                 return;
 
-            AclHelper.ModifyAclIf(path, isFolder, security => AclHelper.RemoveManagedDenyAces(security, knownSids));
+            aclAccessor.ModifyAclWithFallback(path, isFolder, security => AclHelper.RemoveManagedDenyAces(security, knownSids));
         }
         catch (Exception ex)
         {

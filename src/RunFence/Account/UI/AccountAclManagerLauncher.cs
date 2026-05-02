@@ -1,4 +1,5 @@
 using Autofac.Features.OwnedInstances;
+using RunFence.Acl;
 using RunFence.Acl.UI.Forms;
 
 namespace RunFence.Account.UI;
@@ -30,6 +31,11 @@ public class AccountAclManagerLauncher(
     public void OpenAclManager(string sid, string displayName, IWin32Window? parent)
     {
         OpenAclManagerInternal(sid, isContainer: false, displayName, parent);
+    }
+
+    public void OpenLowIntegrityAclManager(IWin32Window? parent)
+    {
+        OpenAclManagerInternal(AclHelper.LowIntegritySid, isContainer: false, "Low Integrity", parent);
     }
 
     private void OpenAclManagerInternal(string sid, bool isContainer, string displayName, IWin32Window? parent)

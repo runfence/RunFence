@@ -10,7 +10,10 @@ namespace RunFence.Firewall.UI;
 /// On <see cref="FirewallApplyPhase.GlobalIcmp"/> failure: reports a warning only
 /// (rules were applied; only global ICMP enforcement failed; no rollback).
 /// </summary>
-public class FirewallApplyHelper(IAccountFirewallSettingsApplier firewallSettingsApplier, ILoggingService log)
+public class FirewallApplyHelper(
+    IAccountFirewallSettingsApplier firewallSettingsApplier,
+    DynamicPortRangeChecker portRangeChecker,
+    ILoggingService log)
 {
     /// <summary>
     /// Applies firewall settings synchronously. On <see cref="FirewallApplyPhase.AccountRules"/> failure,
@@ -30,6 +33,7 @@ public class FirewallApplyHelper(IAccountFirewallSettingsApplier firewallSetting
         try
         {
             firewallSettingsApplier.ApplyAccountFirewallSettings(sid, username, previous, final, database);
+            _ = portRangeChecker.CheckIfNeededAsync(final);
             return false;
         }
         catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.AccountRules)
@@ -71,6 +75,7 @@ public class FirewallApplyHelper(IAccountFirewallSettingsApplier firewallSetting
         try
         {
             await firewallSettingsApplier.ApplyAccountFirewallSettingsAsync(sid, username, previous, final, database);
+            await portRangeChecker.CheckIfNeededAsync(final);
             return false;
         }
         catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.AccountRules)

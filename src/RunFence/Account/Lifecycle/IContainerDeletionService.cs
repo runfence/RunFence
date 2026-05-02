@@ -10,5 +10,5 @@ public interface IContainerDeletionService
     /// Returns false if DeleteProfile fails — caller should preserve the entry for retry.
     /// Callers handle enforcement revert, ancestor ACL recompute, and save/refresh.
     /// </summary>
-    bool DeleteContainer(AppContainerEntry entry, string? containerSid);
+    Task<bool> DeleteContainer(AppContainerEntry entry, string? containerSid);
 }

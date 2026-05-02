@@ -17,10 +17,8 @@ public partial class FirewallAllowlistDialog : Form
     private readonly FirewallPortsTabHandler _portsHandler;
     private readonly FirewallAllowlistGridHelper _allowlistGridHelper;
     private readonly FirewallPortsGridHelper _portsGridHelper;
-    private readonly BlockedConnectionAggregator _aggregator;
-    private readonly FirewallAllowlistImportExportService _importExportService;
-    private readonly IBlockedConnectionReader? _blockedConnectionReader;
-    private readonly IDnsResolver? _dnsResolver;
+    private readonly BlockedConnectionsFlowHelper _blockedConnectionsFlow;
+    private FirewallAllowlistImportExportHelper _importExportHelper = null!;
     private bool _initialAllowInternet;
     private bool _initialAllowLan;
     private bool _initialAllowLocalhost;
@@ -35,39 +33,24 @@ public partial class FirewallAllowlistDialog : Form
     /// </summary>
     public event EventHandler<FirewallApplyEventArgs>? Applied;
 
-    /// <summary>
-    /// True if the user applied changes at least once. Only meaningful after the dialog closes.
-    /// </summary>
-    public bool WasApplied { get; private set; }
-
-    /// <summary>
-    /// The last applied allowlist. Only meaningful when <see cref="WasApplied"/> is true.
-    /// </summary>
+    /// <summary>The last applied allowlist. Only meaningful after Apply was clicked.</summary>
     public List<FirewallAllowlistEntry> Result { get; private set; } = [];
 
-    /// <summary>
-    /// Whether Internet access is allowed. Only meaningful when <see cref="WasApplied"/> is true.
-    /// </summary>
+    /// <summary>Whether Internet access is allowed. Only meaningful after Apply was clicked.</summary>
     public bool AllowInternet { get; private set; } = true;
 
-    /// <summary>
-    /// Whether LAN access is allowed. Only meaningful when <see cref="WasApplied"/> is true.
-    /// </summary>
+    /// <summary>Whether LAN access is allowed. Only meaningful after Apply was clicked.</summary>
     public bool AllowLan { get; private set; } = true;
 
-    /// <summary>
-    /// Whether Localhost access is allowed. Only meaningful when <see cref="WasApplied"/> is true.
-    /// </summary>
+    /// <summary>Whether Localhost access is allowed. Only meaningful after Apply was clicked.</summary>
     public bool AllowLocalhost { get; private set; } = true;
 
-    /// <summary>
-    /// The last applied localhost port allow-list. Only meaningful when <see cref="WasApplied"/> is true.
-    /// </summary>
+    /// <summary>The last applied localhost port allow-list. Only meaningful after Apply was clicked.</summary>
     public IReadOnlyList<string> AllowedLocalhostPorts { get; private set; } = [];
 
     /// <summary>
     /// Whether the background scanner is enabled to block cross-user ephemeral ports.
-    /// Only meaningful when <see cref="WasApplied"/> is true.
+    /// Only meaningful after Apply was clicked.
     /// </summary>
     public bool FilterEphemeralLoopback { get; private set; } = true;
 
@@ -77,24 +60,19 @@ public partial class FirewallAllowlistDialog : Form
         FirewallAllowlistValidator validator,
         FirewallPortValidator portValidator,
         FirewallDomainResolver domainResolver,
-        BlockedConnectionAggregator aggregator,
+        BlockedConnectionsFlowHelper blockedConnectionsFlow,
         FirewallAllowlistImportExportService importExportService,
         string? displayName = null,
         bool allowInternet = true,
         bool allowLan = true,
         bool allowLocalhost = true,
-        IBlockedConnectionReader? blockedConnectionReader = null,
-        IDnsResolver? dnsResolver = null,
         IReadOnlyList<string>? allowedLocalhostPorts = null,
         bool filterEphemeralLoopback = true)
     {
         _firewallNetworkInfo = firewallNetworkInfo;
         _allowlistHandler = new FirewallAllowlistTabHandler(validator, domainResolver, current);
         _portsHandler = new FirewallPortsTabHandler(portValidator, allowedLocalhostPorts);
-        _aggregator = aggregator;
-        _importExportService = importExportService;
-        _blockedConnectionReader = blockedConnectionReader;
-        _dnsResolver = dnsResolver;
+        _blockedConnectionsFlow = blockedConnectionsFlow;
         _initialAllowInternet = allowInternet;
         _initialAllowLan = allowLan;
         _initialAllowLocalhost = allowLocalhost;
@@ -104,17 +82,32 @@ public partial class FirewallAllowlistDialog : Form
         Icon = AppIcons.GetAppIcon();
         Text = displayName != null ? $"Internet Allowlist \u2014 {displayName}" : "Internet Allowlist";
 
+        _tooltip.SetToolTip(_filterEphemeralCheckBox,
+            "Dynamically blocks loopback connections to services running under other accounts on ephemeral ports (49152-65535).");
+
         _allowlistGridHelper = new FirewallAllowlistGridHelper(
-            _grid, _ctxAdd, _ctxRemoveItem, _ctxExportItem,
+            _grid,
+            v => _ctxAdd.Visible = v,
+            v => _ctxRemoveItem.Visible = v,
+            v => _ctxExportItem.Visible = v,
             _allowlistHandler,
-            TryExportToFile, TryExportCombinedToFile,
+            (entries, title) => _importExportHelper.TryExportToFile(entries, title),
+            () => _importExportHelper.TryExportCombinedToFile(),
             UpdateApplyButton, UpdateToolbarForCurrentTab);
 
         _portsGridHelper = new FirewallPortsGridHelper(
-            _portsGrid, _portsCtxAdd, _portsCtxRemove, _portsCtxExport,
+            _portsGrid,
+            v => _portsCtxAdd.Visible = v,
+            v => _portsCtxRemove.Visible = v,
+            v => _portsCtxExport.Visible = v,
             _portsHandler,
-            TryExportToFile, TryExportCombinedToFile,
+            (entries, title) => _importExportHelper.TryExportToFile(entries, title),
+            () => _importExportHelper.TryExportCombinedToFile(),
             UpdateApplyButton);
+
+        _importExportHelper = new FirewallAllowlistImportExportHelper(
+            importExportService, _allowlistHandler, _portsHandler,
+            _allowlistGridHelper, _portsGridHelper, this);
 
         _allowInternetCheckBox.Checked = allowInternet;
         _allowLanCheckBox.Checked = allowLan;
@@ -178,7 +171,7 @@ public partial class FirewallAllowlistDialog : Form
             : "Export selected ports to file (exports all entries and ports when nothing is selected)";
 
         _resolveButton.Enabled = isInternetTab && !_allowlistGridHelper.IsResolvingDomains;
-        _viewBlockedButton.Enabled = isInternetTab && _blockedConnectionReader != null;
+        _viewBlockedButton.Enabled = isInternetTab;
     }
 
     private void OnTabChanged(object? sender, EventArgs e) => UpdateToolbarForCurrentTab();
@@ -214,9 +207,9 @@ public partial class FirewallAllowlistDialog : Form
     private void OnRemoveButtonClick(object? sender, EventArgs e)
     {
         if (_tabControl.SelectedTab == _allowlistTab)
-            _allowlistGridHelper.RemoveSelectedEntries();
+            _allowlistGridHelper.RemoveSelected();
         else
-            _portsGridHelper.RemoveSelectedPorts();
+            _portsGridHelper.RemoveSelected();
     }
 
     private void OnExportButtonClick(object? sender, EventArgs e)
@@ -234,7 +227,7 @@ public partial class FirewallAllowlistDialog : Form
             _allowlistGridHelper.AddEntry(input);
     }
 
-    private void OnRemoveClick(object? sender, EventArgs e) => _allowlistGridHelper.RemoveSelectedEntries();
+    private void OnRemoveClick(object? sender, EventArgs e) => _allowlistGridHelper.RemoveSelected();
     private void OnExportClick(object? sender, EventArgs e) => _allowlistGridHelper.ExportSelected();
 
     private void OnGridCellEndEdit(object? sender, DataGridViewCellEventArgs e) =>
@@ -265,7 +258,7 @@ public partial class FirewallAllowlistDialog : Form
             _portsGridHelper.AddPort(input);
     }
 
-    private void OnPortsRemoveClick(object? sender, EventArgs e) => _portsGridHelper.RemoveSelectedPorts();
+    private void OnPortsRemoveClick(object? sender, EventArgs e) => _portsGridHelper.RemoveSelected();
     private void OnPortsExportClick(object? sender, EventArgs e) => _portsGridHelper.ExportSelected();
 
     private void OnPortsGridCellEndEdit(object? sender, DataGridViewCellEventArgs e) =>
@@ -291,45 +284,7 @@ public partial class FirewallAllowlistDialog : Form
 
     private void OnImportClick(object? sender, EventArgs e)
     {
-        using var dlg = new OpenFileDialog();
-        dlg.Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*";
-        dlg.Title = "Import Firewall Settings";
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-        if (dlg.ShowDialog(this) != DialogResult.OK)
-            return;
-
-        var fileResult = _importExportService.ImportFromFile(dlg.FileName);
-        if (fileResult?.Lines == null)
-        {
-            MessageBox.Show($"Import failed: {fileResult?.ErrorMessage ?? "Unknown error"}", "Error",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        var allowlistResult = _allowlistHandler.ImportLines(fileResult.Lines.AllowlistLines);
-        var portsResult = _portsHandler.ImportLines(fileResult.Lines.PortLines);
-
-        if (allowlistResult.AddedEntries.Count == 0 && portsResult.AddedPorts.Count == 0)
-        {
-            MessageBox.Show("No new entries to import (all duplicates or invalid).", "Import",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        _allowlistGridHelper.AddImportedEntries(allowlistResult.AddedEntries);
-        _portsGridHelper.AddImportedPorts(portsResult.AddedPorts);
-
-        var parts = new List<string>();
-        if (allowlistResult.AddedEntries.Count > 0)
-            parts.Add($"{allowlistResult.AddedEntries.Count} {(allowlistResult.AddedEntries.Count == 1 ? "allowlist entry" : "allowlist entries")}");
-        if (portsResult.AddedPorts.Count > 0)
-            parts.Add($"{portsResult.AddedPorts.Count} {(portsResult.AddedPorts.Count == 1 ? "port exception" : "port exceptions")}");
-        var msg = $"Imported {string.Join(" and ", parts)}.";
-        if (allowlistResult.EntryLimitReached)
-            msg += $"\n\n{allowlistResult.LicenseLimitMessage}";
-        if (portsResult.PortLimitReached)
-            msg += $"\n\nMaximum of {LocalhostPortParser.MaxAllowedPorts} port entries reached.";
-        MessageBox.Show(msg, "Import", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        _importExportHelper.OnImportClick();
         UpdateApplyButton();
     }
 
@@ -353,17 +308,12 @@ public partial class FirewallAllowlistDialog : Form
 
     private void OpenBlockedConnectionsDialog(bool enableAuditLogging = false)
     {
-        if (_blockedConnectionReader == null || _dnsResolver == null)
+        var selected = _blockedConnectionsFlow.ShowDialog(
+            _allowlistHandler.GetEntries(), this, enableAuditLogging);
+        if (selected == null)
             return;
 
-        using var dlg = new BlockedConnectionsDialog(
-            _blockedConnectionReader, _dnsResolver,
-            _aggregator, _allowlistHandler.GetEntries(),
-            enableAuditLogging: enableAuditLogging);
-        if (dlg.ShowDialog(this) != DialogResult.OK)
-            return;
-
-        var addResult = _allowlistGridHelper.AddEntriesFromBlockedConnections(dlg.SelectedEntries);
+        var addResult = _allowlistGridHelper.AddEntriesFromBlockedConnections(selected);
         if (addResult.TruncatedCount > 0)
         {
             var limitMessage = _allowlistHandler.GetLicenseLimitMessage();
@@ -392,55 +342,6 @@ public partial class FirewallAllowlistDialog : Form
             await _allowlistGridHelper.ResolveDomainEntriesAsync(showError: false);
     }
 
-    private bool TryExportToFile(IReadOnlyList<string> entries, string title)
-    {
-        if (entries.Count == 0)
-        {
-            MessageBox.Show("Nothing to export.", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return false;
-        }
-
-        using var dlg = new SaveFileDialog();
-        dlg.Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*";
-        dlg.DefaultExt = "txt";
-        dlg.Title = title;
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-        if (dlg.ShowDialog(this) != DialogResult.OK)
-            return false;
-
-        var exportEntries = entries.Select(v => new FirewallAllowlistEntry { Value = v }).ToList();
-        var error = _importExportService.ExportToFile(dlg.FileName, exportEntries);
-        if (error != null)
-        {
-            MessageBox.Show($"Export failed: {error}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return false;
-        }
-        return true;
-    }
-
-    private void TryExportCombinedToFile()
-    {
-        var allEntries = _allowlistHandler.GetEntries();
-        var allPorts = _portsHandler.GetPortEntries();
-        if (allEntries.Count == 0 && allPorts.Count == 0)
-        {
-            MessageBox.Show("Nothing to export.", "Export", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        using var dlg = new SaveFileDialog();
-        dlg.Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*";
-        dlg.DefaultExt = "txt";
-        dlg.Title = "Export Firewall Settings";
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-        if (dlg.ShowDialog(this) != DialogResult.OK)
-            return;
-
-        var error = _importExportService.ExportCombinedToFile(dlg.FileName, allEntries, allPorts);
-        if (error != null)
-            MessageBox.Show($"Export failed: {error}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-    }
-
     private bool HasUnappliedChanges() =>
         _allowInternetCheckBox.Checked != _initialAllowInternet ||
         _allowLanCheckBox.Checked != _initialAllowLan ||
@@ -462,7 +363,6 @@ public partial class FirewallAllowlistDialog : Form
         AllowedLocalhostPorts = _portsHandler.GetPortEntries().ToList();
         FilterEphemeralLoopback = _filterEphemeralCheckBox.Checked;
 
-        WasApplied = true;
         var args = new FirewallApplyEventArgs();
         Applied?.Invoke(this, args);
         if (!args.RolledBack)

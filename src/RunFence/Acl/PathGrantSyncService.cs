@@ -7,14 +7,14 @@ using RunFence.Infrastructure;
 namespace RunFence.Acl;
 
 /// <summary>
-/// Scans filesystem paths and synchronizes grant DB entries with NTFS state.
-/// Reads ACEs from the NTFS ACL for a given path and creates or updates matching
-/// <see cref="GrantedPathEntry"/> records in the database.
+/// Synchronizes grant DB entries with NTFS state. Reads ACEs from the NTFS ACL for a given
+/// path and creates or updates matching <see cref="GrantedPathEntry"/> records in the database.
 /// </summary>
 public class PathGrantSyncService(
     UiThreadDatabaseAccessor dbAccessor,
-    IGrantNtfsHelper ntfs,
-    ILoggingService log)
+    IGrantAceService grantAceService,
+    ILoggingService log,
+    IFileSystemPathInfo pathInfo) : IGrantSyncService
 {
     /// <summary>
     /// Reads actual NTFS ACEs for <paramref name="path"/> for a specific <paramref name="sid"/>
@@ -26,13 +26,13 @@ public class PathGrantSyncService(
     public bool UpdateFromPath(string path, string? sid = null)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = Directory.Exists(normalized);
-        if (!isFolder && !File.Exists(normalized))
+        bool isFolder = pathInfo.DirectoryExists(normalized);
+        if (!isFolder && !pathInfo.FileExists(normalized))
             return false;
 
         try
         {
-            var security = ntfs.GetSecurity(normalized);
+            var security = grantAceService.GetSecurity(normalized);
             var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false,
                 typeof(SecurityIdentifier));
             var ownerIdentity = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
@@ -40,7 +40,7 @@ public class PathGrantSyncService(
             bool isAdminOwner = ownerIdentity != null && ownerIdentity.Equals(adminsSid);
 
             var candidates = new Dictionary<(string Sid, bool IsDeny), AceAccumulator>(
-                SidDenyKeyComparer.Instance);
+                SidDenyKeyComparer);
 
             foreach (FileSystemAccessRule rule in rules)
             {
@@ -112,9 +112,17 @@ public class PathGrantSyncService(
     {
         return dbAccessor.Write(database =>
         {
-            var grants = database.GetOrCreateAccount(sid).Grants;
+            if (string.Equals(sid, AclHelper.AllApplicationPackagesSid, StringComparison.OrdinalIgnoreCase) &&
+                database.SharedContainerTraverseGrants.Any(e =>
+                    e.IsTraverseOnly &&
+                    string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase)))
+                return false;
+
             if (TraverseCoreOperations.FindTraverseEntryInDb(database, sid, path) != null)
                 return false;
+            var grants = string.Equals(sid, AclHelper.AllApplicationPackagesSid, StringComparison.OrdinalIgnoreCase)
+                ? database.SharedContainerTraverseGrants
+                : database.GetOrCreateAccount(sid).Grants;
             grants.Add(new GrantedPathEntry { Path = path, IsTraverseOnly = true });
             return true;
         });
@@ -126,14 +134,5 @@ public class PathGrantSyncService(
         bool IsOwner = false,
         bool IsAdminOwner = false);
 
-    private sealed class SidDenyKeyComparer : IEqualityComparer<(string Sid, bool IsDeny)>
-    {
-        public static readonly SidDenyKeyComparer Instance = new();
-
-        public bool Equals((string Sid, bool IsDeny) x, (string Sid, bool IsDeny) y)
-            => string.Equals(x.Sid, y.Sid, StringComparison.OrdinalIgnoreCase) && x.IsDeny == y.IsDeny;
-
-        public int GetHashCode((string Sid, bool IsDeny) obj)
-            => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Sid), obj.IsDeny);
-    }
+    private static readonly GrantPathKeyComparer SidDenyKeyComparer = new();
 }

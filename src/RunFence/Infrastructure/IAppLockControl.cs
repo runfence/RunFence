@@ -7,4 +7,5 @@ public interface IAppLockControl
     void Lock();
     void Unlock();
     Task<bool> TryUnlockAsync(bool isAdmin);
+    Task<bool> TryUnlockForOperationAsync(bool isAdmin);
 }

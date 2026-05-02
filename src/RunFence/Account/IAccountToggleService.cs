@@ -12,7 +12,7 @@ public interface IAccountToggleService
     /// Updates the allow-internet firewall setting for an account and applies firewall rules.
     /// Returns an error message if the firewall rule application fails, null on success.
     /// </summary>
-    string? SetAllowInternet(string sid, string username, bool allowInternet);
+    string? SetAllowInternet(string sid, bool allowInternet);
 }
 
 public record SetLogonBlockedResult(bool Success, string? ErrorMessage, bool IsLicenseLimit = false);

@@ -1,6 +1,5 @@
 using RunFence.Account.Lifecycle;
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
 namespace RunFence.Account.UI;
@@ -16,6 +15,7 @@ public class AccountDeletionOrchestrator(
     ISessionProvider sessionProvider,
     OperationGuard operationGuard,
     ISidResolver sidResolver,
+    IProfilePathResolver profilePathResolver,
     IAccountDeletionService accountDeletion,
     ILocalUserProvider localUserProvider)
 {
@@ -57,7 +57,7 @@ public class AccountDeletionOrchestrator(
 
             var session = sessionProvider.GetSession();
             var displayName = accountRow.Credential != null
-                ? SidNameResolver.GetDisplayName(accountRow.Credential, sidResolver, session.Database.SidNames)
+                ? SidNameResolver.GetDisplayName(accountRow.Credential, sidResolver, session.Database.SidNames, profilePathResolver)
                 : accountRow.Username;
 
             var usedBy = session.Database.Apps.Where(a =>

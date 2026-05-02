@@ -21,7 +21,7 @@ public class FirewallEnforcementOrchestratorTests
     private readonly Mock<IFirewallCleanupService> _cleanupService = new();
     private readonly Mock<IFirewallDomainRefreshRequester> _refreshRequester = new();
 
-    private readonly FirewallResolvedDomainCache _domainCache = new();
+    private readonly FirewallResolvedDomainCache _domainCache = new(new FirewallDomainDirtyTracker());
     private readonly FirewallEnforcementRetryState _retryState = new();
 
     public FirewallEnforcementOrchestratorTests()

@@ -1,7 +1,5 @@
 using System.Security.AccessControl;
-using RunFence.Acl;
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch.Container;
 using RunFence.Launch.Tokens;
@@ -12,28 +10,39 @@ namespace RunFence.Launch;
 public class LaunchFacade(
     IProcessLauncher processLauncher,
     ILaunchDefaultsResolver defaultsResolver,
-    IPathGrantService pathGrantService,
+    ILaunchTargetResolver launchTargetResolver,
+    ILaunchAccessManager launchAccessManager,
     IDatabaseService databaseService,
     ISessionProvider sessionProvider,
-    ISidResolver sidResolver,
+    IProfilePathResolver profilePathResolver,
     IUiThreadInvoker uiThreadInvoker)
     : ILaunchFacade
 {
     public ProcessInfo? LaunchFile(ProcessLaunchTarget target, LaunchIdentity identity, Func<string, string, bool>? permissionPrompt = null)
     {
         var resolved = defaultsResolver.ResolveDefaults(identity);
-        var (wrappedTarget, isWrapped) = ProcessLaunchHelper.WrapTargetForLaunch(target);
+        var traversal = launchTargetResolver.TraversePath(target.ExePath, resolved);
         bool unelevated = resolved.IsUnelevated ?? true;
 
+        if (traversal.IsFolder)
+            return LaunchFolderBrowser(identity, traversal.TraversedPath, permissionPrompt);
+
+        var traversedTarget = target with
+        {
+            ExePath = traversal.TraversedPath,
+            Arguments = string.IsNullOrEmpty(target.Arguments) ? traversal.ShortcutArguments : target.Arguments,
+            WorkingDirectory = string.IsNullOrEmpty(target.WorkingDirectory) ? traversal.ShortcutWorkingDirectory : target.WorkingDirectory
+        };
+
         string? grantPermissionToExePath;
-        if (PathHelper.IsOwnDir(target.ExePath))
-            grantPermissionToExePath = target.ExePath;
+        if (PathHelper.IsOwnDir(traversal.TraversedPath))
+            grantPermissionToExePath = traversal.TraversedPath;
         else
         {
             if (permissionPrompt != null)
             {
-                var ensureAccessResult = pathGrantService.EnsureAccess(
-                    resolved.Sid, Path.GetDirectoryName(target.ExePath) ?? string.Empty,
+                var ensureAccessResult = launchAccessManager.EnsureAccess(resolved,
+                    Path.GetDirectoryName(traversal.TraversedPath) ?? string.Empty,
                     FileSystemRights.ReadAndExecute, permissionPrompt, unelevated);
                 if (ensureAccessResult.DatabaseModified)
                     SaveConfigAsync();
@@ -43,20 +52,20 @@ public class LaunchFacade(
         }
 
         if (permissionPrompt != null
-            && !string.IsNullOrEmpty(target.WorkingDirectory)
+            && !string.IsNullOrEmpty(traversedTarget.WorkingDirectory)
             && !string.Equals(
-                target.WorkingDirectory.TrimEnd(Path.DirectorySeparatorChar),
-                (Path.GetDirectoryName(target.ExePath) ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar),
+                traversedTarget.WorkingDirectory.TrimEnd(Path.DirectorySeparatorChar),
+                (Path.GetDirectoryName(traversal.TraversedPath) ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar),
                 StringComparison.OrdinalIgnoreCase))
         {
-            if (pathGrantService.EnsureAccess(
-                    resolved.Sid, target.WorkingDirectory, FileSystemRights.ReadAndExecute,
-                    permissionPrompt, unelevated).DatabaseModified)
+            if (launchAccessManager.EnsureAccess(resolved, traversedTarget.WorkingDirectory,
+                    FileSystemRights.ReadAndExecute, permissionPrompt, unelevated).DatabaseModified)
                 SaveConfigAsync();
         }
 
-        var result = LaunchCore(wrappedTarget, resolved, grantPermissionToExePath);
-        if (isWrapped)
+        using var resolution = launchTargetResolver.ResolveFileHandler(resolved, traversedTarget);
+        var result = LaunchCore(resolution.Target, resolved, grantPermissionToExePath);
+        if (resolution.Kind == LaunchResolutionKind.ShellWrapped)
         {
             result?.Dispose();
             return null;
@@ -74,8 +83,10 @@ public class LaunchFacade(
         {
             if (resolved is AppContainerLaunchIdentity c)
                 folderPath = AppContainerPaths.GetContainerDataPath(c.Entry.Name);
+            else if (SidResolutionHelper.IsSystemSid(resolved.Sid))
+                folderPath = Environment.GetFolderPath(Environment.SpecialFolder.System);
             else
-                folderPath = sidResolver.TryGetStartMenuProgramsPath(resolved.Sid,
+                folderPath = profilePathResolver.TryGetStartMenuProgramsPath(resolved.Sid,
                                  string.Equals(SidResolutionHelper.GetCurrentUserSid(), resolved.Sid,
                                      StringComparison.OrdinalIgnoreCase))
                              ?? throw new InvalidOperationException(
@@ -90,16 +101,16 @@ public class LaunchFacade(
 
         if (resolved is not AppContainerLaunchIdentity && folderPermissionPrompt != null)
         {
-            if (pathGrantService.EnsureAccess(
-                    resolved.Sid, folderPath, FileSystemRights.ReadAndExecute,
-                    folderPermissionPrompt, resolved.IsUnelevated ?? true).DatabaseModified)
+            if (launchAccessManager.EnsureAccess(resolved, folderPath,
+                    FileSystemRights.ReadAndExecute, folderPermissionPrompt,
+                    resolved.IsUnelevated ?? true).DatabaseModified)
                 SaveConfigAsync();
         }
 
         var target = new ProcessLaunchTarget(folderBrowserExe, resolvedArgs, folderPath);
-        var (wrappedTarget, isWrapped) = ProcessLaunchHelper.WrapTargetForLaunch(target);
-        var result = LaunchCore(wrappedTarget, resolved, folderBrowserExe);
-        if (isWrapped) { result?.Dispose(); return null; }
+        using var resolution = launchTargetResolver.ResolveFileHandler(resolved, target);
+        var result = LaunchCore(resolution.Target, resolved, folderBrowserExe);
+        if (resolution.Kind == LaunchResolutionKind.ShellWrapped) { result?.Dispose(); return null; }
         return result;
     }
 
@@ -108,25 +119,32 @@ public class LaunchFacade(
         if (url.Length > 32000)
             throw new ArgumentException($"URL is too long ({url.Length} characters). Maximum allowed is 32000.", nameof(url));
         var resolved = defaultsResolver.ResolveDefaults(identity);
-        var target = ProcessLaunchHelper.BuildUrlLaunchTarget(url);
-        LaunchCore(target, resolved, null)?.Dispose();
+        using var resolution = launchTargetResolver.ResolveUrlHandler(resolved, url);
+        LaunchCore(resolution.Target, resolved, null)?.Dispose();
     }
 
     private ProcessInfo? LaunchCore(ProcessLaunchTarget target, LaunchIdentity identity, string? grantPermissionToExePath)
     {
+        EnsureReadExecuteAccess(identity, AppContext.BaseDirectory);
+
         if (grantPermissionToExePath != null)
         {
             var exeDir = Path.GetDirectoryName(grantPermissionToExePath);
-            if (!string.IsNullOrEmpty(exeDir)
-                && pathGrantService.EnsureAccess(identity.Sid, exeDir,
-                    FileSystemRights.ReadAndExecute, confirm: null,
-                    unelevated: identity.IsUnelevated ?? true).DatabaseModified)
-            {
-                SaveConfigAsync();
-            }
+            if (!string.IsNullOrEmpty(exeDir) && !PathHelper.IsSamePath(exeDir, AppContext.BaseDirectory))
+                EnsureReadExecuteAccess(identity, exeDir);
         }
 
         return processLauncher.Launch(identity, target);
+    }
+
+    private void EnsureReadExecuteAccess(LaunchIdentity identity, string path)
+    {
+        if (launchAccessManager.EnsureAccess(identity, path,
+                FileSystemRights.ReadAndExecute, confirm: null,
+                unelevated: identity.IsUnelevated ?? true).DatabaseModified)
+        {
+            SaveConfigAsync();
+        }
     }
 
     private void SaveConfigAsync()

@@ -1,5 +1,4 @@
 using RunFence.Account;
-using RunFence.Apps;
 using RunFence.Core.Models;
 using RunFence.Persistence;
 
@@ -33,7 +32,7 @@ public class HandlerMappingGridBuilder(
                     HandlerDisplay: appName,
                     AccountDisplay: accountName,
                     ArgsTemplate: entry.ArgumentsTemplate ?? "",
-                    Tag: new AppMappingRowTag(kvp.Key, entry.AppId)));
+                    Tag: new AppMappingRowTag(kvp.Key, entry.AppId, entry.PathPrefixes?.AsReadOnly(), entry.ReplacePrefixes)));
             }
         }
 
@@ -50,6 +49,19 @@ public class HandlerMappingGridBuilder(
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Returns the combined set of keys from all app-based and direct handler mappings in the database.
+    /// </summary>
+    public IReadOnlySet<string> GetExistingKeys(AppDatabase db)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in handlerMappingService.GetAllHandlerMappings(db).Keys)
+            keys.Add(key);
+        foreach (var key in handlerMappingService.GetEffectiveDirectHandlerMappings(db).Keys)
+            keys.Add(key);
+        return keys;
     }
 
     /// <summary>
@@ -72,7 +84,7 @@ public class HandlerMappingGridBuilder(
     {
         if (app == null) return "";
         if (!string.IsNullOrEmpty(app.AccountSid))
-            return sidNameCache.GetDisplayName(app.AccountSid) ?? app.AccountSid;
+            return sidNameCache.GetDisplayName(app.AccountSid);
         if (!string.IsNullOrEmpty(app.AppContainerName))
             return app.AppContainerName;
         return "";

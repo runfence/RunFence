@@ -32,6 +32,7 @@ partial class EditAccountDialog
     private Label _settingsLabel;
     private TextBox _settingsPathTextBox;
     private Button _browseButton;
+    private Panel _bottomPanel;
     private Label _statusLabel;
     private Button _deleteButton;
     private Button _okButton;
@@ -44,8 +45,8 @@ partial class EditAccountDialog
         if (disposing)
         {
             components?.Dispose();
-            _passwordTextBox.Clear();
-            _confirmPasswordTextBox.Clear();
+            _passwordSecure?.Dispose();
+            _confirmPasswordSecure?.Dispose();
             // NOTE: NewPassword is NOT disposed here — caller owns it
         }
         base.Dispose(disposing);
@@ -77,12 +78,14 @@ partial class EditAccountDialog
         _settingsLabel = new Label();
         _settingsPathTextBox = new TextBox();
         _browseButton = new Button();
+        _bottomPanel = new Panel();
         _statusLabel = new Label();
         _deleteButton = new Button();
         _okButton = new Button();
         _cancelButton = new Button();
 
         SuspendLayout();
+        _bottomPanel.SuspendLayout();
 
         // ── Left column (x=15, width=270) ──────────────────────────────
 
@@ -98,46 +101,46 @@ partial class EditAccountDialog
 
         // _pwLabel
         _pwLabel.Text = "New password (blank to keep existing):";
-        _pwLabel.Location = new Point(15, 72);
+        _pwLabel.Location = new Point(15, 68);
         _pwLabel.AutoSize = true;
 
         // _passwordTextBox
-        _passwordTextBox.Location = new Point(15, 94);
+        _passwordTextBox.Location = new Point(15, 90);
         _passwordTextBox.Size = new Size(270, 23);
         _passwordTextBox.UseSystemPasswordChar = true;
 
         // _confirmLabel
         _confirmLabel.Text = "Confirm new password:";
-        _confirmLabel.Location = new Point(15, 129);
+        _confirmLabel.Location = new Point(15, 121);
         _confirmLabel.AutoSize = true;
 
         // _confirmPasswordTextBox
-        _confirmPasswordTextBox.Location = new Point(15, 151);
+        _confirmPasswordTextBox.Location = new Point(15, 143);
         _confirmPasswordTextBox.Size = new Size(270, 23);
         _confirmPasswordTextBox.UseSystemPasswordChar = true;
 
         // _groupsLabel
         _groupsLabel.Text = "Local groups:";
-        _groupsLabel.Location = new Point(15, 186);
+        _groupsLabel.Location = new Point(15, 174);
         _groupsLabel.AutoSize = true;
 
         // _groupsListBox
-        _groupsListBox.Location = new Point(15, 208);
+        _groupsListBox.Location = new Point(15, 196);
         _groupsListBox.Size = new Size(270, 130);
         _groupsListBox.CheckOnClick = true;
 
         // _settingsLabel
         _settingsLabel.Text = "Desktop settings file (optional import):";
-        _settingsLabel.Location = new Point(15, 355);
+        _settingsLabel.Location = new Point(15, 338);
         _settingsLabel.AutoSize = true;
 
         // _settingsPathTextBox
-        _settingsPathTextBox.Location = new Point(15, 377);
+        _settingsPathTextBox.Location = new Point(15, 360);
         _settingsPathTextBox.Size = new Size(195, 23);
 
         // _browseButton
         _browseButton.Text = "Browse...";
-        _browseButton.Location = new Point(218, 376);
+        _browseButton.Location = new Point(218, 359);
         _browseButton.Size = new Size(67, 25);
         _browseButton.FlatStyle = FlatStyle.System;
         _browseButton.Click += OnBrowseSettingsClick;
@@ -156,83 +159,97 @@ partial class EditAccountDialog
 
         // _networkLoginCheckBox
         _networkLoginCheckBox.Text = "Network Login";
-        _networkLoginCheckBox.Location = new Point(305, 65);
+        _networkLoginCheckBox.Location = new Point(305, 61);
         _networkLoginCheckBox.AutoSize = true;
 
         // _bgAutorunCheckBox
         _bgAutorunCheckBox.Text = "Bg Autorun";
-        _bgAutorunCheckBox.Location = new Point(305, 93);
+        _bgAutorunCheckBox.Location = new Point(305, 85);
         _bgAutorunCheckBox.AutoSize = true;
 
         // _allowInternetCheckBox
         _allowInternetCheckBox.Text = "Internet";
-        _allowInternetCheckBox.Location = new Point(305, 121);
+        _allowInternetCheckBox.Location = new Point(305, 109);
         _allowInternetCheckBox.AutoSize = true;
 
         // _allowLanCheckBox
         _allowLanCheckBox.Text = "LAN";
-        _allowLanCheckBox.Location = new Point(305, 149);
+        _allowLanCheckBox.Location = new Point(305, 133);
         _allowLanCheckBox.AutoSize = true;
 
         // _allowLocalhostCheckBox
         _allowLocalhostCheckBox.Text = "Localhost";
-        _allowLocalhostCheckBox.Location = new Point(305, 177);
+        _allowLocalhostCheckBox.Location = new Point(305, 157);
         _allowLocalhostCheckBox.AutoSize = true;
 
         // _privilegeLevelLabel
         _privilegeLevelLabel.Text = "Default privilege level:";
-        _privilegeLevelLabel.Location = new Point(305, 205);
+        _privilegeLevelLabel.Location = new Point(305, 185);
         _privilegeLevelLabel.AutoSize = true;
 
         // _privilegeLevelComboBox
         _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        _privilegeLevelComboBox.Location = new Point(305, 227);
+        _privilegeLevelComboBox.Location = new Point(305, 207);
         _privilegeLevelComboBox.Size = new Size(200, 23);
-        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Basic", "Low Integrity" });
+        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Above Basic", "Basic", "Low Integrity" });
 
         // _ephemeralCheckBox
         _ephemeralCheckBox.Text = "Ephemeral (auto-delete after 24h)";
-        _ephemeralCheckBox.Location = new Point(305, 261);
+        _ephemeralCheckBox.Location = new Point(305, 241);
         _ephemeralCheckBox.AutoSize = true;
         _ephemeralCheckBox.Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold);
 
         // _installLabel
         _installLabel.Text = "Install:";
-        _installLabel.Location = new Point(305, 302);
+        _installLabel.Location = new Point(305, 270);
         _installLabel.AutoSize = true;
 
         // _installListBox
-        _installListBox.Location = new Point(305, 324);
+        _installListBox.Location = new Point(305, 292);
         _installListBox.Size = new Size(270, 100);
         _installListBox.CheckOnClick = true;
 
         // ── Bottom (full width) ─────────────────────────────────────────
 
+        // _bottomPanel
+        _bottomPanel.Dock = DockStyle.Bottom;
+        _bottomPanel.Location = new Point(0, 392);
+        _bottomPanel.Size = new Size(590, 42);
+
         // _statusLabel
-        _statusLabel.Location = new Point(15, 442);
-        _statusLabel.Size = new Size(560, 20);
+        _statusLabel.Location = new Point(15, 11);
+        _statusLabel.Size = new Size(380, 20);
+        _statusLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         _statusLabel.ForeColor = Color.Red;
 
         // _deleteButton
         _deleteButton.Text = "Delete Account";
-        _deleteButton.Location = new Point(15, 472);
+        _deleteButton.Location = new Point(15, 7);
         _deleteButton.Size = new Size(120, 28);
+        _deleteButton.Anchor = AnchorStyles.Top | AnchorStyles.Left;
         _deleteButton.FlatStyle = FlatStyle.System;
         _deleteButton.Click += OnDeleteClick;
 
         // _okButton
         _okButton.Text = "OK";
-        _okButton.Location = new Point(415, 472);
+        _okButton.Location = new Point(415, 7);
         _okButton.Size = new Size(75, 28);
+        _okButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _okButton.FlatStyle = FlatStyle.System;
         _okButton.Click += OnOkClick;
 
         // _cancelButton
         _cancelButton.Text = "Cancel";
         _cancelButton.DialogResult = DialogResult.Cancel;
-        _cancelButton.Location = new Point(500, 472);
+        _cancelButton.Location = new Point(500, 7);
         _cancelButton.Size = new Size(75, 28);
+        _cancelButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _cancelButton.FlatStyle = FlatStyle.System;
+
+        _bottomPanel.Controls.AddRange(new Control[]
+        {
+            _statusLabel, _deleteButton, _okButton, _cancelButton
+        });
 
         // EditAccountDialog
         AutoScaleDimensions = new SizeF(7F, 15F);
@@ -242,7 +259,7 @@ partial class EditAccountDialog
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
-        ClientSize = new Size(590, 512);
+        ClientSize = new Size(590, 434);
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
         Controls.AddRange(new Control[]
@@ -254,9 +271,10 @@ partial class EditAccountDialog
             _allowLabel, _allowInternetCheckBox, _allowLocalhostCheckBox, _allowLanCheckBox,
             _privilegeLevelLabel, _privilegeLevelComboBox, _ephemeralCheckBox,
             _installLabel, _installListBox,
-            _statusLabel, _deleteButton, _okButton, _cancelButton
+            _bottomPanel
         });
 
+        _bottomPanel.ResumeLayout(false);
         ResumeLayout(false);
         PerformLayout();
     }

@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using RunFence.Apps.Shortcuts;
-using RunFence.Apps.UI.Forms;
-using RunFence.Infrastructure;
+using RunFence.Launching.Resolution;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
 
@@ -9,39 +8,40 @@ namespace RunFence.Wizard.UI.Forms.Steps;
 /// Wizard step for picking an executable path and providing an optional display name for the app entry.
 /// Auto-fills the app name from the file's product description or filename.
 /// </summary>
-public class AppPathStep : WizardStepPage
+internal class AppPathStep : WizardStepPage
 {
     private readonly Action<string, string> _setPathAndName;
-    private readonly IShortcutDiscoveryService _discoveryService;
+    private readonly IExecutablePathResolver _executablePathResolver;
 
     private Label _descriptionLabel = null!;
     private Label _pathLabel = null!;
-    private TextBox _pathTextBox = null!;
-    private Button _browseButton = null!;
-    private Button _discoverButton = null!;
+    private AppPathBrowseControl _pathBrowseControl = null!;
     private Label _nameLabel = null!;
     private TextBox _appNameTextBox = null!;
 
     public AppPathStep(
         Action<string, string> setPathAndName,
         IShortcutDiscoveryService discoveryService,
+        IShortcutIconHelper iconHelper,
+        IExecutablePathResolver executablePathResolver,
         string? description = null,
         string? initialPath = null,
         string? initialName = null)
     {
         _setPathAndName = setPathAndName;
-        _discoveryService = discoveryService;
-        BuildContent(description, initialPath, initialName);
+        _executablePathResolver = executablePathResolver;
+        BuildContent(discoveryService, iconHelper, description, initialPath, initialName);
     }
 
     public override string StepTitle => "Application";
 
     public override string? Validate()
     {
-        var path = _pathTextBox.Text.Trim();
+        var path = _pathBrowseControl.PathText.Trim();
         if (path.Length == 0)
             return "Please select an application.";
-        if (!File.Exists(path))
+        var resolved = ResolvePath(path);
+        if (!File.Exists(resolved))
             return "The selected file does not exist.";
         if (_appNameTextBox.Text.Trim().Length == 0)
             return "Please enter an app name.";
@@ -50,10 +50,17 @@ public class AppPathStep : WizardStepPage
 
     public override void Collect()
     {
-        _setPathAndName(_pathTextBox.Text.Trim(), _appNameTextBox.Text.Trim());
+        var path = _pathBrowseControl.PathText.Trim();
+        var resolved = ResolvePath(path);
+        _setPathAndName(resolved, _appNameTextBox.Text.Trim());
     }
 
-    private void BuildContent(string? description, string? initialPath, string? initialName)
+    private void BuildContent(
+        IShortcutDiscoveryService discoveryService,
+        IShortcutIconHelper iconHelper,
+        string? description,
+        string? initialPath,
+        string? initialName)
     {
         SuspendLayout();
         Padding = new Padding(8);
@@ -81,47 +88,9 @@ public class AppPathStep : WizardStepPage
             Padding = new Padding(0, 0, 0, 4)
         };
 
-        _pathTextBox = new TextBox
-        {
-            Font = new Font("Segoe UI", 10),
-            Dock = DockStyle.Fill
-        };
-        _pathTextBox.TextChanged += (_, _) => AutoFillAppName();
-
-        int inputHeight = _pathTextBox.PreferredHeight;
-
-        _browseButton = new Button
-        {
-            Text = "Browse…",
-            Font = new Font("Segoe UI", 9),
-            Width = 72,
-            Height = inputHeight,
-            Dock = DockStyle.Right,
-            FlatStyle = FlatStyle.System
-        };
-        _browseButton.Click += OnBrowseClick;
-
-        _discoverButton = new Button
-        {
-            Text = "Discover…",
-            Font = new Font("Segoe UI", 9),
-            Width = 88,
-            Height = inputHeight,
-            Dock = DockStyle.Right,
-            FlatStyle = FlatStyle.System
-        };
-        _discoverButton.Click += OnDiscoverClick;
-
-        var pathRow = new Panel
-        {
-            Dock = DockStyle.Top,
-            Height = inputHeight
-        };
-        // Dock=Right: last added = highest Z-order = rightmost position.
-        // Add Browse first (will be to the left), Discover last (rightmost), then Fill textbox.
-        pathRow.Controls.Add(_browseButton);
-        pathRow.Controls.Add(_discoverButton);
-        pathRow.Controls.Add(_pathTextBox);
+        _pathBrowseControl = new AppPathBrowseControl(discoveryService, iconHelper);
+        _pathBrowseControl.Font = new Font("Segoe UI", 10);
+        _pathBrowseControl.PathChanged += (_, _) => AutoFillAppName();
 
         _nameLabel = new Label
         {
@@ -141,84 +110,50 @@ public class AppPathStep : WizardStepPage
         // Add in reverse order so Dock=Top stacks top-to-bottom
         Controls.Add(_appNameTextBox);
         Controls.Add(_nameLabel);
-        Controls.Add(pathRow);
+        Controls.Add(_pathBrowseControl);
         Controls.Add(_pathLabel);
         if (hasDesc)
             Controls.Add(_descriptionLabel);
         ResumeLayout(false);
 
         if (!string.IsNullOrEmpty(initialPath))
-            _pathTextBox.Text = initialPath;
+            _pathBrowseControl.PathText = initialPath;
         if (!string.IsNullOrEmpty(initialName))
             _appNameTextBox.Text = initialName;
     }
 
-    private void OnBrowseClick(object? sender, EventArgs e)
-    {
-        using var dlg = new OpenFileDialog();
-        dlg.Title = "Select Application";
-        dlg.Filter = "Executable files (*.exe)|*.exe|All files (*.*)|*.*";
-        dlg.CheckFileExists = true;
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-
-        if (!string.IsNullOrWhiteSpace(_pathTextBox.Text))
-        {
-            var dir = Path.GetDirectoryName(_pathTextBox.Text);
-            if (Directory.Exists(dir))
-                dlg.InitialDirectory = dir;
-        }
-
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-            _pathTextBox.Text = dlg.FileName;
-    }
-
-    private async void OnDiscoverClick(object? sender, EventArgs e)
-    {
-        _discoverButton.Enabled = false;
-        Cursor = Cursors.WaitCursor;
-        try
-        {
-            var apps = await Task.Run(() => _discoveryService.DiscoverApps());
-            if (IsDisposed) return;
-
-            using var dlg = new AppDiscoveryDialog(apps);
-            if (dlg.ShowDialog(this) == DialogResult.OK)
-            {
-                _pathTextBox.Text = dlg.SelectedPath;
-                if (string.IsNullOrWhiteSpace(_appNameTextBox.Text) && dlg.SelectedName != null)
-                    _appNameTextBox.Text = dlg.SelectedName;
-            }
-        }
-        finally
-        {
-            if (!IsDisposed)
-            {
-                Cursor = Cursors.Default;
-                _discoverButton.Enabled = true;
-            }
-        }
-    }
-
     private void AutoFillAppName()
     {
-        var path = _pathTextBox.Text.Trim();
-        if (!File.Exists(path))
+        var path = _pathBrowseControl.PathText.Trim();
+        var resolved = ResolvePath(path);
+        if (!File.Exists(resolved))
             return;
+
+        // Check if a name was auto-suggested by the Discover dialog
+        var discoveredName = _pathBrowseControl.DiscoveredName;
+        if (discoveredName != null && string.IsNullOrWhiteSpace(_appNameTextBox.Text))
+        {
+            _appNameTextBox.Text = discoveredName;
+            return;
+        }
 
         string suggestedName;
         try
         {
-            var info = FileVersionInfo.GetVersionInfo(path);
+            var info = FileVersionInfo.GetVersionInfo(resolved);
             suggestedName = !string.IsNullOrWhiteSpace(info.ProductName)
                 ? info.ProductName.Trim()
-                : Path.GetFileNameWithoutExtension(path);
+                : Path.GetFileNameWithoutExtension(resolved);
         }
         catch
         {
-            suggestedName = Path.GetFileNameWithoutExtension(path);
+            suggestedName = Path.GetFileNameWithoutExtension(resolved);
         }
 
         if (string.IsNullOrWhiteSpace(_appNameTextBox.Text))
             _appNameTextBox.Text = suggestedName;
     }
+
+    private string ResolvePath(string path) =>
+        _executablePathResolver.TryResolvePath(path, ExecutablePathResolutionContext.CurrentProcess()) ?? path;
 }

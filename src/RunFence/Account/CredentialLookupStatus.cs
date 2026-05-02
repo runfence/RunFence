@@ -6,5 +6,6 @@ public enum CredentialLookupStatus
     CurrentAccount,
     InteractiveUser,
     NotFound,
-    MissingPassword
+    MissingPassword,
+    SystemAccount
 }

@@ -1,12 +1,14 @@
+using System.IO.Pipes;
+using System.Security.Principal;
+using Moq;
+using RunFence.Core;
+using RunFence.Core.Ipc;
 using RunFence.DragBridge;
+using RunFence.Launch.Tokens;
 using Xunit;
 
 namespace RunFence.Tests;
 
-/// <summary>
-/// Tests for captured file state management (via <see cref="CapturedFileStore"/>) and
-/// arg building (via <see cref="DragBridgeCopyFlow.BuildArgs"/>).
-/// </summary>
 public class DragBridgeCopyFlowTests
 {
     // ── GetCapturedFiles — captured file state ───────────────────────────
@@ -26,9 +28,11 @@ public class DragBridgeCopyFlowTests
     [Fact]
     public void GetCapturedFiles_WithinFiveMinutes_ReturnsCapturedFilesAndSid()
     {
-        var store = new CapturedFileStore();
+        long fakeTick = 0;
+        var store = new CapturedFileStore(() => fakeTick);
         var files = new List<string> { @"C:\file1.txt", @"C:\file2.txt" };
         store.SetCapturedFiles(files, "S-1-5-21-1-2-3-4");
+        fakeTick = 4 * 60_000; // advance to 4 minutes — still within 5-minute expiry
 
         var (captured, sourceSid, expired) = store.GetCapturedFiles();
 
@@ -76,9 +80,9 @@ public class DragBridgeCopyFlowTests
         => DragBridgeCopyFlow.BuildArgs(pipeName, cursorPos, restoreHwnd);
 
     [Fact]
-    public void BuildArgs_ContainsRequiredFlagsAndPid()
+    public void BuildArgs_ContainsRequiredFlagsAndValues()
     {
-        var result = InvokeBuildArgs("TestPipe-abc123", new Point(123, 456));
+        var result = InvokeBuildArgs("TestPipe-abc123", new Point(123, 456), restoreHwnd: 12345);
 
         Assert.Contains("--pipe", result);
         Assert.Contains("TestPipe-abc123", result);
@@ -87,17 +91,9 @@ public class DragBridgeCopyFlowTests
         Assert.Contains("--runfence-pid", result);
         var pidIdx = result.IndexOf("--runfence-pid");
         Assert.Equal(Environment.ProcessId.ToString(), result[pidIdx + 1]);
-        Assert.Contains("--restore-hwnd", result);
-    }
-
-    [Fact]
-    public void BuildArgs_RestoreHwnd_IsIncludedInArgs()
-    {
-        var result = InvokeBuildArgs("pipe1", new Point(0, 0), restoreHwnd: 12345);
-
-        var idx = result.IndexOf("--restore-hwnd");
-        Assert.True(idx >= 0, "--restore-hwnd flag must be present");
-        Assert.Equal("12345", result[idx + 1]);
+        var hwndIdx = result.IndexOf("--restore-hwnd");
+        Assert.True(hwndIdx >= 0, "--restore-hwnd flag must be present");
+        Assert.Equal("12345", result[hwndIdx + 1]);
     }
 
     [Theory]
@@ -130,5 +126,220 @@ public class DragBridgeCopyFlowTests
         var result = InvokeBuildArgs("some-pipe", new Point(1, 2), restoreHwnd: 3);
 
         Assert.Equal(10, result.Count);
+    }
+
+    // ── RunBridgeAsync — bridge flow scenarios ────────────────────────────
+
+    private static readonly SecurityIdentifier TestSid = new("S-1-5-32-545");
+    private static readonly WindowOwnerInfo TestOwner = new(TestSid, 0x2000, false);
+
+    private static (NamedPipeServerStream Server, NamedPipeClientStream Client) CreatePipePair()
+    {
+        var pipeName = $"RunFenceTest_DragBridgeFlow_{Guid.NewGuid():N}";
+        var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024);
+        var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+        return (server, client);
+    }
+
+    private static Mock<IDragBridgePipeLauncher> CreateLauncher(
+        NamedPipeServerStream server, bool verifyResult)
+    {
+        var launcher = new Mock<IDragBridgePipeLauncher>();
+        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, It.IsAny<bool>())).Returns(server);
+        launcher.Setup(l => l.LaunchForSid(It.IsAny<WindowOwnerInfo>(), It.IsAny<IReadOnlyList<string>>(),
+            It.IsAny<INotificationService>())).Returns((ProcessInfo?)null);
+        launcher.Setup(l => l.VerifyClientProcess(It.IsAny<NamedPipeServerStream>(), null)).Returns(verifyResult);
+        return launcher;
+    }
+
+    [Fact]
+    public async Task RunBridgeAsync_ConnectionTimeout_LogsErrorAndReturnsWithoutCapture()
+    {
+        // Arrange: launcher returns a real unconnected pipe server; no client ever connects
+        // within the short timeout → WaitForConnectionAsync is cancelled by the timeout CTS.
+        var pipeName = $"RunFenceTest_Timeout_{Guid.NewGuid():N}";
+        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024);
+
+        var launcher = new Mock<IDragBridgePipeLauncher>();
+        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, It.IsAny<bool>())).Returns(server);
+        launcher.Setup(l => l.LaunchForSid(It.IsAny<WindowOwnerInfo>(), It.IsAny<IReadOnlyList<string>>(),
+            It.IsAny<INotificationService>())).Returns((ProcessInfo?)null);
+        launcher.Setup(l => l.KillProcess(null));
+
+        var notifications = new Mock<INotificationService>();
+        var log = new Mock<ILoggingService>();
+        var capturedFileStore = new Mock<ICapturedFileStore>();
+
+        var flow = new DragBridgeCopyFlow(
+            launcher.Object, notifications.Object, log.Object, capturedFileStore.Object,
+            pipeConnectTimeoutMs: 50); // very short timeout — client never connects
+
+        // Act
+        await flow.RunBridgeAsync(TestOwner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
+
+        // Assert: timeout error logged; no files captured
+        log.Verify(l => l.Error(It.Is<string>(s => s.Contains("timeout"))), Times.Once);
+        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<List<string>>(), It.IsAny<string>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(NativeTokenHelper.MandatoryLevelLow, true, true)]
+    [InlineData(NativeTokenHelper.MandatoryLevelLow, false, false)]
+    [InlineData(NativeTokenHelper.MandatoryLevelMedium, true, false)]
+    public async Task RunBridgeAsync_CreatesLowIntegrityPipeOnlyForLowIntegrityOwner(
+        int integrityLevel,
+        bool isInRestrictedJob,
+        bool expectedAllowLowIntegrityClient)
+    {
+        var pipeName = $"RunFenceTest_LowIlFlag_{Guid.NewGuid():N}";
+        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024);
+
+        var owner = new WindowOwnerInfo(TestSid, integrityLevel, isInRestrictedJob);
+        var launcher = new Mock<IDragBridgePipeLauncher>();
+        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, expectedAllowLowIntegrityClient))
+            .Returns(server);
+        launcher.Setup(l => l.LaunchForSid(It.IsAny<WindowOwnerInfo>(), It.IsAny<IReadOnlyList<string>>(),
+            It.IsAny<INotificationService>())).Returns((ProcessInfo?)null);
+
+        var flow = new DragBridgeCopyFlow(
+            launcher.Object,
+            new Mock<INotificationService>().Object,
+            new Mock<ILoggingService>().Object,
+            new Mock<ICapturedFileStore>().Object,
+            pipeConnectTimeoutMs: 50);
+
+        await flow.RunBridgeAsync(owner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
+
+        launcher.Verify(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, expectedAllowLowIntegrityClient), Times.Once);
+    }
+
+    [Fact]
+    public async Task RunBridgeAsync_ClientVerificationFails_LogsErrorAndReturnsWithoutCapture()
+    {
+        // Arrange: client connects but VerifyClientProcess returns false → flow returns early.
+        var (server, client) = CreatePipePair();
+        await using var _1 = server;
+        await using var _2 = client;
+
+        var launcher = CreateLauncher(server, verifyResult: false);
+        var notifications = new Mock<INotificationService>();
+        var log = new Mock<ILoggingService>();
+        var capturedFileStore = new Mock<ICapturedFileStore>();
+
+        var flow = new DragBridgeCopyFlow(
+            launcher.Object, notifications.Object, log.Object, capturedFileStore.Object);
+
+        // Connect the client concurrently so WaitForConnectionAsync returns
+        var connectTask = Task.Run(() => client.ConnectAsync(5000));
+
+        // Act
+        await flow.RunBridgeAsync(TestOwner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
+        await connectTask;
+
+        // Assert: verification failure logged; no files captured; no SignalReady called
+        log.Verify(l => l.Error(It.Is<string>(s => s.Contains("verification"))), Times.Once);
+        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<List<string>>(), It.IsAny<string>()), Times.Never);
+        launcher.Verify(l => l.SignalReady(It.IsAny<NamedPipeServerStream>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task RunBridgeAsync_ResolveRequest_InvokesResolveDelegateAndWritesResult()
+    {
+        // Arrange: client sends a ResolveRequest message; the resolve delegate is called and
+        // the resolved paths are written back on the pipe.
+        var (server, client) = CreatePipePair();
+        await using var _1 = server;
+        await using var _2 = client;
+
+        var resolvedPaths = new List<string> { @"C:\resolved\file.txt" };
+        Func<CancellationToken, Task<List<string>?>> resolveDelegate =
+            _ => Task.FromResult<List<string>?>(resolvedPaths);
+
+        var launcher = CreateLauncher(server, verifyResult: true);
+        var notifications = new Mock<INotificationService>();
+        var log = new Mock<ILoggingService>();
+        var capturedFileStore = new Mock<ICapturedFileStore>();
+
+        var flow = new DragBridgeCopyFlow(
+            launcher.Object, notifications.Object, log.Object, capturedFileStore.Object);
+
+        // Simulate client: connect, consume initial FileList, send ResolveRequest, read response.
+        var clientTask = Task.Run(async () =>
+        {
+            await client.ConnectAsync(5000);
+
+            // Read initial FileList written by the flow after verification
+            var initial = await DragBridgeProtocol.ReadAsync(client);
+            Assert.NotNull(initial);
+            Assert.Equal(DragBridgeMessageType.FileList, initial!.MessageType);
+
+            // Send a ResolveRequest
+            await DragBridgeProtocol.WriteAsync(client,
+                new DragBridgeData { MessageType = DragBridgeMessageType.ResolveRequest });
+
+            // Read the resolved paths sent back by the flow
+            var response = await DragBridgeProtocol.ReadAsync(client);
+            Assert.NotNull(response);
+            Assert.Equal(resolvedPaths, response!.FilePaths);
+
+            // Close client stream to end the bridge read loop
+            client.Close();
+        });
+
+        // Act
+        await flow.RunBridgeAsync(TestOwner, [], new Point(0, 0), resolveDelegate, false, 0, CancellationToken.None);
+        await clientTask;
+
+        // Assert: resolve delegate was invoked (verified by client receiving resolved paths)
+        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<List<string>>(), It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task RunBridgeAsync_FileListMessage_StoresCapturedFiles()
+    {
+        // Arrange: client sends a FileList drop message; files are stored in the captured file store.
+        var (server, client) = CreatePipePair();
+        await using var _1 = server;
+        await using var _2 = client;
+
+        var droppedFiles = new List<string> { @"C:\user\file1.txt", @"C:\user\file2.txt" };
+
+        var launcher = CreateLauncher(server, verifyResult: true);
+        var notifications = new Mock<INotificationService>();
+        var log = new Mock<ILoggingService>();
+        var capturedFileStore = new Mock<ICapturedFileStore>();
+
+        var flow = new DragBridgeCopyFlow(
+            launcher.Object, notifications.Object, log.Object, capturedFileStore.Object);
+
+        var clientTask = Task.Run(async () =>
+        {
+            await client.ConnectAsync(5000);
+
+            // Consume initial FileList written by the flow
+            await DragBridgeProtocol.ReadAsync(client);
+
+            // Send a drop (FileList) with actual file paths
+            await DragBridgeProtocol.WriteAsync(client,
+                new DragBridgeData { FilePaths = droppedFiles });
+
+            // Close client to end the bridge read loop
+            client.Close();
+        });
+
+        // Act
+        await flow.RunBridgeAsync(TestOwner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
+        await clientTask;
+
+        // Assert: dropped files captured with the owner SID
+        capturedFileStore.Verify(
+            s => s.SetCapturedFiles(
+                It.Is<List<string>>(files => files.SequenceEqual(droppedFiles)),
+                TestSid.Value),
+            Times.Once);
+        log.Verify(l => l.Info(It.Is<string>(s => s.Contains("captured") && s.Contains("2"))), Times.Once);
     }
 }

@@ -47,7 +47,7 @@ public static class Base32
     /// </summary>
     public static byte[] Decode(string base32)
     {
-        var result = new System.Collections.Generic.List<byte>();
+        var result = new List<byte>();
         int buffer = 0;
         int bitsLeft = 0;
         foreach (char c in base32.ToUpperInvariant())

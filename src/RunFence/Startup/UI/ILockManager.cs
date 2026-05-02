@@ -7,4 +7,5 @@ public interface ILockManager
     void LockWindow();
     void Unlock();
     Task<bool> TryUnlockAsync(bool isAdmin);
+    Task<bool> TryUnlockForOperationAsync(bool isAdmin);
 }

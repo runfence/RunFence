@@ -30,7 +30,7 @@ public class StartupUI(
         secureDesktop.Run(() =>
         {
             using var dlg = new PinDialog(PinDialogMode.Set);
-            dlg.ProcessingCallback = async (newPin, _) =>
+            dlg.ProcessingCallback = async (ProtectedString newPin, string? _) =>
             {
                 try
                 {
@@ -69,8 +69,9 @@ public class StartupUI(
                 using var dlg = new PinDialog(PinDialogMode.Verify,
                     configSalt != null
                         ? "Your app configuration was created in a different session. Verification may take a moment longer."
-                        : null);
-                dlg.VerifyCallback = pin =>
+                        : null,
+                    exitOnCancel: true);
+                dlg.VerifyCallback = (ProtectedString pin) =>
                 {
                     if (!pinService.VerifyPin(pin, store, out var k))
                         return false;
@@ -123,7 +124,7 @@ public class StartupUI(
         secureDesktop.Run(() =>
         {
             using var dlg = new PinDialog(PinDialogMode.Set);
-            dlg.ProcessingCallback = async (newPin, _) =>
+            dlg.ProcessingCallback = async (ProtectedString newPin, string? _) =>
             {
                 try
                 {
@@ -172,7 +173,10 @@ public class StartupUI(
         }
 
         if (isBackground)
+        {
+            log.Info("Silent takeover requested via --background mode");
             return true;
+        }
 
         var takeoverResult = MessageBox.Show(
             "RunFence is running in another session. Take over?",

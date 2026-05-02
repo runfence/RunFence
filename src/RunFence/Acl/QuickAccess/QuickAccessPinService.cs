@@ -1,4 +1,3 @@
-using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Launch;
@@ -24,7 +23,9 @@ public class QuickAccessPinService(
             return;
 
         log.Info($"Pinning {filteredPaths.Count} folder(s) for {accountSid}: {string.Join(", ", filteredPaths)}");
-        _ = Task.Run(() => TryLaunchProcess(filteredPaths, unpin: false, accountSid));
+        var pinTask = Task.Run(() => TryLaunchProcess(filteredPaths, unpin: false, accountSid));
+        pinTask.ContinueWith(t => log.Warn($"QuickAccessPinService: pin task faulted for {accountSid}: {t.Exception!.InnerException?.Message ?? t.Exception.Message}"),
+            TaskContinuationOptions.OnlyOnFaulted);
     }
 
     public void UnpinFolders(string accountSid, IReadOnlyList<string> paths)
@@ -36,7 +37,9 @@ public class QuickAccessPinService(
             return;
 
         log.Info($"Unpinning {paths.Count} folder(s) for {accountSid}: {string.Join(", ", paths)}");
-        _ = Task.Run(() => TryLaunchProcess(paths, unpin: true, accountSid));
+        var unpinTask = Task.Run(() => TryLaunchProcess(paths, unpin: true, accountSid));
+        unpinTask.ContinueWith(t => log.Warn($"QuickAccessPinService: unpin task faulted for {accountSid}: {t.Exception!.InnerException?.Message ?? t.Exception.Message}"),
+            TaskContinuationOptions.OnlyOnFaulted);
     }
 
     public void PinAllGrantedFolders()
@@ -45,7 +48,7 @@ public class QuickAccessPinService(
         foreach (var account in session.Database.Accounts)
         {
             var folderPaths = account.Grants
-                .Where(g => !g.IsTraverseOnly && !g.IsDeny && Directory.Exists(g.Path))
+                .Where(g => g is { IsTraverseOnly: false, IsDeny: false } && Directory.Exists(g.Path))
                 .Select(g => g.Path).ToList();
             if (folderPaths.Count > 0)
                 PinFolders(account.Sid, folderPaths);
@@ -54,7 +57,7 @@ public class QuickAccessPinService(
 
     private bool IsEligible(string accountSid)
     {
-        if (AclHelper.IsContainerSid(accountSid))
+        if (AclHelper.IsContainerSid(accountSid) || AclHelper.IsLowIntegritySid(accountSid))
             return false;
         if (string.Equals(accountSid, SidResolutionHelper.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
             return false;

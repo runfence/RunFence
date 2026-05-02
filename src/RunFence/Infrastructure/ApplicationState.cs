@@ -3,7 +3,8 @@ using RunFence.Startup.UI;
 
 namespace RunFence.Infrastructure;
 
-public class ApplicationState(ISessionProvider sessionProvider, ILockManager lockManager, IModalTracker modalTracker) : IAppStateProvider, IAppLockControl, IDataChangeNotifier
+public class ApplicationState(ISessionProvider sessionProvider, ILockManager lockManager, IModalTracker modalTracker)
+    : IAppStateProvider, IAppLockControl, IDataChangeNotifier, IApplicationDataChangeSource
 {
     private volatile bool _isShuttingDown;
 
@@ -33,6 +34,7 @@ public class ApplicationState(ISessionProvider sessionProvider, ILockManager loc
     public void Lock() => lockManager.LockWindow();
     public void Unlock() => lockManager.Unlock();
     public Task<bool> TryUnlockAsync(bool isAdmin) => lockManager.TryUnlockAsync(isAdmin);
+    public Task<bool> TryUnlockForOperationAsync(bool isAdmin) => lockManager.TryUnlockForOperationAsync(isAdmin);
 
     // IDataChangeNotifier
     public event Action? DataChanged;

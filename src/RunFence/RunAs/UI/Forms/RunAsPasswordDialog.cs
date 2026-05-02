@@ -1,7 +1,7 @@
-using System.Security;
 using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Apps.UI;
+using RunFence.Core;
 
 namespace RunFence.RunAs.UI.Forms;
 
@@ -10,8 +10,9 @@ public partial class RunAsPasswordDialog : Form
     private readonly IWindowsAccountService _accountService;
     private readonly string _sid;
     private readonly string _usernameFallback;
+    private readonly SecurePasswordBox _passwordSecure;
 
-    public SecureString? Password { get; private set; }
+    public ProtectedString? Password { get; private set; }
     public bool RememberPassword => _rememberCheckBox.Checked;
 
     public RunAsPasswordDialog(string accountDisplayName, IWindowsAccountService accountService,
@@ -23,32 +24,32 @@ public partial class RunAsPasswordDialog : Form
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         _accountLabel.Text = $"Enter password for: {accountDisplayName}";
-        PasswordEyeToggle.AddTo(_passwordTextBox);
+        _passwordSecure = new SecurePasswordBox(_passwordTextBox);
+        _passwordSecure.AddEyeToggle();
     }
 
     private void OnOkClick(object? sender, EventArgs e)
     {
         _statusLabel.Text = "";
 
-        if (_passwordTextBox.Text.Length == 0)
+        if (_passwordSecure.IsEmpty)
         {
             _statusLabel.Text = "Password is required.";
             return;
         }
 
-        var error = _accountService.ValidatePassword(_sid, _passwordTextBox.Text, _usernameFallback);
+        var pwd = _passwordSecure.GetPassword();
+
+        var error = _accountService.ValidatePassword(_sid, pwd, _usernameFallback);
         if (error != null)
         {
+            pwd.Dispose();
             _statusLabel.Text = error;
             return;
         }
 
-        Password = new SecureString();
-        foreach (char c in _passwordTextBox.Text)
-            Password.AppendChar(c);
-        Password.MakeReadOnly();
+        Password = pwd;
 
-        _passwordTextBox.Clear();
         DialogResult = DialogResult.OK;
         Close();
     }

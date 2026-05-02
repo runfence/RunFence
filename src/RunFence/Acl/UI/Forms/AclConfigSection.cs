@@ -1,7 +1,7 @@
 using System.ComponentModel;
+using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 using RunFence.UI;
 
 namespace RunFence.Acl.UI.Forms;
@@ -12,14 +12,10 @@ namespace RunFence.Acl.UI.Forms;
 /// </summary>
 public partial class AclConfigSection : UserControl
 {
-    private readonly IAclService _aclService;
     private readonly AclAllowListGridHandler _allowListHandler;
     private readonly AllowListEntryFactory _allowListEntryFactory;
     private readonly AclConfigValidator _validator;
-    private readonly ILoggingService _log;
-
-    private readonly List<string> _folderDepthPaths = new();
-    private readonly List<int> _folderDepthIndices = new();
+    private readonly FolderDepthHelper _folderDepthHelper;
 
     // State
     private bool _isFolder;
@@ -46,13 +42,12 @@ public partial class AclConfigSection : UserControl
         }
     }
 
-    public AclConfigSection(IAclService aclService, AclAllowListGridHandler allowListHandler, AllowListEntryFactory allowListEntryFactory, AclConfigValidator validator, ILoggingService log)
+    public AclConfigSection(AclAllowListGridHandler allowListHandler, AllowListEntryFactory allowListEntryFactory, AclConfigValidator validator, FolderDepthHelper folderDepthHelper)
     {
-        _aclService = aclService;
         _allowListHandler = allowListHandler;
         _allowListEntryFactory = allowListEntryFactory;
         _validator = validator;
-        _log = log;
+        _folderDepthHelper = folderDepthHelper;
         InitializeComponent();
         _allowTsAddButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22));
         _allowTsRemoveButton.Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33));
@@ -68,16 +63,16 @@ public partial class AclConfigSection : UserControl
         _context = context;
     }
 
-    public void PopulateFromExisting(AppEntry app)
+    public void PopulateFromExisting(AclConfigInitializationModel model)
     {
-        _restrictAclCheckBox.Checked = app.RestrictAcl;
-        _aclModeDenyRadio.Checked = app.AclMode == AclMode.Deny;
-        _aclModeAllowRadio.Checked = app.AclMode == AclMode.Allow;
-        _deniedRightsComboBox.SelectedIndex = (int)app.DeniedRights;
+        _restrictAclCheckBox.Checked = model.RestrictAcl;
+        _aclModeDenyRadio.Checked = model.AclMode == AclMode.Deny;
+        _aclModeAllowRadio.Checked = model.AclMode == AclMode.Allow;
+        _deniedRightsComboBox.SelectedIndex = (int)model.DeniedRights;
 
-        if (app.AllowedAclEntries != null)
+        if (model.AllowedAclEntries != null)
         {
-            foreach (var entry in app.AllowedAclEntries)
+            foreach (var entry in model.AllowedAclEntries)
             {
                 var idx = _allowEntriesGrid.Rows.Add(
                     _allowListEntryFactory.GetDisplayName(entry.Sid, null, _context?.SidNames),
@@ -87,8 +82,8 @@ public partial class AclConfigSection : UserControl
             }
         }
 
-        _aclFileRadio.Checked = app.AclTarget == AclTarget.File;
-        _aclFolderRadio.Checked = app.AclTarget == AclTarget.Folder;
+        _aclFileRadio.Checked = model.AclTarget == AclTarget.File;
+        _aclFolderRadio.Checked = model.AclTarget == AclTarget.Folder;
     }
 
     /// <summary>
@@ -125,46 +120,7 @@ public partial class AclConfigSection : UserControl
     private void UpdateFolderDepthCombo(string? exePath = null)
     {
         exePath ??= _context?.Provider.GetExePath() ?? "";
-        _folderDepthComboBox.Items.Clear();
-        _folderDepthPaths.Clear();
-        _folderDepthIndices.Clear();
-
-        if (string.IsNullOrEmpty(exePath) || PathHelper.IsUrlScheme(exePath) || (_isFolder ? !Directory.Exists(exePath) : !File.Exists(exePath)))
-        {
-            _folderDepthComboBox.Items.Add(_isFolder ? "(select folder first)" : "(select file first)");
-            _folderDepthComboBox.SelectedIndex = 0;
-            return;
-        }
-
-        try
-        {
-            var folder = _isFolder
-                ? Path.GetFullPath(exePath)
-                : Path.GetDirectoryName(Path.GetFullPath(exePath))!;
-            for (int depth = 0; depth <= Constants.MaxFolderAclDepth; depth++)
-            {
-                if (!_aclService.IsBlockedPath(folder))
-                {
-                    _folderDepthPaths.Add(folder);
-                    _folderDepthIndices.Add(depth);
-                    _folderDepthComboBox.Items.Add(Path.GetFileName(folder) is { Length: > 0 } name ? name : folder);
-                }
-
-                var parent = Path.GetDirectoryName(folder);
-                if (parent == null)
-                    break;
-                folder = parent;
-            }
-        }
-        catch (Exception ex)
-        {
-            _log.Debug($"UpdateFolderDepthCombo: path resolution failed for '{exePath}': {ex.Message}");
-            _folderDepthComboBox.Items.Add("(invalid path)");
-        }
-
-        if (_folderDepthComboBox.Items.Count > 0)
-            _folderDepthComboBox.SelectedIndex = 0;
-
+        _folderDepthHelper.UpdateFolderDepthCombo(_folderDepthComboBox, exePath, _isFolder);
         UpdateAclPathLabel();
     }
 
@@ -173,16 +129,14 @@ public partial class AclConfigSection : UserControl
     /// </summary>
     public void SelectFolderDepth(int folderAclDepth)
     {
-        var depthIdx = _folderDepthIndices.IndexOf(folderAclDepth);
-        if (depthIdx >= 0)
-            _folderDepthComboBox.SelectedIndex = depthIdx;
+        _folderDepthHelper.SelectFolderDepth(_folderDepthComboBox, folderAclDepth);
     }
 
     private (AclTarget Target, int Depth) ResolveAclTargetAndDepth(bool isFolder)
     {
         var aclTarget = isFolder ? AclTarget.Folder : _aclFileRadio.Checked ? AclTarget.File : AclTarget.Folder;
-        var depth = _aclFolderRadio.Checked && _folderDepthComboBox.SelectedIndex >= 0 && _folderDepthComboBox.SelectedIndex < _folderDepthIndices.Count
-            ? _folderDepthIndices[_folderDepthComboBox.SelectedIndex]
+        var depth = _aclFolderRadio.Checked
+            ? _folderDepthHelper.GetSelectedDepth(_folderDepthComboBox.SelectedIndex)
             : 0;
         return (aclTarget, depth);
     }
@@ -200,16 +154,20 @@ public partial class AclConfigSection : UserControl
         var (aclTarget, depth) = ResolveAclTargetAndDepth(_isFolder);
         var isAllowMode = _aclModeAllowRadio.Checked;
 
-        var conflict = _validator.CheckPathConflict(exePath, _isFolder, isAllowMode,
+        var error = _validator.CheckPathConflict(exePath, _isFolder, isAllowMode,
             aclTarget, depth, _context.ExistingApps, _context.CurrentAppId);
 
-        if (conflict != null)
-            _allowConflictLabel.Text = conflict;
+        var labelText = error ?? _validator.CheckPathOverlapWarning(exePath, _isFolder, isAllowMode,
+            aclTarget, depth, _context.ExistingApps, _context.CurrentAppId);
+
+        if (labelText != null)
+            _allowConflictLabel.Text = labelText;
 
         _allowConflictLabel.Visible = _restrictAclCheckBox.Checked
                                       && !string.IsNullOrEmpty(_allowConflictLabel.Text);
 
-        return _allowConflictLabel.Text is { Length: > 0 } text ? text : null;
+        // Return only the blocking error (not warning) so Validate can distinguish
+        return error;
     }
 
     /// <summary>
@@ -310,7 +268,6 @@ public partial class AclConfigSection : UserControl
         _deniedRightsComboBox.Visible = isRestricted && isDeny;
 
         _allowPanel.Visible = isRestricted && isAllow;
-        _allowConflictLabel.Visible = isRestricted && !string.IsNullOrEmpty(_allowConflictLabel.Text);
 
         _aclModePanel.Visible = isRestricted;
         _aclTargetPanel.Visible = isRestricted;
@@ -319,21 +276,25 @@ public partial class AclConfigSection : UserControl
 
         bool showConflict = isRestricted && !string.IsNullOrEmpty(_allowConflictLabel.Text);
 
-        // In deny mode, reposition the conflict label below the deny-specific controls.
-        if (isDeny && showConflict)
-            _allowConflictLabel.Location = _allowConflictLabel.Location with { Y = 182 };
-        else if (isAllow)
-            _allowConflictLabel.Location = _allowConflictLabel.Location with { Y = 340 };
-
-        int height;
-        if (!isRestricted)
-            height = 30;
-        else if (isAllow)
-            height = 368;
+        if (showConflict)
+        {
+            // Position conflict label below the last visible content control.
+            Control lastContent = isDeny ? _deniedRightsComboBox : _allowPanel;
+            int conflictY = lastContent.Bottom + 6;
+            _allowConflictLabel.Location = _allowConflictLabel.Location with { Y = conflictY };
+            _allowConflictLabel.Visible = true;
+            Height = _allowConflictLabel.Bottom + 6;
+        }
         else
-            height = showConflict ? 208 : 195;
-
-        Height = height;
+        {
+            _allowConflictLabel.Visible = false;
+            if (!isRestricted)
+                Height = _restrictAclCheckBox.Bottom + 5;
+            else if (isAllow)
+                Height = _allowPanel.Bottom + 6;
+            else
+                Height = _deniedRightsComboBox.Bottom + 6;
+        }
     }
 
     private void UpdateAclState()
@@ -353,9 +314,9 @@ public partial class AclConfigSection : UserControl
 
     private void UpdateAclPathLabel()
     {
-        var idx = _folderDepthComboBox.SelectedIndex;
-        if (idx >= 0 && idx < _folderDepthPaths.Count)
-            _aclPathLabel.Text = $"Target: {_folderDepthPaths[idx]}";
+        var selectedPath = _folderDepthHelper.GetSelectedPath(_folderDepthComboBox.SelectedIndex);
+        if (selectedPath != null)
+            _aclPathLabel.Text = $"Target: {selectedPath}";
         else if (_folderDepthComboBox.SelectedItem != null)
             _aclPathLabel.Text = $"Target: {_folderDepthComboBox.SelectedItem}";
     }
@@ -390,7 +351,7 @@ public partial class AclConfigSection : UserControl
         var result = await _allowListEntryFactory.PromptNewEntryAsync(
             _context?.Provider.GetSelectedAccountSid(),
             _context?.SidNames,
-            FindForm(),
+            FindForm()!,
             existingEntries);
 
         if (result == null)

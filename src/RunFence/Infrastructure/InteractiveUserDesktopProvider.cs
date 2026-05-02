@@ -1,9 +1,10 @@
 using RunFence.Acl.Permissions;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 
 namespace RunFence.Infrastructure;
 
-public class InteractiveUserDesktopProvider(ISidResolver sidResolver, IInteractiveUserResolver interactiveUserResolver) : IInteractiveUserDesktopProvider
+public class InteractiveUserDesktopProvider(IProfilePathResolver profilePathResolver, IInteractiveUserResolver interactiveUserResolver) : IInteractiveUserDesktopProvider
 {
     private string? _cachedDesktopPath;
     private string? _cachedTaskBarPath;
@@ -27,8 +28,8 @@ public class InteractiveUserDesktopProvider(ISidResolver sidResolver, IInteracti
         if (interactiveSid == null)
             return null;
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
-        var isCurrentAccount = string.Equals(interactiveSid, currentSid, StringComparison.OrdinalIgnoreCase);
-        _cachedDesktopPath = sidResolver.TryGetDesktopPath(interactiveSid, isCurrentAccount);
+        var isCurrentAccount = SidComparer.SidEquals(interactiveSid, currentSid);
+        _cachedDesktopPath = profilePathResolver.TryGetDesktopPath(interactiveSid, isCurrentAccount);
         return _cachedDesktopPath;
     }
 
@@ -40,8 +41,8 @@ public class InteractiveUserDesktopProvider(ISidResolver sidResolver, IInteracti
         if (interactiveSid == null)
             return null;
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
-        var isCurrentAccount = string.Equals(interactiveSid, currentSid, StringComparison.OrdinalIgnoreCase);
-        _cachedTaskBarPath = sidResolver.TryGetTaskBarPath(interactiveSid, isCurrentAccount);
+        var isCurrentAccount = SidComparer.SidEquals(interactiveSid, currentSid);
+        _cachedTaskBarPath = profilePathResolver.TryGetTaskBarPath(interactiveSid, isCurrentAccount);
         return _cachedTaskBarPath;
     }
 }

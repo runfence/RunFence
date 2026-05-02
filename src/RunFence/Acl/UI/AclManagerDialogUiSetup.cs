@@ -39,7 +39,7 @@ public static class AclManagerDialogUiSetup
         export.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x33, 0x66, 0x99), 30);
         export.ToolTipText = "Export";
         import.DisplayStyle = ToolStripItemDisplayStyle.Image;
-        import.Image = UiIconFactory.CreateToolbarIcon("\u21A9", Color.FromArgb(0x66, 0x66, 0x99), 30);
+        import.Image = UiIconFactory.CreateToolbarIcon("\u2193", Color.FromArgb(0x33, 0x66, 0xCC), 30);
         import.ToolTipText = "Import";
     }
 }

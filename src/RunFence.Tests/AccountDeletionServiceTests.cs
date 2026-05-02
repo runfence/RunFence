@@ -205,7 +205,9 @@ public class AccountDeletionServiceTests
         var ex = Assert.Throws<InvalidOperationException>(() => service.DeleteAccount(Sid, Username, store));
         Assert.Contains("Access denied", ex.Message);
 
-        // Nothing touched after DeleteUser failure — restrictions, firewall, credentials all intact
+        // DeleteUser failure is terminal: the OS account still exists, so removing restrictions,
+        // firewall rules, and credentials would leave the account in an inconsistent half-deleted
+        // state. All subsequent steps are skipped intentionally.
         _lifecycleManager.Verify(m => m.ClearAccountRestrictions(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<AppSettings?>()), Times.Never);
         _firewallCleanupService.Verify(f => f.RemoveAllRules(It.IsAny<string>()), Times.Never);
         _credentialManager.Verify(m => m.RemoveCredentialsBySid(It.IsAny<string>(), It.IsAny<CredentialStore>()), Times.Never);
@@ -215,6 +217,9 @@ public class AccountDeletionServiceTests
     [Fact]
     public void DeleteAccount_ClearRestrictionsThrows_ContinuesDeletion()
     {
+        // Unlike DeleteUser failure (which is terminal because the OS account still exists),
+        // post-delete cleanup steps are best-effort: the account is already gone, so partial
+        // cleanup is better than stopping entirely. Each non-fatal exception is logged as a warning.
         // Arrange
         var (database, store) = BuildSession();
         _lifecycleManager.Setup(m => m.ClearAccountRestrictions(Sid, Username, It.IsAny<AppSettings?>()))

@@ -11,9 +11,8 @@ partial class SidMigrationDialog
     private Label _stepTitleLabel;
     private Panel _stepPanel;
     private Panel _buttonPanel;
-    private Button _backButton;
+    private Button _secondaryButton;
     private Button _nextButton;
-    private Button _cancelCloseButton;
 
     private SidMigrationDialog() { InitializeComponent(); }
 
@@ -29,9 +28,8 @@ partial class SidMigrationDialog
         _stepTitleLabel = new Label();
         _stepPanel = new Panel();
         _buttonPanel = new Panel();
-        _backButton = new Button();
+        _secondaryButton = new Button();
         _nextButton = new Button();
-        _cancelCloseButton = new Button();
 
         SuspendLayout();
         _buttonPanel.SuspendLayout();
@@ -42,14 +40,6 @@ partial class SidMigrationDialog
         _stepTitleLabel.AutoSize = true;
         _stepTitleLabel.Font = new Font(Font.FontFamily, 12f, FontStyle.Bold);
 
-        // _cancelCloseButton
-        _cancelCloseButton.Text = "Cancel";
-        _cancelCloseButton.Size = new Size(80, 28);
-        _cancelCloseButton.Dock = DockStyle.Right;
-        _cancelCloseButton.FlatStyle = FlatStyle.System;
-        _cancelCloseButton.CausesValidation = false;
-        _cancelCloseButton.Click += OnCancelCloseClick;
-
         // _nextButton
         _nextButton.Text = "Next";
         _nextButton.Size = new Size(80, 28);
@@ -57,20 +47,19 @@ partial class SidMigrationDialog
         _nextButton.FlatStyle = FlatStyle.System;
         _nextButton.Click += OnNextClick;
 
-        // _backButton
-        _backButton.Text = "Back";
-        _backButton.Size = new Size(80, 28);
-        _backButton.Dock = DockStyle.Right;
-        _backButton.FlatStyle = FlatStyle.System;
-        _backButton.Enabled = false;
-        _backButton.CausesValidation = false;
-        _backButton.Click += OnBackClick;
+        // _secondaryButton
+        _secondaryButton.Text = "Cancel";
+        _secondaryButton.Size = new Size(80, 28);
+        _secondaryButton.Dock = DockStyle.Right;
+        _secondaryButton.FlatStyle = FlatStyle.System;
+        _secondaryButton.CausesValidation = false;
+        _secondaryButton.Click += OnSecondaryButtonClick;
 
         // _buttonPanel
         _buttonPanel.Dock = DockStyle.Bottom;
         _buttonPanel.Height = 44;
         _buttonPanel.Padding = new Padding(8, 8, 8, 8);
-        _buttonPanel.Controls.AddRange(new Control[] { _cancelCloseButton, _nextButton, _backButton });
+        _buttonPanel.Controls.AddRange(new Control[] { _secondaryButton, _nextButton });
 
         // _stepPanel
         _stepPanel.Dock = DockStyle.Fill;
@@ -79,11 +68,13 @@ partial class SidMigrationDialog
         AutoScaleDimensions = new SizeF(7F, 15F);
         AutoScaleMode = AutoScaleMode.Font;
         Text = "SID Migration Wizard";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
+        MinimumSize = new Size(600, 480);
         ClientSize = new Size(600, 480);
+        CancelButton = _secondaryButton;
         Controls.AddRange(new Control[] { _stepPanel, _buttonPanel, _stepTitleLabel });
 
         _buttonPanel.ResumeLayout(false);

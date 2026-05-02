@@ -1,12 +1,11 @@
-using System.Security;
+using RunFence.Core;
 using RunFence.Account;
 using RunFence.Account.UI;
-using RunFence.Apps.Shortcuts;
-using RunFence.Infrastructure;
 using RunFence.Account.UI.Forms;
+using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
-using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -24,18 +23,16 @@ namespace RunFence.Wizard.Templates;
 ///         before advancing to <see cref="AppPathStep"/>.</item>
 /// </list>
 /// </summary>
-public class ElevatedAppTemplate(
+internal class ElevatedAppTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
     IAccountCredentialManager credentialManager,
-    ILocalGroupMembershipService groupMembership,
-    ILocalUserProvider localUserProvider,
-    ISidResolver sidResolver,
-    CredentialFilterHelper credentialFilterHelper,
+    WizardAccountPickerStepFactory pickerStepFactory,
     SessionContext session,
     WizardLicenseChecker licenseChecker,
-    Func<WizardCredentialCollector> credentialCollectorFactory,
-    IShortcutDiscoveryService discoveryService)
+    IShortcutDiscoveryService discoveryService,
+    IShortcutIconHelper iconHelper,
+    IExecutablePathResolver executablePathResolver)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -53,16 +50,12 @@ public class ElevatedAppTemplate(
         // reused across multiple "Set up another" sessions in a single wizard session).
         _data.Reset();
 
-        var pickerStep = new AccountPickerStep(
+        var pickerStep = pickerStepFactory.CreatePickerStep(
             setSelection: (sid, isCreate) =>
             {
                 _data.SelectedExistingSid = sid;
                 _data.CreateNewAccount = isCreate;
             },
-            groupMembership: groupMembership,
-            localUserProvider: localUserProvider,
-            sidResolver: sidResolver,
-            credentialFilterHelper: credentialFilterHelper,
             options: new AccountPickerStepOptions(
                 Credentials: session.CredentialStore.Credentials,
                 SidNames: session.Database.SidNames,
@@ -79,13 +72,15 @@ public class ElevatedAppTemplate(
                         _data.AppName = name;
                     },
                     discoveryService,
+                    iconHelper,
+                    executablePathResolver,
                     description: "Select the application to launch under the administrator account. " +
                                  "A desktop shortcut will be created to run it elevated.");
 
                 if (isCreate)
                 {
                     var nameStep = setupHelperFactory.CreateAccountNameStep(
-                        (name, _) => _data.NewAccountName = name,
+                        (name, password) => { _data.NewAccountName = name; password.Dispose(); },
                         showPassword: false,
                         maxNameLength: 20,
                         description: "Choose a name for the new administrator account. " +
@@ -99,7 +94,7 @@ public class ElevatedAppTemplate(
             {
                 if (_data.CreateNewAccount || string.IsNullOrEmpty(_data.SelectedExistingSid))
                     return Task.CompletedTask;
-                var pw = credentialCollectorFactory().CollectIfNeeded(_data.SelectedExistingSid, session, progress);
+                var pw = pickerStepFactory.CreateCredentialCollector().CollectIfNeeded(_data.SelectedExistingSid, session, progress);
                 if (pw != null) _data.CollectedPassword = pw;
                 return Task.CompletedTask;
             });
@@ -111,6 +106,8 @@ public class ElevatedAppTemplate(
                 _data.AppName = name;
             },
             discoveryService,
+            iconHelper,
+            executablePathResolver,
             description: "Select the application to launch under the administrator account. " +
                          "A desktop shortcut will be created to run it elevated.");
 
@@ -137,13 +134,20 @@ public class ElevatedAppTemplate(
                 return;
             }
 
+            // Use executor for account creation + app entry + enforcement + save
+            if (string.IsNullOrEmpty(_data.AppPath) || string.IsNullOrEmpty(_data.AppName))
+            {
+                progress.ReportError("No application path was provided.");
+                return;
+            }
+
             progress.ReportStatus($"Creating administrator account '{_data.NewAccountName}'...");
 
             var passwordChars = PasswordHelper.GenerateRandomPassword();
-            string passwordText;
+            ProtectedString password;
             try
             {
-                passwordText = new string(passwordChars);
+                password = ProtectedString.FromChars(passwordChars);
             }
             finally
             {
@@ -152,8 +156,8 @@ public class ElevatedAppTemplate(
 
             var createRequest = new EditAccountDialogCreateHandler.CreateAccountRequest(
                 Username: _data.NewAccountName,
-                PasswordText: passwordText,
-                ConfirmPasswordText: passwordText,
+                Password: password,
+                ConfirmPassword: password.Copy(),
                 IsEphemeral: false,
                 CheckedGroups: [(GroupFilterHelper.AdministratorsSid, "Administrators")],
                 UncheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
@@ -161,13 +165,6 @@ public class ElevatedAppTemplate(
                 AllowNetworkLogin: false,
                 AllowBgAutorun: false,
                 CurrentHiddenCount: 0);
-
-            // Use executor for account creation + app entry + enforcement + save
-            if (string.IsNullOrEmpty(_data.AppPath) || string.IsNullOrEmpty(_data.AppName))
-            {
-                progress.ReportError("No application path was provided.");
-                return;
-            }
 
             var appName = _data.AppName;
             var appPath = _data.AppPath;
@@ -197,7 +194,15 @@ public class ElevatedAppTemplate(
                 ],
                 CreateDesktopShortcut: true);
 
-            await executor.ExecuteAsync(flowParams, progress);
+            try
+            {
+                await executor.ExecuteAsync(flowParams, progress);
+            }
+            finally
+            {
+                createRequest.Password.Dispose();
+                createRequest.ConfirmPassword.Dispose();
+            }
             return;
         }
 
@@ -264,7 +269,7 @@ public class ElevatedAppTemplate(
         public string? AppName { get; set; }
 
         /// <summary>Password collected from <see cref="CredentialEditDialog"/> for an existing account without stored credentials.</summary>
-        public SecureString? CollectedPassword { get; set; }
+        public ProtectedString? CollectedPassword { get; set; }
 
         public void Reset()
         {

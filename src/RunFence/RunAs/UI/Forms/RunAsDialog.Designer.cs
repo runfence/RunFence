@@ -102,7 +102,7 @@ partial class RunAsDialog
         _credLabel.AutoSize = true;
         _credLabel.Location = new Point(15, 56);
 
-        // _credentialListBox
+        // _credentialListBox (size and anchor set in code)
         _credentialListBox.Location = new Point(15, 78);
         _credentialListBox.Size = new Size(450, 210);
         _credentialListBox.IntegralHeight = false;
@@ -133,9 +133,9 @@ partial class RunAsDialog
         _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _privilegeLevelComboBox.Size = new Size(200, 23);
         _privilegeLevelComboBox.Location = new Point(265, 295);
-        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Basic", "Low Integrity" });
+        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Above Basic", "Basic", "Low Integrity" });
 
-        // _revertButton (shown when shortcutContext.IsAlreadyManaged && ManagedApp != null)
+        // _revertButton (shown when shortcutContext.IsAlreadyManaged && ManagedApp != null; position and anchor set in code)
         _revertButton.Text = "Revert Shortcut";
         _revertButton.Size = new Size(120, 28);
         _revertButton.FlatStyle = FlatStyle.System;
@@ -143,7 +143,7 @@ partial class RunAsDialog
         _revertButton.Location = new Point(15, 355);
         _revertButton.Click += OnRevertClick;
 
-        // _launchButton
+        // _launchButton (position and anchor set in code)
         _launchButton.Text = "Launch";
         _launchButton.Size = new Size(90, 28);
         _launchButton.FlatStyle = FlatStyle.System;
@@ -151,7 +151,7 @@ partial class RunAsDialog
         _launchButton.Location = new Point(155, 355);
         _launchButton.Click += OnLaunchClick;
 
-        // _addAppButton
+        // _addAppButton (position and anchor set in code)
         _addAppButton.Text = "Add app entry\u2026";
         _addAppButton.Size = new Size(120, 28);
         _addAppButton.FlatStyle = FlatStyle.System;
@@ -159,7 +159,7 @@ partial class RunAsDialog
         _addAppButton.Location = new Point(250, 355);
         _addAppButton.Click += OnAddAppClick;
 
-        // _cancelButton
+        // _cancelButton (position and anchor set in code)
         _cancelButton.Text = "Cancel";
         _cancelButton.Size = new Size(90, 28);
         _cancelButton.FlatStyle = FlatStyle.System;

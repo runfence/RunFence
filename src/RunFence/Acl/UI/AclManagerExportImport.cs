@@ -12,18 +12,20 @@ namespace RunFence.Acl.UI;
 
 /// <summary>
 /// Handles Export and Import of grant configurations for <see cref="AclManagerDialog"/>.
-/// Export produces account-agnostic JSON (no SID). Import adds to pending state.
+/// Export produces account-agnostic JSON (no SID). Import delegates to <see cref="AclImportProcessor"/>.
 /// </summary>
 public class AclManagerExportImport(
     IPathGrantService pathGrantService,
     IAclPermissionService aclPermission,
     ILoggingService log,
-    IDatabaseProvider databaseProvider)
+    IDatabaseProvider databaseProvider,
+    AclImportProcessor importProcessor)
 {
     private AclManagerPendingChanges _pending = null!;
     private string _sid = null!;
     private bool _isContainer;
     private IWin32Window _owner = null!;
+    private Func<Task<bool>>? _applyAsync;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -36,12 +38,14 @@ public class AclManagerExportImport(
         AclManagerPendingChanges pending,
         string sid,
         bool isContainer,
-        IWin32Window owner)
+        IWin32Window owner,
+        Func<Task<bool>>? applyAsync = null)
     {
         _pending = pending;
         _sid = sid;
         _isContainer = isContainer;
         _owner = owner;
+        _applyAsync = applyAsync;
     }
 
     /// <summary>
@@ -49,8 +53,20 @@ public class AclManagerExportImport(
     /// nothing selected → export ALL; grants tab selection → selected grants only;
     /// traverse tab selection → selected traverse entries only.
     /// </summary>
-    public void Export(DataGridView grantsGrid, DataGridView traverseGrid, bool grantsTabActive)
+    public async Task Export(DataGridView grantsGrid, DataGridView traverseGrid, bool grantsTabActive)
     {
+        if (_pending.HasPendingChanges && _applyAsync != null)
+        {
+            var result = MessageBox.Show(
+                "There are unapplied changes. Apply them before exporting?\n\nClick OK to apply first, or Cancel to abort.",
+                "Export",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Warning);
+            if (result == DialogResult.Cancel)
+                return;
+            if (!await _applyAsync())
+                return;
+        }
         bool grantsSelected = grantsTabActive && grantsGrid.SelectedRows.Count > 0
                                               && grantsGrid.SelectedRows.Cast<DataGridViewRow>().Any(r => r.Tag is GrantedPathEntry);
         bool traverseSelected = !grantsTabActive && traverseGrid.SelectedRows.Count > 0
@@ -81,12 +97,10 @@ public class AclManagerExportImport(
             return;
         }
 
-        using var sfd = new SaveFileDialog
-        {
-            Title = "Export Grants",
-            Filter = "RunFence Grants (*.rfg)|*.rfg|JSON files (*.json)|*.json",
-            DefaultExt = "rfg"
-        };
+        using var sfd = new SaveFileDialog();
+        sfd.Title = "Export Grants";
+        sfd.Filter = "RunFence Grants (*.rfg)|*.rfg|JSON files (*.json)|*.json";
+        sfd.DefaultExt = "rfg";
         FileDialogHelper.AddInteractiveUserCustomPlaces(sfd);
         if (sfd.ShowDialog(_owner) != DialogResult.OK)
             return;
@@ -111,11 +125,9 @@ public class AclManagerExportImport(
     /// </summary>
     public void Import(Action refreshGrids)
     {
-        using var ofd = new OpenFileDialog
-        {
-            Title = "Import Grants",
-            Filter = "RunFence Grants (*.rfg;*.json)|*.rfg;*.json|All files (*.*)|*.*"
-        };
+        using var ofd = new OpenFileDialog();
+        ofd.Title = "Import Grants";
+        ofd.Filter = "RunFence Grants (*.rfg;*.json)|*.rfg;*.json|All files (*.*)|*.*";
         FileDialogHelper.AddInteractiveUserCustomPlaces(ofd);
         if (ofd.ShowDialog(_owner) != DialogResult.OK)
             return;
@@ -142,14 +154,10 @@ public class AclManagerExportImport(
             return;
         }
 
-        bool anyAdded = false;
+        bool anyAdded;
         try
         {
-            ProcessImport(exportData, () =>
-            {
-                anyAdded = true;
-                refreshGrids();
-            });
+            anyAdded = importProcessor.ProcessImport(exportData, _pending, _sid, _isContainer);
         }
         catch (Exception ex)
         {
@@ -159,15 +167,15 @@ public class AclManagerExportImport(
             return;
         }
 
-        if (!anyAdded)
+        if (anyAdded)
+            refreshGrids();
+        else
         {
             MessageBox.Show("No new entries to import (all paths already exist).", "Import Grants",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
 
-    private bool IsTraverseAlreadyPresent(string normalizedPath) =>
-        _pending.ExistsTraverseInDbOrPending(databaseProvider.GetDatabase(), _sid, normalizedPath, checkUntrack: false);
 
     /// <summary>
     /// Iterates grant entries from the database (filtered by <paramref name="dbFilter"/>),
@@ -211,7 +219,17 @@ public class AclManagerExportImport(
 
     private List<ExportTraverseEntry> BuildAllTraverse()
     {
-        var dbGrants = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants;
+        var database = databaseProvider.GetDatabase();
+        var dbGrants = database.GetAccount(_sid)?.Grants;
+        if (_isContainer)
+        {
+            var entries = new List<GrantedPathEntry>();
+            if (dbGrants != null)
+                entries.AddRange(dbGrants.Where(e => e.IsTraverseOnly));
+            entries.AddRange(database.SharedContainerTraverseGrants.Where(e => e.IsTraverseOnly));
+            dbGrants = entries;
+        }
+
         return ScanPaths(
             dbGrants,
             dbFilter: e => e.IsTraverseOnly &&
@@ -242,7 +260,7 @@ public class AclManagerExportImport(
         var result = new List<ExportTraverseEntry>();
         foreach (DataGridViewRow row in traverseGrid.SelectedRows)
         {
-            if (row.Tag is not GrantedPathEntry entry || !entry.IsTraverseOnly)
+            if (row.Tag is not GrantedPathEntry { IsTraverseOnly: true } entry)
                 continue;
             result.Add(new ExportTraverseEntry(entry.Path));
         }
@@ -310,95 +328,13 @@ public class AclManagerExportImport(
     public void ProcessImport(ExportData exportData, Action refreshGrids)
     {
         if (exportData.Version != 1)
+        {
+            log.Info($"Skipping ACL import: unsupported export version {exportData.Version}");
             return;
-
-        int grantsAdded = 0;
-        int traverseAdded = 0;
-        var addedGrantKeys = new List<(string Path, bool IsDeny)>();
-        var addedTraverseKeys = new List<string>();
-
-        try
-        {
-            foreach (var g in exportData.Grants ?? [])
-            {
-                if (string.IsNullOrEmpty(g.Path))
-                    continue;
-                var normalized = Path.GetFullPath(g.Path);
-
-                bool inDb = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants
-                    .Any(e => string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase)
-                              && e.IsDeny == g.IsDeny && !e.IsTraverseOnly) == true;
-                if (inDb)
-                {
-                    // If pending removal, cancel the removal (import restores the entry).
-                    _pending.PendingRemoves.Remove((normalized, g.IsDeny));
-                    continue;
-                }
-
-                if (_pending.IsPendingAdd(normalized, g.IsDeny))
-                    continue;
-
-                // Build from mode defaults and override only the configurable bits, enforcing always-on
-                // bits (Deny: Write+Special always on; Allow: Read always on) regardless of import data.
-                var savedRights = g.IsDeny
-                    ? SavedRightsState.DefaultForMode(true, own: g.Owner) with { Execute = g.Execute, Read = g.Read }
-                    : SavedRightsState.DefaultForMode(false, own: g.Owner) with { Execute = g.Execute, Write = g.Write, Special = g.Special };
-                var entry = new GrantedPathEntry { Path = normalized, IsDeny = g.IsDeny, SavedRights = savedRights };
-                _pending.PendingAdds[(normalized, g.IsDeny)] = entry;
-                addedGrantKeys.Add((normalized, g.IsDeny));
-                grantsAdded++;
-            }
-
-            var traverseInFile = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var t in exportData.Traverse ?? [])
-                if (!string.IsNullOrEmpty(t.Path))
-                    traverseInFile.Add(Path.GetFullPath(t.Path));
-
-            foreach (var t in exportData.Traverse ?? [])
-            {
-                if (string.IsNullOrEmpty(t.Path))
-                    continue;
-                var normalized = Path.GetFullPath(t.Path);
-                if (IsTraverseAlreadyPresent(normalized))
-                    continue;
-
-                var entry = new GrantedPathEntry { Path = normalized, IsTraverseOnly = true };
-                _pending.PendingTraverseAdds[normalized] = entry;
-                addedTraverseKeys.Add(normalized);
-                traverseAdded++;
-            }
-
-            foreach (var g in exportData.Grants ?? [])
-            {
-                if (g.IsDeny || string.IsNullOrEmpty(g.Path))
-                    continue;
-                var normalizedGrant = Path.GetFullPath(g.Path);
-                var traversePath = TraverseAutoManager.GetTraversePath(normalizedGrant);
-                if (traversePath == null)
-                    continue;
-
-                if (traverseInFile.Contains(traversePath))
-                    continue;
-                if (IsTraverseAlreadyPresent(traversePath))
-                    continue;
-
-                var entry = new GrantedPathEntry { Path = traversePath, IsTraverseOnly = true };
-                _pending.PendingTraverseAdds[traversePath] = entry;
-                addedTraverseKeys.Add(traversePath);
-                traverseAdded++;
-            }
-        }
-        catch (Exception ex)
-        {
-            log.Error("ProcessImport: failed to process import entry — rolling back", ex);
-            foreach (var key in addedGrantKeys)
-                _pending.PendingAdds.Remove(key);
-            foreach (var key in addedTraverseKeys)
-                _pending.PendingTraverseAdds.Remove(key);
-            throw;
         }
 
-        if (grantsAdded > 0 || traverseAdded > 0)
+        var anyAdded = importProcessor.ProcessImport(exportData, _pending, _sid, _isContainer);
+        if (anyAdded)
             refreshGrids();
     }
 }

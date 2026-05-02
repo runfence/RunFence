@@ -3,7 +3,7 @@ using RunFence.Launch;
 
 namespace RunFence.Infrastructure;
 
-public class ShellHelper(ILaunchFacade launchFacade)
+public class ShellHelper(ILaunchFacade launchFacade) : IShellHelper
 {
     public void ShowProperties(string path, IWin32Window? owner = null)
     {
@@ -27,5 +27,15 @@ public class ShellHelper(ILaunchFacade launchFacade)
     public void OpenDefaultAppsSettings()
     {
         launchFacade.LaunchUrl("ms-settings:defaultapps", AccountLaunchIdentity.CurrentAccountElevated);
+    }
+
+    public void OpenUrlAsInteractiveUser(string url)
+    {
+        launchFacade.LaunchUrl(
+            url,
+            AccountLaunchIdentity.InteractiveUser with
+            {
+                AssociationResolutionPolicy = AssociationResolutionPolicy.AllowAccountRedirection
+            });
     }
 }

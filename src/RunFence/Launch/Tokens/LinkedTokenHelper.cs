@@ -9,6 +9,7 @@ namespace RunFence.Launch.Tokens;
 /// so that operations that need HKCU of the interactive user work correctly
 /// in elevated/linked-session scenarios.
 /// </summary>
+/// <remarks>Methods above threshold: <c>RunUnderLinkedToken</c> is 6 sequential native calls (OpenProcessToken→GetLinkedToken→DuplicateToken→Impersonate→action→Revert). Splitting any part creates partial impersonation states that are unsafe to manage across class boundaries. Reviewed 2026-04-09.</remarks>
 public static class LinkedTokenHelper
 {
     /// <summary>

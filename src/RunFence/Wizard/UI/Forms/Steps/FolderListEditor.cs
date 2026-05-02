@@ -13,7 +13,7 @@ namespace RunFence.Wizard.UI.Forms.Steps;
 /// Call <see cref="Initialize"/> after construction to set the label text and browse mode.
 /// Use <see cref="AddExtraToolbarButton"/> / <see cref="AddExtraContextMenuItem"/> to insert
 /// step-specific buttons (e.g., Discover) before the Remove button.
-/// Use <see cref="GetItems"/> / <see cref="SetItems"/> / <see cref="AddItem"/> to access the list.
+/// Use <see cref="GetItems"/> / <see cref="AddItem"/> to access the list.
 /// </remarks>
 public class FolderListEditor : UserControl
 {
@@ -65,15 +65,6 @@ public class FolderListEditor : UserControl
 
     /// <summary>Returns all current items in the list.</summary>
     public IReadOnlyList<string> GetItems() => _listBox.Items.Cast<string>().ToList();
-
-    /// <summary>Replaces all items in the list with <paramref name="items"/>.</summary>
-    public void SetItems(IEnumerable<string> items)
-    {
-        _listBox.Items.Clear();
-        foreach (var item in items)
-            _listBox.Items.Add(item);
-        UpdateButtons();
-    }
 
     /// <summary>
     /// Adds <paramref name="path"/> to the list if it is not already present (case-insensitive comparison).

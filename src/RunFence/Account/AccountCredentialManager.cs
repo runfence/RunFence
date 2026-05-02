@@ -1,13 +1,13 @@
-using System.Security;
+using System.Security.Cryptography;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Security;
 
 namespace RunFence.Account;
 
 public class AccountCredentialManager(
-    ICredentialEncryptionService encryptionService,
-    ICredentialDecryptionService credentialDecryption)
+    ICredentialEncryptionService encryptionService)
     : IAccountCredentialManager
 {
     /// <summary>
@@ -15,10 +15,10 @@ public class AccountCredentialManager(
     /// or null if a credential with the same SID already exists (duplicate guard).
     /// </summary>
     public Guid? StoreCreatedUserCredential(
-        string sid, SecureString password,
+        string sid, ProtectedString password,
         CredentialStore credStore, ProtectedBuffer pinKey)
     {
-        if (credStore.Credentials.Any(c => string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase)))
+        if (credStore.Credentials.Any(c => SidComparer.SidEquals(c.Sid, sid)))
             return null;
 
         var id = Guid.NewGuid();
@@ -41,11 +41,11 @@ public class AccountCredentialManager(
     /// Returns (success, errorMessage). errorMessage is non-null on duplicate.
     /// </summary>
     public (bool Success, Guid? CredentialId, string? Error) AddNewCredential(
-        string sid, SecureString? password,
+        string sid, ProtectedString? password,
         CredentialStore credStore, ProtectedBuffer pinKey)
     {
         if (credStore.Credentials.Any(c =>
-                string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase)))
+                SidComparer.SidEquals(c.Sid, sid)))
         {
             return (false, null, "A credential with this account already exists.");
         }
@@ -69,7 +69,7 @@ public class AccountCredentialManager(
         return (true, id, null);
     }
 
-    public void UpdateCredentialPassword(CredentialEntry credEntry, SecureString password, ProtectedBuffer pinKey)
+    public void UpdateCredentialPassword(CredentialEntry credEntry, ProtectedString password, ProtectedBuffer pinKey)
     {
         using var scope = pinKey.Unprotect();
         credEntry.EncryptedPassword = encryptionService.Encrypt(password, scope.Data);
@@ -83,19 +83,32 @@ public class AccountCredentialManager(
     public void RemoveCredentialsBySid(string sid, CredentialStore credStore)
     {
         credStore.Credentials.RemoveAll(c =>
-            string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase));
+            SidComparer.SidEquals(c.Sid, sid));
     }
 
-    public CredentialLookupStatus DecryptCredential(
+    public bool TryDecryptStoredPassword(
         string accountSid, CredentialStore credStore, ProtectedBuffer pinKey,
-        out SecureString? password)
+        out ProtectedString? password)
     {
-        using var scope = pinKey.Unprotect();
-        return credentialDecryption.TryDecryptCredential(
-            accountSid, credStore, scope.Data,
-            out _, out password);
-    }
+        var credential = credStore.Credentials.FirstOrDefault(c =>
+            SidComparer.SidEquals(c.Sid, accountSid));
 
-    public CredentialLookupStatus CheckCredential(string accountSid, CredentialStore credStore) =>
-        credentialDecryption.CheckCredential(accountSid, credStore);
+        if (credential == null || credential.EncryptedPassword.Length == 0)
+        {
+            password = null;
+            return false;
+        }
+
+        using var scope = pinKey.Unprotect();
+        try
+        {
+            password = encryptionService.Decrypt(credential.EncryptedPassword, scope.Data);
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            password = null;
+            return false;
+        }
+    }
 }

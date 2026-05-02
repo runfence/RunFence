@@ -7,20 +7,22 @@ namespace RunFence.Acl.UI;
 
 /// <summary>
 /// Handles user-initiated actions in <see cref="AclManagerDialog"/>: Fix ACLs, shell drag-drop,
-/// Open in Explorer, path selection, direct grant-path addition, deferred grant removal,
-/// and Own checkbox changes.
+/// path selection, direct grant-path addition, and deferred grant/traverse removal.
 /// </summary>
 public class AclManagerActionOrchestrator(
     IDatabaseProvider databaseProvider,
     AclManagerGrantsHelper grantsHelper,
     AclManagerTraverseHelper traverseHelper,
+    AclManagerTraverseOperations traverseOperations,
     TraverseAutoManager traverseAutoManager,
     IReparsePointPromptHelper reparsePointHelper,
-    ShellHelper shellHelper)
+    ISpecificContainerAceConflictDetector specificContainerAceConflictDetector)
 {
-    private readonly AclManagerGrantsHelper _grantsHelper = grantsHelper;
-    private readonly AclManagerTraverseHelper _traverseHelper = traverseHelper;
-    private readonly TraverseAutoManager _traverseAutoManager = traverseAutoManager;
+    private const string SpecificContainerAceLowIntegrityConflictMessage =
+        "This path has an explicit AppContainer package SID ACE. Specific AppContainer ACEs conflict with ordinary Low Integrity access; remove the specific container ACE or replace it with ALL APPLICATION PACKAGES before adding this Low Integrity grant.";
+    private const string LowIntegrityAceSpecificContainerConflictMessage =
+        "This path has a Low Integrity ACE. Adding a specific AppContainer package SID ACE here will make ordinary Low Integrity access stop working; remove the Low Integrity grant or use ALL APPLICATION PACKAGES instead.";
+
     private string _sid = null!;
     private bool _isContainer;
     private IWin32Window _owner = null!;
@@ -46,19 +48,19 @@ public class AclManagerActionOrchestrator(
         if (isTraverseTab)
         {
             var entries = expandedRows
-                .Where(r => r.Tag is GrantedPathEntry te && _traverseHelper.FixableEntries.Contains(te))
+                .Where(r => r.Tag is GrantedPathEntry te && traverseHelper.FixableEntries.Contains(te))
                 .Select(r => (GrantedPathEntry)r.Tag!)
                 .ToList();
             if (entries.Count > 0)
-                _traverseHelper.FixTraversePaths(entries);
+                traverseOperations.FixTraversePaths(entries);
             return;
         }
 
         var fixableRows = expandedRows
-            .Where(r => r.Tag is GrantedPathEntry e && _grantsHelper.FixableEntries.Contains(e))
+            .Where(r => r.Tag is GrantedPathEntry e && grantsHelper.FixableEntries.Contains(e))
             .ToList();
         foreach (var fixRow in fixableRows)
-            _grantsHelper.FixBrokenGrant((GrantedPathEntry)fixRow.Tag!, fixRow);
+            grantsHelper.FixBrokenGrant((GrantedPathEntry)fixRow.Tag!, fixRow);
     }
 
     /// <param name="targetConfigPath">Config path of the section the user dropped onto; null for main config.</param>
@@ -117,14 +119,8 @@ public class AclManagerActionOrchestrator(
         {
             var pathsToAdd = reparsePointHelper.ResolveForAdd(path, _owner);
             foreach (var p in pathsToAdd)
-                _traverseHelper.AddTraversePathDirect(p);
+                traverseOperations.AddTraversePathDirect(p);
         }
-    }
-
-    public void OpenInExplorer(string path)
-    {
-        string folder = Directory.Exists(path) ? path : Path.GetDirectoryName(path) ?? path;
-        shellHelper.OpenInExplorer(folder);
     }
 
     /// <summary>
@@ -189,9 +185,9 @@ public class AclManagerActionOrchestrator(
         // Auto-remove traverse if no other allow grants depend on it.
         if (!entry.IsDeny)
         {
-            var traversePath = TraverseAutoManager.GetTraversePath(entry.Path);
+            var traversePath = traverseAutoManager.GetTraversePath(entry.Path);
             if (traversePath != null)
-                _traverseAutoManager.AutoRemoveTraverseIfUnneeded(traversePath);
+                traverseAutoManager.AutoRemoveTraverseIfUnneeded(traversePath);
         }
     }
 
@@ -209,63 +205,12 @@ public class AclManagerActionOrchestrator(
         _pending.PendingConfigMoves.Remove(key);
         if (!key.IsDeny)
         {
-            var traversePath = TraverseAutoManager.GetTraversePath(key.Path);
+            var traversePath = traverseAutoManager.GetTraversePath(key.Path);
             if (traversePath != null)
-                _traverseAutoManager.AutoRemoveTraverseIfUnneeded(traversePath);
+                traverseAutoManager.AutoRemoveTraverseIfUnneeded(traversePath);
         }
 
         return true;
-    }
-
-    /// <summary>
-    /// Handles the Own checkbox change for a grant row. Records new ownership in PendingModification
-    /// without mutating the live DB entry, marks the row as pending, and refreshes buttons.
-    /// The <paramref name="updateActionButtons"/> callback is called after state changes.
-    /// </summary>
-    public void HandleOwnChange(DataGridViewRow row, GrantedPathEntry entry, Action updateActionButtons)
-    {
-        // Ownership change is deferred: record in PendingModification without mutating entry.SavedRights.
-        // Deny+unchecked → no dialog, no NTFS write until Apply (no-op on Apply per plan).
-        // The actual NTFS ownership change happens in AclManagerApplyOrchestrator.ApplyAsync.
-        var checkState = (RightCheckState)(row.Cells[AclManagerGrantsHelper.ColOwner].Value ?? RightCheckState.Unchecked);
-        bool ownValue = checkState == RightCheckState.Checked;
-
-        // Capture original Own from the entry's NTFS-committed rights (before any pending change).
-        bool originalOwn = entry.SavedRights?.Own == true;
-
-        var dbKey = (entry.Path, entry.IsDeny);
-        var addKey = (entry.Path, _pending.GetEffectiveIsDeny(entry));
-        if (_pending.PendingAdds.ContainsKey(addKey))
-        {
-            // For pending adds the entry itself is the only record — update SavedRights directly.
-            entry.SavedRights = entry.SavedRights != null
-                ? entry.SavedRights with { Own = ownValue }
-                : SavedRightsState.DefaultForMode(entry.IsDeny, own: ownValue);
-        }
-        else
-        {
-            // DB entry: store updated rights in PendingModification without mutating entry.SavedRights.
-            // Preserve WasIsDeny from any existing modification — it reflects the true NTFS mode and must
-            // not be overwritten when only ownership (not mode) changes after a prior mode switch.
-            // Preserve WasOwn from existing mod if already tracked; otherwise use originalOwn.
-            bool wasIsDeny = _pending.PendingModifications.TryGetValue(dbKey, out var existingMod)
-                ? existingMod.WasIsDeny
-                : entry.IsDeny;
-            bool newIsDeny = existingMod?.NewIsDeny ?? entry.IsDeny;
-            bool wasOwn = existingMod?.WasOwn ?? originalOwn;
-
-            // Compute new rights by updating Own on the current effective rights.
-            var effectiveRights = _pending.GetEffectiveRights(entry) ?? SavedRightsState.DefaultForMode(entry.IsDeny);
-            var newSavedRights = effectiveRights with { Own = ownValue };
-
-            _pending.PendingModifications[dbKey] = new PendingModification(
-                entry, WasIsDeny: wasIsDeny, WasOwn: wasOwn,
-                NewIsDeny: newIsDeny, NewRights: newSavedRights);
-        }
-
-        AclManagerGrantRowRenderer.SetPendingRowColor(row);
-        _grantsHelper.FixableEntries.Remove(entry);
-        updateActionButtons();
     }
 
     /// <summary>
@@ -287,17 +232,36 @@ public class AclManagerActionOrchestrator(
 
         var database = databaseProvider.GetDatabase();
 
-        // 1. Same-mode duplicate check (pending adds + DB, not pending removal).
-        if (_pending.ExistsInDbOrPending(database, _sid, normalized, isDeny))
+        // 1. Same-mode duplicate check. A committed DB entry is a duplicate only when its
+        // explicit ACE is already healthy; otherwise adding the path again means "fix it".
+        if (_pending.IsPendingAdd(normalized, isDeny))
+            return "This path is already in the list.";
+        if (TryQueueExistingGrantFix(database, normalized, isDeny))
+            return null;
+        if (ExistsCommittedGrant(database, normalized, isDeny))
             return "This path is already in the list.";
 
+        if (ShouldWarnLowIntegritySpecificContainerConflict(normalized, isDeny))
+            return SpecificContainerAceLowIntegrityConflictMessage;
+        if (ShouldWarnSpecificContainerLowIntegrityConflict(normalized, isDeny))
+            return LowIntegrityAceSpecificContainerConflictMessage;
+
         // 2. Opposite-mode check: if opposite mode exists, flip isDeny to match.
-        if (_pending.ExistsInDbOrPending(database, _sid, normalized, !isDeny))
+        if (_pending.IsPendingAdd(normalized, !isDeny) ||
+            ExistsCommittedGrant(database, normalized, !isDeny))
         {
             isDeny = !isDeny;
             // After flipping, re-check for same-mode duplicate with the new mode.
-            if (_pending.ExistsInDbOrPending(database, _sid, normalized, isDeny))
+            if (_pending.IsPendingAdd(normalized, isDeny))
                 return "This path is already in the list.";
+            if (TryQueueExistingGrantFix(database, normalized, isDeny))
+                return null;
+            if (ExistsCommittedGrant(database, normalized, isDeny))
+                return "This path is already in the list.";
+            if (ShouldWarnLowIntegritySpecificContainerConflict(normalized, isDeny))
+                return SpecificContainerAceLowIntegrityConflictMessage;
+            if (ShouldWarnSpecificContainerLowIntegrityConflict(normalized, isDeny))
+                return LowIntegrityAceSpecificContainerConflictMessage;
         }
 
         // 3. If this path is queued for removal or untrack (same final mode), cancel it.
@@ -308,9 +272,9 @@ public class AclManagerActionOrchestrator(
             bool traverseRestored = false;
             if (!isDeny)
             {
-                var traversePath = TraverseAutoManager.GetTraversePath(normalized);
+                var traversePath = traverseAutoManager.GetTraversePath(normalized);
                 if (traversePath != null)
-                    traverseRestored = _traverseHelper.TryEnsureTraverseAccess(traversePath);
+                    traverseRestored = traverseOperations.TryEnsureTraverseAccess(traversePath);
             }
 
             _gridRefresher.RefreshGrantsGrid();
@@ -332,7 +296,7 @@ public class AclManagerActionOrchestrator(
         };
 
         // 5. Pre-populate SavedRights from existing NTFS ACEs when the matching mode has direct ACEs.
-        var ntfsState = _grantsHelper.TryReadRightsForEntry(entry);
+        var ntfsState = grantsHelper.TryReadRightsForEntry(entry);
         if (ntfsState != null)
         {
             int aceCount = isDeny ? ntfsState.DirectDenyAceCount : ntfsState.DirectAllowAceCount;
@@ -353,9 +317,9 @@ public class AclManagerActionOrchestrator(
         bool traverseAdded = false;
         if (!isDeny)
         {
-            var traversePath = TraverseAutoManager.GetTraversePath(normalized);
+            var traversePath = traverseAutoManager.GetTraversePath(normalized);
             if (traversePath != null)
-                traverseAdded = _traverseHelper.TryEnsureTraverseAccess(traversePath);
+                traverseAdded = traverseOperations.TryEnsureTraverseAccess(traversePath);
         }
 
         _gridRefresher.RefreshGrantsGrid();
@@ -363,14 +327,56 @@ public class AclManagerActionOrchestrator(
             _gridRefresher.RefreshTraverseGrid();
         return null;
     }
-}
 
-/// <summary>
-/// Provides grid refresh callbacks from <see cref="AclManagerDialog"/> to
-/// <see cref="AclManagerActionOrchestrator"/>, ensuring sort glyphs are preserved after repopulation.
-/// </summary>
-public interface IAclManagerGridRefresher
-{
-    void RefreshGrantsGrid();
-    void RefreshTraverseGrid();
+    private bool TryQueueExistingGrantFix(AppDatabase database, string normalized, bool isDeny)
+    {
+        var entry = FindCommittedGrant(database, normalized, isDeny);
+        if (entry?.SavedRights == null)
+            return false;
+
+        var ntfsState = grantsHelper.TryReadRightsForEntry(entry);
+        if (ntfsState == null)
+            return false;
+
+        bool isFolder = Directory.Exists(normalized);
+        if (SavedRightsComparer.Instance.MatchesSavedRights(entry, ntfsState, _isContainer, isFolder))
+            return false;
+
+        var key = (entry.Path, entry.IsDeny);
+        if (!_pending.PendingModifications.ContainsKey(key))
+        {
+            _pending.PendingModifications[key] = new PendingModification(
+                entry,
+                WasIsDeny: entry.IsDeny,
+                WasOwn: entry.SavedRights.Own,
+                NewIsDeny: entry.IsDeny,
+                NewRights: entry.SavedRights);
+        }
+
+        _gridRefresher.RefreshGrantsGrid();
+        return true;
+    }
+
+    private bool ExistsCommittedGrant(AppDatabase database, string normalized, bool isDeny) =>
+        FindCommittedGrant(database, normalized, isDeny) != null;
+
+    private bool ShouldWarnLowIntegritySpecificContainerConflict(string normalized, bool isDeny) =>
+        !isDeny &&
+        AclHelper.IsLowIntegritySid(_sid) &&
+        specificContainerAceConflictDetector.HasExplicitSpecificContainerAce(normalized);
+
+    private bool ShouldWarnSpecificContainerLowIntegrityConflict(string normalized, bool isDeny) =>
+        !isDeny &&
+        AclHelper.IsSpecificContainerSid(_sid) &&
+        specificContainerAceConflictDetector.HasLowIntegrityAce(normalized);
+
+    private GrantedPathEntry? FindCommittedGrant(AppDatabase database, string normalized, bool isDeny)
+    {
+        return database.GetAccount(_sid)?.Grants.FirstOrDefault(e =>
+            string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase) &&
+            e.IsDeny == isDeny &&
+            !e.IsTraverseOnly &&
+            !_pending.IsPendingRemove(normalized, isDeny) &&
+            !_pending.IsUntrackGrant(normalized, isDeny));
+    }
 }

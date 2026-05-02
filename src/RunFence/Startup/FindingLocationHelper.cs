@@ -5,7 +5,7 @@ using RunFence.Launch;
 
 namespace RunFence.Startup;
 
-public class FindingLocationHelper(ILaunchFacade launchFacade, ShellHelper shellHelper)
+public class FindingLocationHelper(ILaunchFacade launchFacade, IShellHelper shellHelper)
 {
     public void OpenLocation(StartupSecurityFinding finding)
     {

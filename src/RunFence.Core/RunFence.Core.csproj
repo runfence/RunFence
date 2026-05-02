@@ -5,10 +5,10 @@
         <UseWindowsForms>true</UseWindowsForms>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     </PropertyGroup>
 
     <ItemGroup>
-        <InternalsVisibleTo Include="RunFence"/>
         <InternalsVisibleTo Include="RunFence.Tests"/>
     </ItemGroup>
 

@@ -1,6 +1,5 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
-using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
@@ -31,11 +30,21 @@ public class NightLightSettingsIO(ISafeExecutor safe) : ISettingsIO
             using var key = Registry.CurrentUser.OpenSubKey(Constants.RegNightLightSettings);
             nightLight.Settings = key?.GetValue("Data") as byte[];
         }, "reading");
+        if (nightLight.State != null || nightLight.Settings != null)
+            Console.Error.WriteLine(
+                "Warning: Night Light settings are stored as CloudStore registry blobs with embedded " +
+                "sequence numbers. When applying to another account, Windows may silently ignore the " +
+                "write if the sequence number is stale.");
         return nightLight;
     }
 
     public void Write(NightLightSettings nightLight)
     {
+        if (nightLight.State != null || nightLight.Settings != null)
+            Console.Error.WriteLine(
+                "Warning: Night Light settings are stored as CloudStore registry blobs with embedded " +
+                "sequence numbers. Windows may silently ignore this write if the sequence number is stale.");
+
         safe.Try(() =>
         {
             if (nightLight.State != null)

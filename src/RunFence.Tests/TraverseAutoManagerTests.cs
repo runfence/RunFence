@@ -1,6 +1,8 @@
 using System.Security.AccessControl;
 using Moq;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
+using RunFence.Acl.Traverse;
 using RunFence.Acl.UI;
 using RunFence.Core.Models;
 using RunFence.Persistence;
@@ -15,6 +17,7 @@ namespace RunFence.Tests;
 public class TraverseAutoManagerTests
 {
     private const string Sid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
+    private const string ContainerSid = "S-1-15-2-99-1-2-3-4-5-6";
     private const string AppPath = @"C:\Apps\MyApp\myapp.exe";
     private const string AppDir = @"C:\Apps\MyApp";
     private const string ParentDir = @"C:\Apps";
@@ -31,6 +34,7 @@ public class TraverseAutoManagerTests
     }
 
     private readonly Mock<IAclPermissionService> _defaultAclPermission = new();
+    private readonly TestFileSystemPathInfo _pathInfo = new();
 
     private static GrantedPathEntry AllowEntry(string path) =>
         new() { Path = path, IsDeny = false, IsTraverseOnly = false };
@@ -42,11 +46,16 @@ public class TraverseAutoManagerTests
         AclManagerPendingChanges pending,
         AppDatabase db,
         IAclPermissionService? aclPermission = null,
-        IReadOnlyList<string>? groupSids = null)
+        IReadOnlyList<string>? groupSids = null,
+        string sid = Sid)
     {
         var dbProvider = new LambdaDatabaseProvider(() => db);
-        var mgr = new TraverseAutoManager(aclPermission ?? _defaultAclPermission.Object, dbProvider);
-        mgr.Initialize(pending, Sid, groupSids ?? []);
+        var mgr = new TraverseAutoManager(
+            aclPermission ?? _defaultAclPermission.Object,
+            dbProvider,
+            new GrantTraversePathResolver(_pathInfo),
+            _pathInfo);
+        mgr.Initialize(pending, sid, groupSids ?? []);
         return mgr;
     }
 
@@ -123,6 +132,19 @@ public class TraverseAutoManagerTests
         Assert.False(pending.IsPendingTraverseAdd(AppDir));
     }
 
+    [Fact]
+    public void AutoAdd_SpecificContainerSharedTraverseAlreadyTracked_DoesNotAddAgain()
+    {
+        var db = MakeDatabase();
+        db.SharedContainerTraverseGrants.Add(TraverseEntry(AppDir));
+        var pending = new AclManagerPendingChanges();
+        var mgr = CreateManager(pending, db, sid: ContainerSid);
+
+        mgr.AutoAddTraverseIfMissing(AppDir);
+
+        Assert.False(pending.IsPendingTraverseAdd(AppDir));
+    }
+
     // --- AutoRemoveTraverseIfUnneeded ---
 
     [Fact]
@@ -138,6 +160,21 @@ public class TraverseAutoManagerTests
 
         // Assert
         Assert.True(pending.IsPendingTraverseRemove(AppDir));
+    }
+
+    [Fact]
+    public void AutoRemove_SpecificContainerSharedTraverseNoOtherGrantsDependOnPath_SchedulesRemoval()
+    {
+        var db = MakeDatabase();
+        var sharedEntry = TraverseEntry(AppDir);
+        db.SharedContainerTraverseGrants.Add(sharedEntry);
+        var pending = new AclManagerPendingChanges();
+        var mgr = CreateManager(pending, db, sid: ContainerSid);
+
+        mgr.AutoRemoveTraverseIfUnneeded(AppDir);
+
+        Assert.True(pending.PendingTraverseRemoves.TryGetValue(AppDir, out var queued));
+        Assert.Same(sharedEntry, queued);
     }
 
     [Fact]
@@ -198,10 +235,15 @@ public class TraverseAutoManagerTests
             allowEntry,
             TraverseEntry(AppDir)
         ]);
-        var pending = new AclManagerPendingChanges();
-        // Simulate the allow entry having been mode-switched to Deny (pending, not yet applied).
-        pending.PendingModifications[(AppPath, false)] = new PendingModification(
-            allowEntry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: null);
+        var pending = new AclManagerPendingChanges
+        {
+            PendingModifications =
+            {
+                // Simulate the allow entry having been mode-switched to Deny (pending, not yet applied).
+                [(AppPath, false)] = new PendingModification(
+                    allowEntry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: null)
+            }
+        };
         var mgr = CreateManager(pending, db);
 
         // Act — the only allow grant is pending switch to Deny; AppDir traverse is no longer needed.
@@ -257,17 +299,23 @@ public class TraverseAutoManagerTests
     [Fact]
     public void GetTraversePath_ForFile_ReturnsParentDirectory()
     {
-        // Files that don't exist on disk → falls back to parent dir
-        var result = TraverseAutoManager.GetTraversePath(AppPath);
+        var mgr = CreateManager(new AclManagerPendingChanges(), MakeDatabase());
+
+        var result = mgr.GetTraversePath(AppPath);
+
         Assert.Equal(AppDir, result, StringComparer.OrdinalIgnoreCase);
     }
 
     [Fact]
     public void GetTraversePath_ForExistingDirectory_ReturnsDirectoryItself()
     {
-        using var tempDir = new TempDirectory("TraversePathTest");
-        var result = TraverseAutoManager.GetTraversePath(tempDir.Path);
-        Assert.Equal(tempDir.Path, result, StringComparer.OrdinalIgnoreCase);
+        const string directoryPath = @"C:\Existing\TraversePathTest";
+        _pathInfo.AddDirectory(directoryPath);
+        var mgr = CreateManager(new AclManagerPendingChanges(), MakeDatabase());
+
+        var result = mgr.GetTraversePath(directoryPath);
+
+        Assert.Equal(directoryPath, result, StringComparer.OrdinalIgnoreCase);
     }
 
     // --- Folder grant traverse ---
@@ -277,17 +325,18 @@ public class TraverseAutoManagerTests
     {
         // For a folder grant (directory path), the traverse entry must cover the folder itself
         // so the account can traverse into it, not just its parent.
-        using var tempDir = new TempDirectory("TraverseFolderTest");
+        const string folderGrantPath = @"C:\Existing\TraverseFolderTest";
+        _pathInfo.AddDirectory(folderGrantPath);
         var pending = new AclManagerPendingChanges();
         var db = MakeDatabase();
         var mgr = CreateManager(pending, db);
 
         // Act — simulate adding an allow grant for a directory
-        var traversePath = TraverseAutoManager.GetTraversePath(tempDir.Path);
+        var traversePath = mgr.GetTraversePath(folderGrantPath);
         mgr.AutoAddTraverseIfMissing(traversePath!);
 
         // Assert — traverse entry is for the folder itself, not its parent
-        Assert.True(pending.IsPendingTraverseAdd(tempDir.Path));
+        Assert.True(pending.IsPendingTraverseAdd(folderGrantPath));
     }
 
     [Fact]
@@ -295,16 +344,17 @@ public class TraverseAutoManagerTests
     {
         // When removing a folder grant, the traverse entry keyed on the folder itself
         // (not its parent) must be scheduled for removal.
-        using var tempDir = new TempDirectory("TraverseFolderRemoveTest");
-        var existing = TraverseEntry(tempDir.Path);
+        const string folderGrantPath = @"C:\Existing\TraverseFolderRemoveTest";
+        _pathInfo.AddDirectory(folderGrantPath);
+        var existing = TraverseEntry(folderGrantPath);
         var db = MakeDatabase([existing]);
         var pending = new AclManagerPendingChanges();
         var mgr = CreateManager(pending, db);
 
-        var traversePath = TraverseAutoManager.GetTraversePath(tempDir.Path);
+        var traversePath = mgr.GetTraversePath(folderGrantPath);
         mgr.AutoRemoveTraverseIfUnneeded(traversePath!);
 
-        Assert.True(pending.IsPendingTraverseRemove(tempDir.Path));
+        Assert.True(pending.IsPendingTraverseRemove(folderGrantPath));
     }
 
     [Fact]
@@ -313,11 +363,11 @@ public class TraverseAutoManagerTests
         // A file grant whose parent is the folder grant's directory depends on the same
         // traverse entry (the folder itself). Removing the folder grant must NOT remove
         // the traverse entry when a file grant inside that folder still exists.
-        using var tempDir = new TempDirectory("TraverseFolderSharedTest");
-        var fileGrantPath = Path.Combine(tempDir.Path, "app.exe");
-        var folderGrantPath = tempDir.Path;
+        const string folderGrantPath = @"C:\Existing\TraverseFolderSharedTest";
+        _pathInfo.AddDirectory(folderGrantPath);
+        var fileGrantPath = Path.Combine(folderGrantPath, "app.exe");
 
-        var existing = TraverseEntry(tempDir.Path);
+        var existing = TraverseEntry(folderGrantPath);
         var db = MakeDatabase([
             AllowEntry(fileGrantPath),
             AllowEntry(folderGrantPath),
@@ -333,11 +383,11 @@ public class TraverseAutoManagerTests
         };
         var mgr = CreateManager(pending, db);
 
-        var traversePath = TraverseAutoManager.GetTraversePath(folderGrantPath);
+        var traversePath = mgr.GetTraversePath(folderGrantPath);
         mgr.AutoRemoveTraverseIfUnneeded(traversePath!);
 
         // File grant still needs traverse on the folder → do not remove
-        Assert.False(pending.IsPendingTraverseRemove(tempDir.Path));
+        Assert.False(pending.IsPendingTraverseRemove(folderGrantPath));
     }
 
     // --- Case insensitivity ---
@@ -362,12 +412,13 @@ public class TraverseAutoManagerTests
     [Fact]
     public void AutoAdd_AclPermissionReportsTraverseAlreadyEffective_SkipsAdd()
     {
-        // When the SID already has effective traverse rights on the real directory (reported
+        // When the SID already has effective traverse rights on the fake directory (reported
         // by IAclPermissionService), AutoAddTraverseIfMissing must not add a pending entry.
-        using var tempDir = new TempDirectory("TraverseAutoTest");
+        const string traversePath = @"C:\Existing\TraverseAutoTest";
+        _pathInfo.AddDirectory(traversePath);
         var aclPermission = new Mock<IAclPermissionService>();
 
-        // Report that traverse rights are already effective on the real temp directory
+        // Report that traverse rights are already effective on the fake directory
         aclPermission
             .Setup(a => a.HasEffectiveRights(
                 It.IsAny<FileSystemSecurity>(), Sid,
@@ -379,11 +430,45 @@ public class TraverseAutoManagerTests
         var pending = new AclManagerPendingChanges();
         var mgr = CreateManager(pending, db, aclPermission.Object);
 
-        // Act — path is a real directory that exists on disk; aclPermission says traverse is covered
-        mgr.AutoAddTraverseIfMissing(tempDir.Path);
+        // Act — path is a fake directory that exists for the service; aclPermission says traverse is covered
+        mgr.AutoAddTraverseIfMissing(traversePath);
 
         // Assert — no pending add since traverse is already effective
-        Assert.False(pending.IsPendingTraverseAdd(tempDir.Path));
+        Assert.False(pending.IsPendingTraverseAdd(traversePath));
+    }
+
+    [Fact]
+    public void AutoAdd_SpecificContainerSid_AllApplicationPackagesAlreadyEffective_SkipsAdd()
+    {
+        const string traversePath = @"C:\Existing\ContainerTraverseAutoTest";
+        _pathInfo.AddDirectory(traversePath);
+        var aclPermission = new Mock<IAclPermissionService>();
+        aclPermission
+            .Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                ContainerSid,
+                It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<FileSystemRights>()))
+            .Returns(false);
+        aclPermission
+            .Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                AclHelper.AllApplicationPackagesSid,
+                It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<FileSystemRights>()))
+            .Returns(true);
+
+        var pending = new AclManagerPendingChanges();
+        var mgr = CreateManager(
+            pending,
+            MakeDatabase(),
+            aclPermission.Object,
+            groupSids: [],
+            sid: ContainerSid);
+
+        mgr.AutoAddTraverseIfMissing(traversePath);
+
+        Assert.False(pending.IsPendingTraverseAdd(traversePath));
     }
 
     [Fact]
@@ -391,7 +476,8 @@ public class TraverseAutoManagerTests
     {
         // When IAclPermissionService reports that the SID does NOT have effective traverse rights,
         // AutoAddTraverseIfMissing must add the traverse entry to PendingTraverseAdds.
-        using var tempDir = new TempDirectory("TraverseAutoTest2");
+        const string traversePath = @"C:\Existing\TraverseAutoTest2";
+        _pathInfo.AddDirectory(traversePath);
         var aclPermission = new Mock<IAclPermissionService>();
 
         // Report that traverse rights are NOT yet present
@@ -406,10 +492,10 @@ public class TraverseAutoManagerTests
         var pending = new AclManagerPendingChanges();
         var mgr = CreateManager(pending, db, aclPermission.Object);
 
-        mgr.AutoAddTraverseIfMissing(tempDir.Path);
+        mgr.AutoAddTraverseIfMissing(traversePath);
 
         // Traverse is not yet effective → must be queued for add
-        Assert.True(pending.IsPendingTraverseAdd(tempDir.Path));
+        Assert.True(pending.IsPendingTraverseAdd(traversePath));
     }
 
     [Fact]
@@ -417,7 +503,8 @@ public class TraverseAutoManagerTests
     {
         // When groupSids are provided, they must be forwarded to IAclPermissionService.HasEffectiveRights
         // so the check considers group memberships when determining effective traverse rights.
-        using var tempDir = new TempDirectory("TraverseAutoTest3");
+        const string traversePath = @"C:\Existing\TraverseAutoTest3";
+        _pathInfo.AddDirectory(traversePath);
         var aclPermission = new Mock<IAclPermissionService>();
         var groupSids = new List<string> { "S-1-5-32-545" }; // BUILTIN\Users
 
@@ -434,7 +521,7 @@ public class TraverseAutoManagerTests
         var pending = new AclManagerPendingChanges();
         var mgr = CreateManager(pending, db, aclPermission.Object, groupSids);
 
-        mgr.AutoAddTraverseIfMissing(tempDir.Path);
+        mgr.AutoAddTraverseIfMissing(traversePath);
 
         // Verify group SIDs were forwarded to the permission check
         Assert.NotNull(capturedGroupSids);

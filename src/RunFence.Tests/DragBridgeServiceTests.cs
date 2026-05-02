@@ -43,6 +43,7 @@ public class DragBridgeServiceTests : IDisposable
 
         var processLauncher = new DragBridgeProcessLauncher(
             _launcher.Object, _log.Object, uiThreadInvoker.Object,
+            new Mock<IKernelObjectMandatoryLabelService>().Object,
             dragBridgeExePath: "fake.exe");
         var copyFlow = new DragBridgeCopyFlow(processLauncher, _notifications.Object, _log.Object,
             new CapturedFileStore(), pipeConnectTimeoutMs: 100);
@@ -54,7 +55,8 @@ public class DragBridgeServiceTests : IDisposable
             uiThreadInvoker.Object,
             aclPermission.Object,
             permissionGrant.Object,
-            new SidDisplayNameResolver(new Mock<ISidResolver>().Object));
+            new SidDisplayNameResolver(new Mock<ISidResolver>().Object, new Mock<IProfilePathResolver>().Object),
+            new DragBridgeChoiceCache());
         var resolveOrchestrator = new DragBridgeResolveOrchestrator(
             pasteHandler,
             sessionSaver.Object,
@@ -147,7 +149,7 @@ public class DragBridgeServiceTests : IDisposable
         // Arrange
         var unknownSid = new SecurityIdentifier("S-1-5-21-0-0-0-9999");
         _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
-            .Returns(new WindowOwnerInfo(unknownSid, NativeTokenHelper.MandatoryLevelHigh));
+            .Returns(new WindowOwnerInfo(unknownSid, NativeTokenHelper.MandatoryLevelHigh, false));
 
         var tcs = new TaskCompletionSource();
         _notifications.Setup(n => n.ShowWarning(It.IsAny<string>(),
@@ -166,15 +168,17 @@ public class DragBridgeServiceTests : IDisposable
     }
 
     [Theory]
-    [InlineData(NativeTokenHelper.MandatoryLevelHigh, PrivilegeLevel.HighestAllowed)]
-    [InlineData(NativeTokenHelper.MandatoryLevelMedium, PrivilegeLevel.Basic)]
-    [InlineData(NativeTokenHelper.MandatoryLevelLow, PrivilegeLevel.LowIntegrity)]
+    [InlineData(NativeTokenHelper.MandatoryLevelHigh, false, PrivilegeLevel.HighestAllowed)]
+    [InlineData(NativeTokenHelper.MandatoryLevelMedium, false, PrivilegeLevel.AboveBasic)]
+    [InlineData(NativeTokenHelper.MandatoryLevelLow, false, PrivilegeLevel.HighestAllowed)]
+    [InlineData(NativeTokenHelper.MandatoryLevelMedium, true, PrivilegeLevel.Basic)]
+    [InlineData(NativeTokenHelper.MandatoryLevelLow, true, PrivilegeLevel.LowIntegrity)]
     public async Task CopyHotkey_CurrentUser_CallsLaunchDirectWithExpectedPrivilegeLevel(
-        int integrityLevel, PrivilegeLevel expectedMode)
+        int integrityLevel, bool isInRestrictedJob, PrivilegeLevel expectedMode)
     {
         // Arrange
         _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
-            .Returns(new WindowOwnerInfo(CurrentSecId, integrityLevel));
+            .Returns(new WindowOwnerInfo(CurrentSecId, integrityLevel, isInRestrictedJob));
 
         var tcs = new TaskCompletionSource();
         _launcher.Setup(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
@@ -216,10 +220,11 @@ public class DragBridgeServiceTests : IDisposable
         _service.ApplySettings(new AppSettings { EnableDragBridge = true });
 
         _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
-            .Returns(new WindowOwnerInfo(managedSecId, NativeTokenHelper.MandatoryLevelHigh));
+            .Returns(new WindowOwnerInfo(managedSecId, NativeTokenHelper.MandatoryLevelMedium, false));
 
         var launchCalledTcs = new TaskCompletionSource();
-        _launcher.Setup(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>()))
+        _launcher.Setup(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>(),
+                PrivilegeLevel.AboveBasic))
             .Callback(() => launchCalledTcs.TrySetResult())
             .Throws(new InvalidOperationException("test: no real process available"));
 
@@ -227,7 +232,8 @@ public class DragBridgeServiceTests : IDisposable
         // 5s timeout waits for async completion, not a fixed sleep delay
         await launchCalledTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        _launcher.Verify(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>()), Times.Once);
+        _launcher.Verify(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>(),
+            PrivilegeLevel.AboveBasic), Times.Once);
         _launcher.Verify(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
             It.IsAny<PrivilegeLevel>()), Times.Never);
         _launcher.Verify(l => l.LaunchDeElevated(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
@@ -255,9 +261,10 @@ public class DragBridgeServiceTests : IDisposable
         _service.ApplySettings(new AppSettings { EnableDragBridge = true });
 
         _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
-            .Returns(new WindowOwnerInfo(managedSecId, NativeTokenHelper.MandatoryLevelHigh));
+            .Returns(new WindowOwnerInfo(managedSecId, NativeTokenHelper.MandatoryLevelHigh, false));
 
-        _launcher.Setup(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>()))
+        _launcher.Setup(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>(),
+                PrivilegeLevel.HighestAllowed))
             .Throws(new InvalidOperationException("Credential decryption failed"));
 
         var errorTcs = new TaskCompletionSource();

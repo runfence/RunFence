@@ -9,45 +9,35 @@ public class AccountLifecycleManager(
     IWindowsAccountService windowsAccountService,
     IAccountLoginRestrictionService loginRestriction,
     IAccountLsaRestrictionService lsaRestriction,
+    IGroupPolicyScriptHelper gpHelper,
     IOrphanedProfileService orphanedProfileService,
     IOrphanedAclCleanupService aclCleanupService,
     ILoggingService log,
     IAccountValidationService accountValidation,
-    ISidResolver sidResolver)
+    IProfilePathResolver profilePathResolver,
+    ValidationRunner validationRunner)
     : IAccountLifecycleManager
 {
+
     /// <summary>
     /// Validates that the account can be deleted (not interactive user, not last admin, no running processes).
     /// Returns null on success, or an error message string on failure.
     /// </summary>
     public async Task<string?> ValidateDeleteAsync(string sid)
     {
-        try
-        {
-            accountValidation.ValidateNotInteractiveUser(sid, "delete");
-        }
-        catch (InvalidOperationException ex)
-        {
-            return ex.Message;
-        }
+        var errors = new List<string>();
 
-        try
-        {
-            await Task.Run(() => accountValidation.ValidateNotLastAdmin(sid, "delete"));
-        }
-        catch (InvalidOperationException ex)
-        {
-            return ex.Message;
-        }
+        if (!validationRunner.RunValidation("ValidateNotInteractiveUser",
+                () => accountValidation.ValidateNotInteractiveUser(sid, "delete"), errors))
+            return errors[0];
 
-        try
-        {
-            await Task.Run(() => accountValidation.ValidateNoRunningProcesses(sid, "delete"));
-        }
-        catch (InvalidOperationException ex)
-        {
-            return ex.Message;
-        }
+        if (!await Task.Run(() => validationRunner.RunValidation("ValidateNotLastAdmin",
+                () => accountValidation.ValidateNotLastAdmin(sid, "delete"), errors)))
+            return errors[0];
+
+        if (!await Task.Run(() => validationRunner.RunValidation("ValidateNoRunningProcesses",
+                () => accountValidation.ValidateNoRunningProcesses(sid, "delete"), errors)))
+            return errors[0];
 
         return null;
     }
@@ -76,9 +66,12 @@ public class AccountLifecycleManager(
         {
         }
 
+        // Use gpHelper directly rather than SetLoginBlockedBySid: the latter contains a rollback
+        // that re-enables the GP logon script if SetAccountHidden fails, which is wrong during
+        // deletion. SetAccountHidden is already handled by the standalone call above.
         try
         {
-            loginRestriction.SetLoginBlockedBySid(sid, username, false);
+            gpHelper.SetLoginBlocked(sid, false);
         }
         catch
         {
@@ -153,7 +146,7 @@ public class AccountLifecycleManager(
     /// </summary>
     public async Task<string?> DeleteProfileAsync(string sid)
     {
-        var profilePath = sidResolver.TryGetProfilePath(sid);
+        var profilePath = profilePathResolver.TryGetProfilePath(sid);
         if (string.IsNullOrEmpty(profilePath) || !Directory.Exists(profilePath))
             return null;
 

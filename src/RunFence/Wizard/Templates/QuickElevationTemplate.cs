@@ -1,5 +1,6 @@
 using RunFence.Account;
 using RunFence.Account.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
@@ -82,7 +83,7 @@ public class QuickElevationTemplate(
         return
         [
             new AccountNameStep(
-                (name, _) => _data.Username = name,
+                (name, password) => { _data.Username = name; password.Dispose(); },
                 showPassword: false,
                 maxNameLength: 1,
                 description: "This creates a dedicated administrator account with a single-character name. " +
@@ -116,8 +117,8 @@ public class QuickElevationTemplate(
         // ("Run as administrator" from a different admin account) is unaffected by this policy.
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: _data.Username,
-            PasswordText: string.Empty,
-            ConfirmPasswordText: string.Empty,
+            Password: ProtectedString.CreateEmpty(),
+            ConfirmPassword: ProtectedString.CreateEmpty(),
             IsEphemeral: false,
             CheckedGroups: [(GroupFilterHelper.AdministratorsSid, "Administrators")],
             UncheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
@@ -126,12 +127,23 @@ public class QuickElevationTemplate(
             AllowBgAutorun: false,
             CurrentHiddenCount: hiddenCount);
 
-        var result = await Task.Run(() => createHandler.Execute(request));
+        EditAccountDialogCreateHandler.CreateAccountResult? result = null;
+        try
+        {
+            result = await Task.Run(() => createHandler.Execute(request));
+        }
+        finally
+        {
+            request.Password.Dispose();
+            request.ConfirmPassword.Dispose();
+        }
         if (result == null)
         {
             progress.ReportError(createHandler.LastValidationError ?? "Account creation failed.");
             return;
         }
+
+        result.Password.Dispose();
 
         foreach (var err in result.Errors)
             progress.ReportError(err);
@@ -167,6 +179,9 @@ public class QuickElevationTemplate(
 
         // Update SidNames
         sidNameCache.ResolveAndCache(result.Sid, result.Username);
+
+        // Set HighestAllowed as the default privilege level — UAC elevation accounts should always run elevated
+        session.Database.GetOrCreateAccount(result.Sid).PrivilegeLevel = PrivilegeLevel.HighestAllowed;
 
         progress.ReportStatus($"Account '{result.Username}' created.");
         sessionSaver.SaveAndRefresh();

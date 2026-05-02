@@ -1,9 +1,9 @@
+using System.Security.AccessControl;
 using System.Security.Principal;
 using Microsoft.Win32;
 using Moq;
 using RunFence.Acl;
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
 using Xunit;
@@ -34,12 +34,12 @@ public class FolderHandlerServiceTests : IDisposable
         _testSid = WindowsIdentity.GetCurrent().User!.Value;
         _tempDir = Path.Combine(Path.GetTempPath(), "RunFenceTests_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_tempDir);
-        _launcherPath = Path.Combine(_tempDir, Constants.LauncherExeName);
+        _launcherPath = Path.Combine(_tempDir, PathConstants.LauncherExeName);
         File.WriteAllBytes(_launcherPath, []);
         _log = new Mock<ILoggingService>();
         _pathGrant = new Mock<IPathGrantService>();
         _localGroupMembership = new Mock<ILocalGroupMembershipService>();
-        _localGroupMembership.Setup(s => s.GetGroupsForUser(It.IsAny<string>())).Returns(new List<LocalUserAccount>());
+        _localGroupMembership.Setup(s => s.GetGroupsForUser(It.IsAny<string>())).Returns([]);
     }
 
     public void Dispose()
@@ -54,8 +54,8 @@ public class FolderHandlerServiceTests : IDisposable
     {
         _localGroupMembership.Setup(s => s.GetGroupsForUser(It.IsAny<string>()))
             .Returns(isAdmin
-                ? new List<LocalUserAccount> { new("Administrators", "S-1-5-32-544") }
-                : new List<LocalUserAccount>());
+                ? [new("Administrators", "S-1-5-32-544")]
+                : []);
         return new(_log.Object, _pathGrant.Object, _localGroupMembership.Object,
             hkuOverride: _hkuRoot, launcherPathOverride: _launcherPath,
             shellServerPathOverride: shellServerPath);
@@ -97,6 +97,21 @@ public class FolderHandlerServiceTests : IDisposable
 
         // Assert
         Assert.True(service.IsRegistered(_testSid));
+    }
+
+    [Fact]
+    public void Register_EnsuresLauncherDirectoryAccessForAccountAndLowIntegrity()
+    {
+        var service = CreateService();
+
+        service.Register(_testSid);
+
+        _pathGrant.Verify(g => g.EnsureAccess(
+            _testSid, _tempDir, FileSystemRights.ReadAndExecute,
+            null, true), Times.Once);
+        _pathGrant.Verify(g => g.EnsureAccess(
+            AclHelper.LowIntegritySid, _tempDir, FileSystemRights.ReadAndExecute,
+            null, true), Times.Once);
     }
 
     [Fact]
@@ -178,7 +193,7 @@ public class FolderHandlerServiceTests : IDisposable
     public void CleanupStaleRegistrations_RemovesStaleClsidOverride()
     {
         // Arrange — plant a stale CLSID registration pointing to our shell server
-        var shellServerPath = Path.Combine(_tempDir, Constants.ShellServerExeName);
+        var shellServerPath = Path.Combine(_tempDir, PathConstants.ShellServerExeName);
         File.WriteAllBytes(shellServerPath, []);
         var service = CreateService(shellServerPath: shellServerPath);
 

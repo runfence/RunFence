@@ -22,9 +22,11 @@ public readonly record struct GrantRemoveResult(bool Found, SavedRightsState? Sa
 /// NTFS operations remain on the calling thread.
 /// </summary>
 public class GrantCoreOperations(
-    IGrantNtfsHelper ntfs,
+    IGrantAceService grantAceService,
+    IFileOwnerService fileOwnerService,
     UiThreadDatabaseAccessor dbAccessor,
-    ILoggingService log)
+    ILoggingService log,
+    IFileSystemPathInfo pathInfo) : IGrantCoreOperations
 {
     /// <summary>
     /// Applies an allow or deny ACE for <paramref name="sid"/> on <paramref name="path"/> and
@@ -39,8 +41,11 @@ public class GrantCoreOperations(
         SavedRightsState? savedRights = null, string? ownerSid = null)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = Directory.Exists(normalized);
-        var rights = savedRights ?? SavedRightsState.DefaultForMode(isDeny);
+        bool isFolder = pathInfo.DirectoryExists(normalized);
+        var canAssignOwner = AclHelper.CanAssignGrantOwner(sid);
+        var rights = AclHelper.ClearBlockedGrantOwner(sid, savedRights ?? SavedRightsState.DefaultForMode(isDeny))!;
+        if (!canAssignOwner)
+            ownerSid = null;
 
         var (hasSameMode, hasOppositeIsDeny) = dbAccessor.Read(db =>
         {
@@ -48,7 +53,7 @@ public class GrantCoreOperations(
             if (acct == null) return (false, (bool?)null);
             bool same = FindGrantEntryInList(acct.Grants, normalized, isDeny) != null;
             var opp = FindGrantEntryInList(acct.Grants, normalized, !isDeny);
-            return (same, opp != null ? (bool?)opp.IsDeny : null);
+            return (same, opp?.IsDeny);
         });
 
         if (hasSameMode)
@@ -56,12 +61,11 @@ public class GrantCoreOperations(
             dbAccessor.Write(db =>
             {
                 var entry = FindGrantEntryInDb(db, sid, normalized, isDeny);
-                if (entry != null)
-                    entry.SavedRights = rights;
+                entry?.SavedRights = rights;
             });
-            ntfs.ApplyAce(normalized, sid, isDeny, rights, isFolder);
+            grantAceService.ApplyAce(normalized, sid, isDeny, rights, isFolder);
             if (ownerSid != null)
-                ntfs.ChangeOwner(normalized, ownerSid, recursive: false);
+                fileOwnerService.ChangeOwner(normalized, ownerSid, recursive: false);
             return new GrantAddResult(AlreadyExisted: true, DatabaseModified: true);
         }
 
@@ -70,10 +74,10 @@ public class GrantCoreOperations(
                 $"An opposite-mode grant for '{normalized}' already exists for SID '{sid}'. " +
                 $"Remove the existing {(hasOppositeIsDeny.Value ? "deny" : "allow")} grant first.");
 
-        ntfs.ApplyAce(normalized, sid, isDeny, rights, isFolder);
+        grantAceService.ApplyAce(normalized, sid, isDeny, rights, isFolder);
 
         if (ownerSid != null)
-            ntfs.ChangeOwner(normalized, ownerSid, recursive: false);
+            fileOwnerService.ChangeOwner(normalized, ownerSid, recursive: false);
 
         dbAccessor.Write(db => db.GetOrCreateAccount(sid).Grants.Add(
             new GrantedPathEntry { Path = normalized, IsDeny = isDeny, SavedRights = rights }));
@@ -102,7 +106,7 @@ public class GrantCoreOperations(
             return new GrantRemoveResult(Found: false, SavedRights: null);
 
         if (updateFileSystem)
-            ntfs.RevertAce(normalized, sid, isDeny);
+            grantAceService.RevertAce(normalized, sid, isDeny);
 
         dbAccessor.Write(db =>
         {
@@ -123,18 +127,21 @@ public class GrantCoreOperations(
         SavedRightsState savedRights, string? ownerSid = null)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = Directory.Exists(normalized);
+        bool isFolder = pathInfo.DirectoryExists(normalized);
+        var canAssignOwner = AclHelper.CanAssignGrantOwner(sid);
+        savedRights = AclHelper.ClearBlockedGrantOwner(sid, savedRights)!;
+        if (!canAssignOwner)
+            ownerSid = null;
 
-        ntfs.ApplyAce(normalized, sid, isDeny, savedRights, isFolder);
+        grantAceService.ApplyAce(normalized, sid, isDeny, savedRights, isFolder);
 
         if (ownerSid != null)
-            ntfs.ChangeOwner(normalized, ownerSid, recursive: false);
+            fileOwnerService.ChangeOwner(normalized, ownerSid, recursive: false);
 
         dbAccessor.Write(db =>
         {
             var entry = FindGrantEntryInDb(db, sid, normalized, isDeny);
-            if (entry != null)
-                entry.SavedRights = savedRights;
+            entry?.SavedRights = savedRights;
         });
     }
 
@@ -144,20 +151,20 @@ public class GrantCoreOperations(
     public void FixGrant(string sid, string path, bool isDeny)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = Directory.Exists(normalized);
+        bool isFolder = pathInfo.DirectoryExists(normalized);
 
         var rights = dbAccessor.Read(db =>
         {
             var entry = FindGrantEntryInDb(db, sid, normalized, isDeny);
             return entry != null
                 ? entry.SavedRights ?? SavedRightsState.DefaultForMode(isDeny)
-                : (SavedRightsState?)null;
+                : null;
         });
 
         if (rights == null)
             return;
 
-        ntfs.ApplyAce(normalized, sid, isDeny, rights, isFolder);
+        grantAceService.ApplyAce(normalized, sid, isDeny, rights, isFolder);
     }
 
     /// <summary>
@@ -181,7 +188,7 @@ public class GrantCoreOperations(
             {
                 try
                 {
-                    ntfs.RevertAce(entry.Path, sid, entry.IsDeny);
+                    grantAceService.RevertAce(entry.Path, sid, entry.IsDeny);
                 }
                 catch (Exception ex)
                 {
@@ -191,6 +198,36 @@ public class GrantCoreOperations(
         }
 
         return grants;
+    }
+
+    /// <summary>
+    /// Validates a prospective grant against the DB: throws <see cref="InvalidOperationException"/>
+    /// if a same-mode duplicate or an opposite-mode entry exists. No side effects.
+    /// </summary>
+    public void ValidateGrant(string sid, string path, bool isDeny)
+    {
+        var normalized = Path.GetFullPath(path);
+
+        dbAccessor.Read(database =>
+        {
+            var account = database.GetAccount(sid);
+            if (account == null) return;
+
+            foreach (var entry in account.Grants)
+            {
+                if (!string.Equals(entry.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
+                    entry.IsTraverseOnly)
+                    continue;
+
+                if (entry.IsDeny == isDeny)
+                    throw new InvalidOperationException(
+                        $"A {(isDeny ? "deny" : "allow")} grant for '{normalized}' already exists for SID '{sid}'.");
+
+                throw new InvalidOperationException(
+                    $"An opposite-mode grant for '{normalized}' already exists for SID '{sid}'. " +
+                    $"Remove the existing {(entry.IsDeny ? "deny" : "allow")} grant first.");
+            }
+        });
     }
 
     /// <summary>

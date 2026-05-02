@@ -2,7 +2,7 @@ namespace RunFence.Startup;
 
 public interface IAutoStartService
 {
-    bool IsAutoStartEnabled();
+    Task<bool> IsAutoStartEnabled();
     Task EnableAutoStart();
-    void DisableAutoStart();
+    Task DisableAutoStart();
 }

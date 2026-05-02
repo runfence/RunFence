@@ -18,6 +18,7 @@ public class DefaultScannerDataAccess : IScannerDataAccess
     private readonly IIfeoRegistryAccess _ifeoRegistry;
     private readonly IWindowsComponentRegistryAccess _windowsComponentRegistry;
     private readonly TaskSchedulerDataAccess _taskScheduler;
+    private readonly ShortcutResolver _shortcutResolver;
     private readonly NativePolicyDataAccess _nativePolicy;
     private readonly IGroupPolicyDataAccess _groupPolicy;
 
@@ -32,6 +33,7 @@ public class DefaultScannerDataAccess : IScannerDataAccess
         _ifeoRegistry = new IfeoRegistryDataAccess();
         _windowsComponentRegistry = new WindowsComponentRegistryDataAccess();
         _taskScheduler = new TaskSchedulerDataAccess();
+        _shortcutResolver = new ShortcutResolver();
         _groupPolicy = new GroupPolicyDataAccess();
     }
 
@@ -59,7 +61,7 @@ public class DefaultScannerDataAccess : IScannerDataAccess
     public DirectorySecurity GetDirectorySecurity(string path) => new DirectoryInfo(path).GetAccessControl();
     public FileSecurity GetFileSecurity(string path) => new FileInfo(path).GetAccessControl();
     public string[] GetFilesInFolder(string folderPath) => Directory.GetFiles(folderPath);
-    public string? ResolveShortcutTarget(string lnkPath) => _taskScheduler.ResolveShortcutTarget(lnkPath);
+    public string? ResolveShortcutTarget(string lnkPath) => _shortcutResolver.ResolveShortcutTarget(lnkPath);
 
     // IAutorunRegistryAccess
     public RegistrySecurity? GetRegistryKeySecurity(RegistryKey hive, string subKeyPath) => _autorunRegistry.GetRegistryKeySecurity(hive, subKeyPath);

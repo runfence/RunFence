@@ -66,22 +66,29 @@ public class WizardTemplateExecutor(
             sid = result.Sid;
 
             // Post-creation setup
-            if (flowParams.SetupOptions != null)
+            try
             {
-                var setupRequest = new WizardAccountSetupHelper.SetupRequest(
-                    Sid: sid,
-                    Username: result.Username,
-                    Password: result.Password,
-                    StoreCredential: flowParams.SetupOptions.StoreCredential,
-                    IsEphemeral: flowParams.SetupOptions.IsEphemeral,
-                    PrivilegeLevel: flowParams.SetupOptions.PrivilegeLevel,
-                    FirewallSettings: flowParams.SetupOptions.FirewallSettings,
-                    DesktopSettingsPath: flowParams.SetupOptions.DesktopSettingsPath,
-                    InstallPackages: flowParams.SetupOptions.InstallPackages,
-                    TrayTerminal: flowParams.SetupOptions.TrayTerminal);
+                if (flowParams.SetupOptions != null)
+                {
+                    var setupRequest = new WizardAccountSetupHelper.SetupRequest(
+                        Sid: sid,
+                        Username: result.Username,
+                        Password: result.Password,
+                        StoreCredential: flowParams.SetupOptions.StoreCredential,
+                        IsEphemeral: flowParams.SetupOptions.IsEphemeral,
+                        PrivilegeLevel: flowParams.SetupOptions.PrivilegeLevel,
+                        FirewallSettings: flowParams.SetupOptions.FirewallSettings,
+                        DesktopSettingsPath: flowParams.SetupOptions.DesktopSettingsPath,
+                        InstallPackages: flowParams.SetupOptions.InstallPackages,
+                        TrayTerminal: flowParams.SetupOptions.TrayTerminal);
 
-                var setupHelper = setupHelperFactory.Create(session);
-                await setupHelper.SetupAsync(setupRequest, progress);
+                    var setupHelper = setupHelperFactory.Create(session);
+                    await setupHelper.SetupAsync(setupRequest, progress);
+                }
+            }
+            finally
+            {
+                result.Password.Dispose();
             }
         }
         else
@@ -111,6 +118,7 @@ public class WizardTemplateExecutor(
         if (buildOptionsList is { Count: > 0 })
         {
             ShortcutTraversalCache? shortcutCache = null;
+            HashSet<string>? managedSids = null;
             foreach (var opts in buildOptionsList)
             {
                 // Per-entry license check (app count grows as entries are added)
@@ -124,10 +132,16 @@ public class WizardTemplateExecutor(
                     session.Database.Apps.Add(app);
                     createdApps.Add(app);
 
+                    // Capture managed SIDs on the UI thread before entering Task.Run to avoid
+                    // accessing the live database from the thread pool.
+                    if (app.ManageShortcuts && shortcutCache == null)
+                        managedSids ??= shortcutDiscovery.CaptureManagedSids();
+
+                    var capturedManagedSids = managedSids;
                     await Task.Run(() =>
                     {
                         var appShortcutCache = app.ManageShortcuts
-                            ? shortcutCache ??= shortcutDiscovery.CreateTraversalCache()
+                            ? shortcutCache ??= shortcutDiscovery.CreateTraversalCache(capturedManagedSids)
                             : new ShortcutTraversalCache([]);
                         enforcementHelper.ApplyChanges(app, session.Database.Apps, appShortcutCache);
                         if (flowParams.CreateDesktopShortcut)

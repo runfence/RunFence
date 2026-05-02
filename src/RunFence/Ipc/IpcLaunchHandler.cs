@@ -16,12 +16,13 @@ namespace RunFence.Ipc;
 public class IpcLaunchHandler(
     IAppStateProvider appState,
     IAppLockControl appLock,
-    IpcUiInvoker ipcUiInvoker,
+    IIpcUiInvoker ipcUiInvoker,
     IAppEntryLauncher entryLauncher,
     IIpcCallerAuthorizer authorizer,
     ISidNameCacheService sidNameCache,
     ILoggingService log,
     IIdleMonitorService idleMonitor,
+    ITrayBalloonService trayBalloon,
     IRunAsFlowHandler? runAsFlowHandler = null)
 {
     public IpcResponse HandleLaunch(IpcMessage message, IpcCallerContext context)
@@ -75,10 +76,12 @@ public class IpcLaunchHandler(
                 catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
                 {
                     log.Error("IPC launch failed: stored credentials are incorrect", ex);
+                    trayBalloon.ShowWarning($"Launch failed: {capturedApp.Name}");
                 }
                 catch (Exception ex)
                 {
                     log.Error("IPC launch failed", ex);
+                    trayBalloon.ShowWarning($"Launch failed: {capturedApp.Name}");
                 }
             });
         }, out var disposeResponse))

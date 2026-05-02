@@ -306,7 +306,7 @@ public class AccountAclBulkScanServiceTests
     {
         // Arrange: a pre-cancelled token so any cancellation-aware code exits immediately
         var cts = new CancellationTokenSource();
-        cts.Cancel();
+        await cts.CancelAsync();
 
         var security = MakeSecurity([(Sid1, FileSystemRights.ReadData, AccessControlType.Allow)]);
         var service = CreateService([(@"C:\Foo", security)]);
@@ -356,7 +356,7 @@ public class AccountAclBulkScanServiceTests
         // Use a real temp file so Directory.Exists returns false for the scanned path.
         using var tempDir = new TempDirectory();
         var tempFile = Path.Combine(tempDir.Path, "test.txt");
-        File.WriteAllText(tempFile, "");
+        await File.WriteAllTextAsync(tempFile, "");
 
         var deleteOnlyRights = FileSystemRights.Delete;
         var security = MakeSecurity([(Sid1, deleteOnlyRights, AccessControlType.Allow)]);
@@ -390,7 +390,7 @@ public class AccountAclBulkScanServiceTests
         var knownSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1, Sid2 };
 
         // Act: either throws OperationCanceledException or returns partial results
-        Dictionary<string, AccountScanResult>? result = null;
+        Dictionary<string, AccountScanResult> result;
         try
         {
             result = await service.ScanAllAccountsAsync(
@@ -403,7 +403,7 @@ public class AccountAclBulkScanServiceTests
         }
 
         // If it returned normally, Sid2 must NOT be present (it was scanned after cancellation)
-        Assert.DoesNotContain(Sid2, (IDictionary<string, AccountScanResult>)result!);
+        Assert.DoesNotContain(Sid2, (IDictionary<string, AccountScanResult>)result);
     }
 
     /// <summary>

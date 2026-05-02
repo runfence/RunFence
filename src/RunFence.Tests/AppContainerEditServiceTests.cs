@@ -22,116 +22,105 @@ public class AppContainerEditServiceTests
     // ── CreateNewContainer ──────────────────────────────────────────────────
 
     [Fact]
-    public void CreateNewContainer_NonEphemeral_AddsEntryToDatabase()
+    public async Task CreateNewContainer_NonEphemeral_AddsEntryToDatabase()
     {
         var db = new AppDatabase();
         _containerService.Setup(s => s.CreateProfile(It.IsAny<AppContainerEntry>()));
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
 
-        var result = CreateHandler(db).CreateNewContainer(
-            "rfn_test", "Test", isEphemeral: false,
-            [], loopback: false, [],
-            out _, out _, out _);
+        var result = await CreateHandler(db).CreateNewContainer(
+            "rfn_test", "Test", isEphemeral: false, [], loopback: false, []);
 
-        Assert.NotNull(result);
+        Assert.NotNull(result.Entry);
         Assert.Single(db.AppContainers);
-        Assert.False(result.IsEphemeral);
-        Assert.Null(result.DeleteAfterUtc);
+        Assert.False(result.Entry!.IsEphemeral);
+        Assert.Null(result.Entry.DeleteAfterUtc);
     }
 
     [Fact]
-    public void CreateNewContainer_Ephemeral_SetsIsEphemeralAndDeleteAfterUtc()
+    public async Task CreateNewContainer_Ephemeral_SetsIsEphemeralAndDeleteAfterUtc()
     {
         var before = DateTime.UtcNow;
         _containerService.Setup(s => s.CreateProfile(It.IsAny<AppContainerEntry>()));
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
 
-        var result = CreateHandler().CreateNewContainer(
-            "rfn_eabc123", "Temp", isEphemeral: true,
-            [], loopback: false, [],
-            out _, out _, out _);
+        var result = await CreateHandler().CreateNewContainer(
+            "rfn_eabc123", "Temp", isEphemeral: true, [], loopback: false, []);
 
-        Assert.NotNull(result);
-        Assert.True(result.IsEphemeral);
-        Assert.NotNull(result.DeleteAfterUtc);
+        Assert.NotNull(result.Entry);
+        Assert.True(result.Entry!.IsEphemeral);
+        Assert.NotNull(result.Entry.DeleteAfterUtc);
         var after = DateTime.UtcNow;
-        Assert.InRange(result.DeleteAfterUtc!.Value, before.AddHours(24).AddSeconds(-5), after.AddHours(24).AddSeconds(5));
+        Assert.InRange(result.Entry.DeleteAfterUtc!.Value, before.AddHours(24).AddSeconds(-5), after.AddHours(24).AddSeconds(5));
     }
 
     [Fact]
-    public void CreateNewContainer_DuplicateProfileName_ReturnsNullWithValidationError()
+    public async Task CreateNewContainer_DuplicateProfileName_ReturnsNullWithValidationError()
     {
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "rfn_test", DisplayName = "Existing" });
 
-        var result = CreateHandler(db).CreateNewContainer(
-            "rfn_test", "Another", isEphemeral: false,
-            [], loopback: false, [],
-            out var validationError, out _, out _);
+        var result = await CreateHandler(db).CreateNewContainer(
+            "rfn_test", "Another", isEphemeral: false, [], loopback: false, []);
 
-        Assert.Null(result);
-        Assert.NotNull(validationError);
+        Assert.Null(result.Entry);
+        Assert.NotNull(result.ValidationError);
         _containerService.Verify(s => s.CreateProfile(It.IsAny<AppContainerEntry>()), Times.Never);
     }
 
     [Fact]
-    public void CreateNewContainer_ProfileCreationThrows_ReturnsNullWithCreationError_EntryNotAdded()
+    public async Task CreateNewContainer_ProfileCreationThrows_ReturnsNullWithCreationError_EntryNotAdded()
     {
         var db = new AppDatabase();
         _containerService.Setup(s => s.CreateProfile(It.IsAny<AppContainerEntry>()))
             .Throws(new InvalidOperationException("OS error"));
 
-        var result = CreateHandler(db).CreateNewContainer(
-            "rfn_test", "Test", isEphemeral: false,
-            [], loopback: false, [],
-            out _, out var creationError, out _);
+        var result = await CreateHandler(db).CreateNewContainer(
+            "rfn_test", "Test", isEphemeral: false, [], loopback: false, []);
 
-        Assert.Null(result);
-        Assert.NotNull(creationError);
+        Assert.Null(result.Entry);
+        Assert.NotNull(result.CreationError);
         Assert.Empty(db.AppContainers);
     }
 
     [Theory]
     [InlineData(true, true)]   // loopback OS call succeeds → EnableLoopback = true
     [InlineData(false, false)] // loopback OS call fails → EnableLoopback = false
-    public void CreateNewContainer_LoopbackRequested_EnableLoopbackReflectsOsResult(
+    public async Task CreateNewContainer_LoopbackRequested_EnableLoopbackReflectsOsResult(
         bool osCallSucceeds, bool expectedEnableLoopback)
     {
         _containerService.Setup(s => s.CreateProfile(It.IsAny<AppContainerEntry>()));
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
-        _containerService.Setup(s => s.SetLoopbackExemption(It.IsAny<string>(), true)).Returns(osCallSucceeds);
+        _containerService.Setup(s => s.SetLoopbackExemption(It.IsAny<string>(), true))
+            .ReturnsAsync(osCallSucceeds);
 
-        var result = CreateHandler().CreateNewContainer(
-            "rfn_test", "Test", isEphemeral: false,
-            [], loopback: true, [],
-            out _, out _, out _);
+        var result = await CreateHandler().CreateNewContainer(
+            "rfn_test", "Test", isEphemeral: false, [], loopback: true, []);
 
-        Assert.NotNull(result);
-        Assert.Equal(expectedEnableLoopback, result.EnableLoopback);
+        Assert.NotNull(result.Entry);
+        Assert.Equal(expectedEnableLoopback, result.Entry!.EnableLoopback);
     }
 
     [Fact]
-    public void CreateNewContainer_ComClsids_GrantedClsidsStoredInEntry()
+    public async Task CreateNewContainer_ComClsids_GrantedClsidsStoredInEntry()
     {
         var clsids = new List<string> { "{CLSID-A}", "{CLSID-B}" };
         _containerService.Setup(s => s.CreateProfile(It.IsAny<AppContainerEntry>()));
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         _containerService.Setup(s => s.GrantComAccess(It.IsAny<string>(), It.IsAny<string>()));
 
-        var result = CreateHandler().CreateNewContainer(
-            "rfn_test", "Test", isEphemeral: false,
-            [], loopback: false, clsids,
-            out _, out _, out var comErrors);
+        var result = await CreateHandler().CreateNewContainer(
+            "rfn_test", "Test", isEphemeral: false, [], loopback: false, clsids);
 
-        Assert.NotNull(result);
-        Assert.NotNull(result.ComAccessClsids);
-        Assert.Contains("{CLSID-A}", result.ComAccessClsids!);
-        Assert.Contains("{CLSID-B}", result.ComAccessClsids!);
-        Assert.Empty(comErrors);
+        Assert.NotNull(result.Entry);
+        Assert.NotNull(result.Entry!.ComAccessClsids);
+        Assert.Contains("{CLSID-A}", result.Entry.ComAccessClsids!);
+        Assert.Contains("{CLSID-B}", result.Entry.ComAccessClsids!);
+        Assert.Empty(result.ComErrors);
     }
 
     [Fact]
-    public void CreateNewContainer_ComGrantFailsForOneClsid_PartialSuccess()
+    public async Task CreateNewContainer_ComGrantFailsForOneClsid_PartialSuccess()
     {
         var clsids = new List<string> { "{CLSID-OK}", "{CLSID-FAIL}" };
         _containerService.Setup(s => s.CreateProfile(It.IsAny<AppContainerEntry>()));
@@ -140,15 +129,13 @@ public class AppContainerEditServiceTests
         _containerService.Setup(s => s.GrantComAccess(It.IsAny<string>(), "{CLSID-FAIL}"))
             .Throws(new UnauthorizedAccessException("denied"));
 
-        var result = CreateHandler().CreateNewContainer(
-            "rfn_test", "Test", isEphemeral: false,
-            [], loopback: false, clsids,
-            out _, out _, out var comErrors);
+        var result = await CreateHandler().CreateNewContainer(
+            "rfn_test", "Test", isEphemeral: false, [], loopback: false, clsids);
 
-        Assert.NotNull(result);
-        Assert.Contains("{CLSID-OK}", result.ComAccessClsids!);
-        Assert.DoesNotContain("{CLSID-FAIL}", result.ComAccessClsids!);
-        Assert.Single(comErrors);
+        Assert.NotNull(result.Entry);
+        Assert.Contains("{CLSID-OK}", result.Entry!.ComAccessClsids!);
+        Assert.DoesNotContain("{CLSID-FAIL}", result.Entry.ComAccessClsids!);
+        Assert.Single(result.ComErrors);
     }
 
     // ── ApplyEditChanges ────────────────────────────────────────────────────
@@ -163,23 +150,23 @@ public class AppContainerEditServiceTests
     };
 
     [Fact]
-    public void ApplyEditChanges_DisplayNameUpdated()
+    public async Task ApplyEditChanges_DisplayNameUpdated()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         var existing = MakeExisting();
 
-        CreateHandler().ApplyEditChanges(existing, "New Name", existing.Capabilities!, false, [], false);
+        await CreateHandler().ApplyEditChanges(existing, "New Name", existing.Capabilities!, false, [], false);
 
         Assert.Equal("New Name", existing.DisplayName);
     }
 
     [Fact]
-    public void ApplyEditChanges_CapabilitiesChanged_ResultIndicatesChange()
+    public async Task ApplyEditChanges_CapabilitiesChanged_ResultIndicatesChange()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         var existing = MakeExisting();
 
-        var result = CreateHandler().ApplyEditChanges(
+        var result = await CreateHandler().ApplyEditChanges(
             existing, existing.DisplayName,
             ["S-1-15-3-1", "S-1-15-3-2"],
             false, [], false);
@@ -188,7 +175,7 @@ public class AppContainerEditServiceTests
     }
 
     [Fact]
-    public void ApplyEditChanges_CapabilitiesUnchanged_ResultIndicatesNoChange()
+    public async Task ApplyEditChanges_CapabilitiesUnchanged_ResultIndicatesNoChange()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         var existing = new AppContainerEntry
@@ -200,7 +187,7 @@ public class AppContainerEditServiceTests
         };
 
         // Same set in reverse order — comparison is order-insensitive, must report no change
-        var result = CreateHandler().ApplyEditChanges(
+        var result = await CreateHandler().ApplyEditChanges(
             existing, existing.DisplayName,
             ["S-1-15-3-2", "S-1-15-3-1"],
             false, [], false);
@@ -209,26 +196,26 @@ public class AppContainerEditServiceTests
     }
 
     [Fact]
-    public void ApplyEditChanges_LoopbackToggleSucceeds_EnableLoopbackUpdated()
+    public async Task ApplyEditChanges_LoopbackToggleSucceeds_EnableLoopbackUpdated()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
-        _containerService.Setup(s => s.SetLoopbackExemption("rfn_test", true)).Returns(true);
+        _containerService.Setup(s => s.SetLoopbackExemption("rfn_test", true)).ReturnsAsync(true);
         var existing = MakeExisting();
 
-        var result = CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, true, [], false);
+        var result = await CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, true, [], false);
 
         Assert.False(result.LoopbackFailed);
         Assert.True(existing.EnableLoopback);
     }
 
     [Fact]
-    public void ApplyEditChanges_LoopbackToggleFails_LoopbackFailedAndValuePreserved()
+    public async Task ApplyEditChanges_LoopbackToggleFails_LoopbackFailedAndValuePreserved()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
-        _containerService.Setup(s => s.SetLoopbackExemption("rfn_test", true)).Returns(false);
+        _containerService.Setup(s => s.SetLoopbackExemption("rfn_test", true)).ReturnsAsync(false);
         var existing = MakeExisting(); // EnableLoopback = false
 
-        var result = CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, true, [], false);
+        var result = await CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, true, [], false);
 
         Assert.True(result.LoopbackFailed);
         Assert.Equal("enable", result.LoopbackFailAction);
@@ -236,13 +223,13 @@ public class AppContainerEditServiceTests
     }
 
     [Fact]
-    public void ApplyEditChanges_ComAdd_NewClsidGrantedAndStoredInEntry()
+    public async Task ApplyEditChanges_ComAdd_NewClsidGrantedAndStoredInEntry()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         _containerService.Setup(s => s.GrantComAccess(It.IsAny<string>(), "{CLSID-NEW}"));
         var existing = MakeExisting();
 
-        var result = CreateHandler().ApplyEditChanges(
+        var result = await CreateHandler().ApplyEditChanges(
             existing, existing.DisplayName, existing.Capabilities!, false,
             ["{CLSID-NEW}"], false);
 
@@ -252,14 +239,14 @@ public class AppContainerEditServiceTests
     }
 
     [Fact]
-    public void ApplyEditChanges_ComRemove_RevokedClsidRemovedFromEntry()
+    public async Task ApplyEditChanges_ComRemove_RevokedClsidRemovedFromEntry()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         _containerService.Setup(s => s.RevokeComAccess(It.IsAny<string>(), "{CLSID-OLD}"));
         var existing = MakeExisting();
         existing.ComAccessClsids = ["{CLSID-OLD}"];
 
-        var result = CreateHandler().ApplyEditChanges(
+        var result = await CreateHandler().ApplyEditChanges(
             existing, existing.DisplayName, existing.Capabilities!, false,
             [], false);
 
@@ -268,7 +255,7 @@ public class AppContainerEditServiceTests
     }
 
     [Fact]
-    public void ApplyEditChanges_ComRevokeFails_ErrorReportedAndClsidKeptInEntry()
+    public async Task ApplyEditChanges_ComRevokeFails_ErrorReportedAndClsidKeptInEntry()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         _containerService.Setup(s => s.RevokeComAccess(It.IsAny<string>(), "{CLSID-OLD}"))
@@ -276,7 +263,7 @@ public class AppContainerEditServiceTests
         var existing = MakeExisting();
         existing.ComAccessClsids = ["{CLSID-OLD}"];
 
-        var result = CreateHandler().ApplyEditChanges(
+        var result = await CreateHandler().ApplyEditChanges(
             existing, existing.DisplayName, existing.Capabilities!, false,
             [], false);
 
@@ -288,13 +275,13 @@ public class AppContainerEditServiceTests
     // ── ApplyEditChanges: Ephemeral toggle ──────────────────────────────────
 
     [Fact]
-    public void ApplyEditChanges_EphemeralToggledOn_SetsIsEphemeralAndDeleteAfterUtc()
+    public async Task ApplyEditChanges_EphemeralToggledOn_SetsIsEphemeralAndDeleteAfterUtc()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         var existing = MakeExisting(); // IsEphemeral = false by default
         var before = DateTime.UtcNow;
 
-        CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, false, [], isEphemeral: true);
+        await CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, false, [], isEphemeral: true);
 
         var after = DateTime.UtcNow;
         Assert.True(existing.IsEphemeral);
@@ -303,21 +290,21 @@ public class AppContainerEditServiceTests
     }
 
     [Fact]
-    public void ApplyEditChanges_EphemeralToggledOff_ClearsIsEphemeralAndDeleteAfterUtc()
+    public async Task ApplyEditChanges_EphemeralToggledOff_ClearsIsEphemeralAndDeleteAfterUtc()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         var existing = MakeExisting();
         existing.IsEphemeral = true;
         existing.DeleteAfterUtc = DateTime.UtcNow.AddHours(12);
 
-        CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, false, [], isEphemeral: false);
+        await CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, false, [], isEphemeral: false);
 
         Assert.False(existing.IsEphemeral);
         Assert.Null(existing.DeleteAfterUtc);
     }
 
     [Fact]
-    public void ApplyEditChanges_EphemeralUnchanged_DoesNotModifyDeleteAfterUtc()
+    public async Task ApplyEditChanges_EphemeralUnchanged_DoesNotModifyDeleteAfterUtc()
     {
         _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
         var originalExpiry = DateTime.UtcNow.AddHours(12);
@@ -325,9 +312,53 @@ public class AppContainerEditServiceTests
         existing.IsEphemeral = true;
         existing.DeleteAfterUtc = originalExpiry;
 
-        CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, false, [], isEphemeral: true);
+        await CreateHandler().ApplyEditChanges(existing, existing.DisplayName, existing.Capabilities!, false, [], isEphemeral: true);
 
         Assert.True(existing.IsEphemeral);
         Assert.Equal(originalExpiry, existing.DeleteAfterUtc); // not reset to +24h
+    }
+
+    // ── F-83: Non-empty capabilities stored in entry ─────────────────────────────
+
+    [Fact]
+    public async Task CreateNewContainer_NonEmptyCapabilities_StoredInEntry()
+    {
+        // Arrange: create with a non-empty capabilities list
+        var capabilities = new List<string> { "S-1-15-3-1", "S-1-15-3-2" };
+        _containerService.Setup(s => s.CreateProfile(It.IsAny<AppContainerEntry>()));
+        _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
+
+        // Act
+        var result = await CreateHandler().CreateNewContainer(
+            "rfn_test", "Test", isEphemeral: false, capabilities, loopback: false, []);
+
+        // Assert: capabilities correctly stored in entry
+        Assert.NotNull(result.Entry);
+        Assert.NotNull(result.Entry!.Capabilities);
+        Assert.Equal(2, result.Entry.Capabilities!.Count);
+        Assert.Contains("S-1-15-3-1", result.Entry.Capabilities);
+        Assert.Contains("S-1-15-3-2", result.Entry.Capabilities);
+    }
+
+    [Fact]
+    public async Task ApplyEditChanges_NonEmptyCapabilities_StoredInEntry()
+    {
+        // Arrange: existing entry has one capability; update to two capabilities
+        _containerService.Setup(s => s.GetSid(It.IsAny<string>())).Returns("S-1-15-2-1");
+        var existing = MakeExisting(); // existing has ["S-1-15-3-1"]
+
+        var newCapabilities = new List<string> { "S-1-15-3-1", "S-1-15-3-2", "S-1-15-3-3" };
+
+        // Act
+        var result = await CreateHandler().ApplyEditChanges(
+            existing, existing.DisplayName, newCapabilities, false, [], false);
+
+        // Assert: capabilities updated and stored correctly
+        Assert.NotNull(existing.Capabilities);
+        Assert.Equal(3, existing.Capabilities!.Count);
+        Assert.Contains("S-1-15-3-1", existing.Capabilities);
+        Assert.Contains("S-1-15-3-2", existing.Capabilities);
+        Assert.Contains("S-1-15-3-3", existing.Capabilities);
+        Assert.True(result.CapabilitiesChanged);
     }
 }

@@ -1,5 +1,4 @@
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
 namespace RunFence.Launch.Tokens;
@@ -10,7 +9,7 @@ namespace RunFence.Launch.Tokens;
 /// All fields on <see cref="AccountLaunchIdentity"/> must be fully resolved before calling:
 /// <c>Credentials</c> and <c>PrivilegeLevel</c> must be non-null.
 /// </summary>
-public class AccountProcessLauncher(ILoggingService log, CreateProcessLauncherHelper createProcessLauncherHelper, IInteractiveLogonHelper logonHelper, LogonTokenProvider logonTokenProvider) : IAccountProcessLauncher
+public class AccountProcessLauncher(ILoggingService log, ICreateProcessLauncherHelper createProcessLauncherHelper, IInteractiveLogonHelper logonHelper, ILogonTokenProvider logonTokenProvider) : IAccountProcessLauncher
 {
     public ProcessInfo Launch(ProcessLaunchTarget target, AccountLaunchIdentity identity)
     {

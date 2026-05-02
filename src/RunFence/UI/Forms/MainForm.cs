@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using Microsoft.Win32;
 using RunFence.Account.UI.Forms;
 using RunFence.Apps.UI;
 using RunFence.Apps.UI.Forms;
@@ -10,14 +9,14 @@ using RunFence.Infrastructure;
 using RunFence.Licensing.UI.Forms;
 using RunFence.Persistence.UI;
 using RunFence.TrayIcon;
-using RunFence.UI;
-using RunFence.Wizard.UI;
 
 namespace RunFence.UI.Forms;
 
-public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisibility
+public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisibility,
+    IMainFormDataRefreshTarget, IMainFormLockTarget, IStartupFormLifetime
 {
     private static readonly int WmTaskbarCreated = (int)WindowNative.RegisterWindowMessage("TaskbarCreated");
+    private const int WM_ACTIVATEAPP = 0x001C;
     private readonly ApplicationsPanel _appsPanel;
     private readonly AccountsPanel _accountsPanel;
     private readonly GroupsPanel _groupsPanel;
@@ -28,15 +27,17 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     private readonly MainFormStartupOrchestrator _startupHandler;
     private readonly MainFormTrayHandler _trayHandler;
+    private readonly MainFormWindowRequestHandler _windowRequestHandler;
+    private readonly MainFormBackgroundAutoLockCoordinator _autoLockCoordinator;
     private readonly ApplicationState _applicationState;
-    private readonly MainFormFirstRunExporter _firstRunExporter;
-    private readonly IInteractiveUserDesktopProvider _interactiveUserDesktopProvider;
 
     private bool _suppressInitialVisibility;
     private bool _wasStartedInBackground;
 
     public event Action<ProtectedBuffer, ProtectedBuffer>? PinDerivedKeyReplaced;
 
+    // Reviewed: 12 deps are justified — each is an already-extracted independent handler with
+    // no overlap in responsibility. MainForm is the composition root for the main window.
     public MainForm(
         SessionContext session,
         ApplicationState applicationState,
@@ -47,10 +48,9 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         OptionsPanel optionsPanel,
         MainFormStartupOrchestrator startupHandler,
         MainFormTrayHandler trayHandler,
-        WizardLauncher wizardLauncher,
-        AboutPanel aboutPanel,
-        MainFormFirstRunExporter firstRunExporter,
-        IInteractiveUserDesktopProvider interactiveUserDesktopProvider)
+        MainFormWindowRequestHandler windowRequestHandler,
+        MainFormBackgroundAutoLockCoordinator autoLockCoordinator,
+        AboutPanel aboutPanel)
     {
         _session = session;
         _applicationState = applicationState;
@@ -61,8 +61,8 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _optionsPanel = optionsPanel;
         _startupHandler = startupHandler;
         _trayHandler = trayHandler;
-        _firstRunExporter = firstRunExporter;
-        _interactiveUserDesktopProvider = interactiveUserDesktopProvider;
+        _windowRequestHandler = windowRequestHandler;
+        _autoLockCoordinator = autoLockCoordinator;
 
         _trayHandler.LicenseChangedRefreshNeeded += () => _optionsPanel.SetData(_session);
 
@@ -74,23 +74,24 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _appsPanel.DataChanged += HandleDataChanged;
         _appsPanel.EnforcementRequested += OnEnforcementRequested;
         _appsPanel.AccountNavigationRequested += OnNavigateToAccount;
-        _appsPanel.WizardRequested += async owner => await wizardLauncher.OpenWizardAsync(owner);
-        _appsPanel.WizardButtonEnabled = true;
-        wizardLauncher.WizardCompleted += HandleDataChanged;
         _applicationsTab.Controls.Add(_appsPanel);
+        _appsPanel.Dock = DockStyle.Fill;
 
         _accountsPanel.DataChanged += HandleDataChanged;
         _accountsPanel.AppNavigationRequested += OnNavigateToApp;
         _accountsPanel.NewAppRequested += OnNewAppForAccount;
         _accountsTab.Controls.Add(_accountsPanel);
+        _accountsPanel.Dock = DockStyle.Fill;
 
         _groupsPanel.GroupsChanged += OnGroupsChanged;
         _groupsTab.Controls.Add(_groupsPanel);
+        _groupsPanel.Dock = DockStyle.Fill;
 
         _optionsPanel.SettingsChanged += OnOptionsSettingsChanged;
         _optionsPanel.PinDerivedKeyChanged += OnPinDerivedKeyChanged;
         _optionsPanel.DataChanged += HandleDataChanged;
         _optionsPanel.CleanupRequested += OnCleanupRequested;
+        _optionsPanel.MigrationExitRequested += () => Application.Exit();
         _optionsPanel.ConfigLoadRequested += path =>
         {
             var (success, errorMessage) = _configHandler.LoadApps(path);
@@ -99,8 +100,10 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         };
         _optionsPanel.ConfigUnloadRequested += path => _configHandler.UnloadApps(path);
         _optionsTab.Controls.Add(_optionsPanel);
+        _optionsPanel.Dock = DockStyle.Fill;
 
         _aboutTab.Controls.Add(aboutPanel);
+        aboutPanel.Dock = DockStyle.Fill;
 
         _tabControl.SelectedIndexChanged += (_, _) => ScheduleAvailabilityCheck();
 
@@ -114,14 +117,10 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         };
         Resize += OnResize;
 
-        // Re-detect the interactive desktop user when a fast user switch occurs so that
-        // the cached interactive user SID stays up to date for the new active session.
-        SystemEvents.SessionSwitch += OnSessionSwitch;
-
         SetData();
 
         if (_session.Database.Apps.Count == 0)
-            _tabControl.SelectedIndex = 1;
+            _tabControl.SelectedTab = _accountsTab;
     }
 
     // IMainFormVisibility explicit implementations
@@ -132,8 +131,6 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     void IMainFormVisibility.BeginInvokeOnUiThread(Action action) => BeginInvoke(action);
     void IMainFormVisibility.InvokeOnUiThread(Action action) => Invoke(action);
-
-    public IConfigManagementContext ConfigManagement => _configHandler;
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool SuppressInitialVisibility
@@ -147,7 +144,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     public void SetStartupComplete()
     {
-        _trayHandler.SetStartupComplete();
+        _windowRequestHandler.SetStartupComplete();
     }
 
     protected override void SetVisibleCore(bool value)
@@ -164,12 +161,14 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         base.SetVisibleCore(value);
     }
 
-    public Task TryShowWindowAsync() => _trayHandler.TryShowWindowAsync();
+    public Task TryShowWindowAsync() => _windowRequestHandler.TryShowWindowAsync();
+    public Task<bool> HandleElevatedUnlockRequestAsync() => _windowRequestHandler.HandleElevatedUnlockRequestAsync();
 
     public void ConfigureIdleMonitor() => _trayHandler.ConfigureIdleMonitor();
 
-    public void ShowWindowNormal() => _trayHandler.ShowAndActivate();
-    public void ShowWindowUnlocked() => _trayHandler.ShowAndActivateForUnlock();
+    public void ShowWindowNormal() => _windowRequestHandler.ShowAndActivate();
+    public void ShowWindowUnlocked() => _windowRequestHandler.ShowAndActivateForUnlock();
+    public void HandleWindowlessUnlock() => _autoLockCoordinator.HandleWindowlessUnlock();
 
     public bool ConfirmWindowsHelloUnavailableFallback() =>
         MessageBox.Show(this,
@@ -197,11 +196,17 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         WindowForegroundHelper.ForceToForeground(Handle);
         BringToFront();
         _trayHandler.RefreshDiscovery();
-        BeginInvoke(async () =>
+        BeginInvoke(async void () =>
         {
-            if (!_wasStartedInBackground)
-                await _firstRunExporter.PromptExportSettingsIfNeededAsync(this);
-            await _startupHandler.RunStartupChecksAsync(this, _wasStartedInBackground, _trayHandler.ShowNagIfNeeded);
+            try
+            {
+                await _startupHandler.RunStartupChecksAsync(this, _wasStartedInBackground, _windowRequestHandler.ShowNagIfNeeded);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Startup checks failed:\n{ex.Message}", "RunFence — Startup Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         });
     }
 
@@ -213,31 +218,27 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _applicationState.IsShuttingDown = true;
         foreach (var path in _configHandler.GetLoadedConfigPaths().ToList())
             _configHandler.UnloadApps(path);
-        SystemEvents.SessionSwitch -= OnSessionSwitch;
         Application.RemoveMessageFilter(this);
         _trayHandler.HandleFormClosing();
-    }
-
-    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
-    {
-        if (e.Reason is not (SessionSwitchReason.ConsoleConnect
-            or SessionSwitchReason.ConsoleDisconnect
-            or SessionSwitchReason.SessionLogon
-            or SessionSwitchReason.SessionLogoff
-            or SessionSwitchReason.RemoteConnect
-            or SessionSwitchReason.RemoteDisconnect))
-            return;
-
-        SidResolutionHelper.ReinitializeInteractiveUserSid();
-        _interactiveUserDesktopProvider.InvalidateCache();
+        _configHandler.TerminateEmptyJobKeepers();
     }
 
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WmTaskbarCreated)
             _trayHandler.RestoreIconVisibility();
+        if (m.Msg == WM_ACTIVATEAPP)
+        {
+            if (m.WParam == IntPtr.Zero)
+                _autoLockCoordinator.HandleAppDeactivated();
+            else
+                _autoLockCoordinator.HandleAppActivated();
+        }
         base.WndProc(ref m);
     }
+
+    bool IMainFormVisibility.IsModalActive => _applicationState.IsModalOpen;
+    bool IMainFormVisibility.HasOtherWindowsOpen => Application.OpenForms.OfType<Form>().Any(f => f != this && f.Visible);
 
     public bool PreFilterMessage(ref Message m)
     {
@@ -288,7 +289,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     private void OnNavigateToAccount(string accountSid)
     {
-        _tabControl.SelectedIndex = 1;
+        _tabControl.SelectedTab = _accountsTab;
         _accountsPanel.SelectBySid(accountSid);
     }
 
@@ -299,7 +300,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     private void OnNewAppForAccount(string accountSid)
     {
-        _tabControl.SelectedIndex = 0;
+        _tabControl.SelectedTab = _applicationsTab;
         _appsPanel.OpenAddDialogForAccount(accountSid);
     }
 
@@ -318,17 +319,17 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     private void OnResize(object? sender, EventArgs e)
     {
-        _trayHandler.HandleResize();
+        _autoLockCoordinator.HandleResize();
     }
 
     private void RefreshActivePanel()
     {
         if (_trayHandler.LockManager.IsLocked)
             return;
-        DataPanel? panel = _tabControl.SelectedIndex switch
+        DataPanel? panel = _tabControl.SelectedTab switch
         {
-            1 => _accountsPanel,
-            2 => _groupsPanel,
+            var t when t == _accountsTab => _accountsPanel,
+            var t when t == _groupsTab => _groupsPanel,
             _ => null
         };
         panel?.RefreshOnActivation();
@@ -361,6 +362,8 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     private void ScheduleAvailabilityCheck()
         => _configHandler.ScheduleAvailabilityCheck();
+
+    public void ShowTrayBalloon(string text) => _trayHandler.ShowBalloonTip(text);
 
     // --- Event handler methods for AppLifecycleStarter wiring ---
     public void UpdateTray() => _trayHandler.UpdateTray();

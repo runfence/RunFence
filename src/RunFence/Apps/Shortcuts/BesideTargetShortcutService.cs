@@ -1,13 +1,21 @@
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Launching.Resolution;
 
 namespace RunFence.Apps.Shortcuts;
 
-public class BesideTargetShortcutService(ILoggingService log, IShortcutProtectionService protection, IShortcutComHelper shortcutHelper) : IBesideTargetShortcutService
+internal class BesideTargetShortcutService(
+    ILoggingService log,
+    IShortcutProtectionService protection,
+    IShortcutComHelper shortcutHelper,
+    IExecutableKindService executableKindService)
+    : IBesideTargetShortcutService
 {
     public void CreateBesideTargetShortcut(AppEntry app, string launcherPath, string iconPath, string username)
     {
         if (app.IsUrlScheme)
+            return;
+        if (executableKindService.IsUwpExeFile(app.ExePath))
             return;
 
         var shortcutName = GetBesideTargetShortcutName(app, username);
@@ -87,7 +95,7 @@ public class BesideTargetShortcutService(ILoggingService log, IShortcutProtectio
                             string? target = sc.TargetPath;
                             string? args = sc.Arguments;
                             return target != null &&
-                                   target.EndsWith(Constants.LauncherExeName, StringComparison.OrdinalIgnoreCase) &&
+                                   target.EndsWith(PathConstants.LauncherExeName, StringComparison.OrdinalIgnoreCase) &&
                                    args != null &&
                                    (args == app.Id || args.StartsWith(app.Id + " "));
                         });
@@ -153,14 +161,14 @@ public class BesideTargetShortcutService(ILoggingService log, IShortcutProtectio
         }
     }
 
-    public static string GetBesideTargetShortcutName(AppEntry app, string username)
+    internal static string GetBesideTargetShortcutName(AppEntry app, string username)
     {
         var baseName = GetTargetBaseName(app);
         var sanitizedUsername = ShortcutPathHelper.SanitizeFileName(username);
         return $"{baseName}-as-{sanitizedUsername}.lnk";
     }
 
-    public static List<string> GetBesideTargetShortcutPaths(AppEntry app, string shortcutName)
+    internal static List<string> GetBesideTargetShortcutPaths(AppEntry app, string shortcutName)
     {
         var dirs = GetBesideTargetDirectories(app);
         return dirs.Select(dir => Path.Combine(dir, shortcutName)).ToList();
@@ -215,11 +223,10 @@ public class BesideTargetShortcutService(ILoggingService log, IShortcutProtectio
             string? workingDirectory = sc.WorkingDirectory;
             string? icon = sc.IconLocation;
 
-            if (target == null || !ShortcutPathHelper.IsSamePath(target, launcherPath))
+            if (target == null || !PathHelper.IsSamePath(target, launcherPath))
                 return false;
-            if (!ShortcutPathHelper.IsSamePath(
-                    workingDirectory ?? "",
-                    ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath)))
+            string right = ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath);
+            if (!PathHelper.IsSamePath(workingDirectory ?? "", right))
                 return false;
             if (args != app.Id)
                 return false;

@@ -1,6 +1,4 @@
-using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 using RunFence.PrefTrans.UI.Forms;
 using RunFence.UI.Forms;
 
@@ -18,21 +16,11 @@ public class AccountImportUIHandler(IAccountImportHandler importHandler)
         _importButton = importButton;
     }
 
-    public async Task HandleImportClickAsync(
-        AppDatabase db,
-        CredentialStore store,
-        ProtectedBuffer key,
-        Form? parent,
-        Control owner,
-        OperationGuard operationGuard,
-        Action<string> setStatus,
-        Action<bool> setControlsEnabled,
-        Action updateButtonState,
-        Action<string> savePrefsPath)
+    public async Task HandleImportClickAsync(IAccountsPanelContext context)
     {
         if (!_importColumnVisible)
         {
-            SetImportMode(true, updateButtonState);
+            SetImportMode(true, context.UpdateButtonState);
 
             if (_grid.SelectedRows.Count > 0)
             {
@@ -53,32 +41,22 @@ public class AccountImportUIHandler(IAccountImportHandler importHandler)
 
         if (selectedAccounts.Count == 0)
         {
-            SetImportMode(false, updateButtonState);
+            SetImportMode(false, context.UpdateButtonState);
             return;
         }
 
-        await ImportToAccountsAsync(selectedAccounts, db, store, key, parent, owner, operationGuard, setStatus, setControlsEnabled, updateButtonState, savePrefsPath);
+        await ImportToAccountsAsync(selectedAccounts, context);
 
-        SetImportMode(false, updateButtonState);
+        SetImportMode(false, context.UpdateButtonState);
         foreach (DataGridViewRow row in _grid.Rows)
             row.Cells["Import"].Value = false;
     }
 
-    private async Task ImportToAccountsAsync(
-        List<AccountRow> accounts,
-        AppDatabase db,
-        CredentialStore store,
-        ProtectedBuffer key,
-        Form? parent,
-        Control owner,
-        OperationGuard operationGuard,
-        Action<string> setStatus,
-        Action<bool> setControlsEnabled,
-        Action updateButtonState,
-        Action<string> savePrefsPath)
+    private async Task ImportToAccountsAsync(List<AccountRow> accounts, IAccountsPanelContext context)
     {
-        setControlsEnabled(false);
-        operationGuard.Begin(owner);
+        var owner = context.OwnerControl;
+        context.SetControlsEnabled(false);
+        context.OperationGuard.Begin(owner);
 
         try
         {
@@ -87,39 +65,39 @@ public class AccountImportUIHandler(IAccountImportHandler importHandler)
                     a.Credential ?? new CredentialEntry { Sid = a.Sid }, a.Username))
                 .ToList();
 
-            string? selectedFile;
+            string selectedFile;
             using (var dlg = new OpenFileDialog())
             {
-                DesktopSettingsImportDialog.Setup(dlg, db.LastPrefsFilePath);
-                if (dlg.ShowDialog(parent) != DialogResult.OK)
+                DesktopSettingsImportDialog.Setup(dlg, context.Database.LastPrefsFilePath);
+                if (dlg.ShowDialog(owner.FindForm()) != DialogResult.OK)
                     return;
                 selectedFile = dlg.FileName;
             }
 
+            var parent = owner.FindForm();
             var logForm = new ImportProgressForm(parent); // intentionally no using — form closes/disposes itself when user clicks OK
+            if (parent != null)
+                logForm.Show(parent);
+            else
+                logForm.Show();
 
-            var settingsPath = await importHandler.RunImportAsync(
-                importAccounts, store, key,
-                () => selectedFile,
+            var sink = new ImportProgressSink(selectedFile,
                 logForm.AppendLog,
                 logForm.EnableOkButton,
-                text =>
-                {
-                    if (!owner.IsDisposed)
-                        setStatus(text);
-                },
-                db);
+                text => { if (!owner.IsDisposed) context.UpdateStatus(text); });
+
+            var settingsPath = await importHandler.RunImportAsync(importAccounts, context.CredentialStore, context.PinDerivedKey, sink, context.Database);
 
             if (settingsPath != null && !owner.IsDisposed)
-                savePrefsPath(settingsPath);
+                context.SaveLastPrefsPath(settingsPath);
         }
         finally
         {
-            operationGuard.End(owner);
+            context.OperationGuard.End(owner);
             if (!owner.IsDisposed)
             {
-                setControlsEnabled(true);
-                updateButtonState();
+                context.SetControlsEnabled(true);
+                context.UpdateButtonState();
             }
         }
     }

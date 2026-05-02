@@ -13,7 +13,7 @@ public partial class SidMigrationInAppStep : UserControl
     private readonly SessionContext _session;
     private readonly List<SidMigrationMapping> _filteredMappings;
     private readonly List<string> _filteredDeletes;
-    private readonly ISidResolver _sidResolver;
+    private readonly IProfilePathResolver _profilePathResolver;
 
     /// <summary>Raised when the in-app migration is successfully applied.</summary>
     public event EventHandler? MigrationApplied;
@@ -23,13 +23,13 @@ public partial class SidMigrationInAppStep : UserControl
         SessionContext session,
         List<SidMigrationMapping> filteredMappings,
         List<string> filteredDeletes,
-        ISidResolver sidResolver)
+        IProfilePathResolver profilePathResolver)
     {
         _inAppMigrationHandler = inAppMigrationHandler;
         _session = session;
         _filteredMappings = filteredMappings;
         _filteredDeletes = filteredDeletes;
-        _sidResolver = sidResolver;
+        _profilePathResolver = profilePathResolver;
 
         InitializeComponent();
         PopulateList();
@@ -57,7 +57,7 @@ public partial class SidMigrationInAppStep : UserControl
             _listBox.Items.Add($"[Migrate] {m.Username}: {m.OldSid} \u2192 {m.NewSid}");
         foreach (var sid in _filteredDeletes)
         {
-            var name = _sidResolver.TryResolveNameFromRegistry(sid) ?? sid;
+            var name = _profilePathResolver.TryResolveNameFromRegistry(sid) ?? sid;
             _listBox.Items.Add($"[Delete]  {name}: {sid}");
         }
 

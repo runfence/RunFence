@@ -49,18 +49,18 @@ public class IpcLaunchHandlerTests
         var idleMonitor = new Mock<IIdleMonitorService>();
         var stopwatch = new Mock<IStopwatchProvider>();
 
-        // These deps are never reached when authorization fails — authorization check is first
+        // These deps are never reached when authorization fails - authorization check is first
         var runAsFlowHandler = new RunAsFlowHandler(
             appState.Object,
             appLock.Object,
             uiInvoker.Object,
             log,
-            null!,    // RunAsDialogPresenter — not reached
-            null!,    // RunAsResultProcessor — not reached
+            null!,    // RunAsDialogPresenter - not reached
+            null!,    // RunAsResultProcessor - not reached
             new RunAsDosProtection(stopwatch.Object),
             authorizer,
             idleMonitor.Object,
-            null!);   // RunAsShortcutHelper — not reached
+            null!);   // ShortcutTargetResolver - not reached
 
         var ipcUiInvoker = new IpcUiInvoker(uiInvoker.Object, appState.Object);
 
@@ -68,11 +68,12 @@ public class IpcLaunchHandlerTests
             appState.Object,
             appLock.Object,
             ipcUiInvoker,
-            null!,    // IAppEntryLauncher — not reached on RunAs path
+            null!,    // IAppEntryLauncher - not reached on RunAs path
             authorizer,
-            null!,    // ISidNameCacheService — not reached on RunAs path
+            null!,    // ISidNameCacheService - not reached on RunAs path
             log,
             idleMonitor.Object,
+            null!,    // ITrayBalloonService - not reached on RunAs path
             runAsFlowHandler);
 
         // A path-based AppId triggers the RunAs flow (contains path separator)

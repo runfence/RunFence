@@ -1,10 +1,12 @@
 using Autofac;
 using Autofac.Extras.Ordering;
+using RunFence.Core;
 using RunFence.Firewall;
 using RunFence.Firewall.UI;
 using RunFence.Firewall.UI.Forms;
 using RunFence.Firewall.Wfp;
 using RunFence.Infrastructure;
+using RunFence.Startup.NonElevatedMocks;
 
 namespace RunFence.Startup.Modules;
 
@@ -32,6 +34,14 @@ public class FirewallModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<FirewallDomainBatchResolver>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<FirewallDomainDirtyTracker>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<FirewallResolvedDomainCache>()
             .AsSelf()
             .SingleInstance();
@@ -41,15 +51,15 @@ public class FirewallModule : Module
             .SingleInstance();
 
         builder.RegisterType<FirewallComRuleApplier>()
-            .AsSelf()
+            .As<IFirewallComRuleApplier>()
             .SingleInstance();
 
         builder.RegisterType<FirewallWfpRuleApplier>()
-            .AsSelf()
+            .As<IFirewallWfpRuleApplier>()
             .SingleInstance();
 
         builder.RegisterType<FirewallAccountRuleApplier>()
-            .AsSelf()
+            .As<IFirewallAccountRuleApplier>()
             .As<IFirewallDnsRefreshTarget>()
             .SingleInstance();
 
@@ -96,7 +106,11 @@ public class FirewallModule : Module
             .OrderBy(2)
             .SingleInstance();
 
-        builder.RegisterType<WfpEphemeralPortScanner>()
+        builder.Register(c => new WfpEphemeralPortScanner(
+                c.Resolve<IWfpLocalhostBlocker>(),
+                c.Resolve<UiThreadDatabaseAccessor>(),
+                c.Resolve<ILoggingService>(),
+                startTimer: true))
             .As<IBackgroundService>()
             .OrderBy(3)
             .SingleInstance();
@@ -109,12 +123,31 @@ public class FirewallModule : Module
             .As<IDnsResolver>()
             .SingleInstance();
 
+        builder.RegisterType<DynamicPortRangeChecker>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallApplyHelper>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallAllowlistValidator>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallPortValidator>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallDomainResolver>().AsSelf().SingleInstance();
         builder.RegisterType<BlockedConnectionAggregator>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallAllowlistImportExportService>().AsSelf().SingleInstance();
+        builder.RegisterType<BlockedConnectionsFlowHelper>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallDialogFactory>().AsSelf().SingleInstance();
+
+        builder.RegisterType<FirewallSettingsService>()
+            .As<IFirewallSettingsService>()
+            .SingleInstance();
+
+        builder.RegisterType<AccountFirewallToggleService>()
+            .As<IAccountFirewallToggle>()
+            .SingleInstance();
+
+        if (DebugHelper.UseAdminOperationMocks)
+        {
+            builder.RegisterDecorator<NoOpFirewallRuleManager, IFirewallRuleManager>();
+            builder.RegisterDecorator<NoOpWfpLocalhostBlocker, IWfpLocalhostBlocker>();
+            builder.RegisterDecorator<NoOpWfpIcmpBlocker, IWfpIcmpBlocker>();
+            builder.RegisterDecorator<NoOpWfpGlobalIcmpBlocker, IWfpGlobalIcmpBlocker>();
+            builder.RegisterDecorator<NoOpBlockedConnectionReader, IBlockedConnectionReader>();
+        }
     }
 }

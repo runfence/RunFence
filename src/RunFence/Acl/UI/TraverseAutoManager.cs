@@ -9,7 +9,11 @@ namespace RunFence.Acl.UI;
 /// Manages automatic traverse-entry creation and removal in response to allow-grant
 /// add/remove/mode-switch operations in the ACL Manager.
 /// </summary>
-public class TraverseAutoManager(IAclPermissionService aclPermission, IDatabaseProvider databaseProvider)
+public class TraverseAutoManager(
+    IAclPermissionService aclPermission,
+    IDatabaseProvider databaseProvider,
+    GrantTraversePathResolver traversePathResolver,
+    IFileSystemPathInfo pathInfo)
 {
     private AclManagerPendingChanges _pending = null!;
     private string _sid = null!;
@@ -27,8 +31,8 @@ public class TraverseAutoManager(IAclPermissionService aclPermission, IDatabaseP
     /// the grant path itself when it is a directory (folder grant), or its parent directory
     /// otherwise (file grant). Returns null when the parent directory cannot be determined.
     /// </summary>
-    public static string? GetTraversePath(string grantPath)
-        => Directory.Exists(grantPath) ? grantPath : Path.GetDirectoryName(grantPath);
+    public string? GetTraversePath(string grantPath)
+        => traversePathResolver.GetTraversePath(grantPath);
 
     /// <summary>
     /// Auto-adds a traverse entry for <paramref name="traversePath"/> to PendingTraverseAdds
@@ -48,12 +52,12 @@ public class TraverseAutoManager(IAclPermissionService aclPermission, IDatabaseP
         }
 
         // Already in DB as traverse-only? Already covered, nothing to add.
-        if (HasExistingTraverseEntry(traversePath))
+        if (FindExistingTraverseEntry(traversePath) != null)
             return;
 
 
         // Skip auto-add when the SID already has effective traverse rights on this path.
-        if (TraverseRightsHelper.HasEffectiveTraverse(traversePath, _sid, _groupSids, aclPermission))
+        if (TraverseRightsHelper.HasEffectiveTraverseForGrantSid(traversePath, _sid, _groupSids, aclPermission, pathInfo))
             return;
 
         _pending.PendingTraverseAdds[traversePath] = new GrantedPathEntry
@@ -77,11 +81,9 @@ public class TraverseAutoManager(IAclPermissionService aclPermission, IDatabaseP
                 _pending.PendingTraverseAdds.Remove(traversePath);
                 _pending.PendingTraverseConfigMoves.Remove(traversePath);
             }
-            else if (HasExistingTraverseEntry(traversePath))
+            else
             {
-                var traverseEntry = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants
-                    .FirstOrDefault(e => e.IsTraverseOnly &&
-                                         string.Equals(e.Path, traversePath, StringComparison.OrdinalIgnoreCase));
+                var traverseEntry = FindExistingTraverseEntry(traversePath);
                 if (traverseEntry != null)
                 {
                     _pending.PendingTraverseRemoves[traversePath] = traverseEntry;
@@ -91,10 +93,19 @@ public class TraverseAutoManager(IAclPermissionService aclPermission, IDatabaseP
         }
     }
 
-    private bool HasExistingTraverseEntry(string path)
+    private GrantedPathEntry? FindExistingTraverseEntry(string path)
     {
-        return databaseProvider.GetDatabase().GetAccount(_sid)?.Grants
-            .Any(e => e.IsTraverseOnly && string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase)) == true;
+        var database = databaseProvider.GetDatabase();
+        var accountEntry = database.GetAccount(_sid)?.Grants
+            .FirstOrDefault(e => e.IsTraverseOnly &&
+                                 string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase));
+        if (accountEntry != null)
+            return accountEntry;
+
+        return AclHelper.IsSpecificContainerSid(_sid)
+            ? database.SharedContainerTraverseGrants.FirstOrDefault(e => e.IsTraverseOnly &&
+                                                                         string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase))
+            : null;
     }
 
     /// <summary>

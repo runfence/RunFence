@@ -119,7 +119,7 @@ public class FirewallAddressExclusionBuilder(
                 includeLocalAddresses: false);
             foreach (var pendingDomain in exclusions.PendingDomains)
             {
-                var pendingKey = $"{pendingDomain.Sid}\0{pendingDomain.Domain}";
+                var pendingKey = pendingDomain.DeduplicationKey;
                 if (pendingKeys.Add(pendingKey))
                     pendingDomains.Add(pendingDomain);
             }

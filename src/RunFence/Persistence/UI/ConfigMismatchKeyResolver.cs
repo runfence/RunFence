@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Security;
 using RunFence.Startup.UI.Forms;
@@ -53,7 +54,7 @@ public class ConfigMismatchKeyResolver(
                 using var dlg = new PinDialog(PinDialogMode.Verify,
                     "This config was encrypted with a different PIN. Enter that PIN to decrypt it.\n" +
                     "It will then be re-encrypted with your current PIN.");
-                dlg.VerifyCallback = pin =>
+                dlg.VerifyCallback = (ProtectedString pin) =>
                 {
                     var key = pinService.DeriveKey(pin, fileSalt);
                     try

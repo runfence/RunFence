@@ -1,10 +1,11 @@
 using System.Diagnostics;
-using System.Security;
 using RunFence.Account;
 using RunFence.Account.UI;
+using RunFence.Launch;
 using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
+using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -18,7 +19,7 @@ namespace RunFence.Wizard.Templates;
 /// and pins a tray terminal. After the wizard closes, opens the firewall allowlist dialog with the
 /// blocked-connections dialog auto-opened inside it so the user can whitelist required domains.
 /// </summary>
-public class AiAgentTemplate(
+internal class AiAgentTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
     EditAccountDialogCreateHandler createHandler,
@@ -27,7 +28,9 @@ public class AiAgentTemplate(
     IWizardSessionSaver sessionSaver,
     SessionContext session,
     WizardLicenseChecker licenseChecker,
-    IShortcutDiscoveryService discoveryService)
+    IShortcutDiscoveryService discoveryService,
+    IShortcutIconHelper iconHelper,
+    IExecutableKindService executableKindService)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -40,8 +43,6 @@ public class AiAgentTemplate(
 
     public void Cleanup()
     {
-        _data.CreatedPassword?.Dispose();
-        _data.CreatedPassword = null;
     }
 
     public IReadOnlyList<WizardStepPage> CreateSteps()
@@ -49,7 +50,7 @@ public class AiAgentTemplate(
         _data.Reset();
 
         var accountNameStep = setupHelperFactory.CreateAccountNameStep(
-            (name, _) => _data.Username = name,
+            (name, password) => { _data.Username = name; password.Dispose(); },
             description: "Choose a name for the new isolated AI agent account. " +
                          "It will be created without Users group membership. " +
                          "Required packages are installed during wizard setup, before firewall rules take effect.");
@@ -77,6 +78,7 @@ public class AiAgentTemplate(
                 _data.AppPath = appPath;
             },
             discoveryService,
+            iconHelper,
             commitAction: OnCommitAiOptionsAsync);
 
         return [accountNameStep, projectPathsStep, firewallOptionsStep, aiToolStep];
@@ -100,22 +102,23 @@ public class AiAgentTemplate(
         if (!licenseChecker.CheckCanAddCredential(session, progress))
             throw new OperationCanceledException("License check failed.");
 
-        var defaults = setupHelperFactory.CreateAccountDefaults();
+        using var defaults = setupHelperFactory.CreateAccountDefaults();
 
         progress.ReportStatus($"Creating account '{_data.Username}'...");
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: _data.Username,
-            PasswordText: defaults.Password,
-            ConfirmPasswordText: defaults.Password,
-            IsEphemeral: false,
-            CheckedGroups: [],
-            UncheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
-            AllowLogon: false,
-            AllowNetworkLogin: false,
-            AllowBgAutorun: false,
-            CurrentHiddenCount: 0);
+        var request = EditAccountDialogCreateHandler.CreateAccountRequest.ForIsolatedAccount(
+            _data.Username, defaults.Password);
 
-        var result = await Task.Run(() => createHandler.Execute(request));
+        EditAccountDialogCreateHandler.CreateAccountResult? result = null;
+        try
+        {
+            result = await Task.Run(() => createHandler.Execute(request));
+        }
+        finally
+        {
+            request.Password.Dispose();
+            request.ConfirmPassword.Dispose();
+        }
+
         if (result == null)
         {
             var error = createHandler.LastValidationError ?? "Account creation failed.";
@@ -124,25 +127,31 @@ public class AiAgentTemplate(
         }
 
         _data.CreatedSid = result.Sid;
-        _data.CreatedPassword = result.Password;
         foreach (var err in result.Errors)
             progress.ReportError(err);
 
         // Setup: store credential, SidNames, AccountEntry; no firewall yet (done in ExecuteAsync).
         var setupHelper = setupHelperFactory.Create(session);
-        var setupRequest = new WizardAccountSetupHelper.SetupRequest(
-            Sid: result.Sid,
-            Username: result.Username,
-            Password: result.Password,
-            StoreCredential: true,
-            IsEphemeral: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
-            FirewallSettings: null,
-            DesktopSettingsPath: defaults.DesktopSettingsPath,
-            InstallPackages: null,
-            TrayTerminal: false);
+        try
+        {
+            var setupRequest = new WizardAccountSetupHelper.SetupRequest(
+                Sid: result.Sid,
+                Username: result.Username,
+                Password: result.Password,
+                StoreCredential: true,
+                IsEphemeral: false,
+                PrivilegeLevel: PrivilegeLevel.Basic,
+                FirewallSettings: null,
+                DesktopSettingsPath: defaults.DesktopSettingsPath,
+                InstallPackages: null,
+                TrayTerminal: false);
 
-        await setupHelper.SetupAsync(setupRequest, progress);
+            await setupHelper.SetupAsync(setupRequest, progress);
+        }
+        finally
+        {
+            result.Password.Dispose();
+        }
 
         // Install packages and wait for completion before advancing.
         // Firewall rules that block internet will be applied in ExecuteAsync — we must ensure
@@ -209,7 +218,11 @@ public class AiAgentTemplate(
                         accountSid: sid,
                         restrictAcl: false,
                         aclMode: AclMode.Deny,
-                        manageShortcuts: true)
+                        manageShortcuts: true,
+                        privilegeLevel: executableKindService.IsUwpExeFile(appPath)
+                                        && db.GetAccount(sid)?.PrivilegeLevel is not (PrivilegeLevel.AboveBasic or PrivilegeLevel.HighestAllowed)
+                            ? PrivilegeLevel.AboveBasic
+                            : null)
                 ],
                 CreateDesktopShortcut: true);
 
@@ -251,10 +264,9 @@ public class AiAgentTemplate(
         public List<string> ProjectPaths { get; set; } = [];
         public string? AppPath { get; set; }
         public string? CreatedSid { get; set; }
-        public SecureString? CreatedPassword { get; set; }
-        public bool AllowInternet { get; set; } = false;
-        public bool AllowLan { get; set; } = false;
-        public bool AllowLocalhost { get; set; } = false;
+        public bool AllowInternet { get; set; }
+        public bool AllowLan { get; set; }
+        public bool AllowLocalhost { get; set; }
 
         public void Reset()
         {
@@ -263,8 +275,6 @@ public class AiAgentTemplate(
             ProjectPaths = [];
             AppPath = null;
             CreatedSid = null;
-            CreatedPassword?.Dispose();
-            CreatedPassword = null;
             AllowInternet = false;
             AllowLan = false;
             AllowLocalhost = false;

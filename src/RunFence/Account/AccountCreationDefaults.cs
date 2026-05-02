@@ -1,7 +1,5 @@
-using RunFence.Account.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
-using RunFence.UI;
 
 namespace RunFence.Account;
 
@@ -9,13 +7,11 @@ namespace RunFence.Account;
 /// Canonical default values for new account creation, shared between the Create Account dialog
 /// and wizard templates. Both consumers initialize their UI or data from these defaults,
 /// ensuring future changes (e.g. new fields, different defaults) propagate everywhere automatically.
+/// Implements IDisposable because Password is a ProtectedString that must be disposed after use.
 /// </summary>
 public record AccountCreationDefaults(
     string Username,
-    string Password, // Plain string by design: all consumers assign this to a WinForms TextBox.Text, which is
-                     // inherently a .NET string. SecureString overloads offer no benefit here since the text
-                     // is immediately exposed as a string in the UI. The char[] used to generate the password
-                     // is cleared in Create() immediately after constructing this string.
+    ProtectedString Password,
     List<(string Sid, string Name)> CheckedGroups,
     bool AllowLogon,
     bool AllowNetworkLogin,
@@ -25,9 +21,10 @@ public record AccountCreationDefaults(
     bool AllowLocalhost,
     bool IsEphemeral,
     PrivilegeLevel PrivilegeLevel,
-    string DesktopSettingsPath,
-    List<InstallablePackage> InstallPackages)
+    string DesktopSettingsPath) : IDisposable
 {
+    public void Dispose() => Password.Dispose();
+
     /// <summary>
     /// Creates defaults for account creation.
     /// Username is a timestamp-based unique name.
@@ -36,21 +33,19 @@ public record AccountCreationDefaults(
     /// unchecked=empty (no other groups are unchecked by default).
     /// Internet is allowed by default; LAN and Localhost are blocked by default (more secure isolation).
     /// </summary>
-    public static AccountCreationDefaults Create(AppDatabase database, ILocalGroupMembershipService groupMembership)
+    public static AccountCreationDefaults Create(AppDatabase database)
     {
-        var allGroups = GroupFilterHelper.FilterForCreateDialog(groupMembership.GetLocalGroups()).ToList();
-
         // Users group is unchecked by default: Windows adds all authenticated users to BUILTIN\Users
         // at the token level regardless of SAM membership, so explicit membership is redundant.
         // All groups start unchecked; user can add them explicitly.
         List<(string Sid, string Name)> checkedGroups = [];
 
         char[]? generatedChars = null;
-        string password;
+        ProtectedString password;
         try
         {
             generatedChars = PasswordHelper.GenerateRandomPassword();
-            password = new string(generatedChars);
+            password = ProtectedString.FromChars(generatedChars);
         }
         finally
         {
@@ -59,6 +54,8 @@ public record AccountCreationDefaults(
         }
 
         return new AccountCreationDefaults(
+            // Minute-level granularity is by design: Windows usernames are limited to 20 chars, and
+            // two accounts created in the same minute are rare enough that collisions can be resolved manually.
             Username: $"u{DateTime.Now:yyMMddHHmm}",
             Password: password,
             CheckedGroups: checkedGroups,
@@ -70,7 +67,6 @@ public record AccountCreationDefaults(
             AllowLocalhost: false,
             IsEphemeral: false,
             PrivilegeLevel: PrivilegeLevel.Basic,
-            DesktopSettingsPath: database.Settings.DefaultDesktopSettingsPath,
-            InstallPackages: []);
+            DesktopSettingsPath: database.Settings.DefaultDesktopSettingsPath);
     }
 }

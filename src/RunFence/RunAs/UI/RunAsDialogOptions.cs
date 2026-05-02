@@ -12,6 +12,7 @@ public record RunAsDialogOptions(
     string? Arguments,
     List<CredentialEntry> Credentials,
     List<AppEntry> ExistingApps,
+    string? InitialAccountSid = null,
     string? LastUsedAccountSid = null,
     HashSet<string>? SidsNeedingPermission = null,
     IReadOnlyDictionary<string, string>? SidNames = null,
@@ -19,4 +20,5 @@ public record RunAsDialogOptions(
     List<AppContainerEntry>? AppContainers = null,
     string? LastUsedContainerName = null,
     string? CurrentUserSid = null,
-    IReadOnlyDictionary<string, PrivilegeLevel>? AccountPrivilegeLevels = null);
+    IReadOnlyDictionary<string, PrivilegeLevel>? AccountPrivilegeLevels = null,
+    bool ShowSystemInRunAs = false);

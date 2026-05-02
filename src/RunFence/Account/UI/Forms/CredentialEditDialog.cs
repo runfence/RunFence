@@ -1,5 +1,5 @@
 using System.ComponentModel;
-using System.Security;
+using RunFence.Account.UI;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -10,16 +10,14 @@ namespace RunFence.Account.UI.Forms;
 public partial class CredentialEditDialog : Form
 {
     public string Username => _usernameComboBox.Text.Trim();
-    public SecureString? Password { get; private set; }
+    public ProtectedString? Password { get; private set; }
     public string? Sid { get; private set; }
     public bool OpenCreateUser { get; private set; }
-    // Plain string by design: TextBox.Text is unavoidably a .NET managed string.
-    // Cleared by the consumer (AccountCredentialOperations) immediately after reading.
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public string? CapturedPasswordText { get; set; }
+    public ProtectedString? CapturedPassword { get; set; }
 
     private CredentialEntry? _existing;
-    private List<LocalUserAccount> _localUsers = [];
+    private IReadOnlyList<LocalUserAccount> _localUsers = [];
     private string? _defaultUsername;
     private bool _isEditMode;
     private IReadOnlyDictionary<string, string>? _sidNames;
@@ -27,6 +25,7 @@ public partial class CredentialEditDialog : Form
     private readonly IWindowsAccountService _accountService;
     private readonly SidDisplayNameResolver _displayNameResolver;
     private readonly ISidEntryHelper _sidEntryHelper;
+    private SecurePasswordBox _passwordSecure = null!;
 
     public CredentialEditDialog(
         SidDisplayNameResolver displayNameResolver,
@@ -45,7 +44,7 @@ public partial class CredentialEditDialog : Form
     /// </summary>
     public void Initialize(
         CredentialEntry? existing = null,
-        List<LocalUserAccount>? localUsers = null,
+        IReadOnlyList<LocalUserAccount>? localUsers = null,
         string? defaultUsername = null,
         IReadOnlyDictionary<string, string>? sidNames = null,
         IReadOnlyCollection<string>? existingSids = null)
@@ -63,11 +62,16 @@ public partial class CredentialEditDialog : Form
     {
         Text = _existing != null ? "Edit Credential" : "Add Credential";
 
-        var yPos = 15;
-        // _usernameLabel at (15,15) - set in Designer
-        yPos += 22;
-        // _usernameComboBox at (15,37) - set in Designer
-        yPos += 30; // yPos=67
+        const int margin = 15;
+        const int rowGap = 7;
+        const int formWidth = 360;
+
+        var yPos = margin;
+        _usernameLabel.Location = new Point(margin, yPos);
+        yPos += _usernameLabel.PreferredHeight + rowGap;
+
+        _usernameComboBox.Location = new Point(margin, yPos);
+        _usernameComboBox.Width = formWidth - margin * 2;
 
         if (_isEditMode)
         {
@@ -80,31 +84,37 @@ public partial class CredentialEditDialog : Form
             _usernameComboBox.SelectedIndex = 0;
             _usernameComboBox.Enabled = false;
 
-            // Show SID text box
-            _sidTextBox.Location = new Point(15, yPos);
+            yPos += _usernameComboBox.PreferredHeight + 4;
+
+            // Show SID text box directly below combo
+            _sidTextBox.Location = new Point(margin, yPos);
+            _sidTextBox.Width = formWidth - margin * 2;
             _sidTextBox.BackColor = BackColor;
             _sidTextBox.Text = _existing?.Sid ?? "";
             _sidTextBox.Visible = true;
-            yPos += 25; // yPos=92
+            yPos += _sidTextBox.PreferredHeight + rowGap;
         }
         else
         {
             _usernameComboBox.Text = _defaultUsername ?? "";
             foreach (var user in _localUsers)
                 _usernameComboBox.Items.Add(user.Username);
+            yPos += _usernameComboBox.PreferredHeight + rowGap;
         }
 
-        _passwordLabel.Location = new Point(15, yPos);
-        yPos += 22;
+        _passwordLabel.Location = new Point(margin, yPos);
+        yPos += _passwordLabel.PreferredHeight + rowGap;
 
-        _passwordTextBox.Location = new Point(15, yPos);
-        PasswordEyeToggle.AddTo(_passwordTextBox);
-        yPos += 35;
+        _passwordTextBox.Location = new Point(margin, yPos);
+        _passwordTextBox.Width = formWidth - margin * 2;
+        _passwordSecure = new SecurePasswordBox(_passwordTextBox);
+        _passwordSecure.AddEyeToggle();
+        yPos += _passwordTextBox.PreferredHeight + rowGap + 5;
 
-        _statusLabel.Location = new Point(15, yPos);
-        yPos += 25;
+        _statusLabel.Location = new Point(margin, yPos);
+        _statusLabel.Width = formWidth - margin * 2;
+        yPos += _statusLabel.Height + rowGap;
 
-        const int formWidth = 360;
         const int btnWidth = 75;
         const int btnGap = 10;
         const int btnRight = formWidth - btnGap - btnWidth;
@@ -119,17 +129,18 @@ public partial class CredentialEditDialog : Form
 
         if (_isEditMode)
         {
-            _okButton.Location = new Point(185, yPos);
-            _cancelButton.Location = new Point(270, yPos);
+            _okButton.Location = new Point(btnMiddle, yPos);
+            _cancelButton.Location = new Point(btnRight, yPos);
             _passwordTextBox.TextChanged += (_, _) => UpdateOkButtonState();
         }
         else
         {
             _okButton.Text = "Add";
-            _createButton.Location = new Point(100, yPos);
+            _createButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            _createButton.Location = new Point(btnLeft, yPos);
             _createButton.Visible = true;
-            _okButton.Location = new Point(185, yPos);
-            _cancelButton.Location = new Point(270, yPos);
+            _okButton.Location = new Point(btnMiddle, yPos);
+            _cancelButton.Location = new Point(btnRight, yPos);
             _usernameComboBox.TextChanged += (_, _) =>
             {
                 UpdateCreateButtonState();
@@ -144,6 +155,8 @@ public partial class CredentialEditDialog : Form
 
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
+
+        UpdateOkButtonState();
 
         Shown += (_, _) =>
         {
@@ -194,28 +207,28 @@ public partial class CredentialEditDialog : Form
         // Password validation — runas requires a password for non-current accounts.
         // In edit mode, OK is only enabled when password text is non-empty (UpdateOkButtonState),
         // so the text is guaranteed non-empty here.
-        if (_passwordTextBox.Text.Length == 0)
+        if (_passwordSecure.IsEmpty)
         {
             _statusLabel.Text = "Password is required. RunAs will not work without a password.";
             return;
         }
 
+        var pwd = _passwordSecure.GetPassword();
+
         // Validate credentials via LogonUser (skip for current account)
         var isCurrentAccount = _existing?.IsCurrentAccount == true;
         if (!isCurrentAccount && Sid != null)
         {
-            var validationResult = _accountService.ValidatePassword(Sid, _passwordTextBox.Text, _usernameComboBox.Text.Trim());
+            var validationResult = _accountService.ValidatePassword(Sid, pwd, _usernameComboBox.Text.Trim());
             if (validationResult != null)
             {
+                pwd.Dispose();
                 _statusLabel.Text = validationResult;
                 return;
             }
         }
 
-        Password = new SecureString();
-        foreach (char c in _passwordTextBox.Text)
-            Password.AppendChar(c);
-        Password.MakeReadOnly();
+        Password = pwd;
 
         DialogResult = DialogResult.OK;
         Close();
@@ -225,12 +238,12 @@ public partial class CredentialEditDialog : Form
     {
         if (_isEditMode)
         {
-            _okButton.Enabled = _passwordTextBox.Text.Length > 0;
+            _okButton.Enabled = !_passwordSecure.IsEmpty;
         }
         else
         {
             var hasUsername = !string.IsNullOrWhiteSpace(_usernameComboBox.Text);
-            _okButton.Enabled = hasUsername && _passwordTextBox.Text.Length > 0;
+            _okButton.Enabled = hasUsername && !_passwordSecure.IsEmpty;
         }
     }
 
@@ -246,8 +259,8 @@ public partial class CredentialEditDialog : Form
     private void OnCreateClick(object? sender, EventArgs e)
     {
         OpenCreateUser = true;
-        CapturedPasswordText = _passwordTextBox.Text;
-        _passwordTextBox.Clear();
+        CapturedPassword = _passwordSecure.GetPassword();
+        _passwordSecure.Clear();
         DialogResult = DialogResult.Retry;
         Close();
     }

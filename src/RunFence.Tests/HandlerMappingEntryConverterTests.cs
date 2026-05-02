@@ -18,6 +18,8 @@ public class HandlerMappingEntryConverterTests
 
         Assert.Equal("myAppId", entry.AppId);
         Assert.Null(entry.ArgumentsTemplate);
+        Assert.Null(entry.PathPrefixes);
+        Assert.False(entry.ReplacePrefixes);
     }
 
     [Fact]
@@ -29,6 +31,8 @@ public class HandlerMappingEntryConverterTests
 
         Assert.Equal("myAppId", entry.AppId);
         Assert.Null(entry.ArgumentsTemplate);
+        Assert.Null(entry.PathPrefixes);
+        Assert.False(entry.ReplacePrefixes);
     }
 
     [Fact]
@@ -77,6 +81,23 @@ public class HandlerMappingEntryConverterTests
     }
 
     [Fact]
+    public void RoundTrip_WithPathPrefixesAndReplacePrefixes_PreservesAllFields()
+    {
+        var original = new HandlerMappingEntry("myAppId", "--flag \"%1\"",
+            PathPrefixes: [@"C:\Work\"],
+            ReplacePrefixes: true);
+
+        var json = JsonSerializer.Serialize(original, Options);
+        var deserialized = JsonSerializer.Deserialize<HandlerMappingEntry>(json, Options);
+
+        Assert.Equal(original.AppId, deserialized.AppId);
+        Assert.Equal(original.ArgumentsTemplate, deserialized.ArgumentsTemplate);
+        Assert.NotNull(deserialized.PathPrefixes);
+        Assert.Equal(original.PathPrefixes, deserialized.PathPrefixes);
+        Assert.True(deserialized.ReplacePrefixes);
+    }
+
+    [Fact]
     public void Deserialize_MissingAppId_ThrowsJsonException()
     {
         var json = """{"ArgumentsTemplate":"\"%1\""}""";
@@ -100,7 +121,7 @@ public class HandlerMappingEntryConverterTests
         var dict = JsonSerializer.Deserialize<Dictionary<string, HandlerMappingEntry>>(json, Options);
 
         Assert.NotNull(dict);
-        Assert.Equal(3, dict!.Count);
+        Assert.Equal(3, dict.Count);
 
         // Old format: plain string value
         Assert.Equal("plainAppId", dict[".txt"].AppId);

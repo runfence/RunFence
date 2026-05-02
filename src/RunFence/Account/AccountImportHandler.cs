@@ -10,7 +10,7 @@ namespace RunFence.Account;
 /// </summary>
 public class AccountImportHandler(
     ISettingsTransferService settingsTransferService,
-    IAccountCredentialManager credentialManager,
+    ICredentialDecryptionService credentialDecryption,
     SessionPersistenceHelper persistenceHelper,
     ILoggingService log) : IAccountImportHandler
 {
@@ -20,29 +20,23 @@ public class AccountImportHandler(
     /// <param name="accounts">Accounts to import to. Accounts without a stored credential entry are skipped.</param>
     /// <param name="credStore">The credential store for password decryption.</param>
     /// <param name="pinKey">The PIN-derived key.</param>
-    /// <param name="selectFile">Callback that returns the selected settings file path, or null if cancelled.</param>
-    /// <param name="appendLog">Callback to append a line to the progress log.</param>
-    /// <param name="enableOk">Callback to enable the OK button when import is complete.</param>
-    /// <param name="onStatusUpdate">Callback to update a status label during import.</param>
+    /// <param name="sink">Progress sink for file selection and UI feedback.</param>
     /// <returns>The selected settings file path if import completed, or null if the user cancelled.</returns>
     public async Task<string?> RunImportAsync(
         List<ImportAccount> accounts,
         CredentialStore credStore,
         ProtectedBuffer pinKey,
-        Func<string?> selectFile,
-        Action<string> appendLog,
-        Action enableOk,
-        Action<string> onStatusUpdate,
+        IImportProgressSink sink,
         AppDatabase? db = null)
     {
-        var settingsPath = selectFile();
+        var settingsPath = sink.SelectFile();
         if (settingsPath == null)
             return null;
 
         if (!File.Exists(settingsPath))
         {
-            appendLog("Settings file not found.");
-            enableOk();
+            sink.AppendLog("Settings file not found.");
+            sink.EnableOk();
             return null;
         }
 
@@ -52,18 +46,18 @@ public class AccountImportHandler(
             foreach (var account in accounts)
             {
                 completed++;
-                onStatusUpdate(accounts.Count == 1
+                sink.UpdateStatus(accounts.Count == 1
                     ? $"Importing to {account.Username}..."
                     : $"Importing {completed}/{accounts.Count}...");
 
-                appendLog($"Importing to {account.Username}...");
+                sink.AppendLog($"Importing to {account.Username}...");
 
-                var lookupStatus = credentialManager.CheckCredential(
+                var lookupStatus = credentialDecryption.CheckCredential(
                     account.CredEntry.Sid, credStore);
 
                 if (lookupStatus is CredentialLookupStatus.NotFound or CredentialLookupStatus.MissingPassword)
                 {
-                    appendLog($"  SKIPPED: Cannot decrypt credentials for {account.Username} (status: {lookupStatus}).");
+                    sink.AppendLog($"  SKIPPED: Cannot decrypt credentials for {account.Username} (status: {lookupStatus}).");
                     continue;
                 }
 
@@ -74,23 +68,23 @@ public class AccountImportHandler(
                     persistenceHelper.SaveConfig(db, pinKey, credStore.ArgonSalt);
 
                 var status = result.Success ? "OK" : "FAILED";
-                appendLog($"  [{status}] {result.Message}");
+                sink.AppendLog($"  [{status}] {result.Message}");
             }
 
-            appendLog("");
-            appendLog("Import complete.");
-            onStatusUpdate("Import complete.");
+            sink.AppendLog("");
+            sink.AppendLog("Import complete.");
+            sink.UpdateStatus("Import complete.");
         }
         catch (Exception ex)
         {
-            appendLog("");
-            appendLog($"Error: {ex.Message}");
-            onStatusUpdate($"Import error: {ex.Message}");
+            sink.AppendLog("");
+            sink.AppendLog($"Error: {ex.Message}");
+            sink.UpdateStatus($"Import error: {ex.Message}");
             log.Error("Import UI error", ex);
         }
         finally
         {
-            enableOk();
+            sink.EnableOk();
         }
 
         return settingsPath;

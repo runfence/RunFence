@@ -30,14 +30,17 @@ partial class SidMigrationInAppStep
         _resultLabel = new Label();
 
         SuspendLayout();
+        Size = new Size(595, 330);
 
         // _summaryLabel
         _summaryLabel.Location = new Point(15, 10);
         _summaryLabel.Size = new Size(560, 25);
+        _summaryLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
         // _listBox
         _listBox.Location = new Point(15, 40);
         _listBox.Size = new Size(560, 130);
+        _listBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
 
         // _applyButton
         _applyButton.Text = "Apply";
@@ -45,17 +48,18 @@ partial class SidMigrationInAppStep
         _applyButton.Size = new Size(100, 28);
         _applyButton.FlatStyle = FlatStyle.System;
         _applyButton.Visible = false;
+        _applyButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
         _applyButton.Click += OnApplyClick;
 
         // _resultLabel
         _resultLabel.Location = new Point(15, 220);
         _resultLabel.Size = new Size(560, 100);
         _resultLabel.Visible = false;
+        _resultLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
         Controls.AddRange(new Control[] { _summaryLabel, _listBox, _applyButton, _resultLabel });
 
         AutoScaleMode = AutoScaleMode.Font;
-        Size = new Size(595, 330);
         ResumeLayout(false);
     }
 }

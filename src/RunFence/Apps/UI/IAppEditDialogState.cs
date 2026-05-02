@@ -20,4 +20,5 @@ public interface IAppEditDialogState
     bool AllowPassWorkDir { get; }
     string StatusText { set; }
     string? ArgumentsTemplateText { get; }
+    IReadOnlyList<string>? AppPathPrefixes { get; }
 }

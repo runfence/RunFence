@@ -1,4 +1,3 @@
-using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Launch;
@@ -41,10 +40,6 @@ public class AppEntryBuilder(IAppEntryIdGenerator idGenerator)
             if (!Directory.Exists(exePath))
                 return "Folder not found.";
         }
-        else if (!File.Exists(exePath))
-        {
-            return "File not found.";
-        }
 
         if (selectedAccount == null && appContainerName == null)
             return "Please select an account or AppContainer.";
@@ -80,7 +75,7 @@ public class AppEntryBuilder(IAppEntryIdGenerator idGenerator)
             IsUrlScheme = isUrl,
             IsFolder = opts.IsFolder,
             DefaultArguments = opts.IsFolder ? "" : opts.DefaultArgs,
-            AllowPassingArguments = !opts.IsFolder && opts.AllowPassArgs,
+            AllowPassingArguments = opts is { IsFolder: false, AllowPassArgs: true },
             WorkingDirectory = opts.IsFolder || isUrl ? null : resolvedWorkDir,
             AllowPassingWorkingDirectory = !opts.IsFolder && !isUrl && opts.AllowPassWorkingDir,
             PrivilegeLevel = opts.PrivilegeLevel,
@@ -98,7 +93,8 @@ public class AppEntryBuilder(IAppEntryIdGenerator idGenerator)
             EnvironmentVariables = opts.IsFolder || isUrl || opts.EnvironmentVariables?.Count is null or 0
                 ? null
                 : opts.EnvironmentVariables,
-            ArgumentsTemplate = opts.IsFolder ? null : string.IsNullOrEmpty(opts.ArgumentsTemplate) ? null : opts.ArgumentsTemplate
+            ArgumentsTemplate = opts.IsFolder ? null : string.IsNullOrEmpty(opts.ArgumentsTemplate) ? null : opts.ArgumentsTemplate,
+            PathPrefixes = opts.IsFolder || opts.PathPrefixes?.Count is null or 0 ? null : opts.PathPrefixes
         };
     }
 

@@ -12,7 +12,7 @@ public class EnforcementResultApplier(IAppContainerService appContainerService)
         foreach (var (appId, timestamp) in result.TimestampUpdates)
         {
             var app = database.Apps.FirstOrDefault(a => a.Id == appId);
-            if (app != null) app.LastKnownExeTimestamp = timestamp;
+            app?.LastKnownExeTimestamp = timestamp;
         }
 
         bool traverseRetracked = false;
@@ -22,7 +22,7 @@ public class EnforcementResultApplier(IAppContainerService appContainerService)
                 ? container.Sid
                 : appContainerService.GetSid(container.Name);
             if (string.IsNullOrEmpty(containerSid)) continue;
-            var traversePaths = TraversePathsHelper.GetOrCreateTraversePaths(database, containerSid);
+            var traversePaths = database.SharedContainerTraverseGrants;
             traverseRetracked |= TraversePathsHelper.TrackPath(traversePaths, traverseDir, appliedPaths);
         }
 

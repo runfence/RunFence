@@ -21,4 +21,9 @@ internal static class TokenPrivilegeNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool AdjustTokenPrivileges(IntPtr tokenHandle, bool disableAllPrivileges,
         ref TOKEN_PRIVILEGES newState, uint bufferLength, IntPtr previousState, IntPtr returnLength);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AdjustTokenPrivileges(IntPtr tokenHandle, bool disableAllPrivileges,
+        IntPtr newState, uint bufferLength, IntPtr previousState, IntPtr returnLength);
 }

@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Windows.Automation;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using Timer = System.Threading.Timer;
@@ -35,11 +36,16 @@ public class MediaKeyBridgeService : IMediaKeyBridgeService, IRequiresInitializa
     // Polled every 2 seconds by _pollTimer; read on the UI/hook thread.
     private volatile bool _interactiveUserPlaying;
     private Timer? _pollTimer;
+    private int _pollInProgress; // 0 = idle, 1 = running; Interlocked reentrancy guard
 
     // Deduplication: prevents the shell hook from re-bridging a key that the WH_KEYBOARD_LL
     // hook already bridged. Both callbacks execute on the main UI thread — no synchronization needed.
     private long _lastBridgedAt; // Environment.TickCount64
     private const long BridgeDedupWindowMs = 200;
+
+    // UIAutomation cache: keyed by focused HWND to avoid repeated slow queries inside the hook callback.
+    private static nint _cachedUiaHwnd;
+    private static bool _cachedUiaIsText;
 
     public MediaKeyBridgeService(ILoggingService log, IUiThreadInvoker uiThreadInvoker,
         ICoreAudioSessionChecker audioChecker)
@@ -83,38 +89,47 @@ public class MediaKeyBridgeService : IMediaKeyBridgeService, IRequiresInitializa
 
     private void PollAudioSession(object? state)
     {
-        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-        if (string.IsNullOrEmpty(interactiveSid))
-        {
-            if (_interactiveUserPlaying)
-            {
-                _interactiveUserPlaying = false;
-                _log.Info("MediaKeyBridge: interactiveUserPlaying changed → False");
-            }
-
+        if (Interlocked.CompareExchange(ref _pollInProgress, 1, 0) != 0)
             return;
-        }
-
-        // Invoke (not BeginInvoke) is required: ICoreAudioSessionChecker uses COM interfaces that must
-        // be called on the STA UI thread, and the result must be read before the timer callback can return.
-        bool playing = false;
         try
         {
-            _uiThreadInvoker.Invoke(() => { playing = _audioChecker.IsAnySessionActive(interactiveSid); });
-        }
-        catch (ObjectDisposedException)
-        {
-            return;
-        }
-        catch (InvalidOperationException)
-        {
-            return;
-        }
+            var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
+            if (string.IsNullOrEmpty(interactiveSid))
+            {
+                if (_interactiveUserPlaying)
+                {
+                    _interactiveUserPlaying = false;
+                    _log.Info("MediaKeyBridge: interactiveUserPlaying changed → False");
+                }
 
-        if (playing != _interactiveUserPlaying)
+                return;
+            }
+
+            // Invoke (not BeginInvoke) is required: ICoreAudioSessionChecker uses COM interfaces that must
+            // be called on the STA UI thread, and the result must be read before the timer callback can return.
+            bool playing = false;
+            try
+            {
+                _uiThreadInvoker.Invoke(() => { playing = _audioChecker.IsAnySessionActive(interactiveSid); });
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            catch (InvalidOperationException)
+            {
+                return;
+            }
+
+            if (playing != _interactiveUserPlaying)
+            {
+                _interactiveUserPlaying = playing;
+                _log.Info($"MediaKeyBridge: interactiveUserPlaying changed → {playing}");
+            }
+        }
+        finally
         {
-            _interactiveUserPlaying = playing;
-            _log.Info($"MediaKeyBridge: interactiveUserPlaying changed → {playing}");
+            Interlocked.Exchange(ref _pollInProgress, 0);
         }
     }
 
@@ -219,7 +234,7 @@ public class MediaKeyBridgeService : IMediaKeyBridgeService, IRequiresInitializa
         // Post Space key to the sandboxed browser window. Browsers handle WM_KEYDOWN/WM_KEYUP
         // with VK_SPACE directly in their renderer for play/pause without needing SMTC registration.
         WindowNative.PostMessage(hwnd, WindowNative.WM_KEYDOWN, (IntPtr)VK_SPACE, (IntPtr)((SpaceScanCode << 16) | 1));
-        WindowNative.PostMessage(hwnd, WindowNative.WM_KEYUP, (IntPtr)VK_SPACE, unchecked((nint)(uint)(0xC0000000 | (SpaceScanCode << 16) | 1)));
+        WindowNative.PostMessage(hwnd, WindowNative.WM_KEYUP, (IntPtr)VK_SPACE, unchecked((nint)(0xC0000000 | (SpaceScanCode << 16) | 1)));
         _log.Info($"MediaKeyBridge: posted Space to hwnd=0x{hwnd.ToInt64():X} pid={pid}");
         return true;
     }
@@ -249,13 +264,43 @@ public class MediaKeyBridgeService : IMediaKeyBridgeService, IRequiresInitializa
         WindowNative.GetClassName(info.hwndFocus, sb, sb.Capacity);
         var className = sb.ToString();
 
-        return className.Equals("Edit", StringComparison.OrdinalIgnoreCase)
-               || className.Equals("Button", StringComparison.OrdinalIgnoreCase)
-               || className.Equals("ListBox", StringComparison.OrdinalIgnoreCase)
-               || className.Equals("ComboBox", StringComparison.OrdinalIgnoreCase)
-               || className.Equals("SysListView32", StringComparison.OrdinalIgnoreCase)
-               || className.Equals("SysTreeView32", StringComparison.OrdinalIgnoreCase)
-               || className.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase);
+        if (className.Equals("Edit", StringComparison.OrdinalIgnoreCase)
+            || className.Equals("Button", StringComparison.OrdinalIgnoreCase)
+            || className.Equals("ListBox", StringComparison.OrdinalIgnoreCase)
+            || className.Equals("ComboBox", StringComparison.OrdinalIgnoreCase)
+            || className.Equals("SysListView32", StringComparison.OrdinalIgnoreCase)
+            || className.Equals("SysTreeView32", StringComparison.OrdinalIgnoreCase)
+            || className.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // UIAutomation fallback: covers WPF, UWP, and Chromium/Electron renderer controls
+        // that don't expose a classic Win32 window class. Chromium address bars and search fields
+        // expose ControlType.Edit via UIAutomation even when GetClassName returns "Chrome_RenderWidgetHostHWND".
+        // Cache the result by HWND to avoid repeated slow queries inside the hook callback.
+        if (info.hwndFocus == _cachedUiaHwnd)
+            return _cachedUiaIsText;
+
+        try
+        {
+            var focused = AutomationElement.FocusedElement;
+            if (focused != null)
+            {
+                var controlTypeId = focused.Current.ControlType.Id;
+                var isText = controlTypeId == ControlType.Edit.Id || controlTypeId == ControlType.Document.Id;
+                _cachedUiaHwnd = info.hwndFocus;
+                _cachedUiaIsText = isText;
+                return isText;
+            }
+        }
+        catch
+        {
+            // UIAutomation may throw COMException, ElementNotAvailableException, etc.
+            // Swallow all exceptions — this is a best-effort fallback.
+        }
+
+        // focused == null or exception: invalidate cache so the next call re-queries UIAutomation.
+        _cachedUiaHwnd = 0;
+        return false;
     }
 
     /// <summary>

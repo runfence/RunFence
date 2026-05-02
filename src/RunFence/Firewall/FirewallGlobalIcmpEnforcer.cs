@@ -11,7 +11,7 @@ public class FirewallGlobalIcmpEnforcer(
     IWfpGlobalIcmpBlocker wfpGlobalIcmpBlocker)
     : IGlobalIcmpPolicyService
 {
-    public GlobalIcmpEnforcementPlan CreateGlobalIcmpPlan(
+    internal GlobalIcmpEnforcementPlan CreateGlobalIcmpPlan(
         AppDatabase database,
         IReadOnlyDictionary<string, IReadOnlyList<string>> resolvedDomainsCache)
         => CreateGlobalIcmpPlan(

@@ -2,11 +2,12 @@ using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using RunFence.Core;
 using RunFence.Infrastructure;
 
 namespace RunFence.Security;
 
-public class SecureDesktopHelper : ISecureDesktopRunner
+public class SecureDesktopHelper(ILoggingService log) : ISecureDesktopRunner
 {
     private const uint DESKTOP_ALL = 0x01FF;
     private const int UOI_NAME = 2;
@@ -57,13 +58,15 @@ public class SecureDesktopHelper : ISecureDesktopRunner
     {
         if (Interlocked.CompareExchange(ref _active, 1, 0) != 0)
         {
-            action(); // fallback: run on current desktop (reentrancy)
+            log.Warn("SecureDesktopHelper: reentrant call — running action on current desktop");
+            action();
             return;
         }
 
         IntPtr origDesk = OpenInputDesktop(0, false, DESKTOP_ALL);
         if (origDesk == IntPtr.Zero)
         {
+            log.Warn($"SecureDesktopHelper: OpenInputDesktop failed (error={Marshal.GetLastWin32Error()}) — running action on current desktop");
             Interlocked.Exchange(ref _active, 0);
             action();
             return;
@@ -73,6 +76,7 @@ public class SecureDesktopHelper : ISecureDesktopRunner
         IntPtr newDesk = CreateRestrictedDesktop(deskName);
         if (newDesk == IntPtr.Zero)
         {
+            log.Warn($"SecureDesktopHelper: CreateRestrictedDesktop failed (error={Marshal.GetLastWin32Error()}) — running action on current desktop");
             Interlocked.Exchange(ref _active, 0);
             CloseDesktop(origDesk);
             action();
@@ -83,6 +87,7 @@ public class SecureDesktopHelper : ISecureDesktopRunner
         {
             if (!SwitchDesktop(newDesk))
             {
+                log.Warn($"SecureDesktopHelper: SwitchDesktop failed (error={Marshal.GetLastWin32Error()}) — running action on current desktop");
                 action();
                 return;
             }
@@ -92,7 +97,7 @@ public class SecureDesktopHelper : ISecureDesktopRunner
             {
                 if (!SetThreadDesktop(newDesk))
                 {
-                    // Fallback: run on this thread without desktop association
+                    log.Warn($"SecureDesktopHelper: SetThreadDesktop failed (error={Marshal.GetLastWin32Error()}) — running action without desktop association");
                     action();
                     return;
                 }

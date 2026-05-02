@@ -9,7 +9,7 @@ namespace RunFence.Ipc;
 /// </summary>
 public class IpcOpenFolderHandler(
     IAppLockControl appLock,
-    IpcUiInvoker ipcUiInvoker,
+    IIpcUiInvoker ipcUiInvoker,
     IDirectoryValidator? directoryValidator,
     ILoggingService log,
     IShellFolderOpener shellFolderOpener)

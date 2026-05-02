@@ -1,5 +1,4 @@
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using Timer = System.Windows.Forms.Timer;
 
@@ -43,7 +42,7 @@ public sealed class DiscoveryRefreshManager(StartMenuDiscoveryService discoveryS
         if (_trayManager == null || _host == null)
             return;
 
-        var generation = ++_generation;
+        var generation = Interlocked.Increment(ref _generation);
         var session = sessionProvider.GetSession();
         var snapshot = session.Database.CreateSnapshot();
         var trayDiscoverySids = snapshot.Accounts

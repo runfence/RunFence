@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 
 namespace RunFence.Licensing;
@@ -8,7 +9,7 @@ public class EvaluationLimitHelper(IEvaluationLimitPrompt prompt, ILicenseServic
     public int CountCredentialsExcludingCurrent(IEnumerable<CredentialEntry> credentials)
     {
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
-        return credentials.Count(c => !string.Equals(c.Sid, currentSid, StringComparison.OrdinalIgnoreCase));
+        return credentials.Count(c => !SidComparer.SidEquals(c.Sid, currentSid));
     }
 
     /// <inheritdoc/>

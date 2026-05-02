@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using RunFence.Account.UI;
 using RunFence.Apps.UI;
+using RunFence.Core;
 using RunFence.Infrastructure;
 
 namespace RunFence.Startup.UI.Forms;
@@ -17,14 +18,13 @@ public partial class PinDialog : Form
 
     private readonly PinDialogMode _mode;
     private readonly bool _allowReset;
+    private readonly bool _exitOnCancel;
     private readonly string? _promptMessage;
     private readonly OperationGuard _guard = new();
 
-    // EnteredPin is a plain string: it persists in managed memory until GC, and cannot be explicitly
-    // zeroed. This is an inherent .NET string limitation — the same trade-off accepted throughout
-    // the codebase (e.g., AccountCreationDefaults). The window is narrow: the string exists only
-    // between the user clicking OK and the dialog closing, at which point the reference is dropped.
-    private string EnteredPin { get; set; } = string.Empty;
+    private SecurePasswordBox _passwordSecure = null!;
+    private SecurePasswordBox? _confirmPasswordSecure;
+
     public bool ResetRequested { get; private set; }
 
     /// <summary>
@@ -32,25 +32,39 @@ public partial class PinDialog : Form
     /// Runs on a background thread to avoid blocking the UI during Argon2id derivation.
     /// </summary>
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Func<string, bool>? VerifyCallback { get; set; }
+    public Func<ProtectedString, bool>? VerifyCallback { get; set; }
 
     /// <summary>
-    /// For Set mode: async callback that runs crypto operations while the dialog
-    /// stays open with a "Processing..." status. Takes (enteredPin, null) and returns
-    /// null on success or an error message on failure. The dialog closes only on success.
+    /// Optional async callback that runs crypto operations while the dialog stays open
+    /// with a "Processing..." status. Takes (enteredPin, null) and returns null on success
+    /// or an error message on failure. The dialog closes only on success.
+    /// In Verify mode, runs after <see cref="VerifyCallback"/> succeeds.
     /// </summary>
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Func<string, string?, Task<string?>>? ProcessingCallback { get; set; }
+    public Func<ProtectedString, string?, Task<string?>>? ProcessingCallback { get; set; }
 
-    public PinDialog(PinDialogMode mode, string? promptMessage = null, bool allowReset = true)
+    public PinDialog(PinDialogMode mode, string? promptMessage = null, bool allowReset = true, bool exitOnCancel = false)
     {
         _mode = mode;
         _allowReset = allowReset;
+        _exitOnCancel = exitOnCancel;
         _promptMessage = promptMessage;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         ConfigureLayout();
         Shown += (_, _) => Activate();
+#pragma warning disable CS0162
+        if (DebugHelper.IsDebugBuild)
+            Shown += (_, _) =>
+            {
+                using var debugPin = ProtectedString.FromChars("1111".AsSpan());
+                _passwordSecure.SetFromProtectedString(debugPin);
+                _pinTextBox.SelectAll();
+                _pinTextBox.Focus();
+                if (_mode == PinDialogMode.Set)
+                    _confirmPasswordSecure?.SetFromProtectedString(debugPin);
+            };
+#pragma warning restore CS0162
     }
 
     private void ConfigureLayout()
@@ -81,14 +95,16 @@ public partial class PinDialog : Form
 
         var yPos = 15; // pinLabel row
         yPos += 22; // after pinLabel
-        PasswordEyeToggle.AddTo(_pinTextBox);
+        _passwordSecure = new SecurePasswordBox(_pinTextBox);
+        _passwordSecure.AddEyeToggle();
         yPos += 35; // after pinTextBox
 
         if (_mode == PinDialogMode.Set)
         {
             _confirmLabel.Visible = true;
             yPos += 22; // after confirmLabel
-            PasswordEyeToggle.AddTo(_confirmPinTextBox);
+            _confirmPasswordSecure = new SecurePasswordBox(_confirmPinTextBox);
+            _confirmPasswordSecure.AddEyeToggle();
             _confirmPinTextBox.Visible = true;
             yPos += 35; // after confirmTextBox
         }
@@ -101,7 +117,8 @@ public partial class PinDialog : Form
 
         if (_mode == PinDialogMode.Verify)
         {
-            _cancelButton.Text = "Exit";
+            if (_exitOnCancel)
+                _cancelButton.Text = "Exit";
             _forgotLink.Visible = _allowReset;
             _forgotLink.Location = new Point(15, yPos + 5);
             _forgotLink.LinkClicked += (_, _) =>
@@ -114,7 +131,7 @@ public partial class PinDialog : Form
 
         ClientSize = new Size(330, labelHeight + yPos + 43);
         _inputPanel.Size = new Size(330, yPos + 43);
-        _statusLabel.Location = new Point(15, statusY);
+        _statusLabel.Location = new Point(15, labelHeight + statusY);
         _statusLabel.BringToFront();
     }
 
@@ -122,62 +139,59 @@ public partial class PinDialog : Form
     {
         _statusLabel.Text = "";
 
-        if (string.IsNullOrEmpty(_pinTextBox.Text))
+        if (_passwordSecure.IsEmpty)
         {
             _statusLabel.Text = "PIN is required.";
             return;
         }
 
-        if (_mode == PinDialogMode.Set && _pinTextBox.Text.Length < MinPinLength)
+        switch (_mode)
         {
-            _statusLabel.Text = $"PIN must be at least {MinPinLength} characters.";
-            return;
-        }
-
-        if (_mode == PinDialogMode.Set &&
-            _confirmPinTextBox != null &&
-            _pinTextBox.Text != _confirmPinTextBox.Text)
-        {
-            _statusLabel.Text = "PINs do not match.";
-            return;
-        }
-
-        if (_mode == PinDialogMode.Verify && VerifyCallback != null)
-        {
-            var pin = _pinTextBox.Text;
-            _guard.Begin(_inputPanel);
-            bool verified;
-            try
-            {
-                _statusLabel.ForeColor = Color.DarkBlue;
-                _statusLabel.Text = "Verifying PIN...";
-
-                var callback = VerifyCallback;
-                verified = await Task.Run(() => callback(pin));
-
-                if (IsDisposed)
-                    return;
-            }
-            finally
-            {
-                if (!_inputPanel.IsDisposed)
-                    _guard.End(_inputPanel);
-            }
-
-            _statusLabel.ForeColor = Color.Red;
-
-            if (!verified)
-            {
-                _statusLabel.Text = "Incorrect PIN.";
-                _pinTextBox.Clear();
-                _pinTextBox.Focus();
+            case PinDialogMode.Set when _passwordSecure.GetPasswordLength() < MinPinLength:
+                _statusLabel.Text = $"PIN must be at least {MinPinLength} characters.";
                 return;
+            case PinDialogMode.Set when
+                _confirmPasswordSecure != null &&
+                !_passwordSecure.PasswordsMatch(_confirmPasswordSecure):
+                _statusLabel.Text = "PINs do not match.";
+                return;
+            case PinDialogMode.Verify when VerifyCallback != null:
+            {
+                _guard.Begin(_inputPanel);
+                bool verified;
+                try
+                {
+                    _statusLabel.ForeColor = Color.DarkBlue;
+                    _statusLabel.Text = "Verifying PIN...";
+
+                    var callback = VerifyCallback;
+                    using var pin = _passwordSecure.GetPassword();
+                    verified = await Task.Run(() => callback(pin));
+
+                    if (IsDisposed)
+                        return;
+                }
+                finally
+                {
+                    if (!_inputPanel.IsDisposed)
+                        _guard.End(_inputPanel);
+                }
+
+                _statusLabel.ForeColor = Color.Red;
+
+                if (!verified)
+                {
+                    _statusLabel.Text = "Incorrect PIN.";
+                    _passwordSecure.Clear();
+                    _pinTextBox.Focus();
+                    return;
+                }
+
+                break;
             }
         }
 
-        EnteredPin = _pinTextBox.Text;
-
-        if (_mode == PinDialogMode.Set && ProcessingCallback != null)
+        if (ProcessingCallback != null)
         {
             _guard.Begin(_inputPanel);
             string? error;
@@ -186,7 +200,15 @@ public partial class PinDialog : Form
                 _statusLabel.ForeColor = Color.DarkBlue;
                 _statusLabel.Text = "Processing...";
 
-                error = await ProcessingCallback(EnteredPin, null);
+                var pin = _passwordSecure.GetPassword();
+                try
+                {
+                    error = await ProcessingCallback(pin, null);
+                }
+                finally
+                {
+                    pin.Dispose();
+                }
 
                 if (IsDisposed)
                     return;
@@ -205,7 +227,6 @@ public partial class PinDialog : Form
             }
         }
 
-        _pinTextBox.Clear();
         DialogResult = DialogResult.OK;
         Close();
     }

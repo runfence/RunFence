@@ -9,121 +9,184 @@ namespace RunFence.Tests;
 
 public class ConfigAvailabilityMonitorTests
 {
-    [Fact]
-    public void AutoUnloadUnavailableConfigs_ReschedulesAfterFiring()
+    private readonly Mock<IAppConfigService> _appConfigService = new();
+    private readonly Mock<ILoggingService> _log = new();
+    private readonly Mock<IAppStateProvider> _appStateProvider = new();
+    private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
+    private readonly OperationGuard _enforcementGuard = new();
+    private readonly Mock<IUiTimerFactory> _timerFactory = new();
+    private readonly Mock<IUiTimer> _timer = new();
+
+    public ConfigAvailabilityMonitorTests()
     {
-        // Arrange
-        var appConfigService = new Mock<IAppConfigService>();
-        var log = new Mock<ILoggingService>();
-        var appStateProvider = new Mock<IAppStateProvider>();
-        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
-        var enforcementGuard = new OperationGuard();
+        _timerFactory.Setup(f => f.Create()).Returns(_timer.Object);
 
-        appStateProvider.Setup(a => a.IsShuttingDown).Returns(false);
-        appStateProvider.Setup(a => a.IsModalOpen).Returns(false);
-
-        // The monitor must have loaded configs to allow scheduling
-        appConfigService.Setup(s => s.HasLoadedConfigs).Returns(true);
-        appConfigService.Setup(s => s.GetLoadedConfigPaths())
-            .Returns(new[] { @"C:\nonexistent_config_test.rfn" });
-
-        // BeginInvoke executes the callback synchronously for testing
-        uiThreadInvoker
-            .Setup(u => u.BeginInvoke(It.IsAny<Action>()))
-            .Callback<Action>(a => a());
-
-        using var monitor = new ConfigAvailabilityMonitor(
-            appConfigService.Object, log.Object, appStateProvider.Object,
-            uiThreadInvoker.Object, enforcementGuard);
-
-        monitor.AutoUnloadRequired += (_, _) => { };
-
-        // Act: trigger the availability check by scheduling and letting the timer fire.
-        // Since we can't easily trigger the WinForms Timer in a test, we verify the structural
-        // behavior by checking that the monitor's public ScheduleAvailabilityCheck method
-        // can be called and doesn't throw when conditions are met.
-        monitor.ScheduleAvailabilityCheck();
-
-        // Verify the monitor was set up correctly and can schedule
-        // The actual timer-based behavior is a WinForms integration concern.
-        // The key behavioral contract is that ScheduleAvailabilityCheck() does not throw
-        // and respects the guard conditions.
-        Assert.True(appConfigService.Object.HasLoadedConfigs);
+        // Permissive defaults: not shutting down, not modal, configs loaded.
+        _appStateProvider.Setup(a => a.IsShuttingDown).Returns(false);
+        _appStateProvider.Setup(a => a.IsModalOpen).Returns(false);
+        _appConfigService.Setup(s => s.HasLoadedConfigs).Returns(true);
     }
+
+    private ConfigAvailabilityMonitor BuildMonitor() =>
+        new(_appConfigService.Object, _log.Object, _appStateProvider.Object,
+            _uiThreadInvoker.Object, _enforcementGuard, _timerFactory.Object);
 
     [Fact]
     public void ScheduleAvailabilityCheck_DoesNotSchedule_WhenShuttingDown()
     {
-        var appConfigService = new Mock<IAppConfigService>();
-        var log = new Mock<ILoggingService>();
-        var appStateProvider = new Mock<IAppStateProvider>();
-        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
-        var enforcementGuard = new OperationGuard();
+        _appStateProvider.Setup(a => a.IsShuttingDown).Returns(true);
 
-        appStateProvider.Setup(a => a.IsShuttingDown).Returns(true);
-        appConfigService.Setup(s => s.HasLoadedConfigs).Returns(true);
-
-        using var monitor = new ConfigAvailabilityMonitor(
-            appConfigService.Object, log.Object, appStateProvider.Object,
-            uiThreadInvoker.Object, enforcementGuard);
-
-        // Act: should not throw and should not schedule (shutting down)
+        using var monitor = BuildMonitor();
         monitor.ScheduleAvailabilityCheck();
 
-        // The monitor should not attempt anything when shutting down
-        appConfigService.Verify(s => s.GetLoadedConfigPaths(), Times.Never);
+        _appConfigService.Verify(s => s.GetLoadedConfigPaths(), Times.Never);
+        _timerFactory.Verify(f => f.Create(), Times.Never);
     }
 
     [Fact]
     public void ScheduleAvailabilityCheck_DoesNotSchedule_WhenNoLoadedConfigs()
     {
-        var appConfigService = new Mock<IAppConfigService>();
-        var log = new Mock<ILoggingService>();
-        var appStateProvider = new Mock<IAppStateProvider>();
-        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
-        var enforcementGuard = new OperationGuard();
+        _appConfigService.Setup(s => s.HasLoadedConfigs).Returns(false);
 
-        appStateProvider.Setup(a => a.IsShuttingDown).Returns(false);
-        appStateProvider.Setup(a => a.IsModalOpen).Returns(false);
-        appConfigService.Setup(s => s.HasLoadedConfigs).Returns(false);
-
-        using var monitor = new ConfigAvailabilityMonitor(
-            appConfigService.Object, log.Object, appStateProvider.Object,
-            uiThreadInvoker.Object, enforcementGuard);
-
-        // Act
+        using var monitor = BuildMonitor();
         monitor.ScheduleAvailabilityCheck();
 
-        // No configs loaded — nothing to schedule
-        appConfigService.Verify(s => s.GetLoadedConfigPaths(), Times.Never);
+        _appConfigService.Verify(s => s.GetLoadedConfigPaths(), Times.Never);
+        _timerFactory.Verify(f => f.Create(), Times.Never);
+    }
+
+    [Fact]
+    public void ScheduleAvailabilityCheck_CreatesAndStartsTimer_WhenAllGuardsPass()
+    {
+        using var monitor = BuildMonitor();
+        monitor.ScheduleAvailabilityCheck();
+
+        _timerFactory.Verify(f => f.Create(), Times.Once);
+        _timer.Verify(t => t.Start(), Times.Once);
     }
 
     [Fact]
     public void ScheduleAvailabilityCheck_DoesNotSchedule_WhenEnforcementInProgress()
     {
-        var appConfigService = new Mock<IAppConfigService>();
-        var log = new Mock<ILoggingService>();
-        var appStateProvider = new Mock<IAppStateProvider>();
-        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
-        var enforcementGuard = new OperationGuard();
+        _enforcementGuard.Begin();
 
-        appStateProvider.Setup(a => a.IsShuttingDown).Returns(false);
-        appStateProvider.Setup(a => a.IsModalOpen).Returns(false);
-        appConfigService.Setup(s => s.HasLoadedConfigs).Returns(true);
-
-        // Begin an operation to simulate enforcement in progress
-        enforcementGuard.Begin();
-
-        using var monitor = new ConfigAvailabilityMonitor(
-            appConfigService.Object, log.Object, appStateProvider.Object,
-            uiThreadInvoker.Object, enforcementGuard);
-
-        // Act
+        using var monitor = BuildMonitor();
         monitor.ScheduleAvailabilityCheck();
 
-        // Enforcement in progress — should not schedule
-        appConfigService.Verify(s => s.GetLoadedConfigPaths(), Times.Never);
+        _appConfigService.Verify(s => s.GetLoadedConfigPaths(), Times.Never);
+        _timerFactory.Verify(f => f.Create(), Times.Never);
 
-        enforcementGuard.End();
+        _enforcementGuard.End();
+    }
+
+    [Fact]
+    public void ScheduleAvailabilityCheck_DoesNotSchedule_WhenModalOpen()
+    {
+        _appStateProvider.Setup(a => a.IsModalOpen).Returns(true);
+
+        using var monitor = BuildMonitor();
+        monitor.ScheduleAvailabilityCheck();
+
+        _timerFactory.Verify(f => f.Create(), Times.Never);
+    }
+
+    [Fact]
+    public void ScheduleAvailabilityCheck_ReusesExistingTimer_OnSecondCall()
+    {
+        using var monitor = BuildMonitor();
+        monitor.ScheduleAvailabilityCheck();
+        monitor.ScheduleAvailabilityCheck();
+
+        // Timer created only once, but started twice (re-armed)
+        _timerFactory.Verify(f => f.Create(), Times.Once);
+        _timer.Verify(t => t.Start(), Times.Exactly(2));
+    }
+
+    [Fact]
+    public void Tick_StopsTimer_BeforeCheckingPaths()
+    {
+        _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(Array.Empty<string>());
+
+        using var monitor = BuildMonitor();
+        monitor.ScheduleAvailabilityCheck();
+
+        // Fire the timer Tick event
+        _timer.Raise(t => t.Tick += null, _timer.Object, EventArgs.Empty);
+
+        _timer.Verify(t => t.Stop(), Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public void Tick_ChecksConfigPaths_WhenGuardsPass()
+    {
+        _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(Array.Empty<string>());
+
+        using var monitor = BuildMonitor();
+        monitor.ScheduleAvailabilityCheck();
+        _timer.Raise(t => t.Tick += null, _timer.Object, EventArgs.Empty);
+
+        _appConfigService.Verify(s => s.GetLoadedConfigPaths(), Times.Once);
+    }
+
+    [Fact]
+    public void Tick_RaisesAutoUnloadOnUiThread_WhenFilesMissing()
+    {
+        var missingPath = @"C:\does-not-exist-runfence-test.rfn";
+        _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([missingPath]);
+
+        // Use ManualResetEventSlim to avoid Thread.Sleep polling: signal when BeginInvoke fires.
+        var callbackSignal = new ManualResetEventSlim(false);
+        Action? capturedAction = null;
+        _uiThreadInvoker.Setup(u => u.BeginInvoke(It.IsAny<Action>()))
+            .Callback<Action>(a =>
+            {
+                capturedAction = a;
+                callbackSignal.Set();
+            });
+
+        List<string>? unloadedPaths = null;
+
+        using var monitor = BuildMonitor();
+        monitor.AutoUnloadRequired += (_, paths) => unloadedPaths = paths;
+
+        monitor.ScheduleAvailabilityCheck();
+        _timer.Raise(t => t.Tick += null, _timer.Object, EventArgs.Empty);
+
+        // Wait for Task.Run to post the UI thread callback (no polling — event-driven)
+        Assert.True(callbackSignal.Wait(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
+
+        capturedAction!();
+
+        Assert.NotNull(unloadedPaths);
+        Assert.Contains(missingPath, unloadedPaths!);
+        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Auto-unloading"))), Times.Once);
+    }
+
+    [Fact]
+    public void Tick_ReschedulesTimer_AfterAutoUnload()
+    {
+        var missingPath = @"C:\does-not-exist-runfence-test2.rfn";
+        _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([missingPath]);
+
+        var callbackSignal = new ManualResetEventSlim(false);
+        Action? capturedAction = null;
+        _uiThreadInvoker.Setup(u => u.BeginInvoke(It.IsAny<Action>()))
+            .Callback<Action>(a =>
+            {
+                capturedAction = a;
+                callbackSignal.Set();
+            });
+
+        using var monitor = BuildMonitor();
+        monitor.AutoUnloadRequired += (_, _) => { };
+
+        monitor.ScheduleAvailabilityCheck();
+        _timer.Raise(t => t.Tick += null, _timer.Object, EventArgs.Empty);
+
+        Assert.True(callbackSignal.Wait(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
+        capturedAction!();
+
+        // After unload, ScheduleAvailabilityCheck is called → timer restarted (Stop then Start again)
+        _timer.Verify(t => t.Start(), Times.AtLeast(2));
     }
 }

@@ -9,7 +9,7 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
     public void Register()
     {
         log.Info("ContextMenuService: registering context menu.");
-        var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+        var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
             log.Warn($"Launcher not found at {launcherPath}, skipping context menu registration");
@@ -18,13 +18,13 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
 
         ExportIcon();
 
-        foreach (var registryPath in Constants.ContextMenuRegistryPaths)
+        foreach (var registryPath in PathConstants.ContextMenuRegistryPaths)
         {
             try
             {
                 using var shellKey = Registry.LocalMachine.CreateSubKey(registryPath);
                 shellKey.SetValue(null, "RunFence...");
-                shellKey.SetValue("Icon", Constants.ExportedIconPath);
+                shellKey.SetValue("Icon", PathConstants.ExportedIconPath);
 
                 using var commandKey = shellKey.CreateSubKey("command");
                 commandKey.SetValue(null, $"\"{launcherPath}\" \"%1\"");
@@ -41,7 +41,7 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
     public void Unregister()
     {
         log.Info("ContextMenuService: unregistering context menu.");
-        foreach (var registryPath in Constants.ContextMenuRegistryPaths)
+        foreach (var registryPath in PathConstants.ContextMenuRegistryPaths)
         {
             try
             {
@@ -55,7 +55,7 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
 
         try
         {
-            var iconPath = Constants.ExportedIconPath;
+            var iconPath = PathConstants.ExportedIconPath;
             if (File.Exists(iconPath))
                 File.Delete(iconPath);
         }
@@ -71,7 +71,7 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
     {
         try
         {
-            var iconPath = Constants.ExportedIconPath;
+            var iconPath = PathConstants.ExportedIconPath;
             var dir = Path.GetDirectoryName(iconPath);
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);

@@ -31,7 +31,7 @@ public class AppHandlerRegistrationService(
 
     public void Sync(Dictionary<string, HandlerMappingEntry> effectiveHandlerMappings, List<AppEntry> apps)
     {
-        var launcherPath = launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+        var launcherPath = launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
             log.Warn($"AppHandlerRegistrationService.Sync: launcher not found at {launcherPath}, skipping");
@@ -108,7 +108,7 @@ public class AppHandlerRegistrationService(
             if (classesKey != null)
             {
                 var subKeyNames = classesKey.GetSubKeyNames()
-                    .Where(n => n.StartsWith(Constants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase))
+                    .Where(n => n.StartsWith(PathConstants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase))
                     .ToList();
                 foreach (var name in subKeyNames)
                 {
@@ -126,7 +126,7 @@ public class AppHandlerRegistrationService(
             // Remove Capabilities key (standard location)
             try
             {
-                _hklm.DeleteSubKeyTree(Constants.HandlerCapabilitiesRegistryPath, throwOnMissingSubKey: false);
+                _hklm.DeleteSubKeyTree(PathConstants.HandlerCapabilitiesRegistryPath, throwOnMissingSubKey: false);
             }
             catch (Exception ex)
             {
@@ -135,7 +135,7 @@ public class AppHandlerRegistrationService(
 
             // Remove RegisteredApplications entry
             using var regAppsKey = _hklm.OpenSubKey(@"Software\RegisteredApplications", writable: true);
-            regAppsKey?.DeleteValue(Constants.HandlerRegisteredAppName, throwOnMissingValue: false);
+            regAppsKey?.DeleteValue(PathConstants.HandlerRegisteredAppName, throwOnMissingValue: false);
 
             ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
             log.Info("AppHandlerRegistrationService.UnregisterAll: complete");
@@ -148,7 +148,7 @@ public class AppHandlerRegistrationService(
 
     private void RegisterAssociationProgId(string association, AppEntry app, string launcherPath)
     {
-        var progId = Constants.HandlerProgIdPrefix + association;
+        var progId = PathConstants.HandlerProgIdPrefix + association;
         var classesPrefix = $@"Software\Classes\{progId}";
 
         var iconPath = ResolveIconPath(app, launcherPath);
@@ -168,19 +168,19 @@ public class AppHandlerRegistrationService(
     {
         // Standard location outside Software\Classes — prevents Windows from double-discovering
         // RunFence via both RegisteredApplications and a Capabilities subkey on a ProgId.
-        using (var capsKey = _hklm.CreateSubKey(Constants.HandlerCapabilitiesRegistryPath))
+        using (var capsKey = _hklm.CreateSubKey(PathConstants.HandlerCapabilitiesRegistryPath))
         {
-            capsKey.SetValue("ApplicationName", Constants.HandlerRegisteredAppName);
+            capsKey.SetValue("ApplicationName", PathConstants.HandlerRegisteredAppName);
             capsKey.SetValue("ApplicationDescription", "Launches files and URLs through RunFence-managed applications");
         }
 
         using var regAppsKey = _hklm.CreateSubKey(@"Software\RegisteredApplications");
-        regAppsKey.SetValue(Constants.HandlerRegisteredAppName, Constants.HandlerCapabilitiesRegistryPath);
+        regAppsKey.SetValue(PathConstants.HandlerRegisteredAppName, PathConstants.HandlerCapabilitiesRegistryPath);
     }
 
     private void RebuildCapabilities(Dictionary<string, string> validMappings)
     {
-        var capsPrefix = Constants.HandlerCapabilitiesRegistryPath;
+        var capsPrefix = PathConstants.HandlerCapabilitiesRegistryPath;
 
         // Clear existing URLAssociations and FileAssociations subkeys before rebuilding
         try
@@ -204,9 +204,9 @@ public class AppHandlerRegistrationService(
 
         // Separate file extensions (start with '.') from URL protocols
         var urlAssociations = validMappings.Where(kvp => !kvp.Key.StartsWith('.'))
-            .ToDictionary(kvp => kvp.Key, kvp => Constants.HandlerProgIdPrefix + kvp.Key);
+            .ToDictionary(kvp => kvp.Key, kvp => PathConstants.HandlerProgIdPrefix + kvp.Key);
         var fileAssociations = validMappings.Where(kvp => kvp.Key.StartsWith('.'))
-            .ToDictionary(kvp => kvp.Key, kvp => Constants.HandlerProgIdPrefix + kvp.Key);
+            .ToDictionary(kvp => kvp.Key, kvp => PathConstants.HandlerProgIdPrefix + kvp.Key);
 
         if (urlAssociations.Count > 0)
         {
@@ -227,7 +227,7 @@ public class AppHandlerRegistrationService(
     {
         // RunFence_Handler is no longer created; if present from an older installation it will be removed here.
         var desiredProgIds = new HashSet<string>(
-            validMappings.Keys.Select(k => Constants.HandlerProgIdPrefix + k),
+            validMappings.Keys.Select(k => PathConstants.HandlerProgIdPrefix + k),
             StringComparer.OrdinalIgnoreCase);
 
         using var classesKey = _hklm.OpenSubKey(@"Software\Classes", writable: true);
@@ -235,7 +235,7 @@ public class AppHandlerRegistrationService(
             return;
 
         var toDelete = classesKey.GetSubKeyNames()
-            .Where(n => n.StartsWith(Constants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase)
+            .Where(n => n.StartsWith(PathConstants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase)
                         && !desiredProgIds.Contains(n))
             .ToList();
 
@@ -270,7 +270,7 @@ public class AppHandlerRegistrationService(
         var filtered = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var kvp in mappings)
         {
-            if (Constants.BrowserAssociations.Contains(kvp.Key))
+            if (EvaluationConstants.BrowserAssociations.Contains(kvp.Key))
                 filtered[kvp.Key] = kvp.Value;
         }
 

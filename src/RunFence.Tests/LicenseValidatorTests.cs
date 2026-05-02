@@ -189,7 +189,7 @@ public class LicenseValidatorTests
         // We sign it with the test key so it passes signature verification, then expect Malformed
         // when the name-length bounds check fires.
         var nameBytes = new byte[] { 0x41, 0x42 }; // "AB" — only 2 bytes
-        var payload = new List<byte> { Constants.MajorVersion };
+        var payload = new List<byte> { EvaluationConstants.MajorVersion };
         payload.AddRange(TestMachineHash);
         payload.AddRange(BitConverter.GetBytes((uint)0)); // lifetime
         payload.Add((byte)LicenseTier.Annual);

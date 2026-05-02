@@ -58,14 +58,14 @@ public class AppInitializationHelper(ISidResolver sidResolver) : IAppInitializat
         return changed;
     }
 
-    public void PopulateDefaultIpcCallers(AppDatabase database)
+    private void PopulateDefaultIpcCallers(AppDatabase database)
     {
         var currentSid = sidResolver.GetCurrentUserSid();
         database.GetOrCreateAccount(currentSid).IsIpcCaller = true;
         database.UpdateSidName(currentSid,
             sidResolver.TryResolveName(currentSid) ?? currentSid);
 
-        var interactiveUserSid = NativeTokenHelper.TryGetInteractiveUserSid()?.Value;
+        var interactiveUserSid = SidResolutionHelper.GetInteractiveUserSid();
         if (interactiveUserSid != null &&
             !string.Equals(interactiveUserSid, currentSid, StringComparison.OrdinalIgnoreCase))
         {
@@ -79,5 +79,6 @@ public class AppInitializationHelper(ISidResolver sidResolver) : IAppInitializat
     {
         PopulateDefaultIpcCallers(database);
         EnsureInteractiveUserSidName(database);
+        WellKnownAccountDefaults.Apply(database);
     }
 }

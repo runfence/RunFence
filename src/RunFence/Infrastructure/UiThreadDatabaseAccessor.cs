@@ -13,6 +13,9 @@ public class UiThreadDatabaseAccessor(IDatabaseProvider databaseProvider, IUiThr
     public T Read<T>(Func<AppDatabase, T> reader)
         => uiThreadInvoker.Invoke(() => reader(databaseProvider.GetDatabase()));
 
+    public void Read(Action<AppDatabase> reader)
+        => uiThreadInvoker.Invoke(() => reader(databaseProvider.GetDatabase()));
+
     public T Write<T>(Func<AppDatabase, T> writer)
         => uiThreadInvoker.Invoke(() => writer(databaseProvider.GetDatabase()));
 

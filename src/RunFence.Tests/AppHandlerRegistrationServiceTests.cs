@@ -23,7 +23,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         _licenseService = new Mock<ILicenseService>();
         _licenseService.Setup(l => l.IsLicensed).Returns(true);
         _testSubKey = $@"Software\RunFenceTests\HandlerReg_{Guid.NewGuid():N}";
-        _hklmRoot = Registry.CurrentUser.CreateSubKey(_testSubKey)!;
+        _hklmRoot = Registry.CurrentUser.CreateSubKey(_testSubKey);
         _tempDir = new TempDirectory("RunFenceHandlerTests");
         _launcherPath = Path.Combine(_tempDir.Path, "RunFence.Launcher.exe");
         File.WriteAllText(_launcherPath, "stub");
@@ -62,9 +62,21 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     {
         using var classesKey = _hklmRoot.OpenSubKey(@"Software\Classes");
         return classesKey?.GetSubKeyNames()
-            .Where(n => n.StartsWith(Constants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase))
+            .Where(n => n.StartsWith(PathConstants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase))
             .ToList() ?? [];
     }
+
+    // Derives a relative subkey path for a ProgId under Software\Classes
+    private static string ProgIdKey(string association)
+        => $@"Software\Classes\{PathConstants.HandlerProgIdPrefix}{association}";
+
+    // Derives the URLAssociations key path relative to _hklmRoot
+    private static string UrlAssociationsKey()
+        => PathConstants.HandlerCapabilitiesRegistryPath + @"\URLAssociations";
+
+    // Derives the FileAssociations key path relative to _hklmRoot
+    private static string FileAssociationsKey()
+        => PathConstants.HandlerCapabilitiesRegistryPath + @"\FileAssociations";
 
     // --- Per-association ProgId creation ---
 
@@ -76,8 +88,8 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         CreateService().Sync(mappings, [app]);
 
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_http"));
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_.pdf"));
+        Assert.NotNull(OpenKey(ProgIdKey("http")));
+        Assert.NotNull(OpenKey(ProgIdKey(".pdf")));
     }
 
     [Fact]
@@ -87,7 +99,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
 
-        var cmd = ReadValue(@"Software\Classes\RunFence_http\shell\open\command");
+        var cmd = ReadValue(ProgIdKey("http") + @"\shell\open\command");
         Assert.NotNull(cmd);
         Assert.Contains("--resolve", cmd);
         Assert.Contains("\"http\"", cmd);
@@ -104,8 +116,8 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
         svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), ["https"] = new HandlerMappingEntry("app1") }, [app]);
 
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_http"));
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_https"));
+        Assert.NotNull(OpenKey(ProgIdKey("http")));
+        Assert.NotNull(OpenKey(ProgIdKey("https")));
     }
 
     [Fact]
@@ -117,8 +129,8 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         // RegisteredApplications must point to the standard location outside Software\Classes
         // to prevent Windows from double-discovering RunFence in Default Apps.
-        var regAppsValue = ReadValue(@"Software\RegisteredApplications", Constants.HandlerRegisteredAppName);
-        Assert.Equal(Constants.HandlerCapabilitiesRegistryPath, regAppsValue);
+        var regAppsValue = ReadValue(@"Software\RegisteredApplications", PathConstants.HandlerRegisteredAppName);
+        Assert.Equal(PathConstants.HandlerCapabilitiesRegistryPath, regAppsValue);
         Assert.DoesNotContain(@"Software\Classes", regAppsValue!);
     }
 
@@ -131,10 +143,10 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), ["https"] = new HandlerMappingEntry("app1") }, [app]);
         svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
 
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_http"));
-        Assert.Null(OpenKey(@"Software\Classes\RunFence_https"));
+        Assert.NotNull(OpenKey(ProgIdKey("http")));
+        Assert.Null(OpenKey(ProgIdKey("https")));
 
-        using var urlKey = OpenKey(@"Software\RunFence\Capabilities\URLAssociations");
+        using var urlKey = OpenKey(UrlAssociationsKey());
         Assert.NotNull(urlKey?.GetValue("http"));
         Assert.Null(urlKey.GetValue("https"));
     }
@@ -146,11 +158,11 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app1") }, [app]);
 
-        using var urlKey = OpenKey(@"Software\RunFence\Capabilities\URLAssociations");
-        using var fileKey = OpenKey(@"Software\RunFence\Capabilities\FileAssociations");
+        using var urlKey = OpenKey(UrlAssociationsKey());
+        using var fileKey = OpenKey(FileAssociationsKey());
 
-        Assert.Equal("RunFence_http", urlKey?.GetValue("http") as string);
-        Assert.Equal("RunFence_.pdf", fileKey?.GetValue(".pdf") as string);
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + "http", urlKey?.GetValue("http") as string);
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".pdf", fileKey?.GetValue(".pdf") as string);
         // Cross-check: extensions not in URL, protocols not in File
         Assert.Null(urlKey?.GetValue(".pdf"));
         Assert.Null(fileKey?.GetValue("http"));
@@ -168,12 +180,12 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         // Exactly the expected ProgIds, no extras
         var progIds = GetProgIds();
-        Assert.Contains("RunFence_http", progIds);
-        Assert.Contains("RunFence_.pdf", progIds);
+        Assert.Contains(PathConstants.HandlerProgIdPrefix + "http", progIds);
+        Assert.Contains(PathConstants.HandlerProgIdPrefix + ".pdf", progIds);
         Assert.Equal(2, progIds.Count);
 
         // URLAssociations has exactly one value
-        using var urlKey = OpenKey(@"Software\RunFence\Capabilities\URLAssociations");
+        using var urlKey = OpenKey(UrlAssociationsKey());
         var urlValues = urlKey?.GetValueNames() ?? [];
         Assert.Single(urlValues);
         Assert.Equal("http", urlValues[0]);
@@ -188,7 +200,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
         svc.Sync(new Dictionary<string, HandlerMappingEntry>(), [app]);
 
-        Assert.Null(OpenKey(@"Software\Classes\RunFence_http"));
+        Assert.Null(OpenKey(ProgIdKey("http")));
     }
 
     [Fact]
@@ -199,7 +211,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         CreateService().Sync(mappings, []);
 
         _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("app not found"))), Times.Once);
-        Assert.Null(OpenKey(@"Software\Classes\RunFence_http"));
+        Assert.Null(OpenKey(ProgIdKey("http")));
     }
 
     [Fact]
@@ -229,8 +241,8 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app2") }, [app1, app2]);
 
-        var icon1 = ReadValue(@"Software\Classes\RunFence_http\DefaultIcon");
-        var icon2 = ReadValue(@"Software\Classes\RunFence_.pdf\DefaultIcon");
+        var icon1 = ReadValue(ProgIdKey("http") + @"\DefaultIcon");
+        var icon2 = ReadValue(ProgIdKey(".pdf") + @"\DefaultIcon");
         Assert.NotNull(icon1);
         Assert.NotNull(icon2);
         Assert.Contains(_launcherPath, icon1);
@@ -240,18 +252,19 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     [Fact]
     public void Sync_LegacyRunFenceHandlerKeyInClasses_IsRemovedToPreventDuplicate()
     {
-        // Pre-create legacy RunFence_Handler key as it existed in older installations
-        // (Capabilities were inside Software\Classes\RunFence_Handler instead of Software\RunFence\Capabilities)
-        _hklmRoot.CreateSubKey(@"Software\Classes\RunFence_Handler\Capabilities")!.Dispose();
+        // Pre-create a stale ProgId-prefixed Handler key as it might exist from an older installation
+        // (Capabilities were inside Software\Classes\{Prefix}Handler instead of the standard location)
+        var legacyHandlerKey = ProgIdKey("Handler");
+        _hklmRoot.CreateSubKey(legacyHandlerKey + @"\Capabilities").Dispose();
 
         var app = MakeApp("app1");
         CreateService().Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1") }, [app]);
 
-        // Legacy key must be removed — its presence inside Software\Classes caused Windows
+        // Legacy handler key must be removed — its presence inside Software\Classes caused Windows
         // to show RunFence twice in Default Apps.
-        Assert.Null(OpenKey(@"Software\Classes\RunFence_Handler"));
+        Assert.Null(OpenKey(legacyHandlerKey));
         // New Capabilities must be at the standard location
-        Assert.NotNull(OpenKey(@"Software\RunFence\Capabilities"));
+        Assert.NotNull(OpenKey(PathConstants.HandlerCapabilitiesRegistryPath));
     }
 
     // --- UnregisterAll ---
@@ -265,12 +278,12 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         svc.Sync(new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry("app1"), [".pdf"] = new HandlerMappingEntry("app1") }, [app]);
         svc.UnregisterAll();
 
-        Assert.Null(OpenKey(@"Software\Classes\RunFence_http"));
-        Assert.Null(OpenKey(@"Software\Classes\RunFence_.pdf"));
-        Assert.Null(OpenKey(@"Software\RunFence\Capabilities"));
+        Assert.Null(OpenKey(ProgIdKey("http")));
+        Assert.Null(OpenKey(ProgIdKey(".pdf")));
+        Assert.Null(OpenKey(PathConstants.HandlerCapabilitiesRegistryPath));
 
         using var regApps = OpenKey(@"Software\RegisteredApplications");
-        Assert.Null(regApps?.GetValue(Constants.HandlerRegisteredAppName));
+        Assert.Null(regApps?.GetValue(PathConstants.HandlerRegisteredAppName));
     }
 
     // --- License filtering ---
@@ -290,12 +303,12 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         CreateService(license.Object).Sync(mappings, [app]);
 
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_http"));
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_https"));
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_.htm"));
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_.html"));
-        Assert.Null(OpenKey(@"Software\Classes\RunFence_.pdf"));
-        Assert.Null(OpenKey(@"Software\Classes\RunFence_mailto"));
+        Assert.NotNull(OpenKey(ProgIdKey("http")));
+        Assert.NotNull(OpenKey(ProgIdKey("https")));
+        Assert.NotNull(OpenKey(ProgIdKey(".htm")));
+        Assert.NotNull(OpenKey(ProgIdKey(".html")));
+        Assert.Null(OpenKey(ProgIdKey(".pdf")));
+        Assert.Null(OpenKey(ProgIdKey("mailto")));
     }
 
     [Fact]
@@ -314,10 +327,10 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         var progIds = GetProgIds();
         Assert.Equal(4, progIds.Count);
-        Assert.Contains("RunFence_http", progIds);
-        Assert.Contains("RunFence_https", progIds);
-        Assert.Contains("RunFence_.htm", progIds);
-        Assert.Contains("RunFence_.html", progIds);
+        Assert.Contains(PathConstants.HandlerProgIdPrefix + "http", progIds);
+        Assert.Contains(PathConstants.HandlerProgIdPrefix + "https", progIds);
+        Assert.Contains(PathConstants.HandlerProgIdPrefix + ".htm", progIds);
+        Assert.Contains(PathConstants.HandlerProgIdPrefix + ".html", progIds);
     }
 
     // --- Effective merged mappings ---
@@ -335,8 +348,8 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         CreateService().Sync(effectiveMappings, [mainApp, extraApp]);
 
-        Assert.NotNull(OpenKey(@"Software\Classes\RunFence_http"));
-        var cmd = ReadValue(@"Software\Classes\RunFence_http\shell\open\command");
+        Assert.NotNull(OpenKey(ProgIdKey("http")));
+        var cmd = ReadValue(ProgIdKey("http") + @"\shell\open\command");
         Assert.NotNull(cmd);
         Assert.Contains("\"http\"", cmd);
         // Exactly one ProgId for http (not two)

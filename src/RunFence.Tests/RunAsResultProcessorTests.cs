@@ -2,7 +2,6 @@ using System.Security.AccessControl;
 using Moq;
 using RunFence.Account;
 using RunFence.Acl;
-using RunFence.Acl.Permissions;
 using RunFence.Acl.QuickAccess;
 using RunFence.Acl.UI;
 using RunFence.Apps.Shortcuts;
@@ -79,6 +78,7 @@ public class RunAsResultProcessorTests : IDisposable
             _shortcutService.Object,
             new Mock<IBesideTargetShortcutService>().Object,
             sessionProvider,
+            new Mock<IInteractiveUserSidResolver>().Object,
             _log.Object);
     }
 
@@ -147,14 +147,15 @@ public class RunAsResultProcessorTests : IDisposable
     private static RunAsDialogResult MakeCredentialResult(
         CredentialEntry credential,
         AppEntry? existingApp = null,
-        AncestorPermissionResult? permissionGrant = null)
+        AncestorPermissionResult? permissionGrant = null,
+        bool updateOriginalShortcut = false)
         => new(
             Credential: credential,
             SelectedContainer: null,
             PermissionGrant: permissionGrant,
             CreateAppEntryOnly: false,
             PrivilegeLevel: PrivilegeLevel.Basic,
-            UpdateOriginalShortcut: false,
+            UpdateOriginalShortcut: updateOriginalShortcut,
             RevertShortcutRequested: false,
             EditExistingApp: null,
             ExistingAppForLaunch: existingApp);
@@ -300,6 +301,93 @@ public class RunAsResultProcessorTests : IDisposable
         processor.ProcessContainerResult(result, FilePath, null, null, false, null);
 
         _launchOrchestrator.Verify(o => o.Launch(existingApp, null, null, It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
+    // ── TC-29: UpdateOriginalShortcut=true ───────────────────────────────────
+
+    [Fact]
+    public void ProcessCredentialResult_UpdateOriginalShortcut_ExistingApp_UpdatesShortcut()
+    {
+        // Arrange — result has UpdateOriginalShortcut=true and a matching ExistingAppForLaunch.
+        // Verify that shortcutService.UpdateShortcutToLauncher is called for that app.
+        var credential = new CredentialEntry { Sid = UserSid };
+        var existingApp = new AppEntry { Id = "app01", Name = "MyApp", AccountSid = UserSid };
+        _database.Apps.Add(existingApp);
+        const string lnkPath = @"C:\Users\Public\Desktop\MyApp.lnk";
+
+        using var result = MakeCredentialResult(credential, existingApp: existingApp,
+            updateOriginalShortcut: true);
+        var processor = CreateProcessor();
+
+        // Act
+        processor.ProcessCredentialResult(result, FilePath, null, null, false, lnkPath);
+
+        // Assert — shortcutService.UpdateShortcutToLauncher called for app01
+        _shortcutService.Verify(s => s.UpdateShortcutToLauncher(
+            lnkPath, existingApp.Id, It.IsAny<string>(), It.IsAny<string?>()), Times.Once);
+    }
+
+    [Fact]
+    public void ProcessCredentialResult_UpdateOriginalShortcut_MatchingDbApp_UpdatesShortcut()
+    {
+        // Arrange — no ExistingAppForLaunch, but database has matching app (same SID + same ExePath).
+        // UpdateOriginalShortcut=true → shortcut updated using the found DB app's Id.
+        var credential = new CredentialEntry { Sid = UserSid };
+        var dbApp = new AppEntry { Id = "app02", Name = "DbApp", AccountSid = UserSid, ExePath = FilePath };
+        _database.Apps.Add(dbApp);
+        const string lnkPath = @"C:\Users\Public\Desktop\DbApp.lnk";
+
+        using var result = MakeCredentialResult(credential, updateOriginalShortcut: true);
+        var processor = CreateProcessor();
+
+        // Act
+        processor.ProcessCredentialResult(result, FilePath, null, null, false, lnkPath);
+
+        // Assert
+        _shortcutService.Verify(s => s.UpdateShortcutToLauncher(
+            lnkPath, dbApp.Id, It.IsAny<string>(), It.IsAny<string?>()), Times.Once);
+    }
+
+    [Fact]
+    public void ProcessCredentialResult_UpdateOriginalShortcut_NoMatchingApp_NoShortcutUpdate()
+    {
+        // Arrange — UpdateOriginalShortcut=true but no ExistingAppForLaunch and no matching DB app.
+        // In this case appId remains null and shortcut is NOT updated.
+        var credential = new CredentialEntry { Sid = UserSid };
+        const string lnkPath = @"C:\Users\Public\Desktop\Unknown.lnk";
+
+        using var result = MakeCredentialResult(credential, updateOriginalShortcut: true);
+        var processor = CreateProcessor();
+
+        // Act
+        processor.ProcessCredentialResult(result, FilePath, null, null, false, lnkPath);
+
+        // Assert — no shortcut update because appId could not be resolved
+        _shortcutService.Verify(s => s.UpdateShortcutToLauncher(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public void ProcessCredentialResult_UpdateOriginalShortcutFalse_NoShortcutUpdate()
+    {
+        // Arrange — UpdateOriginalShortcut=false even with a matching app; shortcut must not be updated.
+        var credential = new CredentialEntry { Sid = UserSid };
+        var existingApp = new AppEntry { Id = "app03", Name = "MyApp", AccountSid = UserSid };
+        _database.Apps.Add(existingApp);
+        const string lnkPath = @"C:\Users\Public\Desktop\MyApp.lnk";
+
+        using var result = MakeCredentialResult(credential, existingApp: existingApp,
+            updateOriginalShortcut: false);
+        var processor = CreateProcessor();
+
+        // Act
+        processor.ProcessCredentialResult(result, FilePath, null, null, false, lnkPath);
+
+        // Assert — no shortcut update
+        _shortcutService.Verify(s => s.UpdateShortcutToLauncher(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>()),
+            Times.Never);
     }
 
     // ── ProcessShortcutRevert ───────────────────────────────────────────

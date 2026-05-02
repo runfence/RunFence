@@ -7,8 +7,7 @@ using Xunit;
 namespace RunFence.Tests;
 
 /// <summary>
-/// Tests for AppInitializationHelper.NormalizeAccountSids — the startup fix that sets empty AccountSid
-/// to the current account SID, with the AppContainer exception.
+/// Tests for AppInitializationHelper — NormalizeAccountSids and InitializeNewDatabase.
 /// </summary>
 public class NormalizeAccountSidsTests
 {
@@ -84,5 +83,17 @@ public class NormalizeAccountSidsTests
         var changed = CreateHelper().NormalizeAccountSids(new List<AppEntry>(), CurrentSid);
 
         Assert.False(changed);
+    }
+
+    [Fact]
+    public void InitializeNewDatabase_SystemAccount_HasHighestAllowed()
+    {
+        var database = new AppDatabase();
+
+        CreateHelper().InitializeNewDatabase(database);
+
+        var system = database.GetAccount(SidConstants.SystemSid);
+        Assert.NotNull(system);
+        Assert.Equal(PrivilegeLevel.HighestAllowed, system.PrivilegeLevel);
     }
 }

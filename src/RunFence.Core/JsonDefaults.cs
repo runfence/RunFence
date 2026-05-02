@@ -1,12 +1,20 @@
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 
 namespace RunFence.Core;
 
 public static class JsonDefaults
 {
-    public static readonly JsonSerializerOptions Options = new()
+    public static readonly JsonSerializerOptions Options;
+
+    static JsonDefaults()
     {
-        WriteIndented = true,
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
+        Options = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            TypeInfoResolver = new DefaultJsonTypeInfoResolver()
+        };
+        Options.MakeReadOnly();
+    }
 }

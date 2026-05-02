@@ -136,6 +136,28 @@ public static class AccountGridHelper
         return _boldFont;
     }
 
+    /// <summary>
+    /// Adds an account row to the grid and returns the created <see cref="DataGridViewRow"/>.
+    /// Sets <see cref="DataGridViewRow.Tag"/> to <paramref name="accountRow"/> and the SID cell tooltip.
+    /// Callers are responsible for further per-section cell configuration (tooltips, ReadOnly, etc.).
+    /// </summary>
+    public static DataGridViewRow AddAccountGridRow(
+        DataGridView grid,
+        AccountRow accountRow,
+        Image icon,
+        string displayName,
+        bool logonValue,
+        bool allowInternet,
+        string appsText,
+        string profilePath)
+    {
+        var idx = grid.Rows.Add(false, icon, displayName, logonValue, allowInternet, appsText, profilePath, accountRow.Sid);
+        var row = grid.Rows[idx];
+        row.Tag = accountRow;
+        row.Cells["SID"].ToolTipText = accountRow.Sid;
+        return row;
+    }
+
     public static void AddGroupHeaderRow(DataGridView grid, string title)
     {
         var colCount = grid.Columns.Count;

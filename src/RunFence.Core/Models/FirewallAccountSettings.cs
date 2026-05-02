@@ -11,11 +11,12 @@ public class FirewallAccountSettings
     public List<string> LocalhostPortExemptions { get; set; } = ["53", "49152-65535"];
     public bool FilterEphemeralLoopback { get; set; } = true;
 
+    private static readonly HashSet<string> DefaultPortExemptions = ["53", "49152-65535"];
+
     [JsonIgnore]
     public bool IsDefault => AllowInternet && AllowLocalhost && AllowLan && Allowlist.Count == 0
         && FilterEphemeralLoopback
-        && LocalhostPortExemptions.Count == 2 && LocalhostPortExemptions[0] == "53"
-        && LocalhostPortExemptions[1] == "49152-65535";
+        && LocalhostPortExemptions.Count == 2 && DefaultPortExemptions.SetEquals(LocalhostPortExemptions);
 
     public FirewallAccountSettings Clone() => new()
     {

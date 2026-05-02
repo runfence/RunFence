@@ -1,6 +1,4 @@
-using RunFence.Core;
 using RunFence.Infrastructure;
-using RunFence.Launch;
 
 namespace RunFence.Account.UI;
 
@@ -11,11 +9,10 @@ namespace RunFence.Account.UI;
 /// firewall by <see cref="AccountFirewallMenuHandler"/>;
 /// process row menu by <see cref="AccountProcessMenuHandler"/>.
 /// Coordinated by <see cref="AccountContextMenuOrchestrator"/>.
+/// Menu item state configuration is delegated to <see cref="AccountMenuStateConfigurator"/>.
 /// </summary>
 public class AccountContextMenuHandler(
-    IWindowsAccountService windowsAccountService,
-    AccountToolResolver toolResolver,
-    PackageInstallService packageInstallService,
+    AccountMenuStateConfigurator menuStateConfigurator,
     ISessionProvider sessionProvider,
     IProcessTerminationService processTerminationService)
 {
@@ -33,86 +30,13 @@ public class AccountContextMenuHandler(
 
     public void ShowAccountMenu(AccountRow accountRow, AccountContextMenuItems i, ContextMenuStrip contextMenu)
     {
-        var db = sessionProvider.GetSession().Database;
-
         SetAccountItemsVisible(i, true);
         SetContainerItemsVisible(i, false);
         SetProcessItemsVisible(i, false);
 
-        var isCurrentAccount = accountRow.Credential?.IsCurrentAccount == true
-            || string.Equals(accountRow.Sid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase);
-        var isInteractiveUser = SidResolutionHelper.IsInteractiveUserSid(accountRow.Sid);
-        var isUnavailable = accountRow.IsUnavailable;
-        var canLaunch = !isUnavailable &&
-                        (SidResolutionHelper.CanLaunchWithoutPassword(accountRow.Sid) || accountRow.HasStoredPassword);
+        menuStateConfigurator.ConfigureMenuState(accountRow, i, _processDisplayManager);
 
-        i.EditAccount.Enabled = !isUnavailable;
-
-        var showAddAtTop = accountRow.Credential == null && !isCurrentAccount && !isUnavailable;
-        i.AddCredential.Visible = showAddAtTop;
-        i.AddCredentialSeparator.Visible = showAddAtTop;
-        i.EditCredential.Visible = !showAddAtTop;
-        i.EditCredential.Enabled = !isCurrentAccount && !isUnavailable;
-
-        i.RemoveCredential.Enabled = accountRow.Credential != null && !isCurrentAccount && !isUnavailable;
-        i.DeleteUser.Enabled = !isCurrentAccount && !isInteractiveUser && !isUnavailable;
-        i.PinFolderBrowserToTray.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
-        i.PinFolderBrowserToTray.Checked = !string.IsNullOrEmpty(accountRow.Sid) &&
-                                           db.GetAccount(accountRow.Sid)?.TrayFolderBrowser == true;
-        i.PinDiscoveryToTray.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
-        i.PinDiscoveryToTray.Checked = !string.IsNullOrEmpty(accountRow.Sid) &&
-                                       db.GetAccount(accountRow.Sid)?.TrayDiscovery == true;
-        i.PinTerminalToTray.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
-        i.PinTerminalToTray.Checked = !string.IsNullOrEmpty(accountRow.Sid) &&
-                                      db.GetAccount(accountRow.Sid)?.TrayTerminal == true;
-        i.ManageAssociations.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
-        i.ManageAssociations.Checked = !string.IsNullOrEmpty(accountRow.Sid) &&
-                                       (db.GetAccount(accountRow.Sid)?.ManageAssociations ?? true);
-        i.CopySid.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
-        i.CopyProfilePath.Enabled = !isUnavailable && !string.IsNullOrEmpty(accountRow.Sid);
-        var profilePath = windowsAccountService.GetProfilePath(accountRow.Sid);
-        i.OpenProfileFolder.Enabled = !isUnavailable && !string.IsNullOrEmpty(profilePath) && Directory.Exists(profilePath);
-        i.CopyPassword.Enabled = accountRow.Credential != null && !isCurrentAccount && !isUnavailable && accountRow.HasStoredPassword;
-        i.TypePassword.Enabled = accountRow.Credential != null && !isCurrentAccount && !isUnavailable && accountRow.HasStoredPassword;
-        i.RotatePassword.Enabled = !isCurrentAccount && !isInteractiveUser && !isUnavailable;
-        // Allowing empty password for the current admin account is by design —
-        // it lets the admin set up logon access without a credential entry.
-        i.SetEmptyPassword.Enabled = !isUnavailable;
-
-        i.EditSubmenu.Enabled = !isUnavailable;
-
-        bool canInstall = !isUnavailable &&
-                          (SidResolutionHelper.CanLaunchWithoutPassword(accountRow.Sid) || accountRow.HasStoredPassword);
-        var useWindowsTerminal = canLaunch && toolResolver.ResolveTerminalExe(accountRow.Sid) != "cmd.exe";
-        i.ManageSeparator.Visible = true;
-        i.ManageSubmenu.Visible = true;
-        i.ManageSubmenu.Enabled = !isUnavailable;
-        i.AclManager.Enabled = !isUnavailable;
-        i.FolderBrowser.Enabled = canLaunch;
-        i.Cmd.Text = useWindowsTerminal ? "Terminal" : "CMD";
-        i.Cmd.Enabled = canLaunch;
-        i.EnvironmentVariables.Visible = true;
-        i.EnvironmentVariables.Enabled = canLaunch;
-        i.KillAllProcesses.Visible = true;
-        var hasProcesses = !string.IsNullOrEmpty(accountRow.Sid) &&
-                           (_processDisplayManager == null || _processDisplayManager.HasProcesses(accountRow.Sid));
-        i.KillAllProcesses.Enabled = !isCurrentAccount &&
-                                     !isInteractiveUser && !isUnavailable && hasProcesses;
-        i.ManageLaunchSeparator.Visible = true;
-        foreach (var (package, item) in i.InstallItems)
-        {
-            item.Visible = true;
-            bool installed = packageInstallService.IsPackageInstalled(package, accountRow.Sid);
-            item.Text = installed ? $"{package.DisplayName} \u2713" : $"Install {package.DisplayName}";
-            item.Enabled = canInstall && !installed;
-        }
-
-        i.FirewallAllowlist.Visible = true;
-        i.FirewallAllowlist.Enabled = !isUnavailable;
-
-        i.AppsSeparator.Visible = true;
-        i.NewApp.Visible = true;
-        i.NewApp.Enabled = (accountRow.Credential != null || isInteractiveUser) && !isUnavailable;
+        var db = sessionProvider.GetSession().Database;
         int insertIndex = contextMenu.Items.IndexOf(i.NewApp);
 
         var linkedApps = db.Apps
@@ -217,7 +141,9 @@ public class AccountContextMenuHandler(
         i.PinFolderBrowserToTray.Visible = visible;
         i.PinDiscoveryToTray.Visible = visible;
         i.PinTerminalToTray.Visible = visible;
+        i.ShowInRunAs.Visible = false;
         i.ManageAssociations.Visible = visible;
+        i.ReceiveInjectedInput.Visible = visible;
         i.CopySid.Visible = visible;
         i.CopyProfilePath.Visible = visible;
         i.OpenProfileFolder.Visible = visible;
@@ -237,7 +163,6 @@ public class AccountContextMenuHandler(
         i.DeleteContainer.Visible = visible;
         i.CopyContainerProfilePath.Visible = visible;
         i.OpenContainerProfileFolder.Visible = visible;
-        i.ContainerFolderBrowser.Visible = visible;
     }
 
     private static void SetProcessItemsVisible(AccountContextMenuItems i, bool visible)

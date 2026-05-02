@@ -17,6 +17,7 @@ public static class NativeTokenHelper
     private const int TOKEN_USER = 1;
     private const int TOKEN_INTEGRITY_LEVEL = 25;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    private const uint PROCESS_QUERY_INFORMATION = 0x0400;
 
     /// <summary>
     /// Returns the SID of the interactive user in the current session by inspecting
@@ -58,6 +59,38 @@ public static class NativeTokenHelper
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Opens the winlogon.exe process in the current session and returns the process handle.
+    /// Caller must close the handle via CloseHandle.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Thrown when winlogon.exe is not found in the current session.</exception>
+    /// <exception cref="System.ComponentModel.Win32Exception">Thrown when OpenProcess fails.</exception>
+    public static IntPtr OpenWinlogonProcess()
+    {
+        var currentSessionId = Process.GetCurrentProcess().SessionId;
+        var winlogonProcesses = Process.GetProcessesByName("winlogon");
+        int winlogonId;
+        try
+        {
+            var winlogon = winlogonProcesses.FirstOrDefault(p => p.SessionId == currentSessionId);
+            if (winlogon == null)
+                throw new InvalidOperationException("winlogon.exe not found in current session");
+            winlogonId = winlogon.Id;
+        }
+        finally
+        {
+            foreach (var p in winlogonProcesses)
+                p.Dispose();
+        }
+
+        var hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, false, (uint)winlogonId);
+        if (hProcess == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception(
+                Marshal.GetLastWin32Error(),
+                "OpenProcess(winlogon) failed");
+        return hProcess;
     }
 
     /// <summary>

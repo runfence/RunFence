@@ -25,10 +25,10 @@ public class MainFormFirstRunExporter(
             File.Exists(session.Database.Settings.DefaultDesktopSettingsPath))
             return;
 
-        var path = Path.Combine(Constants.ProgramDataDir, "settings.json");
+        var path = Path.Combine(PathConstants.ProgramDataDir, "settings.json");
         try
         {
-            Directory.CreateDirectory(Constants.ProgramDataDir);
+            Directory.CreateDirectory(PathConstants.ProgramDataDir);
             await desktopSettingsHandler.ExportAsync(path);
         }
         catch (Exception ex)
@@ -41,12 +41,22 @@ public class MainFormFirstRunExporter(
         session.Database.Settings.DefaultDesktopSettingsPath = path;
         sessionSaver.SaveConfig();
 
-        var open = MessageBox.Show(owner,
-            $"Desktop settings exported to {path}.\n\nOpen for editing?",
-            "Export Desktop Settings",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
-        if (open == DialogResult.Yes)
-            launchFacade.LaunchFile(path, AccountLaunchIdentity.InteractiveUser);
+        if (!DebugHelper.IsDebugBuild)
+#pragma warning disable CS0162 // Unreachable code detected
+        {
+            var open = MessageBox.Show(owner,
+                $"Desktop settings exported to {path}.\n\nOpen for editing?",
+                "Export Desktop Settings",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (open == DialogResult.Yes)
+                launchFacade.LaunchFile(
+                    path,
+                    AccountLaunchIdentity.InteractiveUser with
+                    {
+                        AssociationResolutionPolicy = AssociationResolutionPolicy.AllowAccountRedirection
+                    })?.Dispose();
+        }
+#pragma warning restore CS0162 // Unreachable code detected
     }
 }

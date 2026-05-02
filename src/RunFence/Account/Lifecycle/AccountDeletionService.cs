@@ -1,5 +1,6 @@
 using RunFence.Acl;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Firewall;
 using RunFence.Infrastructure;
@@ -29,6 +30,7 @@ public class AccountDeletionService(
         if (!success)
             throw new InvalidOperationException(error ?? $"Failed to delete account {sid}");
 
+        // Intentionally after DeleteUser: lifting sandbox restrictions before deletion creates a security window where the account could execute unrestricted operations
         try
         {
             lifecycleManager.ClearAccountRestrictions(sid, username, database.Settings);
@@ -84,7 +86,7 @@ public class AccountDeletionService(
         // Apps belonging to OTHER accounts — used as the "remaining apps" view throughout,
         // so the deleted account's apps are never included in allowedSids or ancestor recomputation.
         var appsExcludingDeleted = database.Apps
-            .Where(a => !string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase))
+            .Where(a => !SidComparer.SidEquals(a.AccountSid, sid))
             .ToList();
 
         // Allow-mode apps of OTHER accounts that granted access to the deleted SID.
@@ -92,7 +94,7 @@ public class AccountDeletionService(
         var allowModeAppsToReapply = appsExcludingDeleted
             .Where(a => a is { RestrictAcl: true, IsUrlScheme: false, AclMode: AclMode.Allow } &&
                         a.AllowedAclEntries?.Any(e =>
-                            string.Equals(e.Sid, sid, StringComparison.OrdinalIgnoreCase)) == true)
+                            SidComparer.SidEquals(e.Sid, sid)) == true)
             .ToList();
 
         // Invalidate so the deleted account is absent from GetLocalUserAccounts().
@@ -102,7 +104,7 @@ public class AccountDeletionService(
         {
             if (!app.RestrictAcl || app.IsUrlScheme)
                 continue;
-            if (!string.Equals(app.AccountSid, sid, StringComparison.OrdinalIgnoreCase))
+            if (!SidComparer.SidEquals(app.AccountSid, sid))
                 continue;
 
             try

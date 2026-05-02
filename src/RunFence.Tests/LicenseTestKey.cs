@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using RunFence.Licensing;
 
 namespace RunFence.Tests;
 

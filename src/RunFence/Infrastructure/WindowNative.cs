@@ -58,15 +58,19 @@ public static class WindowNative
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr GetModuleHandle(string? lpModuleName);
 
-    // ── User32 (low-level keyboard hook) ─────────────────────────────────────
+    // ── User32 (low-level keyboard/mouse hooks) ───────────────────────────────
 
     public const int WH_KEYBOARD_LL = 13;
+    public const int WH_MOUSE_LL = 14;
     public const uint WM_KEYDOWN = 0x0100;
     public const uint WM_KEYUP = 0x0101;
     public const uint WM_SYSKEYDOWN = 0x0104;
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct KBDLLHOOKSTRUCT
@@ -78,8 +82,21 @@ public static class WindowNative
         public UIntPtr dwExtraInfo;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSLLHOOKSTRUCT
+    {
+        public POINT pt;
+        public uint mouseData;
+        public uint flags;
+        public uint time;
+        public UIntPtr dwExtraInfo;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool UnhookWindowsHookEx(IntPtr hhk);
@@ -186,14 +203,6 @@ public static class WindowNative
 
     public const int SW_RESTORE = 9;
 
-    // ── User32 (window enumeration) ───────────────────────────────────────────
-
-    public delegate bool EnumWindowsProc(nint hWnd, nint lParam);
-
-    [DllImport("user32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, nint lParam);
-
     // ── User32 (keyboard input simulation) ───────────────────────────────────
 
     [StructLayout(LayoutKind.Sequential)]
@@ -222,6 +231,7 @@ public static class WindowNative
 
     public const uint WmChar = 0x0102u;
     public const uint InputKeyboard = 1u;
+    public const uint KeyeventfExtendedKey = 0x0001u;
     public const uint KeyeventfKeyup = 0x0002u;
     public const uint KeyeventfUnicode = 0x0004u;
     public const string ConsoleWindowClass = "ConsoleWindowClass";

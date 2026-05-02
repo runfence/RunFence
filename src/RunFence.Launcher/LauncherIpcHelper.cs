@@ -9,41 +9,49 @@ namespace RunFence.Launcher;
 /// sends a message, and returns the response. Shows an error dialog on failure.
 /// Eliminates the triplicated GUI-check + start + wait + send flow.
 /// </summary>
-public static class LauncherIpcHelper
+public class LauncherIpcHelper(
+    ILauncherIpcClient ipcClient,
+    ILauncherGuiController guiController,
+    ILauncherWaitDelay waitDelay)
 {
     /// <summary>
     /// Ensures the RunFence GUI is running, waits for IPC readiness, sends
     /// <paramref name="message"/>, and returns the response.
     /// Returns null if communication failed; an error dialog has already been shown in that case.
     /// </summary>
-    public static IpcResponse? SendWithAutoStart(IpcMessage message)
+    public IpcResponse? SendWithAutoStart(IpcMessage message)
     {
-        bool guiRunning = IsGuiRunning(Constants.MutexName);
+        bool guiRunning = guiController.IsGuiRunning();
 
         if (guiRunning)
         {
-            if (!IpcClient.PingServer())
+            if (!WaitForServerWhile(guiController.IsGuiRunning))
             {
-                ShowError("RunFence is not responding. Please try again or start it manually.");
-                return null;
+                guiRunning = guiController.IsGuiRunning();
+                if (guiRunning)
+                {
+                    ShowError("RunFence is not responding. Please try again or start it manually.");
+                    return null;
+                }
             }
         }
-        else
+
+        if (!guiRunning)
         {
-            if (!StartGui())
+            if (!guiController.StartGui(IsRunAsStartupRequest(message)))
             {
                 ShowError("Failed to start RunFence.");
                 return null;
             }
 
-            if (!WaitForServer())
+            if (!WaitForServerWhile(() => true))
             {
                 ShowError("RunFence is not responding. Please try again or start it manually.");
                 return null;
             }
         }
 
-        var response = IpcClient.SendMessage(message, Constants.LauncherTimeoutMs);
+        var response = ipcClient.SendMessage(message);
         if (response == null)
         {
             ShowError("Failed to communicate with RunFence.");
@@ -53,68 +61,28 @@ public static class LauncherIpcHelper
         return response;
     }
 
-    private static bool IsGuiRunning(string mutexName)
-    {
-        try
-        {
-            using var mutex = Mutex.OpenExisting(mutexName);
-            return true;
-        }
-        catch (WaitHandleCannotBeOpenedException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Mutex exists but we can't access it (expected for non-admin accessing admin mutex)
-            return true;
-        }
-    }
-
-    private static bool StartGui()
-    {
-        try
-        {
-            var guiPath = Path.Combine(AppContext.BaseDirectory, "RunFence.exe");
-            if (!File.Exists(guiPath))
-            {
-                guiPath = Path.Combine(
-                    Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar)) ?? "",
-                    "RunFence", "RunFence.exe");
-            }
-
-            if (!File.Exists(guiPath))
-                return false;
-
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = guiPath,
-                Arguments = "--background",
-                UseShellExecute = true,
-                Verb = "runas"
-            });
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool WaitForServer()
+    private bool WaitForServerWhile(Func<bool> shouldKeepWaiting)
     {
         var sw = Stopwatch.StartNew();
-        while (sw.ElapsedMilliseconds < Constants.LauncherTimeoutMs)
+        while (sw.ElapsedMilliseconds < IpcConstants.LauncherTimeoutMs)
         {
-            if (IpcClient.PingServer())
+            if (ipcClient.PingServer())
                 return true;
-            Thread.Sleep(500);
+
+            if (!shouldKeepWaiting())
+                return false;
+
+            waitDelay.Sleep(500);
         }
 
         return false;
     }
 
-    internal static void ShowError(string message)
+    private static bool IsRunAsStartupRequest(IpcMessage message) =>
+        message.Command == IpcCommands.Launch
+        && message.AppId?.IndexOfAny(['\\', '/']) >= 0;
+
+    public static void ShowError(string message)
     {
         MessageBox.Show(message, "RunFence Launcher", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }

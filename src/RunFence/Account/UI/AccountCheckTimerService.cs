@@ -14,7 +14,7 @@ public class AccountCheckTimerService(
     ISessionProvider sessionProvider,
     ILoggingService log,
     ReconciliationGuard reconciliationGuard,
-    GrantReconciliationService? reconciler = null)
+    GrantReconciliationService reconciler)
     : IDisposable
 {
     private Timer? _timer;
@@ -59,41 +59,37 @@ public class AccountCheckTimerService(
         _inProcess = true;
         // Set the guard before any await so that a concurrent manual refresh cannot start
         // reconciliation during the DetectGroupChanges async gap on the UI thread.
-        if (reconciler != null)
-            reconciliationGuard.IsInProgress = true;
+        reconciliationGuard.IsInProgress = true;
         var reconciliationDispatched = false;
         try
         {
             // Detect group membership changes and reconcile traverse grants asynchronously.
             // Done before the SID-change check so snapshot is updated even if no SID change.
-            if (reconciler != null)
+            var changedSids = await reconciler.DetectGroupChanges();
+            if (changedSids.Count > 0)
             {
-                var changedSids = await reconciler.DetectGroupChanges();
-                if (changedSids.Count > 0)
-                {
-                    _timer?.Stop();
-                    var db = sessionProvider.GetSession().Database;
-                    var grantsSnapshot = db.Accounts.ToDictionary(
-                        a => a.Sid, a => a.Grants.ToList(), StringComparer.OrdinalIgnoreCase);
-                    reconciliationDispatched = true;
-                    _ = Task.Run(() => reconciler.ReconcileChangedSids(changedSids, grantsSnapshot))
-                        .ContinueWith(task =>
+                _timer?.Stop();
+                var db = sessionProvider.GetSession().Database;
+                var grantsSnapshot = db.Accounts.ToDictionary(
+                    a => a.Sid, a => a.Grants.ToList(), StringComparer.OrdinalIgnoreCase);
+                reconciliationDispatched = true;
+                _ = Task.Run(() => reconciler.ReconcileChangedSids(changedSids, grantsSnapshot))
+                    .ContinueWith(task =>
+                    {
+                        reconciliationGuard.IsInProgress = false;
+                        if (task.IsCompletedSuccessfully)
                         {
-                            reconciliationGuard.IsInProgress = false;
-                            if (task.IsCompletedSuccessfully)
-                            {
-                                reconciler.ApplyReconciliationResult(task.Result);
-                                RefreshNeeded?.Invoke();
-                            }
-                            else if (task.Exception != null)
-                            {
-                                log.Error("Grant reconciliation failed", task.Exception);
-                            }
+                            reconciler.ApplyReconciliationResult(task.Result);
+                            RefreshNeeded?.Invoke();
+                        }
+                        else if (task.Exception != null)
+                        {
+                            log.Error("Grant reconciliation failed", task.Exception);
+                        }
 
-                            _timer?.Start();
-                        }, TaskScheduler.FromCurrentSynchronizationContext());
-                    return; // skip rest of tick; will fire again after reconciliation
-                }
+                        _timer?.Start();
+                    }, TaskScheduler.FromCurrentSynchronizationContext());
+                return; // skip rest of tick; will fire again after reconciliation
             }
 
             try

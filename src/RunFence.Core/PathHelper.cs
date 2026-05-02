@@ -19,6 +19,21 @@ public static class PathHelper
         return path.StartsWith(baseDirectory, StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool IsSamePath(string left, string right)
+    {
+        try
+        {
+            return string.Equals(
+                NormalizeComparablePath(left),
+                NormalizeComparablePath(right),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     /// <summary>
     /// Returns true if the path looks like a URL scheme (e.g., "https://..." or "myapp:..."),
     /// as opposed to a drive letter path (e.g., "C:\...") or UNC path (e.g., "\\server\...").
@@ -45,7 +60,7 @@ public static class PathHelper
     /// </summary>
     public static bool IsBlockedAclPath(string path)
     {
-        var blockedPaths = Constants.GetBlockedAclPaths();
+        var blockedPaths = PathConstants.GetBlockedAclPaths();
         return blockedPaths.Any(bp =>
             path.StartsWith(bp + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || string.Equals(path, bp, StringComparison.OrdinalIgnoreCase));
     }
@@ -57,7 +72,7 @@ public static class PathHelper
     /// </summary>
     public static bool IsBlockedAclRoot(string path)
     {
-        var blockedPaths = Constants.GetBlockedAclPaths();
+        var blockedPaths = PathConstants.GetBlockedAclPaths();
         return blockedPaths.Any(bp => string.Equals(path, bp, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -103,4 +118,8 @@ public static class PathHelper
 
         return false;
     }
+
+    private static string NormalizeComparablePath(string path) =>
+        Path.GetFullPath(path)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 }

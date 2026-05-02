@@ -1,5 +1,6 @@
+using Moq;
 using RunFence.Apps.Shortcuts;
-using RunFence.Core.Models;
+using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -19,7 +20,7 @@ public class ShortcutDiscoveryServiceTests
 
         Assert.Equal(1, scanner.ScanCount);
         Assert.Equal(first, second);
-        Assert.Single(first);
+        _ = Assert.Single(first);
     }
 
     [Fact]
@@ -42,32 +43,6 @@ public class ShortcutDiscoveryServiceTests
     }
 
     [Fact]
-    public void TraverseShortcuts_RemainsLive()
-    {
-        var scanner = new CountingShortcutTraversalScanner(
-            [new ShortcutTraversalEntry(@"C:\Links\App.lnk", @"C:\Apps\App.exe", null)]);
-        var service = CreateService(scanner);
-
-        service.TraverseShortcuts().ToList();
-        service.TraverseShortcuts().ToList();
-
-        Assert.Equal(2, scanner.ScanCount);
-    }
-
-    [Fact]
-    public void FindShortcutsWhere_RemainsLive()
-    {
-        var scanner = new CountingShortcutTraversalScanner(
-            [new ShortcutTraversalEntry(@"C:\Links\App.lnk", @"C:\Apps\App.exe", null)]);
-        var service = CreateService(scanner);
-
-        service.FindShortcutsWhere((target, _) => target != null);
-        service.FindShortcutsWhere((target, _) => target != null);
-
-        Assert.Equal(2, scanner.ScanCount);
-    }
-
-    [Fact]
     public void DiscoverApps_UsesLiveTraversalAndFiltering()
     {
         var scanner = new CountingShortcutTraversalScanner(
@@ -78,7 +53,7 @@ public class ShortcutDiscoveryServiceTests
             new ShortcutTraversalEntry(@"C:\Links\Uninstall App.lnk", @"C:\Apps\unins000.exe", null),
             new ShortcutTraversalEntry(@"C:\Links\System.lnk", @"C:\Windows\system32\sfc.exe", null)
         ]);
-        var service = new ShortcutDiscoveryService(scanner);
+        var service = CreateService(scanner);
 
         var apps = service.DiscoverApps();
 
@@ -91,14 +66,14 @@ public class ShortcutDiscoveryServiceTests
     }
 
     private static ShortcutDiscoveryService CreateService(IShortcutTraversalScanner scanner)
-        => new(scanner);
+        => new(scanner, new Mock<IDatabaseProvider>().Object);
 
     private sealed class CountingShortcutTraversalScanner(IReadOnlyList<ShortcutTraversalEntry> entries)
         : IShortcutTraversalScanner
     {
         public int ScanCount { get; private set; }
 
-        public IEnumerable<ShortcutTraversalEntry> ScanShortcuts()
+        public IEnumerable<ShortcutTraversalEntry> ScanShortcuts(HashSet<string>? managedSids)
         {
             ScanCount++;
             foreach (var entry in entries)

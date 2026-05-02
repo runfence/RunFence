@@ -1,6 +1,6 @@
 using RunFence.Apps.UI;
 using RunFence.Core;
-using RunFence.Launch;
+using RunFence.Infrastructure;
 using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Licensing.UI.Forms;
@@ -8,25 +8,25 @@ namespace RunFence.Licensing.UI.Forms;
 public partial class EvaluationNagDialog : Form
 {
     private readonly ILicenseService _licenseService;
-    private readonly ILaunchFacade _launchFacade;
+    private readonly IShellHelper _shellHelper;
     private Timer? _countdownTimer;
     private Timer? _flashTimer;
-    private int _secondsRemaining = 5;
+    private int _secondsRemaining = DebugHelper.IsDebugBuild ? 1 : 5;
 
-    internal EvaluationNagDialog(ILicenseService licenseService, ILaunchFacade launchFacade, bool skipCountdown = false)
+    internal EvaluationNagDialog(ILicenseService licenseService, IShellHelper shellHelper, bool skipCountdown = false)
     {
         _licenseService = licenseService;
-        _launchFacade = launchFacade;
+        _shellHelper = shellHelper;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         _machineCodeTextBox.Text = licenseService.MachineCode;
         _featuresLabel.Text =
-            $"  \u2713  Unlimited app entries  (evaluation: up to {Constants.EvaluationMaxApps})\r\n" +
-            $"  \u2713  Unlimited stored credentials  (evaluation: up to {Constants.EvaluationMaxCredentials})\r\n" +
-            $"  \u2713  AppContainer sandboxing  (evaluation: up to {Constants.EvaluationMaxContainers})\r\n" +
-            $"  \u2713  Hide accounts from logon screen  (evaluation: up to {Constants.EvaluationMaxHiddenAccounts})\r\n" +
+            $"  \u2713  Unlimited app entries  (evaluation: up to {EvaluationConstants.EvaluationMaxApps})\r\n" +
+            $"  \u2713  Unlimited stored credentials  (evaluation: up to {EvaluationConstants.EvaluationMaxCredentials})\r\n" +
+            $"  \u2713  AppContainer sandboxing  (evaluation: up to {EvaluationConstants.EvaluationMaxContainers})\r\n" +
+            $"  \u2713  Hide accounts from logon screen  (evaluation: up to {EvaluationConstants.EvaluationMaxHiddenAccounts})\r\n" +
             "  \u2713  Auto-lock and idle timeout\r\n" +
-            $"  \u2713  Unlimited firewall whitelist entries  (evaluation: up to {Constants.EvaluationMaxFirewallAllowlistEntries})\r\n" +
+            $"  \u2713  Unlimited firewall whitelist entries  (evaluation: up to {EvaluationConstants.EvaluationMaxFirewallAllowlistEntries})\r\n" +
             "  \u2713  Handler associations  (evaluation: browser only)";
         if (skipCountdown)
         {
@@ -80,17 +80,18 @@ public partial class EvaluationNagDialog : Form
         if (_flashTimer != null)
             return; // already flashing; ignore repeated close attempts during animation
 
-        var flashText = $"\u23F3 Please wait... ({_secondsRemaining}s)";
         int flipCount = 0;
 
-        _continueButton.Text = flashText;
+        _continueButton.Text = $"\u23F3 Please wait... ({_secondsRemaining}s)";
         _flashTimer = new Timer { Interval = 250 };
         _flashTimer.Tick += (_, _) =>
         {
             flipCount++;
             // Odd ticks restore countdown text; even ticks show flash text.
             // Always use current _secondsRemaining so text stays accurate if countdown ticked during flash.
-            _continueButton.Text = flipCount % 2 == 0 ? flashText : $"Continue Evaluation ({_secondsRemaining}s)";
+            _continueButton.Text = flipCount % 2 == 0
+                ? $"\u23F3 Please wait... ({_secondsRemaining}s)"
+                : $"Continue Evaluation ({_secondsRemaining}s)";
             if (flipCount >= 5) // ~1.25s total, then restore
             {
                 _flashTimer!.Stop();
@@ -152,14 +153,11 @@ public partial class EvaluationNagDialog : Form
 
     private void OnPaymentLinkClicked(object? sender, LinkLabelLinkClickedEventArgs e)
     {
-        OpenUrl("https://github.com/runfence/RunFence/blob/master/PAYMENT.md");
+        _shellHelper.OpenUrlAsInteractiveUser("https://github.com/runfence/RunFence/blob/master/PAYMENT.md");
     }
 
     private void OnEmailLinkClicked(object? sender, LinkLabelLinkClickedEventArgs e)
     {
-        OpenUrl("mailto:runfencedev@gmail.com");
+        _shellHelper.OpenUrlAsInteractiveUser("mailto:runfencedev@gmail.com");
     }
-
-    private void OpenUrl(string url) =>
-        _launchFacade.LaunchUrl(url, AccountLaunchIdentity.InteractiveUser);
 }

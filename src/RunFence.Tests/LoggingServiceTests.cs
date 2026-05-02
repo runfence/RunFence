@@ -121,4 +121,20 @@ public class LoggingServiceTests : IDisposable
         Assert.Contains("visible", content);
         Assert.DoesNotContain("invisible", content);
     }
+
+    [Fact]
+    public void Fatal_WhenDisabled_StillWritesToFile()
+    {
+        // Arrange: logging disabled
+        _service.Enabled = false;
+
+        // Act: Fatal always writes via force:true regardless of Enabled
+        _service.Fatal("critical failure");
+
+        // Assert: file exists and contains the fatal message
+        Assert.True(File.Exists(_logPath), "Fatal must write even when Enabled=false");
+        var content = ReadLogContent(_logPath);
+        Assert.Contains("[FATAL]", content);
+        Assert.Contains("critical failure", content);
+    }
 }

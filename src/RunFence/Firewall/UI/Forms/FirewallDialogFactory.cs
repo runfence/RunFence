@@ -1,5 +1,4 @@
 using RunFence.Core.Models;
-using RunFence.Firewall.UI;
 
 namespace RunFence.Firewall.UI.Forms;
 
@@ -14,10 +13,8 @@ public class FirewallDialogFactory(
     FirewallAllowlistValidator validator,
     FirewallPortValidator portValidator,
     FirewallDomainResolver domainResolver,
-    BlockedConnectionAggregator aggregator,
-    FirewallAllowlistImportExportService importExportService,
-    IBlockedConnectionReader? blockedConnectionReader,
-    IDnsResolver? dnsResolver)
+    BlockedConnectionsFlowHelper blockedConnectionsFlow,
+    FirewallAllowlistImportExportService importExportService)
 {
     /// <summary>Whether firewall network info is available (i.e. firewall is configured).</summary>
     public bool IsAvailable => firewallNetworkInfo != null;
@@ -44,45 +41,13 @@ public class FirewallDialogFactory(
             validator: validator,
             portValidator: portValidator,
             domainResolver: domainResolver,
-            aggregator: aggregator,
+            blockedConnectionsFlow: blockedConnectionsFlow,
             importExportService: importExportService,
             displayName: displayName,
             allowInternet: allowInternet,
             allowLan: allowLan,
             allowLocalhost: allowLocalhost,
             allowedLocalhostPorts: allowedLocalhostPorts,
-            blockedConnectionReader: blockedConnectionReader,
-            dnsResolver: dnsResolver,
             filterEphemeralLoopback: filterEphemeralLoopback);
-    }
-
-    /// <summary>
-    /// Creates a new <see cref="BlockedConnectionsDialog"/>.
-    /// Returns <c>null</c> when blocked connection reader or DNS resolver is unavailable.
-    /// </summary>
-    public BlockedConnectionsDialog? CreateBlockedConnectionsDialog(
-        IReadOnlyList<FirewallAllowlistEntry> existingAllowlist,
-        bool enableAuditLogging)
-    {
-        if (blockedConnectionReader == null || dnsResolver == null)
-            return null;
-
-        return new BlockedConnectionsDialog(
-            reader: blockedConnectionReader,
-            dnsResolver: dnsResolver,
-            aggregator: aggregator,
-            existingAllowlist: existingAllowlist,
-            enableAuditLogging: enableAuditLogging);
-    }
-
-    /// <summary>
-    /// Enables audit logging if the blocked connection reader is available.
-    /// Swallows exceptions — audit logging is best-effort.
-    /// </summary>
-    public void TrySetAuditPolicyEnabled(bool enabled)
-    {
-        if (blockedConnectionReader == null)
-            return;
-        try { blockedConnectionReader.SetAuditPolicyEnabled(enabled); } catch { }
     }
 }

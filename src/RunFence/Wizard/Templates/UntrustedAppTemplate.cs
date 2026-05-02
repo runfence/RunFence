@@ -1,10 +1,9 @@
-using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Launch.Container;
+using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -27,13 +26,15 @@ namespace RunFence.Wizard.Templates;
 /// <see cref="FirewallOptionsStep"/> for the account path, <see cref="ContainerCapabilitiesStep"/>
 /// for the container path.
 /// </summary>
-public class UntrustedAppTemplate(
+internal class UntrustedAppTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
     IAppContainerService appContainerService,
     SessionContext session,
     WizardLicenseChecker licenseChecker,
-    IShortcutDiscoveryService discoveryService)
+    IShortcutDiscoveryService discoveryService,
+    IShortcutIconHelper iconHelper,
+    IExecutablePathResolver executablePathResolver)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -72,7 +73,7 @@ public class UntrustedAppTemplate(
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
-                    }, discoveryService, appPathDesc,
+                    }, discoveryService, iconHelper, executablePathResolver, appPathDesc,
                         initialPath: _data.AppPath,
                         initialName: _data.AppName)
                 ]
@@ -92,7 +93,7 @@ public class UntrustedAppTemplate(
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
-                    }, discoveryService, appPathDesc,
+                    }, discoveryService, iconHelper, executablePathResolver, appPathDesc,
                         initialPath: _data.AppPath,
                         initialName: _data.AppName)
                 ]);
@@ -115,7 +116,7 @@ public class UntrustedAppTemplate(
             {
                 _data.AppPath = path;
                 _data.AppName = name;
-            }, discoveryService, appPathDesc,
+            }, discoveryService, iconHelper, executablePathResolver, appPathDesc,
                 initialPath: _data.AppPath,
                 initialName: _data.AppName)
         ];
@@ -137,21 +138,12 @@ public class UntrustedAppTemplate(
 
     private async Task ExecuteAccountAsync(IWizardProgressReporter progress)
     {
-        var defaults = setupHelperFactory.CreateAccountDefaults();
+        using var defaults = setupHelperFactory.CreateAccountDefaults();
 
         // Create account: remove from Users, optional low integrity and ephemeral, block all network
         progress.ReportStatus("Creating isolated account...");
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: defaults.Username,
-            PasswordText: defaults.Password,
-            ConfirmPasswordText: defaults.Password,
-            IsEphemeral: _data.IsEphemeral,
-            CheckedGroups: [],
-            UncheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
-            AllowLogon: false,
-            AllowNetworkLogin: false,
-            AllowBgAutorun: false,
-            CurrentHiddenCount: 0);
+        var request = EditAccountDialogCreateHandler.CreateAccountRequest.ForIsolatedAccount(
+            defaults.Username, defaults.Password, isEphemeral: _data.IsEphemeral);
 
         var firewallSettings = new FirewallAccountSettings
         {
@@ -189,7 +181,15 @@ public class UntrustedAppTemplate(
             ],
             CreateDesktopShortcut: true);
 
-        await executor.ExecuteAsync(flowParams, progress);
+        try
+        {
+            await executor.ExecuteAsync(flowParams, progress);
+        }
+        finally
+        {
+            request.Password.Dispose();
+            request.ConfirmPassword.Dispose();
+        }
     }
 
     private async Task ExecuteContainerAsync(IWizardProgressReporter progress)

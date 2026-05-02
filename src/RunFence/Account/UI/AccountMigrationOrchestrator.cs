@@ -16,7 +16,7 @@ public class AccountMigrationOrchestrator(
     IAccountLifecycleManager lifecycleManager,
     ILocalUserProvider localUserProvider,
     ILoggingService log,
-    ISidResolver sidResolver,
+    IProfilePathResolver profilePathResolver,
     ISidNameCacheService sidNameCache) : IDisposable
 {
     private CancellationTokenSource? _aclCleanupCts;
@@ -31,7 +31,7 @@ public class AccountMigrationOrchestrator(
 
     public void MigrateSids(SessionContext session, Form? parent, Action onMigrationApplied)
     {
-        using var dlg = new SidMigrationDialog(session, sidMigrationService, createMigrationHandler(), localUserProvider, log, sidResolver, sidNameCache);
+        using var dlg = new SidMigrationDialog(session, sidMigrationService, createMigrationHandler(), localUserProvider, log, profilePathResolver, sidNameCache);
         modalCoordinator.ShowModal(dlg, parent);
         if (dlg.InAppMigrationApplied)
             onMigrationApplied();

@@ -13,9 +13,6 @@ public class AccountLsaRestrictionService(
     private static readonly string[] NoBgAutostartRights =
         [LsaRightsHelper.SeDenyBatchLogonRight, LsaRightsHelper.SeDenyServiceLogonRight];
 
-    public bool IsLocalOnlyBySid(string sid)
-        => HasAllRights(sid, LocalOnlyRights, "local-only");
-
     public void SetLocalOnlyBySid(string sid, bool localOnly)
     {
         if (localOnly)
@@ -28,30 +25,12 @@ public class AccountLsaRestrictionService(
     public bool? GetLocalOnlyState(string sid)
         => GetRightsState(sid, LocalOnlyRights, "local-only");
 
-    public bool IsNoBgAutostartBySid(string sid)
-        => HasAllRights(sid, NoBgAutostartRights, "no-bg-autostart");
-
     public void SetNoBgAutostartBySid(string sid, bool blocked)
         => SetRights(sid, NoBgAutostartRights, blocked, "no-bg-autostart",
             "Set no-bg-autostart (deny batch + service logon)", "Removed no-bg-autostart restrictions");
 
     public bool? GetNoBgAutostartState(string sid)
         => GetRightsState(sid, NoBgAutostartRights, "no-bg-autostart");
-
-    private bool HasAllRights(string sid, string[] rightNames, string featureName)
-    {
-        try
-        {
-            var sidBytes = lsaRights.GetSidBytes(sid);
-            var rights = lsaRights.EnumerateAccountRights(sidBytes);
-            return rightNames.All(rights.Contains);
-        }
-        catch (Exception ex)
-        {
-            log.Error($"Failed to check {featureName} status for {sid}", ex);
-            return false;
-        }
-    }
 
     private void SetRights(string sid, string[] rightNames, bool enable, string featureName,
         string enabledLogMessage, string disabledLogMessage)

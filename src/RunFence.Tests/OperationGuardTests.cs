@@ -9,7 +9,8 @@ public class OperationGuardTests
     public void Begin_DisablesOwnerControl()
     {
         var guard = new OperationGuard();
-        using var control = new Button { Enabled = true };
+        using var control = new Button();
+        control.Enabled = true;
 
         guard.Begin(control);
 
@@ -24,7 +25,8 @@ public class OperationGuardTests
     public void End_ReEnablesOwnerControl()
     {
         var guard = new OperationGuard();
-        using var control = new Button { Enabled = true };
+        using var control = new Button();
+        control.Enabled = true;
 
         guard.Begin(control);
         guard.End(control);

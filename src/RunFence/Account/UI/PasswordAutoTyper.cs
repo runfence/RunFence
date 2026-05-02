@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Security;
 using System.Text;
 using RunFence.Core;
 using RunFence.Infrastructure;
@@ -15,7 +14,7 @@ public enum AutoTypeResult
 
 public interface IPasswordAutoTyper
 {
-    AutoTypeResult TypeToWindow(IntPtr hwnd, SecureString password);
+    AutoTypeResult TypeToWindow(IntPtr hwnd, ProtectedString password);
 }
 
 /// <summary>
@@ -29,7 +28,7 @@ public interface IPasswordAutoTyper
 /// </summary>
 public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
 {
-    public AutoTypeResult TypeToWindow(IntPtr targetHwnd, SecureString password)
+    public AutoTypeResult TypeToWindow(IntPtr targetHwnd, ProtectedString password)
     {
         if (!WindowNative.IsWindow(targetHwnd))
         {
@@ -40,7 +39,8 @@ public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
         var targetTitle = GetWindowTitle(targetHwnd);
         var targetClass = GetWindowClass(targetHwnd);
         var isConsole = IsConsoleLikeWindow(targetHwnd, targetClass);
-        log.Info($"TypeToWindow: target hwnd=0x{targetHwnd.ToInt64():X} class=\"{targetClass}\" title=\"{targetTitle}\" isConsole={isConsole}");
+        var titleForLog = targetTitle.Length > 50 ? targetTitle[..50] + "…" : targetTitle;
+        log.Info($"TypeToWindow: target hwnd=0x{targetHwnd.ToInt64():X} class=\"{targetClass}\" title=\"{titleForLog}\" isConsole={isConsole}");
 
         // Restore window if minimized — SetForegroundWindow alone only flashes the taskbar for iconic windows.
         if (WindowNative.IsIconic(targetHwnd))
@@ -93,7 +93,7 @@ public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
             log.Info($"TypeToWindow: typing via SendInput to console hwnd=0x{hwndFocus.ToInt64():X}");
         }
 
-        var ptr = Marshal.SecureStringToGlobalAllocUnicode(password);
+        var ptr = password.AllocUnicode();
         try
         {
             for (int i = 0; i < password.Length; i++)

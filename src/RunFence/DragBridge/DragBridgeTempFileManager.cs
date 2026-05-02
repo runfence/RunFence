@@ -3,7 +3,6 @@ using System.Security.Principal;
 using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
 
 namespace RunFence.DragBridge;
 
@@ -13,14 +12,10 @@ public class DragBridgeTempFileManager(
     ISessionSaver sessionSaver,
     IUiThreadInvoker uiThreadInvoker,
     ITempDirectoryAclHelper aclHelper,
-    string? basePath = null)
+    string tempRoot)
     : IDragBridgeTempFileManager
 {
-    private string TempRoot
-    {
-        get => field
-               ?? Path.Combine(Constants.ProgramDataDir, Constants.DragBridgeTempDir);
-    } = basePath;
+    private string TempRoot { get; } = tempRoot;
 
     public string CreateTempFolder(string targetSid, string? containerSid = null)
     {
@@ -139,20 +134,26 @@ public class DragBridgeTempFileManager(
         return dest;
     }
 
-    private static void CopyDirectoryRecursive(string sourceDir, string destDir)
+    private void CopyDirectoryRecursive(string sourceDir, string destDir)
     {
         Directory.CreateDirectory(destDir);
         foreach (var file in Directory.GetFiles(sourceDir))
         {
             if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
+            {
+                log.Warn($"DragBridgeTempFileManager: skipping reparse point (symlink/junction): '{file}'");
                 continue;
+            }
             File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)));
         }
 
         foreach (var subDir in Directory.GetDirectories(sourceDir))
         {
             if ((new DirectoryInfo(subDir).Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                log.Warn($"DragBridgeTempFileManager: skipping reparse point (symlink/junction): '{subDir}'");
                 continue;
+            }
             CopyDirectoryRecursive(subDir, Path.Combine(destDir, Path.GetFileName(subDir)));
         }
     }

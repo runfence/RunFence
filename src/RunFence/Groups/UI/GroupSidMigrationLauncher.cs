@@ -17,7 +17,7 @@ public class GroupSidMigrationLauncher(
     Func<InAppMigrationHandler> createMigrationHandler,
     ILocalUserProvider localUserProvider,
     ILoggingService log,
-    ISidResolver sidResolver,
+    IProfilePathResolver profilePathResolver,
     ISidNameCacheService sidNameCache)
 {
     /// <summary>
@@ -26,7 +26,7 @@ public class GroupSidMigrationLauncher(
     public bool Launch(SessionContext session, IWin32Window? owner)
     {
         using var dlg = new SidMigrationDialog(session, sidMigrationService, createMigrationHandler(), localUserProvider,
-            log, sidResolver, sidNameCache);
+            log, profilePathResolver, sidNameCache);
         modalCoordinator.ShowModal(dlg, owner);
         return dlg.InAppMigrationApplied;
     }

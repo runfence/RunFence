@@ -1,7 +1,4 @@
-using RunFence.Acl.UI.Forms;
-using RunFence.Apps.UI.Forms;
 using RunFence.Core.Models;
-using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI;
 
@@ -10,21 +7,14 @@ namespace RunFence.Apps.UI;
 /// for application by <see cref="AppEditDialog"/> to its controls.
 /// Separates data reading from UI control manipulation.
 /// </summary>
-public class AppEditPopulator(AppEditDialogController controller)
+public class AppEditPopulator
 {
     /// <summary>
-    /// Reads all relevant fields from <paramref name="app"/> and returns a populated state record.
-    /// The dialog applies the returned state to its controls.
-    /// Also populates the provided sections as a side effect (they require direct references).
-    /// </summary>
-    public AppEditState LoadExistingApp(
-        AppEntry app,
-        AclConfigSection aclSection,
-        IpcCallerSection ipcSection,
-        EnvVarsSection envVarsSection)
+     /// Reads all relevant fields from <paramref name="app"/> and returns a populated state record.
+     /// The dialog applies the returned state to its controls.
+     /// </summary>
+    public AppEditState LoadExistingApp(AppEntry app)
     {
-        var result = controller.PopulateNonComboState(app, aclSection, ipcSection, envVarsSection);
-
         return new AppEditState(
             Name: app.Name,
             ExePath: app.ExePath,
@@ -35,8 +25,8 @@ public class AppEditPopulator(AppEditDialogController controller)
             WorkingDirectory: app.WorkingDirectory ?? "",
             AllowPassingWorkingDirectory: app.AllowPassingWorkingDirectory,
             ManageShortcuts: app.ManageShortcuts,
-            SelectedPrivilegeLevel: result.SelectedPrivilegeLevel,
-            OverrideIpcCallers: result.OverrideIpcCallers);
+            SelectedPrivilegeLevel: app.PrivilegeLevel,
+            OverrideIpcCallers: app.AllowedIpcCallers != null);
     }
 }
 

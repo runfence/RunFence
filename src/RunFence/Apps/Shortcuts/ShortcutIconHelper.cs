@@ -3,13 +3,13 @@ using RunFence.Core;
 
 namespace RunFence.Apps.Shortcuts;
 
-public static class ShortcutIconHelper
+public class ShortcutIconHelper(ILoggingService log) : IShortcutIconHelper
 {
-    public static Image? ExtractIcon(string exePath, int size = 16, ILoggingService? log = null)
+    public Image? ExtractIcon(string exePath, int size = 16)
     {
         if (!File.Exists(exePath))
         {
-            log?.Warn($"Icon skipped — file not found: {exePath}");
+            log.Warn($"Icon skipped — file not found: {exePath}");
             return null;
         }
 
@@ -18,7 +18,7 @@ public static class ShortcutIconHelper
             using var rawIcon = Icon.ExtractAssociatedIcon(exePath);
             if (rawIcon == null)
             {
-                log?.Warn($"Icon extraction returned null: {exePath}");
+                log.Warn($"Icon extraction returned null: {exePath}");
                 return null;
             }
 
@@ -31,7 +31,7 @@ public static class ShortcutIconHelper
         }
         catch (Exception ex)
         {
-            log?.Error($"Icon extraction failed for {exePath}", ex);
+            log.Error($"Icon extraction failed for {exePath}", ex);
             return null;
         }
     }

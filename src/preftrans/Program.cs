@@ -28,7 +28,8 @@ public static class Program
                 return 1;
             }
 
-            var command = args[0].ToLowerInvariant();
+            var rawCommand = args[0];
+            var command = CommandLineParser.ResolveCommand(rawCommand, ["store", "load", "show"]);
             try
             {
                 var (reader, writer) = CreateServices();

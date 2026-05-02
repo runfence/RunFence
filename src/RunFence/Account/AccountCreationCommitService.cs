@@ -1,7 +1,4 @@
-using RunFence.Account.UI;
-using RunFence.Account.UI.Forms;
 using RunFence.Apps;
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
@@ -20,43 +17,43 @@ public class AccountCreationCommitService(
     IAssociationAutoSetService autoSetService,
     SessionPersistenceHelper persistenceHelper) : IAccountCreationCommitService
 {
-    public AccountCreationCommitResult? Commit(EditAccountDialog dialog, AppDatabase database)
+    public AccountCreationCommitResult? Commit(AccountCreationData data, AppDatabase database)
     {
         var session = sessionProvider.GetSession();
         var credId = credentialManager.StoreCreatedUserCredential(
-            dialog.CreatedSid!, dialog.CreatedPassword!,
+            data.CreatedSid, data.CreatedPassword,
             session.CredentialStore, session.PinDerivedKey);
 
         if (credId == null)
             return null;
 
         localUserProvider.InvalidateCache();
-        sidNameCache.ResolveAndCache(dialog.CreatedSid!, dialog.NewUsername!);
+        sidNameCache.ResolveAndCache(data.CreatedSid, data.NewUsername);
 
-        autoSetService.AutoSetForUser(dialog.CreatedSid!);
+        autoSetService.AutoSetForUser(data.CreatedSid);
 
-        var createdEntry = database.GetOrCreateAccount(dialog.CreatedSid!);
-        if (dialog.IsEphemeral)
+        var createdEntry = database.GetOrCreateAccount(data.CreatedSid);
+        if (data.IsEphemeral)
             createdEntry.DeleteAfterUtc = DateTime.UtcNow.AddHours(24);
 
-        createdEntry.PrivilegeLevel = dialog.SelectedPrivilegeLevel;
+        createdEntry.PrivilegeLevel = data.PrivilegeLevel;
 
-        if (dialog.FirewallSettingsChanged)
+        if (data.FirewallSettingsChanged)
         {
             var fwSettings = new FirewallAccountSettings
             {
-                AllowInternet = dialog.AllowInternet,
-                AllowLocalhost = dialog.AllowLocalhost,
-                AllowLan = dialog.AllowLan
+                AllowInternet = data.AllowInternet,
+                AllowLocalhost = data.AllowLocalhost,
+                AllowLan = data.AllowLan
             };
-            FirewallAccountSettings.UpdateOrRemove(database, dialog.CreatedSid!, fwSettings);
+            FirewallAccountSettings.UpdateOrRemove(database, data.CreatedSid, fwSettings);
         }
 
         bool showFirstAccountWarning = !database.Settings.HasShownFirstAccountWarning;
         if (showFirstAccountWarning)
             database.Settings.HasShownFirstAccountWarning = true;
 
-        bool showUsersGroupWarning = dialog.UsersGroupUnchecked && !database.Settings.HasShownUsersGroupWarning;
+        bool showUsersGroupWarning = data.UsersGroupUnchecked && !data.AdminGroupChecked && !database.Settings.HasShownUsersGroupWarning;
         if (showUsersGroupWarning)
             database.Settings.HasShownUsersGroupWarning = true;
 

@@ -5,8 +5,8 @@ namespace RunFence.Core.Models;
 public record AllowAclEntry
 {
     public string Sid { get; init; } = string.Empty;
-    public bool AllowExecute { get; set; }
-    public bool AllowWrite { get; set; }
+    public bool AllowExecute { get; init; }
+    public bool AllowWrite { get; init; }
 
     public virtual bool Equals(AllowAclEntry? other) =>
         other is not null

@@ -124,7 +124,7 @@ public class ApplicationsGridPopulator(
             if (row.Tag is AppEntry app && app.Id == appId)
             {
                 row.Selected = true;
-                _grid.CurrentCell = row.Cells["Name"];
+                _grid.CurrentCell = row.Cells["AppName"];
                 return;
             }
         }
@@ -137,7 +137,7 @@ public class ApplicationsGridPopulator(
             if (row.Tag is AppEntry)
             {
                 row.Selected = true;
-                _grid.CurrentCell = row.Cells["Name"];
+                _grid.CurrentCell = row.Cells["AppName"];
                 return;
             }
         }
@@ -153,7 +153,7 @@ public class ApplicationsGridPopulator(
             if (_grid.Rows[i].Tag is AppEntry)
             {
                 _grid.Rows[i].Selected = true;
-                _grid.CurrentCell = _grid.Rows[i].Cells["Name"];
+                _grid.CurrentCell = _grid.Rows[i].Cells["AppName"];
                 return;
             }
         }

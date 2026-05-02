@@ -11,9 +11,9 @@ partial class AppDiscoveryDialog
 
     private TextBox _searchTextBox;
     private StyledDataGridView _grid;
-    private DataGridViewImageColumn _iconCol;
-    private DataGridViewTextBoxColumn _nameCol;
-    private DataGridViewTextBoxColumn _targetPathCol;
+    private DataGridViewImageColumn colIcon;
+    private DataGridViewTextBoxColumn AppName;
+    private DataGridViewTextBoxColumn TargetPath;
     private Label _emptyLabel;
     private FlowLayoutPanel _buttonPanel;
     private Button _okButton;
@@ -35,9 +35,9 @@ partial class AppDiscoveryDialog
     {
         _searchTextBox = new TextBox();
         _grid = new StyledDataGridView();
-        _iconCol = new DataGridViewImageColumn();
-        _nameCol = new DataGridViewTextBoxColumn();
-        _targetPathCol = new DataGridViewTextBoxColumn();
+        colIcon = new DataGridViewImageColumn();
+        AppName = new DataGridViewTextBoxColumn();
+        TargetPath = new DataGridViewTextBoxColumn();
         _emptyLabel = new Label();
         _buttonPanel = new FlowLayoutPanel();
         _okButton = new Button();
@@ -52,30 +52,26 @@ partial class AppDiscoveryDialog
         _searchTextBox.PlaceholderText = "Search applications...";
 
         // _grid
-        _grid.AllowUserToAddRows = false;
-        _grid.AllowUserToDeleteRows = false;
         _grid.ReadOnly = true;
-        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        _grid.MultiSelect = false;
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-        // _iconCol
-        _iconCol.Name = "Icon";
-        _iconCol.HeaderText = "";
-        _iconCol.Width = 24;
-        _iconCol.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
-        _iconCol.Resizable = DataGridViewTriState.False;
-        _iconCol.DefaultCellStyle.NullValue = null;
-        _iconCol.ImageLayout = DataGridViewImageCellLayout.Zoom;
-        _grid.Columns.Add(_iconCol);
+        // colIcon
+        colIcon.Name = "colIcon";
+        colIcon.HeaderText = "";
+        colIcon.Width = 24;
+        colIcon.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+        colIcon.Resizable = DataGridViewTriState.False;
+        colIcon.DefaultCellStyle.NullValue = null;
+        colIcon.ImageLayout = DataGridViewImageCellLayout.Zoom;
+        _grid.Columns.Add(colIcon);
 
-        _nameCol.Name = "Name";
-        _nameCol.HeaderText = "Name";
-        _nameCol.FillWeight = 35;
-        _grid.Columns.Add(_nameCol);
-        _targetPathCol.Name = "TargetPath";
-        _targetPathCol.HeaderText = "Target Path";
-        _targetPathCol.FillWeight = 65;
-        _grid.Columns.Add(_targetPathCol);
+        AppName.Name = "AppName";
+        AppName.HeaderText = "Name";
+        AppName.FillWeight = 35;
+        _grid.Columns.Add(AppName);
+        TargetPath.Name = "TargetPath";
+        TargetPath.HeaderText = "Target Path";
+        TargetPath.FillWeight = 65;
+        _grid.Columns.Add(TargetPath);
         _grid.Dock = DockStyle.Fill;
         _grid.CellDoubleClick += OnGridDoubleClick;
 

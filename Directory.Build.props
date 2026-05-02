@@ -1,5 +1,14 @@
 <Project>
 
+    <PropertyGroup>
+        <!--
+          Self-check builds emit generated sources under each project's artifacts/selfcheck tree.
+          Exclude project-local artifacts outputs from SDK default item globs so nested obj/bin files
+          are not compiled as part of the main project build.
+        -->
+        <DefaultItemExcludesInProjectFolder>$(DefaultItemExcludesInProjectFolder);artifacts\**</DefaultItemExcludesInProjectFolder>
+    </PropertyGroup>
+
     <!--
       Non-Debug builds use a date-based InformationalVersion (1.0.YYYYMMDD) so the About
       panel always shows a meaningful version instead of the SDK default "1.0.0+<hash>".

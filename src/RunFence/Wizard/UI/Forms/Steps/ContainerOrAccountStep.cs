@@ -25,9 +25,6 @@ public class ContainerOrAccountStep : WizardStepPage
         BuildContent();
     }
 
-    /// <summary>Returns true if container mode is currently selected.</summary>
-    public bool IsContainerSelected => _containerRadio.Checked;
-
     public override string StepTitle => "Isolation Mode";
 
     public override string? Validate() => null;

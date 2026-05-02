@@ -1,4 +1,3 @@
-using RunFence.Core.Models;
 using RunFence.Persistence;
 
 namespace RunFence.Apps.UI;
@@ -12,14 +11,17 @@ public class AppEditAssociationHandler(
     IHandlerMappingService handlerMappingService,
     IAppHandlerRegistrationService handlerRegistrationService,
     IAssociationAutoSetService autoSetService,
-    IDatabaseProvider databaseProvider)
+    IDatabaseProvider databaseProvider,
+    Func<HandlerMappingMutationHandler> mutationHandlerFactory)
 {
     private IReadOnlyList<string> _pendingRemovedAssociations = [];
+
+    private readonly HandlerMappingMutationHandler _mutationHandler = mutationHandlerFactory();
 
     /// <summary>
     /// Returns the association items currently mapped to <paramref name="appId"/> across all loaded configs.
     /// </summary>
-    public List<HandlerAssociationItem>? GetCurrentAssociations(string appId)
+    public IReadOnlyList<HandlerAssociationItem>? GetCurrentAssociations(string appId)
     {
         var database = databaseProvider.GetDatabase();
         var allMappings = handlerMappingService.GetAllHandlerMappings(database);
@@ -28,51 +30,22 @@ public class AppEditAssociationHandler(
             .Select(kv =>
             {
                 var e = kv.Value.First(e2 => string.Equals(e2.AppId, appId, StringComparison.OrdinalIgnoreCase));
-                return new HandlerAssociationItem(kv.Key, e.ArgumentsTemplate);
+                return new HandlerAssociationItem(kv.Key, e.ArgumentsTemplate, e.PathPrefixes?.AsReadOnly(), e.ReplacePrefixes);
             })
             .ToList();
 
-        return items.Count > 0 ? items : null;
+        return items.Count > 0 ? items.AsReadOnly() : null;
     }
 
     /// <summary>
-    /// Applies in-memory handler mapping changes (adds/removes/template updates) to the database
+    /// Applies in-memory handler mapping changes (adds/removes/template/prefix updates) to the database
     /// based on the diff between current and new associations.
     /// Stores removed keys internally for use by <see cref="SyncRegistry"/>.
     /// Must be called before saving so the correct config file is written.
     /// </summary>
-    public void ApplyChanges(string appId, List<HandlerAssociationItem> newAssociations)
+    public void ApplyChanges(string appId, IReadOnlyList<HandlerAssociationItem> newAssociations)
     {
-        var database = databaseProvider.GetDatabase();
-        var allMappings = handlerMappingService.GetAllHandlerMappings(database);
-
-        var originalItems = allMappings
-            .Where(kv => kv.Value.Any(e => string.Equals(e.AppId, appId, StringComparison.OrdinalIgnoreCase)))
-            .ToDictionary(
-                kv => kv.Key,
-                kv => kv.Value.First(e => string.Equals(e.AppId, appId, StringComparison.OrdinalIgnoreCase)).ArgumentsTemplate,
-                StringComparer.OrdinalIgnoreCase);
-        var originalKeys = originalItems.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var removedKeys = new List<string>();
-        foreach (var key in originalKeys)
-        {
-            if (!newAssociations.Any(a => string.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase)))
-            {
-                handlerMappingService.RemoveHandlerMapping(key, appId, database);
-                removedKeys.Add(key);
-            }
-        }
-
-        foreach (var item in newAssociations)
-        {
-            bool isNew = !originalKeys.Contains(item.Key);
-            bool templateChanged = !isNew && originalItems[item.Key] != item.ArgumentsTemplate;
-            if (isNew || templateChanged)
-                handlerMappingService.SetHandlerMapping(item.Key, new HandlerMappingEntry(appId, item.ArgumentsTemplate), database);
-        }
-
-        _pendingRemovedAssociations = removedKeys;
+        _pendingRemovedAssociations = _mutationHandler.SetAssociationsForApp(appId, newAssociations);
     }
 
     /// <summary>
@@ -82,22 +55,7 @@ public class AppEditAssociationHandler(
     /// </summary>
     public void RevertChanges(string appId, IReadOnlyList<HandlerAssociationItem> originalAssociations)
     {
-        var database = databaseProvider.GetDatabase();
-        var allMappings = handlerMappingService.GetAllHandlerMappings(database);
-
-        // Remove any new/changed mappings that were applied
-        var currentKeys = allMappings
-            .Where(kv => kv.Value.Any(e => string.Equals(e.AppId, appId, StringComparison.OrdinalIgnoreCase)))
-            .Select(kv => kv.Key)
-            .ToList();
-
-        foreach (var key in currentKeys)
-            handlerMappingService.RemoveHandlerMapping(key, appId, database);
-
-        // Restore original mappings
-        foreach (var item in originalAssociations)
-            handlerMappingService.SetHandlerMapping(item.Key, new HandlerMappingEntry(appId, item.ArgumentsTemplate), database);
-
+        _mutationHandler.SetAssociationsForApp(appId, originalAssociations);
         _pendingRemovedAssociations = [];
     }
 
@@ -129,7 +87,7 @@ public class AppEditAssociationHandler(
     /// Equivalent to calling <see cref="ApplyChanges"/> followed immediately by <see cref="SyncRegistry"/>.
     /// Use when there is no intervening save step between apply and sync.
     /// </summary>
-    public void ApplyAndSync(string appId, List<HandlerAssociationItem> newAssociations)
+    public void ApplyAndSync(string appId, IReadOnlyList<HandlerAssociationItem> newAssociations)
     {
         ApplyChanges(appId, newAssociations);
         SyncRegistry();

@@ -70,7 +70,7 @@ public class SecurityScanner
     private readonly AutorunChecker _autorunChecker;
     private readonly PerUserScanner _perUserScanner;
     private readonly MachineLevelRegistryScanner _registryScanner;
-    private readonly MachineLevelServiceScanner _serviceScanner;
+    private readonly MachineLevelPolicyScanner _policyScanner;
     private readonly DiskRootScanner _diskRootScanner;
 
     public SecurityScanner() : this(new DefaultScannerDataAccess())
@@ -84,7 +84,7 @@ public class SecurityScanner
         _autorunChecker = new AutorunChecker(dataAccess, _aclCheck);
         _perUserScanner = new PerUserScanner(dataAccess, _aclCheck, _autorunChecker);
         _registryScanner = new MachineLevelRegistryScanner(dataAccess, dataAccess, dataAccess, dataAccess, dataAccess, _aclCheck);
-        _serviceScanner = new MachineLevelServiceScanner(dataAccess, _aclCheck, _perUserScanner);
+        _policyScanner = new MachineLevelPolicyScanner(dataAccess, _aclCheck, _perUserScanner);
         _diskRootScanner = new DiskRootScanner(dataAccess, _aclCheck);
     }
 
@@ -166,7 +166,7 @@ public class SecurityScanner
             CurrentUserSid: currentUserSid, InteractiveUserSid: interactiveUserSid);
 
         ct.ThrowIfCancellationRequested();
-        _serviceScanner.ScanPublicStartupFolder(ctx);
+        _policyScanner.ScanPublicStartupFolder(ctx);
         ct.ThrowIfCancellationRequested();
         _registryScanner.ScanMachineRegistryRunKeys(ctx);
         ct.ThrowIfCancellationRequested();
@@ -174,23 +174,23 @@ public class SecurityScanner
         ct.ThrowIfCancellationRequested();
         _registryScanner.ScanAppInitDlls(ctx);
         ct.ThrowIfCancellationRequested();
-        _serviceScanner.ScanTaskScheduler(ctx);
+        _policyScanner.ScanTaskScheduler(ctx);
         ct.ThrowIfCancellationRequested();
-        _serviceScanner.ScanMachineGpScripts(ctx);
+        _policyScanner.ScanMachineGpScripts(ctx);
         ct.ThrowIfCancellationRequested();
-        _serviceScanner.ScanSharedWrapperScripts(ctx);
+        _policyScanner.ScanSharedWrapperScripts(ctx);
         ct.ThrowIfCancellationRequested();
-        _serviceScanner.ScanServices(ctx);
+        _policyScanner.ScanServices(ctx);
         ct.ThrowIfCancellationRequested();
         _registryScanner.ScanIfeo(ctx);
         ct.ThrowIfCancellationRequested();
         _registryScanner.ScanSystemDllLocations(ctx);
         ct.ThrowIfCancellationRequested();
-        _serviceScanner.ScanAccountLockoutPolicy(ctx);
+        _policyScanner.ScanAccountLockoutPolicy(ctx);
         ct.ThrowIfCancellationRequested();
-        _serviceScanner.ScanBlankPasswordPolicy(ctx);
+        _policyScanner.ScanBlankPasswordPolicy(ctx);
         ct.ThrowIfCancellationRequested();
-        _serviceScanner.ScanWindowsFirewall(ctx);
+        _policyScanner.ScanWindowsFirewall(ctx);
         ct.ThrowIfCancellationRequested();
         _diskRootScanner.ScanDiskRoots(ctx);
         ct.ThrowIfCancellationRequested();

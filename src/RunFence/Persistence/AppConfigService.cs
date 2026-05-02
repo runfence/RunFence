@@ -26,11 +26,24 @@ public class AppConfigService(
     public List<AppEntry> GetAppsForConfig(string path, AppDatabase database) =>
         index.GetAppsForConfig(Normalize(path), database);
 
+    public AppConfig GetConfigForExport(string path, AppDatabase database)
+    {
+        var normalized = Normalize(path);
+        return new AppConfig
+        {
+            Apps = GetAppsForConfig(normalized, database),
+            Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, normalized),
+            SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
+                WellKnownSecuritySids.AllApplicationPackagesSid,
+                database.SharedContainerTraverseGrants,
+                normalized),
+            HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(normalized),
+        };
+    }
+
     public IReadOnlyList<string> GetLoadedConfigPaths() => index.GetLoadedConfigPaths();
 
     public bool HasLoadedConfigs => index.HasLoadedConfigs;
-
-    public List<string> GetUnavailableConfigPaths() => index.GetUnavailableConfigPaths();
 
     // --- Load / Unload ---
 
@@ -40,8 +53,8 @@ public class AppConfigService(
         var normalized = Normalize(path);
 
         // Validate: reject paths under app's own data directories
-        var roaming = NormalizeDir(Constants.RoamingAppDataDir);
-        var local = NormalizeDir(Constants.LocalAppDataDir);
+        var roaming = NormalizeDir(PathConstants.RoamingAppDataDir);
+        var local = NormalizeDir(PathConstants.LocalAppDataDir);
         if (normalized.StartsWith(roaming, StringComparison.OrdinalIgnoreCase) ||
             normalized.StartsWith(local, StringComparison.OrdinalIgnoreCase))
         {
@@ -68,6 +81,7 @@ public class AppConfigService(
         }
 
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
+        var existingIds = database.Apps.Select(a => a.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var loadedApps = new List<AppEntry>();
         foreach (var app in config.Apps)
         {
@@ -75,13 +89,14 @@ public class AppConfigService(
                 app.AccountSid = currentSid;
 
             // ID collision: regenerate if already used
-            if (database.Apps.Any(a => a.Id == app.Id))
+            if (existingIds.Contains(app.Id))
             {
-                var newId = idGenerator.GenerateUniqueId(database.Apps.Select(a => a.Id));
+                var newId = idGenerator.GenerateUniqueId(existingIds);
                 log.Info($"App '{app.Name}' had ID collision, regenerated: {app.Id} → {newId}");
                 app.Id = newId;
             }
 
+            existingIds.Add(app.Id);
             database.Apps.Add(app);
             index.AssignApp(app.Id, normalized);
             loadedApps.Add(app);
@@ -104,6 +119,21 @@ public class AppConfigService(
                     dbAccount.Grants.Add(entry);
                     grantTracker.AssignGrant(configAccount.Sid, entry, normalized);
                 }
+            }
+        }
+
+        if (config.SharedContainerTraverseGrants != null)
+        {
+            foreach (var entry in config.SharedContainerTraverseGrants)
+            {
+                if (database.SharedContainerTraverseGrants.Any(e =>
+                        string.Equals(e.Path, entry.Path, StringComparison.OrdinalIgnoreCase) &&
+                        e.IsDeny == entry.IsDeny &&
+                        e.IsTraverseOnly == entry.IsTraverseOnly))
+                    continue;
+
+                database.SharedContainerTraverseGrants.Add(entry);
+                grantTracker.AssignGrant(WellKnownSecuritySids.AllApplicationPackagesSid, entry, normalized);
             }
         }
 
@@ -137,6 +167,14 @@ public class AppConfigService(
 
         foreach (var (sid, grantPath, isDeny, isTraverseOnly) in removedGrants)
         {
+            if (string.Equals(sid, WellKnownSecuritySids.AllApplicationPackagesSid, StringComparison.OrdinalIgnoreCase))
+            {
+                database.SharedContainerTraverseGrants.RemoveAll(e =>
+                    string.Equals(e.Path, grantPath, StringComparison.OrdinalIgnoreCase) &&
+                    e.IsDeny == isDeny && e.IsTraverseOnly == isTraverseOnly);
+                continue;
+            }
+
             var account = database.GetAccount(sid);
             if (account != null)
             {
@@ -211,9 +249,9 @@ public class AppConfigService(
         saveHelper.ReencryptAndSaveAll(store, additionalConfigs, database, newPinDerivedKey);
     }
 
-    public void SaveImportedConfig(string path, List<AppEntry> apps,
+    public void SaveImportedConfig(string path, AppConfig config,
         byte[] pinDerivedKey, byte[] argonSalt)
-        => saveHelper.SaveImportedConfig(path, apps, pinDerivedKey, argonSalt);
+        => saveHelper.SaveImportedConfig(path, config, pinDerivedKey, argonSalt);
 
     // --- Private helpers ---
 

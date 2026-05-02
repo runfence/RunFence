@@ -5,9 +5,9 @@ using RunFence.Core.Models;
 
 namespace RunFence.Infrastructure;
 
-public class IconService(ILoggingService log, string? iconDir = null) : IIconService
+public class IconService(ILoggingService log, string iconDir) : IIconService
 {
-    private readonly string _iconDir = iconDir ?? Constants.ProgramDataIconDir;
+    private readonly string _iconDir = iconDir;
 
     // Badge colors for different accounts
     private static readonly Color[] BadgeColors =

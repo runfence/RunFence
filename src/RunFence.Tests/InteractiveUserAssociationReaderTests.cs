@@ -1,9 +1,7 @@
-using Microsoft.Win32;
 using Moq;
 using RunFence.Acl.Permissions;
 using RunFence.Apps;
 using RunFence.Core;
-using RunFence.Infrastructure;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -103,7 +101,7 @@ public class InteractiveUserAssociationReaderTests : IDisposable
     [Fact]
     public void Extension_WithRunFenceProgId_IsSkipped()
     {
-        SetHkuExtension(".pdf", "RunFence_.pdf");
+        SetHkuExtension(".pdf", PathConstants.HandlerProgIdPrefix + ".pdf");
 
         var entries = CreateReader().GetInteractiveUserAssociations();
 
@@ -128,7 +126,7 @@ public class InteractiveUserAssociationReaderTests : IDisposable
     [Fact]
     public void Extension_UserChoice_RunFenceProgId_IsSkipped()
     {
-        SetUserChoice(".pdf", "RunFence_.pdf");
+        SetUserChoice(".pdf", PathConstants.HandlerProgIdPrefix + ".pdf");
 
         var entries = CreateReader().GetInteractiveUserAssociations();
 

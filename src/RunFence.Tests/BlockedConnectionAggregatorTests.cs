@@ -13,8 +13,7 @@ public class BlockedConnectionAggregatorTests
     private static Dictionary<string, IReadOnlyList<string>> DnsMap(
         params (string ip, string[] hostnames)[] entries) =>
         entries.ToDictionary(
-            e => e.ip,
-            e => (IReadOnlyList<string>)e.hostnames,
+            e => e.ip, IReadOnlyList<string> (e) => e.hostnames,
             StringComparer.OrdinalIgnoreCase);
 
     // --- AggregateByAddress ---

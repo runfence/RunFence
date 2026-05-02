@@ -32,8 +32,13 @@ public class FirewallGlobalIcmpEnforcerTests
     [Fact]
     public void EnforceGlobalIcmpBlock_WhenSettingDisabled_RemovesGlobalBlock()
     {
-        var database = new AppDatabase();
-        database.Settings.BlockIcmpWhenInternetBlocked = false;
+        var database = new AppDatabase
+        {
+            Settings =
+            {
+                BlockIcmpWhenInternetBlocked = false
+            }
+        };
         database.Accounts.Add(new AccountEntry
         {
             Sid = FirstSid,

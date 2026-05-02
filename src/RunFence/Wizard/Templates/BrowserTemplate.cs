@@ -4,6 +4,7 @@ using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Launching.Resolution;
 using RunFence.Persistence;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
@@ -17,13 +18,15 @@ namespace RunFence.Wizard.Templates;
 /// access to allowed folders (downloads, documents, etc.), creates an app entry, and sets up
 /// HTTP/HTTPS/HTML handler associations so clicking links opens the browser automatically.
 /// </summary>
-public class BrowserTemplate(
+internal class BrowserTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
     IHandlerMappingService mappingService,
     IAppHandlerRegistrationService registrationService,
     WizardFolderGrantHelper grantHelper,
-    IShortcutDiscoveryService discoveryService)
+    IShortcutDiscoveryService discoveryService,
+    IShortcutIconHelper iconHelper,
+    IExecutablePathResolver executablePathResolver)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -44,7 +47,7 @@ public class BrowserTemplate(
         return
         [
             setupHelperFactory.CreateAccountNameStep(
-                (name, _) => _data.Username = name,
+                (name, password) => { _data.Username = name; password.Dispose(); },
                 description: "Choose a name for the new isolated browser account. " +
                              "The browser will run in this account, keeping it separated from your main session."),
             new AppPathStep(
@@ -54,6 +57,8 @@ public class BrowserTemplate(
                     _data.AppName = name;
                 },
                 discoveryService,
+                iconHelper,
+                executablePathResolver,
                 description: "Select the browser executable. The app name will appear in the RunFence app list " +
                              "and as the desktop shortcut label."),
             new AllowedPathsStep(
@@ -76,20 +81,11 @@ public class BrowserTemplate(
             return;
         }
 
-        var defaults = setupHelperFactory.CreateAccountDefaults();
+        using var defaults = setupHelperFactory.CreateAccountDefaults();
 
         progress.ReportStatus($"Creating account '{_data.Username}'...");
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: _data.Username,
-            PasswordText: defaults.Password,
-            ConfirmPasswordText: defaults.Password,
-            IsEphemeral: false,
-            CheckedGroups: [],
-            UncheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
-            AllowLogon: false,
-            AllowNetworkLogin: false,
-            AllowBgAutorun: false,
-            CurrentHiddenCount: 0);
+        var request = EditAccountDialogCreateHandler.CreateAccountRequest.ForIsolatedAccount(
+            _data.Username, defaults.Password);
 
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
@@ -116,14 +112,14 @@ public class BrowserTemplate(
                     aclMode: AclMode.Deny,
                     manageShortcuts: true)
             ],
-            PreEnforcementAction: async (session, sid) =>
+            PreEnforcementAction: async (_, sid) =>
             {
                 var readWriteRights = new SavedRightsState(
                     Execute: false, Write: true, Read: true, Special: false, Own: false);
                 await grantHelper.GrantFolderAccessAsync(
                     _data.AllowedPaths, sid, readWriteRights, progress);
             },
-            PostEnforcementAction: (session, apps) =>
+            PostEnforcementAction: (sessionCtx, apps) =>
             {
                 var app = apps.FirstOrDefault();
                 if (app != null)
@@ -131,11 +127,11 @@ public class BrowserTemplate(
                     progress.ReportStatus("Registering handler associations...");
                     try
                     {
-                        foreach (var key in Constants.BrowserAssociations)
-                            mappingService.SetHandlerMapping(key, new HandlerMappingEntry(app.Id), session.Database);
+                        foreach (var key in EvaluationConstants.BrowserAssociations)
+                            mappingService.SetHandlerMapping(key, new HandlerMappingEntry(app.Id), sessionCtx.Database);
 
-                        var effectiveMappings = mappingService.GetEffectiveHandlerMappings(session.Database);
-                        registrationService.Sync(effectiveMappings, session.Database.Apps);
+                        var effectiveMappings = mappingService.GetEffectiveHandlerMappings(sessionCtx.Database);
+                        registrationService.Sync(effectiveMappings, sessionCtx.Database.Apps);
                     }
                     catch (Exception ex)
                     {
@@ -147,7 +143,15 @@ public class BrowserTemplate(
             },
             CreateDesktopShortcut: true);
 
-        await executor.ExecuteAsync(flowParams, progress);
+        try
+        {
+            await executor.ExecuteAsync(flowParams, progress);
+        }
+        finally
+        {
+            request.Password.Dispose();
+            request.ConfirmPassword.Dispose();
+        }
     }
 
     private sealed class CommitData

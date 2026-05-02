@@ -1,5 +1,3 @@
-using RunFence.Core.Models;
-
 namespace RunFence.Firewall;
 
 public static class FirewallPendingDomainHelper
@@ -11,7 +9,7 @@ public static class FirewallPendingDomainHelper
     {
         foreach (var item in additions)
         {
-            var key = $"{item.Sid}\0{item.Domain}";
+            var key = item.DeduplicationKey;
             if (keys.Add(key))
                 list.Add(item);
         }

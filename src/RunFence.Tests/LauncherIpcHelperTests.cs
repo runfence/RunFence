@@ -1,0 +1,144 @@
+using RunFence.Core.Ipc;
+using RunFence.Launcher;
+using Xunit;
+
+namespace RunFence.Tests;
+
+public class LauncherIpcHelperTests
+{
+    [Fact]
+    public void ExistingGuiWaitsForIpcReadinessBeforeSendingMessage()
+    {
+        var ipcClient = new SequencedLauncherIpcClient(false, true);
+        var guiController = new FixedLauncherGuiController(isRunning: true, startResult: false);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay());
+
+        var response = helper.SendWithAutoStart(new IpcMessage { Command = "probe" });
+
+        Assert.NotNull(response);
+        Assert.True(response.Success);
+        Assert.Equal(2, ipcClient.PingCount);
+        Assert.Equal(1, ipcClient.SendCount);
+        Assert.Equal(0, guiController.StartCount);
+    }
+
+    [Fact]
+    public void ExistingGuiDisappearsDuringReadinessWaitStartsNewGui()
+    {
+        var ipcClient = new SequencedLauncherIpcClient(false, true);
+        var guiController = new SequencedLauncherGuiController(
+            startResult: true,
+            true,
+            false,
+            false);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay());
+
+        var response = helper.SendWithAutoStart(new IpcMessage { Command = "probe" });
+
+        Assert.NotNull(response);
+        Assert.True(response.Success);
+        Assert.Equal(2, ipcClient.PingCount);
+        Assert.Equal(1, ipcClient.SendCount);
+        Assert.Equal(1, guiController.StartCount);
+    }
+
+    [Fact]
+    public void ClosedGuiRunAsStartupRequestsStartupUnlockGrant()
+    {
+        var ipcClient = new SequencedLauncherIpcClient(true);
+        var guiController = new FixedLauncherGuiController(isRunning: false, startResult: true);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay());
+
+        var response = helper.SendWithAutoStart(new IpcMessage
+        {
+            Command = IpcCommands.Launch,
+            AppId = @"C:\tools\app.exe"
+        });
+
+        Assert.NotNull(response);
+        Assert.True(response.Success);
+        Assert.True(guiController.LastGrantStartupRunAsUnlock);
+    }
+
+    [Fact]
+    public void ClosedGuiNonRunAsStartupDoesNotRequestStartupUnlockGrant()
+    {
+        var ipcClient = new SequencedLauncherIpcClient(true);
+        var guiController = new FixedLauncherGuiController(isRunning: false, startResult: true);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay());
+
+        var response = helper.SendWithAutoStart(new IpcMessage
+        {
+            Command = IpcCommands.OpenFolder,
+            Arguments = @"C:\tools"
+        });
+
+        Assert.NotNull(response);
+        Assert.True(response.Success);
+        Assert.False(guiController.LastGrantStartupRunAsUnlock);
+    }
+
+    private sealed class SequencedLauncherIpcClient(params bool[] pingResults) : ILauncherIpcClient
+    {
+        private int _pingIndex;
+
+        public int PingCount { get; private set; }
+        public int SendCount { get; private set; }
+
+        public bool PingServer()
+        {
+            PingCount++;
+            if (_pingIndex >= pingResults.Length)
+                return pingResults[^1];
+            return pingResults[_pingIndex++];
+        }
+
+        public IpcResponse? SendMessage(IpcMessage message)
+        {
+            SendCount++;
+            return new IpcResponse { Success = true };
+        }
+    }
+
+    private sealed class FixedLauncherGuiController(bool isRunning, bool startResult) : ILauncherGuiController
+    {
+        public int StartCount { get; private set; }
+        public bool LastGrantStartupRunAsUnlock { get; private set; }
+
+        public bool IsGuiRunning() => isRunning;
+
+        public bool StartGui(bool grantStartupRunAsUnlock)
+        {
+            StartCount++;
+            LastGrantStartupRunAsUnlock = grantStartupRunAsUnlock;
+            return startResult;
+        }
+    }
+
+    private sealed class SequencedLauncherGuiController(bool startResult, params bool[] runningResults) : ILauncherGuiController
+    {
+        private int _runningIndex;
+
+        public int StartCount { get; private set; }
+
+        public bool IsGuiRunning()
+        {
+            if (_runningIndex >= runningResults.Length)
+                return runningResults[^1];
+            return runningResults[_runningIndex++];
+        }
+
+        public bool StartGui(bool grantStartupRunAsUnlock)
+        {
+            StartCount++;
+            return startResult;
+        }
+    }
+
+    private sealed class NoOpLauncherWaitDelay : ILauncherWaitDelay
+    {
+        public void Sleep(int milliseconds)
+        {
+        }
+    }
+}

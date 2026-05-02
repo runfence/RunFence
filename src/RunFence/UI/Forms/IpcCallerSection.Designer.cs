@@ -96,7 +96,6 @@ partial class IpcCallerSection
 
         // IpcCallerSection — add Fill first, then Top items (last added = topmost in DockStyle.Top stack)
         AutoScaleMode = AutoScaleMode.Inherit;
-        Dock = DockStyle.Fill;
         Margin = Padding.Empty;
         Controls.Add(_listBox);
         Controls.Add(_toolStrip);

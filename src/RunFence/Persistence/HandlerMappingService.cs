@@ -1,3 +1,4 @@
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.Persistence;
@@ -63,8 +64,7 @@ public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMapp
         }
 
         return result.ToDictionary(
-            kv => kv.Key,
-            kv => (IReadOnlyList<HandlerMappingEntry>)kv.Value,
+            kv => kv.Key, IReadOnlyList<HandlerMappingEntry> (kv) => kv.Value,
             StringComparer.OrdinalIgnoreCase);
     }
 
@@ -126,20 +126,31 @@ public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMapp
         return null;
     }
 
-    /// <summary>
-    /// Registers handler mappings from a loaded extra config.
-    /// Called by <see cref="AppConfigService"/> when loading an additional config.
-    /// </summary>
+    public void RenameAppIdInConfigMappings(string configPath, string oldAppId, string newAppId)
+    {
+        var normalized = Path.GetFullPath(configPath);
+        if (!_extraHandlerMappings.TryGetValue(normalized, out var mappings) || mappings.Count == 0)
+            return;
+
+        foreach (var (key, entry) in mappings.ToList())
+        {
+            if (!string.Equals(entry.AppId, oldAppId, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            mappings[key] = new HandlerMappingEntry(
+                newAppId,
+                entry.ArgumentsTemplate,
+                entry.PathPrefixes,
+                entry.ReplacePrefixes);
+        }
+    }
+
     public void RegisterConfigMappings(string configPath, Dictionary<string, HandlerMappingEntry> mappings)
     {
         var normalized = Path.GetFullPath(configPath);
         _extraHandlerMappings[normalized] = new Dictionary<string, HandlerMappingEntry>(mappings, StringComparer.OrdinalIgnoreCase);
     }
 
-    /// <summary>
-    /// Removes handler mappings for an unloaded extra config.
-    /// Called by <see cref="AppConfigService"/> when unloading an additional config.
-    /// </summary>
     public void UnregisterConfigMappings(string configPath)
     {
         var normalized = Path.GetFullPath(configPath);
@@ -174,4 +185,9 @@ public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMapp
         if (database.Settings.DirectHandlerMappings.Count == 0)
             database.Settings.DirectHandlerMappings = null;
     }
+
+    public bool IsDefaultBrowser(string appId, IReadOnlyDictionary<string, IReadOnlyList<HandlerMappingEntry>> allMappings)
+        => EvaluationConstants.BrowserAssociations.All(key =>
+            allMappings.TryGetValue(key, out var entries) &&
+            entries.Any(e => string.Equals(e.AppId, appId, StringComparison.Ordinal)));
 }

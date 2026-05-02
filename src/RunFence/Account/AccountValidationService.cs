@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Infrastructure;
 
 namespace RunFence.Account;
@@ -9,7 +10,7 @@ public class AccountValidationService(ILoggingService log, ILocalGroupMembership
     {
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
 
-        if (string.Equals(sid, currentSid, StringComparison.OrdinalIgnoreCase))
+        if (SidComparer.SidEquals(sid, currentSid))
         {
             log.Warn($"Blocked attempt to {action} current account: {sid}");
             throw new InvalidOperationException($"Cannot {action} the current account.");
@@ -29,7 +30,7 @@ public class AccountValidationService(ILoggingService log, ILocalGroupMembership
     {
         var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
         if (interactiveSid != null &&
-            string.Equals(sid, interactiveSid, StringComparison.OrdinalIgnoreCase))
+            SidComparer.SidEquals(sid, interactiveSid))
         {
             log.Warn($"Blocked attempt to {action} interactive user: {sid}");
             throw new InvalidOperationException($"Cannot {action} the currently logged-in account.");
@@ -58,14 +59,11 @@ public class AccountValidationService(ILoggingService log, ILocalGroupMembership
 
         foreach (var proc in processes)
         {
-            using (proc)
-            {
-                var name = proc.ExecutablePath != null
-                    ? Path.GetFileNameWithoutExtension(proc.ExecutablePath)
-                    : $"pid:{proc.Pid}";
-                if (seen.Add(name))
-                    processNames.Add(name);
-            }
+            var name = proc.ExecutablePath != null
+                ? Path.GetFileNameWithoutExtension(proc.ExecutablePath)
+                : $"pid:{proc.Pid}";
+            if (seen.Add(name))
+                processNames.Add(name);
         }
 
         return processNames;
@@ -83,7 +81,7 @@ public class AccountValidationService(ILoggingService log, ILocalGroupMembership
                 .ToList();
 
             return enabledAdminSids.Count <= 1 &&
-                   enabledAdminSids.Any(s => string.Equals(s, sid, StringComparison.OrdinalIgnoreCase));
+                   enabledAdminSids.Any(s => SidComparer.SidEquals(s, sid));
         }
         catch (Exception ex)
         {

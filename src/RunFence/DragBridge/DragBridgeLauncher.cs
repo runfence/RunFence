@@ -29,9 +29,12 @@ public class DragBridgeLauncher(
         }
     }
 
-    public ProcessInfo LaunchManaged(string exePath, string accountSid, IReadOnlyList<string> args)
+    public ProcessInfo LaunchManaged(string exePath, string accountSid, IReadOnlyList<string> args,
+        PrivilegeLevel privilegeLevel)
     {
-        return facade.LaunchFile(new ProcessLaunchTarget(exePath, ArgumentsList: args.ToList()), new AccountLaunchIdentity(accountSid))
+        return facade.LaunchFile(
+                   new ProcessLaunchTarget(exePath, ArgumentsList: args.ToList()),
+                   new AccountLaunchIdentity(accountSid) { PrivilegeLevel = privilegeLevel })
                ?? throw new InvalidOperationException($"LaunchManaged returned null process for '{exePath}'");
     }
 

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.UI;
 
@@ -10,7 +11,7 @@ namespace RunFence.Acl.UI.Forms;
 /// ACL Manager dialog — manages per-path allow/deny grants and traverse paths for
 /// a single account or AppContainer SID.
 /// </summary>
-/// <remarks>Deps above threshold: All 11 deps share one mutable <see cref="AclManagerPendingChanges"/> object for atomic-apply semantics. Extracting a subset would split the atomic state across classes, requiring a shared state holder that adds indirection without reducing coupling. Reviewed 2026-04-14.</remarks>
+/// <remarks>Deps above threshold: 13 deps: all handlers mutate shared <see cref="AclManagerPendingChanges"/> for atomic apply. Splitting would require passing the pending state between classes, breaking the current atomic transaction guarantee. Reviewed 2026-04-09.</remarks>
 public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclManagerDialogHost
 {
     private readonly ILoggingService _log;
@@ -24,12 +25,15 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     private readonly AclManagerExportImport _exportImport;
     private readonly AclManagerSelectionHandler _selectionHandler;
     private readonly AclManagerModificationHandler _modificationHandler;
+    private readonly AclManagerMouseEventHandler _mouseEventHandler;
+    private readonly AclManagerPathActionHelper _pathActionHelper;
     private DropFilesInterceptor? _grantsDropInterceptor;
     private DropFilesInterceptor? _traverseDropInterceptor;
     private readonly AclManagerPendingChanges _pending = new();
     private readonly GridSortHelper _grantsSortHelper = new();
     private readonly GridSortHelper _traverseSortHelper = new();
     private bool _isContainer;
+    private bool _blocksOwnerColumn;
 
     public AclManagerDialog(
         IAclPermissionService aclPermission,
@@ -42,7 +46,9 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         AclManagerApplyOrchestrator applyHandler,
         AclManagerExportImport exportImport,
         AclManagerSelectionHandler selectionHandler,
-        AclManagerModificationHandler modificationHandler)
+        AclManagerModificationHandler modificationHandler,
+        AclManagerMouseEventHandler mouseEventHandler,
+        AclManagerPathActionHelper pathActionHelper)
     {
         _aclPermission = aclPermission;
         _log = log;
@@ -55,6 +61,8 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         _exportImport = exportImport;
         _selectionHandler = selectionHandler;
         _modificationHandler = modificationHandler;
+        _mouseEventHandler = mouseEventHandler;
+        _pathActionHelper = pathActionHelper;
     }
 
     public void Initialize(
@@ -63,8 +71,12 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         string displayName)
     {
         _isContainer = isContainer;
+        _blocksOwnerColumn = !AclHelper.CanAssignGrantOwner(sid, isContainer);
 
         InitializeComponent();
+
+        DataGridViewGroupHeaderHelper.SuppressGroupHeaderTooltips<ConfigSectionHeader>(_grantsGrid);
+        DataGridViewGroupHeaderHelper.SuppressGroupHeaderTooltips<ConfigSectionHeader>(_traverseGrid);
 
         var groupSids = _aclPermission.ResolveAccountGroupSids(sid);
 
@@ -75,19 +87,21 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
             _pending, _grantsSortHelper);
 
         _traverseHelper.Initialize(
-            _traverseGrid, sid, _pending, _traverseSortHelper);
+            _traverseGrid, sid, isContainer, _pending, _traverseSortHelper);
 
         _dragDropHandler.Initialize(sid, _pending);
 
         _actionHandler.Initialize(sid, isContainer, this, _pending, this);
 
-        _applyHandler.Initialize(_pending, sid, isContainer, this);
+        _applyHandler.Initialize(_pending, sid, isContainer);
 
-        _exportImport.Initialize(_pending, sid, isContainer, this);
+        _exportImport.Initialize(_pending, sid, isContainer, this, ExecuteApplyAsync);
 
         var controls = BuildControls();
 
-        _selectionHandler.Initialize(this, isContainer, _pending, controls, RefreshTraverseGrid);
+        _mouseEventHandler.Initialize(controls, RefreshGrantsGrid, RefreshTraverseGrid, _selectionHandler.UpdateActionButtons);
+        _pathActionHelper.Initialize(this, controls);
+        _selectionHandler.Initialize(isContainer, _pending, controls, RefreshTraverseGrid);
         _modificationHandler.Initialize(this, sid, _pending, controls,
             RefreshGrantsGrid, RefreshTraverseGrid, _selectionHandler.UpdateActionButtons);
 
@@ -110,7 +124,6 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
             FixAclsButton = _fixAclsButton,
             ApplyButton = _applyButton,
             ScanStatusLabel = _scanStatusLabel,
-            ProgressBar = _progressBar,
             CtxAddFile = _ctxAddFile,
             CtxAddFolder = _ctxAddFolder,
             CtxGrantsSep = _ctxGrantsSep,
@@ -136,26 +149,29 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         };
     }
 
+    private int ButtonPadding => LogicalToDeviceUnits(8);
+
     private void BuildDynamicContent(string displayName)
     {
         Text = $"ACL Manager \u2014 {displayName}";
-        _formIcon = UiIconFactory.CreateDialogIcon("\U0001F4DC", Color.FromArgb(0x33, 0x66, 0x99));
+        _formIcon = UiIconFactory.CreateDialogIcon("\U0001F4DC", Color.FromArgb(0xCC, 0x99, 0x00));
         Icon = _formIcon;
 
         _ctxPropertiesGrants.Image = UiIconFactory.CreatePropertiesIcon();
         _ctxTraverseProperties.Image = UiIconFactory.CreatePropertiesIcon();
 
         // Position Close and Apply buttons
-        _closeButton.Location = new Point(ClientSize.Width - _closeButton.Width - 8,
-            ClientSize.Height - _closeButton.Height - 8);
-        _applyButton.Location = new Point(_closeButton.Left - _applyButton.Width - 8,
-            ClientSize.Height - _applyButton.Height - 8);
+        _closeButton.Location = new Point(ClientSize.Width - _closeButton.Width - ButtonPadding,
+            ClientSize.Height - _closeButton.Height - ButtonPadding);
+        _applyButton.Location = new Point(_closeButton.Left - _applyButton.Width - ButtonPadding,
+            ClientSize.Height - _applyButton.Height - ButtonPadding);
 
         AclManagerDialogGridSetup.BuildGrantsGrid(_grantsGrid, _isContainer);
         AclManagerDialogGridSetup.BuildTraverseGrid(_traverseGrid);
 
         // Suppress ComboBox cell formatting errors
         _grantsGrid.DataError += (_, e) => { e.ThrowException = false; };
+        _grantsGrid.CellPainting += OnGrantsCellPainting;
 
         AclManagerDialogUiSetup.ConfigureToolbar(_toolStrip, _addFileButton, _addFolderButton, _scanButton, _removeButton, _fixAclsButton, _exportButton, _importButton);
         _toolStrip.PerformLayout();
@@ -169,9 +185,9 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         RefreshTraverseGrid();
 
         _grantsGrid.HandleCreated += (_, _) =>
-            _grantsDropInterceptor = new DropFilesInterceptor(_grantsGrid.Handle, _modificationHandler.HandleGrantsFileDrop);
+            _grantsDropInterceptor = new DropFilesInterceptor(_grantsGrid.Handle, _mouseEventHandler.HandleGrantsFileDrop);
         _traverseGrid.HandleCreated += (_, _) =>
-            _traverseDropInterceptor = new DropFilesInterceptor(_traverseGrid.Handle, _modificationHandler.HandleTraverseFileDrop);
+            _traverseDropInterceptor = new DropFilesInterceptor(_traverseGrid.Handle, _mouseEventHandler.HandleTraverseFileDrop);
 
         Resize += OnResize;
         Shown += OnShown;
@@ -225,15 +241,15 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     {
         int toolbarHeight = _toolStrip.PreferredSize.Height;
         _tabControl.Location = new Point(0, toolbarHeight);
-        _tabControl.Size = new Size(ClientSize.Width, ClientSize.Height - toolbarHeight - _closeButton.Height - 16);
+        _tabControl.Size = new Size(ClientSize.Width, ClientSize.Height - toolbarHeight - _closeButton.Height - ButtonPadding * 2);
     }
 
     private void OnResize(object? sender, EventArgs e)
     {
-        _closeButton.Location = new Point(ClientSize.Width - _closeButton.Width - 8,
-            ClientSize.Height - _closeButton.Height - 8);
-        _applyButton.Location = new Point(_closeButton.Left - _applyButton.Width - 8,
-            ClientSize.Height - _applyButton.Height - 8);
+        _closeButton.Location = new Point(ClientSize.Width - _closeButton.Width - ButtonPadding,
+            ClientSize.Height - _closeButton.Height - ButtonPadding);
+        _applyButton.Location = new Point(_closeButton.Left - _applyButton.Width - ButtonPadding,
+            ClientSize.Height - _applyButton.Height - ButtonPadding);
         PositionTabControl();
     }
 
@@ -245,6 +261,33 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     private void OnTraverseSelectionChanged(object? sender, EventArgs e) => _selectionHandler.HandleSelectionChanged();
     private void OnGrantsCellValueChanged(object? sender, DataGridViewCellEventArgs e) => _selectionHandler.HandleGrantsCellValueChanged(e);
     private void OnGrantsCurrentCellDirtyStateChanged(object? sender, EventArgs e) => _selectionHandler.HandleGrantsDirtyStateChanged();
+    private void OnGrantsCellPainting(object? sender, DataGridViewCellPaintingEventArgs e)
+    {
+        if (!_blocksOwnerColumn || e.RowIndex < 0 || e.ColumnIndex < 0)
+            return;
+        if (_grantsGrid.Columns[e.ColumnIndex].Name != AclManagerGrantsHelper.ColOwner)
+            return;
+        if (_grantsGrid.Rows[e.RowIndex].Tag is not GrantedPathEntry)
+            return;
+
+        e.PaintBackground(e.ClipBounds, true);
+        var checkState = e.Value is RightCheckState.Checked or true or CheckState.Checked;
+        var state = checkState ? ButtonState.Checked | ButtonState.Inactive : ButtonState.Inactive;
+        var size = SystemInformation.MenuCheckSize;
+        var rect = new Rectangle(
+            e.CellBounds.X + (e.CellBounds.Width - size.Width) / 2,
+            e.CellBounds.Y + (e.CellBounds.Height - size.Height) / 2,
+            size.Width,
+            size.Height);
+
+        var graphics = e.Graphics;
+        if (graphics == null)
+            return;
+
+        ControlPaint.DrawCheckBox(graphics, rect, state);
+        e.Handled = true;
+    }
+
     private async void OnScanFolderClick(object? sender, EventArgs e)
     {
         if (_pending.HasPendingChanges)
@@ -263,8 +306,8 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     private void OnGrantsContextMenuOpening(object? sender, CancelEventArgs e) => _selectionHandler.HandleGrantsContextMenuOpening();
     private void OnTraverseContextMenuOpening(object? sender, CancelEventArgs e) => _selectionHandler.HandleTraverseContextMenuOpening();
     private void OnGridKeyDown(object? sender, KeyEventArgs e) => _selectionHandler.HandleGridKeyDown(e);
-    private void OnGrantsMouseClick(object? sender, MouseEventArgs e) => _selectionHandler.HandleGrantsMouseClick(e);
-    private void OnTraverseMouseClick(object? sender, MouseEventArgs e) => _selectionHandler.HandleTraverseMouseClick(e);
+    private void OnGrantsMouseClick(object? sender, MouseEventArgs e) => _pathActionHelper.HandleGrantsMouseClick(e);
+    private void OnTraverseMouseClick(object? sender, MouseEventArgs e) => _pathActionHelper.HandleTraverseMouseClick(e);
     private void OnAddFileClick(object? sender, EventArgs e) => _modificationHandler.AddFile();
     private void OnAddFolderClick(object? sender, EventArgs e) => _modificationHandler.AddFolder();
     private void OnAddTraverseFileClick(object? sender, EventArgs e) => _modificationHandler.AddTraverseFile();
@@ -280,10 +323,27 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     {
         try
         {
-            await _applyHandler.ApplyAsync(_progressBar,
-                enabled => _applyButton.Enabled = enabled,
-                enabled => Enabled = enabled,
-                RefreshGrids);
+            _progressBar.Value = 0;
+            _progressBar.Visible = true;
+            var progress = new Progress<(int current, int total)>(p =>
+            {
+                if (!IsDisposed)
+                {
+                    _progressBar.Maximum = p.total;
+                    _progressBar.Value = Math.Min(p.current, p.total);
+                }
+            });
+            try
+            {
+                await _applyHandler.ApplyAsync(progress,
+                    enabled => _applyButton.Enabled = enabled,
+                    enabled => Enabled = enabled,
+                    RefreshGrids);
+            }
+            finally
+            {
+                _progressBar.Visible = false;
+            }
             return true;
         }
         catch (Exception ex)
@@ -295,33 +355,33 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         }
     }
 
-    private void OnExportClick(object? sender, EventArgs e)
+    private async void OnExportClick(object? sender, EventArgs e)
     {
         bool grantsTabActive = _tabControl.SelectedTab != _traverseTab;
-        _exportImport.Export(_grantsGrid, _traverseGrid, grantsTabActive);
+        await _exportImport.Export(_grantsGrid, _traverseGrid, grantsTabActive);
     }
 
     private void OnImportClick(object? sender, EventArgs e) => _exportImport.Import(RefreshGrids);
-    private void OnOpenFolderGrantsClick(object? sender, EventArgs e) => _selectionHandler.OpenFolderGrants();
-    private void OnCopyPathGrantsClick(object? sender, EventArgs e) => _selectionHandler.CopyPathGrants();
-    private void OnPropertiesGrantsClick(object? sender, EventArgs e) => _selectionHandler.ShowPropertiesGrants();
-    private void OnOpenFolderTraverseClick(object? sender, EventArgs e) => _selectionHandler.OpenFolderTraverse();
-    private void OnCopyPathTraverseClick(object? sender, EventArgs e) => _selectionHandler.CopyPathTraverse();
-    private void OnPropertiesTraverseClick(object? sender, EventArgs e) => _selectionHandler.ShowPropertiesTraverse();
+    private void OnOpenFolderGrantsClick(object? sender, EventArgs e) => _pathActionHelper.OpenFolderGrants();
+    private void OnCopyPathGrantsClick(object? sender, EventArgs e) => _pathActionHelper.CopyPathGrants();
+    private void OnPropertiesGrantsClick(object? sender, EventArgs e) => _pathActionHelper.ShowPropertiesGrants();
+    private void OnOpenFolderTraverseClick(object? sender, EventArgs e) => _pathActionHelper.OpenFolderTraverse();
+    private void OnCopyPathTraverseClick(object? sender, EventArgs e) => _pathActionHelper.CopyPathTraverse();
+    private void OnPropertiesTraverseClick(object? sender, EventArgs e) => _pathActionHelper.ShowPropertiesTraverse();
     private void OnGrantsGridMouseDown(object? sender, MouseEventArgs e)
     {
-        _selectionHandler.HandleGrantsRightClickDown(e);
-        _modificationHandler.HandleGrantsMouseDown(e);
+        _pathActionHelper.HandleGrantsRightClickDown(e);
+        _mouseEventHandler.HandleGrantsMouseDown(e);
     }
 
-    private void OnGrantsGridMouseMove(object? sender, MouseEventArgs e) => _modificationHandler.HandleGrantsMouseMove(e);
+    private void OnGrantsGridMouseMove(object? sender, MouseEventArgs e) => _mouseEventHandler.HandleGrantsMouseMove(e);
 
     private void OnTraverseGridMouseDown(object? sender, MouseEventArgs e)
     {
-        _selectionHandler.HandleTraverseRightClickDown(e);
-        _modificationHandler.HandleTraverseMouseDown(e);
+        _pathActionHelper.HandleTraverseRightClickDown(e);
+        _mouseEventHandler.HandleTraverseMouseDown(e);
     }
-    private void OnTraverseGridMouseMove(object? sender, MouseEventArgs e) => _modificationHandler.HandleTraverseMouseMove(e);
-    private void OnGrantsGridMouseUp(object? sender, MouseEventArgs e) => _modificationHandler.HandleGrantsMouseUp(e);
-    private void OnTraverseGridMouseUp(object? sender, MouseEventArgs e) => _modificationHandler.HandleTraverseMouseUp(e);
+    private void OnTraverseGridMouseMove(object? sender, MouseEventArgs e) => _mouseEventHandler.HandleTraverseMouseMove(e);
+    private void OnGrantsGridMouseUp(object? sender, MouseEventArgs e) => _mouseEventHandler.HandleGrantsMouseUp(e);
+    private void OnTraverseGridMouseUp(object? sender, MouseEventArgs e) => _mouseEventHandler.HandleTraverseMouseUp(e);
 }

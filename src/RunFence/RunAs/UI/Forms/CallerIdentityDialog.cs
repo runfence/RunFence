@@ -9,10 +9,10 @@ public partial class CallerIdentityDialog : Form
     public string? Result { get; private set; }
     public string? ResolvedName { get; private set; }
 
-    private readonly List<LocalUserAccount> _localUsers;
+    private readonly IReadOnlyList<LocalUserAccount> _localUsers;
     private readonly ISidEntryHelper _sidEntryHelper;
 
-    public CallerIdentityDialog(List<LocalUserAccount> localUsers, ISidEntryHelper sidEntryHelper)
+    public CallerIdentityDialog(IReadOnlyList<LocalUserAccount> localUsers, ISidEntryHelper sidEntryHelper)
     {
         _localUsers = localUsers;
         _sidEntryHelper = sidEntryHelper;

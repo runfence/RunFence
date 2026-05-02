@@ -1,12 +1,10 @@
 #region
 
-using System.Security;
 using RunFence.Account.UI;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launch;
 using RunFence.Persistence;
 using RunFence.UI;
 
@@ -14,17 +12,17 @@ using RunFence.UI;
 
 namespace RunFence.Account.UI.Forms;
 
-public partial class EditAccountDialog : Form
+public partial class EditAccountDialog : Form, IAccountEditResult
 {
     public string? NewUsername { get; private set; }
-    public SecureString? NewPassword { get; private set; }
-    public string? NewPasswordText { get; private set; }
+    public ProtectedString? NewPassword { get; private set; }
     public bool IsEphemeral { get; private set; }
     public string? SettingsImportPath { get; private set; }
     public PrivilegeLevel SelectedPrivilegeLevel => _privilegeLevelComboBox.SelectedIndex switch
     {
         0 => PrivilegeLevel.HighestAllowed,
-        2 => PrivilegeLevel.LowIntegrity,
+        1 => PrivilegeLevel.AboveBasic,
+        3 => PrivilegeLevel.LowIntegrity,
         _ => PrivilegeLevel.Basic,
     };
     public bool DeleteRequested { get; private set; }
@@ -36,8 +34,9 @@ public partial class EditAccountDialog : Form
 
     // Create mode output properties
     public string? CreatedSid { get; private set; }
-    public SecureString? CreatedPassword { get; private set; }
+    public ProtectedString? CreatedPassword { get; private set; }
     public bool UsersGroupUnchecked { get; private set; }
+    public bool AdminGroupChecked { get; private set; }
     public IReadOnlyList<InstallablePackage> SelectedInstallPackages { get; private set; } = [];
 
     // Characters invalid in Windows SAM account names
@@ -62,6 +61,8 @@ public partial class EditAccountDialog : Form
     private bool _originalAllowLan;
     private bool _isCreating;
     private readonly InstallPackageSelector _packageSelector = new();
+    private SecurePasswordBox _passwordSecure = null!;
+    private SecurePasswordBox _confirmPasswordSecure = null!;
 
     private static readonly HashSet<string> NeverFilteredGroupNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -125,8 +126,10 @@ public partial class EditAccountDialog : Form
         _usernameTextBox.Text = username;
         _usernameTextBox.SelectionStart = username.Length;
 
-        PasswordEyeToggle.AddTo(_passwordTextBox);
-        PasswordEyeToggle.AddTo(_confirmPasswordTextBox);
+        _passwordSecure = new SecurePasswordBox(_passwordTextBox);
+        _passwordSecure.AddEyeToggle();
+        _confirmPasswordSecure = new SecurePasswordBox(_confirmPasswordTextBox);
+        _confirmPasswordSecure.AddEyeToggle();
 
         foreach (var group in _groups)
         {
@@ -170,7 +173,7 @@ public partial class EditAccountDialog : Form
     /// </summary>
     public void InitializeForCreate(
         string? prefillUsername = null,
-        string? prefillPassword = null,
+        ProtectedString? prefillPassword = null,
         int currentHiddenCount = 0)
     {
         _isCreating = true;
@@ -180,7 +183,7 @@ public partial class EditAccountDialog : Form
         _currentGroupSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         _groups = GroupFilterHelper.FilterForCreateDialog(_groupMembership.GetLocalGroups()).ToList();
 
-        var defaults = AccountCreationDefaults.Create(_databaseProvider.GetDatabase(), _groupMembership);
+        using var defaults = AccountCreationDefaults.Create(_databaseProvider.GetDatabase());
 
         // Create mode UI adjustments
         Text = "Create Account";
@@ -192,12 +195,13 @@ public partial class EditAccountDialog : Form
         _usernameTextBox.Text = prefillUsername ?? defaults.Username;
         _usernameTextBox.SelectionStart = _usernameTextBox.Text.Length;
 
-        var password = prefillPassword ?? defaults.Password;
-        _passwordTextBox.Text = password;
-        _confirmPasswordTextBox.Text = password;
+        _passwordSecure = new SecurePasswordBox(_passwordTextBox);
+        _passwordSecure.AddEyeToggle();
+        _confirmPasswordSecure = new SecurePasswordBox(_confirmPasswordTextBox);
+        _confirmPasswordSecure.AddEyeToggle();
 
-        PasswordEyeToggle.AddTo(_passwordTextBox);
-        PasswordEyeToggle.AddTo(_confirmPasswordTextBox);
+        _passwordSecure.SetFromProtectedString(prefillPassword ?? defaults.Password);
+        _confirmPasswordSecure.SetFromProtectedString(prefillPassword ?? defaults.Password);
 
         var checkedGroupSids = defaults.CheckedGroups.Select(g => g.Sid).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var group in _groups)
@@ -269,7 +273,7 @@ public partial class EditAccountDialog : Form
     {
         if (_isCreating)
         {
-            OnCreateClick();
+            await OnCreateClick();
             return;
         }
 
@@ -290,7 +294,7 @@ public partial class EditAccountDialog : Form
         }
 
         // Validate password confirmation
-        if (_passwordTextBox.Text.Length > 0 && _passwordTextBox.Text != _confirmPasswordTextBox.Text)
+        if (_passwordSecure.GetPasswordLength() > 0 && !_passwordSecure.PasswordsMatch(_confirmPasswordSecure))
         {
             _statusLabel.Text = "Passwords do not match.";
             _okButton.Enabled = true;
@@ -339,17 +343,21 @@ public partial class EditAccountDialog : Form
         var allowLocalhost = _allowLocalhostCheckBox.Checked;
         var allowLan = _allowLanCheckBox.Checked;
         var isEphemeral = _ephemeralCheckBox.Checked;
-        var passwordText = _passwordTextBox.Text;
+        var newPassword = _passwordSecure.IsEmpty ? null : _passwordSecure.GetPassword();
         var installPackages = CollectSelectedInstallPackages();
 
         // Execute slow OS operations (group membership queries, renames, restrictions) on background thread.
         var saveResult = await Task.Run(() => _saveHandler.Execute(request));
 
         if (IsDisposed)
+        {
+            newPassword?.Dispose();
             return;
+        }
 
         if (saveResult.ValidationError != null)
         {
+            newPassword?.Dispose();
             _statusLabel.Text = saveResult.ValidationError;
             _okButton.Enabled = true;
             _cancelButton.Enabled = true;
@@ -373,14 +381,8 @@ public partial class EditAccountDialog : Form
         NewUsername = saveResult.NewUsername;
         IsEphemeral = isEphemeral;
 
-        if (passwordText.Length > 0)
-        {
-            NewPassword = new SecureString();
-            foreach (char c in passwordText)
-                NewPassword.AppendChar(c);
-            NewPassword.MakeReadOnly();
-            NewPasswordText = passwordText;
-        }
+        if (newPassword != null)
+            NewPassword = newPassword;
 
         SelectedInstallPackages = installPackages;
 
@@ -388,7 +390,8 @@ public partial class EditAccountDialog : Form
         Close();
     }
 
-    private void OnCreateClick()
+    /// <remarks>OS calls (CreateLocalUser, AddUserToGroups, LSA) are thread-safe; UI state is captured before Task.Run.</remarks>
+    private async Task OnCreateClick()
     {
         _okButton.Enabled = false;
         _cancelButton.Enabled = false;
@@ -406,7 +409,7 @@ public partial class EditAccountDialog : Form
             return;
         }
 
-        if (_passwordTextBox.Text.Length == 0)
+        if (_passwordSecure.IsEmpty)
         {
             _statusLabel.Text = "Password is required.";
             _okButton.Enabled = true;
@@ -432,8 +435,8 @@ public partial class EditAccountDialog : Form
 
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
             Username: _usernameTextBox.Text.Trim(),
-            PasswordText: _passwordTextBox.Text,
-            ConfirmPasswordText: _confirmPasswordTextBox.Text,
+            Password: _passwordSecure.GetPassword(),
+            ConfirmPassword: _confirmPasswordSecure.GetPassword(),
             IsEphemeral: _ephemeralCheckBox.Checked,
             CheckedGroups: checkedGroups,
             UncheckedGroups: uncheckedDefaultGroups,
@@ -442,7 +445,21 @@ public partial class EditAccountDialog : Form
             AllowBgAutorun: _bgAutorunCheckBox.Checked,
             CurrentHiddenCount: _currentHiddenCount);
 
-        var result = _createHandler.Execute(request);
+        // Capture remaining UI state before background execution
+        var settingsPath = _settingsPathTextBox.Text.Trim();
+        var allowInternet = _allowInternetCheckBox.Checked;
+        var allowLocalhost = _allowLocalhostCheckBox.Checked;
+        var allowLan = _allowLanCheckBox.Checked;
+        var installPackages = CollectSelectedInstallPackages();
+
+        // Execute slow OS operations (CreateLocalUser, group membership, LSA) on background thread.
+        var result = await Task.Run(() => _createHandler.Execute(request));
+        request.Password.Dispose();
+        request.ConfirmPassword.Dispose();
+
+        if (IsDisposed)
+            return;
+
         if (result == null)
         {
             _statusLabel.Text = _createHandler.LastValidationError;
@@ -459,19 +476,20 @@ public partial class EditAccountDialog : Form
         Errors.AddRange(result.Errors);
         UsersGroupUnchecked = uncheckedDefaultGroups.Any(g =>
             string.Equals(g.Sid, GroupFilterHelper.UsersSid, StringComparison.OrdinalIgnoreCase));
+        AdminGroupChecked = checkedGroups.Any(g =>
+            string.Equals(g.Sid, GroupFilterHelper.AdministratorsSid, StringComparison.OrdinalIgnoreCase));
 
         // Desktop settings import path (actual import is done by the caller)
-        var settingsPath = _settingsPathTextBox.Text.Trim();
         if (settingsPath.Length > 0 && File.Exists(settingsPath))
             SettingsImportPath = settingsPath;
 
         // Firewall settings
-        AllowInternet = _allowInternetCheckBox.Checked;
-        AllowLocalhost = _allowLocalhostCheckBox.Checked;
-        AllowLan = _allowLanCheckBox.Checked;
+        AllowInternet = allowInternet;
+        AllowLocalhost = allowLocalhost;
+        AllowLan = allowLan;
         FirewallSettingsChanged = !AllowInternet || !AllowLocalhost || !AllowLan;
 
-        SelectedInstallPackages = CollectSelectedInstallPackages();
+        SelectedInstallPackages = installPackages;
 
         DialogResult = DialogResult.OK;
         Close();
@@ -489,8 +507,9 @@ public partial class EditAccountDialog : Form
         _privilegeLevelComboBox.SelectedIndex = mode switch
         {
             PrivilegeLevel.HighestAllowed => 0,
-            PrivilegeLevel.LowIntegrity => 2,
-            _ => 1,
+            PrivilegeLevel.AboveBasic => 1,
+            PrivilegeLevel.LowIntegrity => 3,
+            _ => 2,
         };
         _toolTip.SetToolTip(_privilegeLevelComboBox, LaunchUiConstants.PrivilegeLevelTooltip);
     }

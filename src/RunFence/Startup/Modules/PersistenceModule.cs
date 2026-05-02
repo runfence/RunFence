@@ -1,9 +1,12 @@
 using Autofac;
 using RunFence.Apps;
+using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.Persistence.UI;
 using RunFence.PrefTrans;
+using RunFence.Startup;
+using RunFence.Startup.NonElevatedMocks;
 
 namespace RunFence.Startup.Modules;
 
@@ -27,8 +30,22 @@ public class PersistenceModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<ConfigGrantPinHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ConfigLoadUnloadService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ShutdownCleanupService>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<ConfigManagementOrchestrator>()
             .As<IConfigManagementContext>()
+            .As<IConfigAvailabilityChecker>()
+            .As<IConfigManagementEventSource>()
             .AsSelf()
             .SingleInstance();
 
@@ -43,7 +60,8 @@ public class PersistenceModule : Module
 
         builder.RegisterType<SettingsTransferService>()
             .As<ISettingsTransferService>()
-            .SingleInstance();
+            .SingleInstance()
+            .WithParameter(new NamedParameter("baseDirectory", AppContext.BaseDirectory));
 
         builder.RegisterType<AppHandlerRegistrationService>()
             .As<IAppHandlerRegistrationService>()
@@ -51,8 +69,17 @@ public class PersistenceModule : Module
 
         builder.RegisterType<AppEntryEnforcementHelper>().AsSelf().SingleInstance();
 
+        builder.RegisterType<ConfigImportFileParser>().As<IConfigImportFileParser>().SingleInstance();
+        builder.RegisterType<MainConfigImportPreservationCollector>().AsSelf().SingleInstance();
+        builder.RegisterType<MainConfigImportEvaluationValidator>().AsSelf().SingleInstance();
+        builder.RegisterType<MainConfigImportRepairService>().AsSelf().SingleInstance();
+        builder.RegisterType<MainConfigImportApplyService>().AsSelf().SingleInstance();
+        builder.RegisterType<MainConfigImportSaveHelper>().AsSelf().SingleInstance();
         builder.RegisterType<ConfigImportHandler>()
             .AsSelf()
             .SingleInstance();
+
+        if (DebugHelper.UseAdminOperationMocks)
+            builder.RegisterDecorator<NoOpAppHandlerRegistrationService, IAppHandlerRegistrationService>();
     }
 }

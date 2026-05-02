@@ -11,8 +11,8 @@ namespace RunFence.Launch.Container;
 public class AppContainerProcessLauncher(
     ILoggingService log,
     IAppContainerEnvironmentSetup environmentSetup,
-    AppContainerProfileSetup appContainerProfileSetup,
-    AppContainerDataFolderService dataFolderService,
+    IAppContainerProfileSetup appContainerProfileSetup,
+    IAppContainerDataFolderService dataFolderService,
     IExplorerTokenProvider explorerTokenProvider,
     IAppContainerSidProvider sidProvider)
     : IAppContainerProcessLauncher
@@ -48,7 +48,7 @@ public class AppContainerProcessLauncher(
             if (!ProcessNative.ConvertStringSidToSid(containerSidStr, out pContainerSid))
             {
                 var err = Marshal.GetLastWin32Error();
-                throw new System.ComponentModel.Win32Exception(err, $"ConvertStringSidToSid failed for container SID '{containerSidStr}'");
+                throw new Win32Exception(err, $"ConvertStringSidToSid failed for container SID '{containerSidStr}'");
             }
 
             log.Info($"AppContainerProcessLauncher: [2/6] Derived AppContainer SID: {containerSidStr}");

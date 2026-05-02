@@ -79,7 +79,7 @@ internal class LicenseValidator
             // Parse payload
             int offset = 0;
             var majorVersion = payload[offset++];
-            if (majorVersion != Constants.MajorVersion)
+            if (majorVersion != EvaluationConstants.MajorVersion)
                 return (LicenseActivationResult.WrongVersion, LicenseInfo.Unlicensed);
 
             if (offset + 12 > payloadLen)

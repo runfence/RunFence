@@ -10,6 +10,7 @@ namespace RunFence.Launch;
 /// Token acquisition helpers live in <see cref="NativeTokenAcquisition"/>.
 /// Environment block helpers live in <see cref="NativeEnvironmentBlock"/>.
 /// </summary>
+/// <remarks>Methods above threshold: thin P/Invoke wrappers: <c>CreateProcessWithToken</c>/<c>CreateProcessWithLogon</c> each build STARTUPINFO, construct command lines, call native API, handle errors. Extracting "business logic" from these would split security-critical native resource management (ProtectedString→pointer, handle cleanup) from the API call itself, creating unsafe partial operations. Reviewed 2026-04-09.</remarks>
 public static class ProcessLaunchNative
 {
     public const uint MAXIMUM_ALLOWED = 0x02000000;
@@ -28,6 +29,7 @@ public static class ProcessLaunchNative
     public const uint LOGON32_LOGON_INTERACTIVE = 2;
     public const uint LOGON32_PROVIDER_DEFAULT = 0;
     public const uint LOGON_WITH_PROFILE = 0x00000001;
+    public const int PI_NOUI = 0x00000001; // LoadUserProfile: suppress dialog if profile not found
     public const uint SE_GROUP_INTEGRITY = 0x00000020;
     public const int TOKEN_INTEGRITY_LEVEL = 25; // TokenIntegrityLevel
     public const int TOKEN_DEFAULT_DACL = 6; // TokenDefaultDacl
@@ -83,12 +85,15 @@ public static class ProcessLaunchNative
 
     public enum SecurityImpersonationLevel
     {
+        SecurityIdentification = 1,
         SecurityImpersonation = 2
     }
 
     public const uint ASFW_ANY = 0xFFFFFFFF;
     public const uint SYNCHRONIZE = 0x00100000;
     public const uint PROCESS_QUERY_INFORMATION = 0x0400;
+    public const uint CREATE_SUSPENDED = 0x00000004;
+    public const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
 
     [DllImport("user32.dll")]
     public static extern bool AllowSetForegroundWindow(uint dwProcessId);
@@ -105,8 +110,11 @@ public static class ProcessLaunchNative
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint ResumeThread(IntPtr hThread);
+
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern bool CreateProcessWithTokenW(IntPtr hToken, uint dwLogonFlags,
+    public static extern bool CreateProcessWithTokenW(IntPtr hToken, uint dwLogonFlags,
         string? lpApplicationName, [In, Out] StringBuilder lpCommandLine,
         uint dwCreationFlags, IntPtr lpEnvironment, string? lpCurrentDirectory,
         ref STARTUPINFO lpStartupInfo,
@@ -202,9 +210,16 @@ public static class ProcessLaunchNative
     // they directly orchestrate P/Invoke calls, handle structs, and manage unmanaged resources.
     // They are not candidates for extraction as business logic.
     public static PROCESS_INFORMATION CreateProcessWithToken(IntPtr hToken,
-        ProcessLaunchTarget psi, IntPtr pEnvironment, ILoggingService log, string? lpDesktop = DefaultInteractiveDesktop)
+        ProcessLaunchTarget psi, IntPtr pEnvironment, ILoggingService log,
+        string? lpDesktop = DefaultInteractiveDesktop, bool suspended = false, bool breakawayFromJob = true)
     {
-        var creationFlags = pEnvironment != IntPtr.Zero ? CREATE_UNICODE_ENVIRONMENT : 0u;
+        // CREATE_BREAKAWAY_FROM_JOB: the process created by CreateProcessWithTokenW may inherit
+        // a parent job (seclogon service job, PCA compatibility job). Without breakaway,
+        // AssignProcessToJobObject can fail because Windows refuses to nest jobs when either
+        // job has UI limits. The flag is silently ignored if the parent doesn't allow breakaway.
+        var creationFlags = (pEnvironment != IntPtr.Zero ? CREATE_UNICODE_ENVIRONMENT : 0u)
+            | (suspended ? CREATE_SUSPENDED : 0u)
+            | (breakawayFromJob ? CREATE_BREAKAWAY_FROM_JOB : 0u);
 
         if (pEnvironment == IntPtr.Zero && psi.EnvironmentVariables?.Count > 0)
             throw new ArgumentException("Environment variables are specified but EnvironmentBlock was not created");
@@ -227,7 +242,7 @@ public static class ProcessLaunchNative
 
         return pi;
     }
-    
+
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool CreateProcessWithLogonW(
         string lpUsername,
@@ -251,7 +266,7 @@ public static class ProcessLaunchNative
 
         try
         {
-            passwordPtr = Marshal.SecureStringToGlobalAllocUnicode(credentials.Password!);
+            passwordPtr = credentials.Password!.AllocUnicode();
 
             var si = new STARTUPINFO
             {

@@ -1,16 +1,6 @@
-using RunFence.Acl;
-using RunFence.Core.Models;
-
 namespace RunFence.Account.UI;
 
-public interface IAccountBulkScanHandler
+public interface IAccountBulkScanHandler : IAccountScanResultProcessor
 {
-    Dictionary<string, AccountScanResult> FilterManagedPaths(
-        Dictionary<string, AccountScanResult> results,
-        IReadOnlyList<AppEntry> apps,
-        IAclService aclService);
-
-    void ApplyScanResults(
-        Dictionary<string, AccountScanResult> selected,
-        Action saveDatabase);
+    Task ScanAcls(IAccountsPanelContext context, IScanProgressReporter progressReporter);
 }

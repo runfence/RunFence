@@ -1,4 +1,3 @@
-using System.Security;
 using Moq;
 using RunFence.Account;
 using RunFence.Apps;
@@ -37,7 +36,6 @@ public class ProcessLauncherTests : IDisposable
     private readonly ProtectedBuffer _protectedPinKey;
 
     private readonly ProcessLauncher _processLauncher;
-    private readonly ILaunchCredentialsLookup _credentialsLookup;
 
     private static LaunchProcessInfo MakeProcessInfo()
         => new LaunchProcessInfo(new ProcessLaunchNative.PROCESS_INFORMATION());
@@ -55,7 +53,7 @@ public class ProcessLauncherTests : IDisposable
 
         var credentialDecryption = new CredentialDecryptionService(
             _encryptionService.Object, _sidResolver.Object);
-        _credentialsLookup = new LaunchCredentialsLookup(
+        var credentialsLookup = new LaunchCredentialsLookup(
             _sessionProvider.Object,
             credentialDecryption);
 
@@ -69,7 +67,7 @@ public class ProcessLauncherTests : IDisposable
 
         _processLauncher = new ProcessLauncher(
             _accountLauncher.Object,
-            _credentialsLookup,
+            credentialsLookup,
             _profileRepair.Object,
             _folderHandler.Object,
             _associationAutoSetService.Object,
@@ -79,7 +77,7 @@ public class ProcessLauncherTests : IDisposable
 
     public void Dispose() => _protectedPinKey.Dispose();
 
-    private void SetupStoredPassword(string sid, SecureString password)
+    private void SetupStoredPassword(string sid, ProtectedString password)
     {
         var encryptedBytes = new byte[] { 1, 2, 3 };
         _credentialStore.Credentials.Add(new CredentialEntry
@@ -95,7 +93,7 @@ public class ProcessLauncherTests : IDisposable
     public void Accept_NullCredentials_ResolvesViaLookup()
     {
         // Arrange — no Credentials on identity; lookup must resolve them from the store
-        var password = new SecureString();
+        var password = new ProtectedString();
         password.AppendChar('p');
         SetupStoredPassword(TestSid, password);
 
@@ -121,7 +119,7 @@ public class ProcessLauncherTests : IDisposable
     public void Accept_CallerProvidedCredentials_SkipsLookup()
     {
         // Arrange — caller passes Credentials directly; lookup should NOT be called
-        using var callerPassword = new SecureString();
+        using var callerPassword = new ProtectedString();
         callerPassword.AppendChar('x');
 
         var callerCreds = new LaunchCredentials(callerPassword, "DOMAIN", "user");
@@ -149,7 +147,7 @@ public class ProcessLauncherTests : IDisposable
     public void Accept_LookedUpPassword_DisposedAfterLaunch()
     {
         // Arrange — password resolved by lookup; must be disposed in finally block
-        var password = new SecureString();
+        var password = new ProtectedString();
         password.AppendChar('s');
         SetupStoredPassword(TestSid, password);
 
@@ -171,7 +169,7 @@ public class ProcessLauncherTests : IDisposable
     {
         // Arrange — caller provides Credentials; the caller owns the password lifetime;
         // ProcessLauncher must NOT dispose it
-        var callerPassword = new SecureString();
+        var callerPassword = new ProtectedString();
         callerPassword.AppendChar('y');
 
         var callerCreds = new LaunchCredentials(callerPassword, "DOMAIN", "user");
@@ -188,5 +186,85 @@ public class ProcessLauncherTests : IDisposable
         // Assert — password still accessible (not disposed by ProcessLauncher)
         callerPassword.AppendChar('z'); // should NOT throw
         callerPassword.Dispose();
+    }
+
+    // ── AppContainer dispatch (TC-3) ────────────────────────────────────────
+
+    [Fact]
+    public void Launch_AppContainerIdentity_DelegatesToContainerLauncher()
+    {
+        // Arrange
+        var container = new AppContainerEntry { Name = "rfn_test", Sid = "S-1-15-2-1-2-3-4" };
+        var identity = new AppContainerLaunchIdentity(container);
+        var target = new ProcessLaunchTarget(@"C:\apps\browser.exe");
+        var expectedInfo = MakeProcessInfo();
+        _containerLauncher.Setup(c => c.LaunchFile(target, identity)).Returns(expectedInfo);
+
+        // Act
+        var result = _processLauncher.Launch(identity, target);
+
+        // Assert — delegated to container launcher
+        Assert.Equal(expectedInfo, result);
+        _containerLauncher.Verify(c => c.LaunchFile(target, identity), Times.Once);
+        _accountLauncher.Verify(a => a.Launch(It.IsAny<ProcessLaunchTarget>(),
+            It.IsAny<AccountLaunchIdentity>()), Times.Never);
+    }
+
+    [Fact]
+    public void Launch_AppContainerIdentity_DoesNotRegisterFolderHandlerOrAutoSet()
+    {
+        // Arrange
+        var container = new AppContainerEntry { Name = "rfn_browser", Sid = "S-1-15-2-2-2-3" };
+        var identity = new AppContainerLaunchIdentity(container);
+        _containerLauncher.Setup(c => c.LaunchFile(It.IsAny<ProcessLaunchTarget>(),
+            It.IsAny<AppContainerLaunchIdentity>())).Returns(MakeProcessInfo());
+
+        // Act
+        _processLauncher.Launch(identity, new ProcessLaunchTarget(@"C:\apps\b.exe"));
+
+        // Assert — folder handler and association auto-set not called for AppContainers
+        _folderHandler.Verify(f => f.Register(It.IsAny<string>()), Times.Never);
+        _associationAutoSetService.Verify(a => a.AutoSetForUser(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void Accept_AccountIdentity_InteractiveUserTokenSource_DoesNotDisposeCallerPassword()
+    {
+        // Arrange — InteractiveUser via IsInteractiveUser flag, with a stored password as fallback.
+        // ProcessLauncher must not dispose caller-owned credentials.
+        var callerPassword = new ProtectedString();
+        callerPassword.AppendChar('i');
+        var callerCreds = new LaunchCredentials(callerPassword, null, null, LaunchTokenSource.InteractiveUser);
+        var identity = new AccountLaunchIdentity(TestSid)
+        {
+            Credentials = callerCreds,
+            PrivilegeLevel = PrivilegeLevel.Basic
+        };
+        var target = new ProcessLaunchTarget(@"C:\apps\app.exe");
+
+        // Act
+        _processLauncher.Accept(identity, target);
+
+        // Assert — password survives (caller owns it)
+        callerPassword.AppendChar('j'); // should NOT throw
+        callerPassword.Dispose();
+    }
+
+    [Fact]
+    public void Accept_AccountIdentity_LaunchSuccess_RegistersFolderHandlerAndAutoSet()
+    {
+        // Arrange
+        var identity = new AccountLaunchIdentity(TestSid)
+        {
+            Credentials = LaunchCredentials.CurrentAccount,
+            PrivilegeLevel = PrivilegeLevel.Basic
+        };
+
+        // Act
+        _processLauncher.Accept(identity, new ProcessLaunchTarget(@"C:\apps\app.exe"));
+
+        // Assert
+        _folderHandler.Verify(f => f.Register(TestSid), Times.Once);
+        _associationAutoSetService.Verify(a => a.AutoSetForUser(TestSid), Times.Once);
     }
 }

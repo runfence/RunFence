@@ -1,6 +1,5 @@
 using Microsoft.Win32;
 using Moq;
-using RunFence.Core;
 using RunFence.Infrastructure;
 
 namespace RunFence.Tests;
@@ -24,8 +23,8 @@ public sealed class RegistryTestHelper : IDisposable
     {
         _hkuSubKey = $@"Software\RunFenceTests\{hkuPrefix}_{Guid.NewGuid():N}";
         _hklmSubKey = $@"Software\RunFenceTests\{hklmPrefix}_{Guid.NewGuid():N}";
-        HkuRoot = Registry.CurrentUser.CreateSubKey(_hkuSubKey)!;
-        HklmRoot = Registry.CurrentUser.CreateSubKey(_hklmSubKey)!;
+        HkuRoot = Registry.CurrentUser.CreateSubKey(_hkuSubKey);
+        HklmRoot = Registry.CurrentUser.CreateSubKey(_hklmSubKey);
 
         HiveManager = new Mock<IUserHiveManager>();
         HiveManager.Setup(h => h.EnsureHiveLoaded(It.IsAny<string>())).Returns((IDisposable?)null);

@@ -4,11 +4,6 @@ using RunFence.Launch;
 
 namespace RunFence.RunAs;
 
-public interface IRunAsLaunchErrorHandler
-{
-    void RunWithErrorHandling(Action launchAction, string filePath);
-}
-
 /// <summary>
 /// Handles error reporting for RunAs launch failures.
 /// Extracted from <see cref="RunAsAppEntryManager"/> so both it and <see cref="RunAsDirectLauncher"/> share

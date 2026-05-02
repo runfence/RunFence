@@ -10,7 +10,7 @@ public class StartupSecurityService(ILoggingService log) : IStartupSecurityServi
 
     public List<StartupSecurityFinding> RunChecks(CancellationToken cancellationToken = default)
     {
-        var scannerPath = Path.Combine(AppContext.BaseDirectory, Constants.SecurityScannerExeName);
+        var scannerPath = Path.Combine(AppContext.BaseDirectory, PathConstants.SecurityScannerExeName);
         if (!File.Exists(scannerPath))
         {
             log.Error($"Security scanner not found: {scannerPath}");

@@ -11,7 +11,7 @@ namespace RunFence.DragBridge;
 /// window resize, etc. When wrong, the user simply gets a DragBridge for the wrong account;
 /// they can click to cancel and retry.
 /// </summary>
-public class WindowOwnerDetector : IWindowOwnerDetector
+public class WindowOwnerDetector(IProcessJobManager processJobManager) : IWindowOwnerDetector
 {
     public WindowOwnerInfo? GetForegroundWindowOwnerInfo()
     {
@@ -59,16 +59,17 @@ public class WindowOwnerDetector : IWindowOwnerDetector
         return TryGetWindowAtCursorInfo();
     }
 
-    private static WindowOwnerInfo? TryGetOwnerInfo(uint pid)
+    private WindowOwnerInfo? TryGetOwnerInfo(uint pid)
     {
         var sid = NativeTokenHelper.TryGetProcessOwnerSid(pid);
         if (sid == null)
             return null;
         var il = NativeTokenHelper.TryGetProcessIntegrityLevel(pid) ?? NativeTokenHelper.MandatoryLevelMedium;
-        return new WindowOwnerInfo(sid, il);
+        var inRestrictedJob = processJobManager.TryGetRestrictedJobForPid((int)pid) != IntPtr.Zero;
+        return new WindowOwnerInfo(sid, il, inRestrictedJob);
     }
 
-    private static WindowOwnerInfo? TryGetWindowAtCursorInfo()
+    private WindowOwnerInfo? TryGetWindowAtCursorInfo()
     {
         if (!InfraWindowNative.GetCursorPos(out var pt))
             return null;

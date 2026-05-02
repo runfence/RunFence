@@ -18,7 +18,7 @@ public class AppContextMenuOrchestrator(
     ILoggingService log,
     IInteractiveUserDesktopProvider interactiveUserDesktopProvider,
     IShortcutService shortcutService,
-    ShellHelper shellHelper,
+    IShellHelper shellHelper,
     DefaultBrowserManager defaultBrowserManager)
 {
     public event Action<string>? AccountNavigationRequested;
@@ -44,7 +44,7 @@ public class AppContextMenuOrchestrator(
         if (string.IsNullOrEmpty(parentDir))
             return;
 
-        var privilegeLevel = shiftHeld ? (PrivilegeLevel?)PrivilegeLevel.HighestAllowed : app.PrivilegeLevel;
+        var privilegeLevel = shiftHeld ? PrivilegeLevel.HighestAllowed : app.PrivilegeLevel;
         try
         {
             facade.LaunchFolderBrowser(
@@ -132,13 +132,15 @@ public class AppContextMenuOrchestrator(
 
     public void CopyLauncherPath(AppEntry app)
     {
-        var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+        var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         Clipboard.SetText($"\"{launcherPath}\" {app.Id}");
     }
 
     public void SetDefaultBrowser(AppEntry app)
     {
-        defaultBrowserManager.SetDefaultBrowser(app);
+        var message = defaultBrowserManager.SetDefaultBrowser(app);
+        if (message != null)
+            MessageBox.Show(message, "Default Browser", MessageBoxButtons.OK, MessageBoxIcon.Information);
         DataSaveAndRefreshRequested?.Invoke();
     }
 }

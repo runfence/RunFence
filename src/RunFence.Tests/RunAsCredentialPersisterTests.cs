@@ -1,4 +1,3 @@
-using System.Security;
 using Moq;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -168,7 +167,7 @@ public class RunAsCredentialPersisterTests : IDisposable
 
         // Assert: no credential added, no save
         Assert.Empty(_credentialStore.Credentials);
-        _encryptionService.Verify(e => e.Encrypt(It.IsAny<SecureString>(), It.IsAny<byte[]>()), Times.Never);
+        _encryptionService.Verify(e => e.Encrypt(It.IsAny<ProtectedString>(), It.IsAny<byte[]>()), Times.Never);
         _databaseService.Verify(d => d.SaveCredentialStore(It.IsAny<CredentialStore>()), Times.Never);
     }
 
@@ -208,10 +207,10 @@ public class RunAsCredentialPersisterTests : IDisposable
     {
         // Arrange
         var encryptedBytes = new byte[] { 1, 2, 3 };
-        _encryptionService.Setup(e => e.Encrypt(It.IsAny<SecureString>(), It.IsAny<byte[]>()))
+        _encryptionService.Setup(e => e.Encrypt(It.IsAny<ProtectedString>(), It.IsAny<byte[]>()))
             .Returns(encryptedBytes);
         var credential = new CredentialEntry { Sid = AccountSid };
-        using var pw = new SecureString();
+        using var pw = new ProtectedString();
         pw.AppendChar('P');
         using var result = MakeResult(credential, rememberPassword: true, adHocPassword: pw);
         var persister = CreatePersister();
@@ -233,10 +232,10 @@ public class RunAsCredentialPersisterTests : IDisposable
         var existingCred = new CredentialEntry { Id = Guid.NewGuid(), Sid = AccountSid, EncryptedPassword = new byte[] { 9, 9, 9 } };
         _credentialStore.Credentials.Add(existingCred);
         var newEncryptedBytes = new byte[] { 1, 2, 3 };
-        _encryptionService.Setup(e => e.Encrypt(It.IsAny<SecureString>(), It.IsAny<byte[]>()))
+        _encryptionService.Setup(e => e.Encrypt(It.IsAny<ProtectedString>(), It.IsAny<byte[]>()))
             .Returns(newEncryptedBytes);
         var credential = new CredentialEntry { Sid = AccountSid };
-        using var pw = new SecureString();
+        using var pw = new ProtectedString();
         pw.AppendChar('P');
         using var result = MakeResult(credential, rememberPassword: true, adHocPassword: pw);
         var persister = CreatePersister();
@@ -255,10 +254,10 @@ public class RunAsCredentialPersisterTests : IDisposable
     public void TrySaveRememberedPassword_EncryptionThrows_LogsWarningAndDoesNotThrow()
     {
         // Arrange
-        _encryptionService.Setup(e => e.Encrypt(It.IsAny<SecureString>(), It.IsAny<byte[]>()))
+        _encryptionService.Setup(e => e.Encrypt(It.IsAny<ProtectedString>(), It.IsAny<byte[]>()))
             .Throws(new InvalidOperationException("Encryption failure"));
         var credential = new CredentialEntry { Sid = AccountSid };
-        using var pw = new SecureString();
+        using var pw = new ProtectedString();
         pw.AppendChar('P');
         using var result = MakeResult(credential, rememberPassword: true, adHocPassword: pw);
         var persister = CreatePersister();
@@ -276,7 +275,7 @@ public class RunAsCredentialPersisterTests : IDisposable
     private static RunAsDialogResult MakeResult(
         CredentialEntry? credential,
         bool rememberPassword = false,
-        SecureString? adHocPassword = null)
+        ProtectedString? adHocPassword = null)
         => new(
             Credential: credential,
             SelectedContainer: null,

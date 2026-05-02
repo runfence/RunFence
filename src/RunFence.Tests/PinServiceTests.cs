@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Security;
 using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -26,8 +25,9 @@ public class PinServiceTests
         var salt = new byte[32];
         new Random(42).NextBytes(salt);
 
-        var key1 = _pinService.DeriveKey("testpin", salt);
-        var key2 = _pinService.DeriveKey("testpin", salt);
+        using var pin = ProtectedString.FromChars("testpin".AsSpan());
+        var key1 = _pinService.DeriveKey(pin, salt);
+        var key2 = _pinService.DeriveKey(pin, salt);
 
         Assert.Equal(key1, key2);
     }
@@ -38,8 +38,10 @@ public class PinServiceTests
         var salt = new byte[32];
         new Random(42).NextBytes(salt);
 
-        var key1 = _pinService.DeriveKey("pin1", salt);
-        var key2 = _pinService.DeriveKey("pin2", salt);
+        using var pin1 = ProtectedString.FromChars("pin1".AsSpan());
+        using var pin2 = ProtectedString.FromChars("pin2".AsSpan());
+        var key1 = _pinService.DeriveKey(pin1, salt);
+        var key2 = _pinService.DeriveKey(pin2, salt);
 
         Assert.NotEqual(key1, key2);
     }
@@ -52,8 +54,9 @@ public class PinServiceTests
         new Random(42).NextBytes(salt1);
         new Random(99).NextBytes(salt2);
 
-        var key1 = _pinService.DeriveKey("testpin", salt1);
-        var key2 = _pinService.DeriveKey("testpin", salt2);
+        using var pin = ProtectedString.FromChars("testpin".AsSpan());
+        var key1 = _pinService.DeriveKey(pin, salt1);
+        var key2 = _pinService.DeriveKey(pin, salt2);
 
         Assert.NotEqual(key1, key2);
     }
@@ -64,16 +67,19 @@ public class PinServiceTests
         var salt = new byte[32];
         new Random(42).NextBytes(salt);
 
-        var key = _pinService.DeriveKey("testpin", salt);
+        using var pin = ProtectedString.FromChars("testpin".AsSpan());
+        var key = _pinService.DeriveKey(pin, salt);
         Assert.Equal(32, key.Length);
     }
 
     [Fact]
     public void VerifyPin_WrongPin_ReturnsFalse()
     {
-        var (store, _) = _pinService.ResetPin("correctpin");
+        using var correctPin = ProtectedString.FromChars("correctpin".AsSpan());
+        var (store, _) = _pinService.ResetPin(correctPin);
 
-        var verified = _pinService.VerifyPin("wrongpin", store, out var key);
+        using var wrongPin = ProtectedString.FromChars("wrongpin".AsSpan());
+        var verified = _pinService.VerifyPin(wrongPin, store, out var key);
         Assert.False(verified);
         Assert.Empty(key);
     }
@@ -81,11 +87,13 @@ public class PinServiceTests
     [Fact]
     public void ChangePin_WithOldKey_VerifiesCanaryBeforeProceeding()
     {
-        var (store, _) = _pinService.ResetPin("testpin");
-        _pinService.VerifyPin("testpin", store, out var oldKey);
+        using var testPin = ProtectedString.FromChars("testpin".AsSpan());
+        var (store, _) = _pinService.ResetPin(testPin);
+        _pinService.VerifyPin(testPin, store, out var oldKey);
 
         // Should succeed with correct old key
-        var (newStore, newKey) = _pinService.ChangePin(oldKey, "newpin", store);
+        using var newPin = ProtectedString.FromChars("newpin".AsSpan());
+        var (newStore, newKey) = _pinService.ChangePin(oldKey, newPin, store);
         Assert.NotNull(newStore);
         Assert.NotEmpty(newKey);
     }
@@ -93,27 +101,26 @@ public class PinServiceTests
     [Fact]
     public void ChangePin_WithOldKey_WrongKey_Throws()
     {
-        var (store, _) = _pinService.ResetPin("correctpin");
+        using var correctPin = ProtectedString.FromChars("correctpin".AsSpan());
+        var (store, _) = _pinService.ResetPin(correctPin);
 
         var wrongKey = new byte[32];
         new Random(77).NextBytes(wrongKey);
 
+        using var newPin = ProtectedString.FromChars("newpin".AsSpan());
         Assert.Throws<CryptographicException>(() =>
-            _pinService.ChangePin(wrongKey, "newpin", store));
+            _pinService.ChangePin(wrongKey, newPin, store));
     }
 
     [Fact]
     public void ChangePin_ReencryptsCredentials()
     {
-        var (store, _) = _pinService.ResetPin("oldpin");
+        using var oldPin = ProtectedString.FromChars("oldpin".AsSpan());
+        var (store, _) = _pinService.ResetPin(oldPin);
 
         // Add a credential with encrypted password
-        _pinService.VerifyPin("oldpin", store, out var oldKey);
-        var password = new SecureString();
-        foreach (var c in "TestPassword")
-            password.AppendChar(c);
-        password.MakeReadOnly();
-
+        _pinService.VerifyPin(oldPin, store, out var oldKey);
+        using var password = new ProtectedString("TestPassword".AsSpan(), protect: false);
         var encrypted = _encryptionService.Encrypt(password, oldKey);
         store.Credentials.Add(new CredentialEntry
         {
@@ -122,7 +129,8 @@ public class PinServiceTests
             EncryptedPassword = encrypted
         });
 
-        var (newStore, newKey) = _pinService.ChangePin(oldKey, "newpin", store);
+        using var newPin = ProtectedString.FromChars("newpin".AsSpan());
+        var (newStore, newKey) = _pinService.ChangePin(oldKey, newPin, store);
 
         Assert.NotNull(newStore);
         Assert.NotEqual(store.ArgonSalt, newStore.ArgonSalt);
@@ -131,23 +139,24 @@ public class PinServiceTests
         Assert.Equal(32, newKey.Length);
 
         // Verify the re-encrypted password can be decrypted with the new key
-        var decrypted = _encryptionService.Decrypt(newStore.Credentials[0].EncryptedPassword, newKey);
-        var bstr = Marshal.SecureStringToBSTR(decrypted);
+        using var decrypted = _encryptionService.Decrypt(newStore.Credentials[0].EncryptedPassword, newKey);
+        var ptr = decrypted.AllocUnicode();
         try
         {
-            var result = Marshal.PtrToStringBSTR(bstr);
+            var result = Marshal.PtrToStringUni(ptr);
             Assert.Equal("TestPassword", result);
         }
         finally
         {
-            Marshal.ZeroFreeBSTR(bstr);
+            Marshal.ZeroFreeGlobalAllocUnicode(ptr);
         }
     }
 
     [Fact]
     public void ChangePin_PreservesCurrentAccountCredentials()
     {
-        var (store, _) = _pinService.ResetPin("oldpin");
+        using var oldPin = ProtectedString.FromChars("oldpin".AsSpan());
+        var (store, _) = _pinService.ResetPin(oldPin);
         store.Credentials.Add(new CredentialEntry
         {
             Id = Guid.NewGuid(),
@@ -155,8 +164,9 @@ public class PinServiceTests
             EncryptedPassword = Array.Empty<byte>()
         });
 
-        _pinService.VerifyPin("oldpin", store, out var oldKey);
-        var (newStore, _) = _pinService.ChangePin(oldKey, "newpin", store);
+        _pinService.VerifyPin(oldPin, store, out var oldKey);
+        using var newPin = ProtectedString.FromChars("newpin".AsSpan());
+        var (newStore, _) = _pinService.ChangePin(oldKey, newPin, store);
 
         Assert.Single(newStore.Credentials);
         Assert.True(newStore.Credentials[0].IsCurrentAccount);
@@ -166,12 +176,14 @@ public class PinServiceTests
     [Fact]
     public void ChangePin_ReturnsUsableKey()
     {
-        var (store, _) = _pinService.ResetPin("oldpin");
-        _pinService.VerifyPin("oldpin", store, out var oldKey);
-        var (newStore, newKey) = _pinService.ChangePin(oldKey, "newpin", store);
+        using var oldPin = ProtectedString.FromChars("oldpin".AsSpan());
+        var (store, _) = _pinService.ResetPin(oldPin);
+        _pinService.VerifyPin(oldPin, store, out var oldKey);
+        using var newPin = ProtectedString.FromChars("newpin".AsSpan());
+        var (newStore, newKey) = _pinService.ChangePin(oldKey, newPin, store);
 
         // The returned key should verify against the new store
-        var verified = _pinService.VerifyPin("newpin", newStore, out var verifyKey);
+        var verified = _pinService.VerifyPin(newPin, newStore, out var verifyKey);
         Assert.True(verified);
         Assert.Equal(newKey, verifyKey);
     }
@@ -179,7 +191,8 @@ public class PinServiceTests
     [Fact]
     public void ResetPin_CreatesNewStore()
     {
-        var (store, pinDerivedKey) = _pinService.ResetPin("newpin");
+        using var pin = ProtectedString.FromChars("newpin".AsSpan());
+        var (store, pinDerivedKey) = _pinService.ResetPin(pin);
 
         Assert.NotNull(store);
         Assert.Equal(32, store.ArgonSalt.Length);
@@ -187,8 +200,44 @@ public class PinServiceTests
         Assert.Empty(store.Credentials);
         Assert.NotNull(pinDerivedKey);
 
-        var verified = _pinService.VerifyPin("newpin", store, out var key);
+        var verified = _pinService.VerifyPin(pin, store, out var key);
         Assert.True(verified);
         Assert.Equal(32, key.Length);
+    }
+
+    [Fact]
+    public void VerifyDerivedKey_CorrectKey_ReturnsTrue()
+    {
+        using var pin = ProtectedString.FromChars("testpin".AsSpan());
+        var (store, pinDerivedKey) = _pinService.ResetPin(pin);
+
+        var result = _pinService.VerifyDerivedKey(pinDerivedKey, store);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void VerifyDerivedKey_WrongKey_ReturnsFalse()
+    {
+        using var pin = ProtectedString.FromChars("testpin".AsSpan());
+        var (store, _) = _pinService.ResetPin(pin);
+        var wrongKey = new byte[32];
+        new Random(77).NextBytes(wrongKey);
+
+        var result = _pinService.VerifyDerivedKey(wrongKey, store);
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void VerifyDerivedKey_CorruptedCanary_ReturnsFalse()
+    {
+        using var pin = ProtectedString.FromChars("testpin".AsSpan());
+        var (store, pinDerivedKey) = _pinService.ResetPin(pin);
+        store.EncryptedCanary[0] ^= 0xFF;
+
+        var result = _pinService.VerifyDerivedKey(pinDerivedKey, store);
+
+        Assert.False(result);
     }
 }

@@ -3,27 +3,23 @@ using RunFence.Account;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Ipc;
-using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
-using RunFence.Persistence;
 
 namespace RunFence.Ipc;
 
 /// <summary>
 /// Handles the <see cref="IpcCommands.HandleAssociation"/> IPC command.
-/// Looks up all handler mappings for the association key, selects the app whose
-/// <see cref="AppEntry.AllowedIpcCallers"/> explicitly contains the caller (falling back to any
-/// authorized app), and launches via the orchestrator.
+/// Resolves the association to the app selected by the standard authorization and
+/// path-prefix rules, then launches via the orchestrator.
 /// </summary>
 public class IpcAssociationHandler(
     IAppStateProvider appState,
     IAppLockControl appLock,
-    IpcUiInvoker ipcUiInvoker,
+    IIpcUiInvoker ipcUiInvoker,
     IAppEntryLauncher entryLauncher,
-    IIpcCallerAuthorizer authorizer,
+    IAssociationLaunchResolver associationLaunchResolver,
     ISidNameCacheService sidNameCache,
-    IHandlerMappingService handlerMappingService,
     ILoggingService log,
     IIdleMonitorService idleMonitor)
 {
@@ -43,53 +39,56 @@ public class IpcAssociationHandler(
         {
             try
             {
-                var database = appState.Database;
-                var allMappings = handlerMappingService.GetAllHandlerMappings(database);
+                var resolution = associationLaunchResolver.Resolve(
+                    appState.Database,
+                    message.Association,
+                    message.Arguments,
+                    context.CallerIdentity,
+                    context.CallerSid,
+                    context.IdentityFromImpersonation);
 
-                if (!allMappings.TryGetValue(message.Association, out var entries))
+                if (resolution.Status != AssociationLaunchResolutionStatus.Success || resolution.App == null)
                 {
-                    result = new IpcResponse { Success = false, ErrorCode = IpcErrorCode.UnknownAssociation, ErrorMessage = $"No handler registered for '{message.Association}'." };
+                    result = resolution.Status switch
+                    {
+                        AssociationLaunchResolutionStatus.UnknownAssociation => new IpcResponse
+                        {
+                            Success = false,
+                            ErrorCode = IpcErrorCode.UnknownAssociation,
+                            ErrorMessage = $"No handler registered for '{message.Association}'."
+                        },
+                        AssociationLaunchResolutionStatus.AppNotFound => new IpcResponse
+                        {
+                            Success = false,
+                            ErrorMessage = $"Registered app for '{message.Association}' not found (config may be unloaded)."
+                        },
+                        AssociationLaunchResolutionStatus.AccessDenied => new IpcResponse
+                        {
+                            Success = false,
+                            ErrorCode = IpcErrorCode.AccessDenied,
+                            ErrorMessage = "Access denied."
+                        },
+                        AssociationLaunchResolutionStatus.PathPrefixMismatch => new IpcResponse
+                        {
+                            Success = false,
+                            ErrorCode = IpcErrorCode.PathPrefixMismatch,
+                            ErrorMessage = "No handler registered for path."
+                        },
+                        _ => new IpcResponse { Success = false, ErrorMessage = "Launch failed." }
+                    };
                     return;
                 }
 
-                // Among all registered apps for this key, prefer the one with an explicit per-app
-                // AllowedIpcCallers containing the caller (most specific), then fall back to any authorized app.
-                AppEntry? authorizedApp = null;
-                bool anyFound = false;
-                foreach (var entry in entries)
-                {
-                    var candidate = database.Apps.FirstOrDefault(a => a.Id == entry.AppId);
-                    if (candidate == null) continue;
-                    anyFound = true;
-                    if (!authorizer.IsCallerAuthorizedForAssociation(context.CallerIdentity, context.CallerSid, candidate, database, context.IdentityFromImpersonation))
-                        continue;
-                    if (authorizer.HasExplicitPerAppAuthorization(context.CallerSid, candidate, database))
-                    {
-                        authorizedApp = candidate;
-                        break; // explicit per-app match — highest priority
-                    }
-                    authorizedApp ??= candidate; // keep first authorized as fallback
-                }
-
-                if (authorizedApp == null)
-                {
-                    if (!anyFound)
-                    {
-                        result = new IpcResponse { Success = false, ErrorMessage = $"Registered app for '{message.Association}' not found (config may be unloaded)." };
-                        return;
-                    }
-                    result = new IpcResponse { Success = false, ErrorCode = IpcErrorCode.AccessDenied, ErrorMessage = "Access denied." };
-                    return;
-                }
-
-                // Associations intentionally do not fall back to app.ArgumentsTemplate — they use only
+                // Associations intentionally do not fall back to app.ArgumentsTemplate â€” they use only
                 // per-association templates. Null coalesces to "" so DetermineArguments replaces DefaultArguments.
-                var associationTemplate = entries
-                    .FirstOrDefault(e => string.Equals(e.AppId, authorizedApp.Id, StringComparison.OrdinalIgnoreCase))
-                    .ArgumentsTemplate ?? "";
+                var associationTemplate = resolution.Entry?.ArgumentsTemplate ?? string.Empty;
 
-                entryLauncher.Launch(authorizedApp, message.Arguments, message.WorkingDirectory,
-                    AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache), associationTemplate);
+                entryLauncher.Launch(
+                    resolution.App,
+                    message.Arguments,
+                    message.WorkingDirectory,
+                    AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache),
+                    associationTemplate);
                 result = new IpcResponse { Success = true };
 
                 idleMonitor.ResetIdleTimer();
@@ -105,7 +104,7 @@ public class IpcAssociationHandler(
             catch (Exception ex)
             {
                 log.Error("IPC association launch failed", ex);
-                result = new IpcResponse { Success = false, ErrorMessage = "Launch failed." };
+                result = new IpcResponse { Success = false, ErrorMessage = $"Launch failed: {ex.GetType().Name}" };
             }
         }, out var disposeResponse))
             return disposeResponse!;

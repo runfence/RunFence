@@ -56,87 +56,87 @@ public class ProcessLaunchHelperTests
     [Theory]
     [InlineData(".cmd")]
     [InlineData(".bat")]
-    public void WrapTargetForLaunch_Script_UnsafePath_ThrowsInvalidOperation(string ext)
+    public void TryWrapForScriptLaunch_UnsafePath_ThrowsInvalidOperation(string ext)
     {
         Assert.Throws<InvalidOperationException>(() =>
-            ProcessLaunchHelper.WrapTargetForLaunch(new ProcessLaunchTarget($"C:\\test&evil{ext}")));
+            ProcessLaunchHelper.TryWrapForScriptLaunch(new ProcessLaunchTarget($"C:\\test&evil{ext}")));
     }
 
     [Theory]
     [InlineData(".msi")]
     [InlineData(".reg")]
     [InlineData(".lnk")]
-    public void WrapTargetForLaunch_NonScript_SpecialCharsInPath_UsesRundll32AndDoesNotThrow(string ext)
+    public void WrapForShellLaunch_SpecialCharsInPath_UsesRundll32AndDoesNotThrow(string ext)
     {
-        var (wrappedTarget, isWrapped) = ProcessLaunchHelper.WrapTargetForLaunch(
+        var wrappedTarget = ProcessLaunchHelper.WrapForShellLaunch(
             new ProcessLaunchTarget($"C:\\test&evil{ext}"));
 
-        Assert.True(isWrapped);
         Assert.Equal("rundll32.exe", wrappedTarget.ExePath);
     }
 
     // --- .ps1 tests ---
 
     [Fact]
-    public void WrapTargetForLaunch_Ps1_UsesPowershellWithExecutionPolicyBypassAndFile()
+    public void TryWrapForScriptLaunch_Ps1_UsesPowershellWithExecutionPolicyBypassAndFile()
     {
-        var (wrappedTarget, isWrapped) = ProcessLaunchHelper.WrapTargetForLaunch(
+        var wrappedTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(
             new ProcessLaunchTarget(@"C:\scripts\deploy.ps1"));
 
-        Assert.False(isWrapped);
+        Assert.NotNull(wrappedTarget);
         Assert.Equal("powershell.exe", wrappedTarget.ExePath);
         Assert.Equal(@"-ExecutionPolicy Bypass -File ""C:\scripts\deploy.ps1""", wrappedTarget.Arguments);
     }
 
     [Fact]
-    public void WrapTargetForLaunch_Ps1_WithArguments_AppendedVerbatim()
+    public void TryWrapForScriptLaunch_Ps1_WithArguments_AppendedVerbatim()
     {
         // Arguments must not be cmd-escaped — powershell.exe is launched directly, not via cmd.exe
-        var (wrappedTarget, _) = ProcessLaunchHelper.WrapTargetForLaunch(
+        var wrappedTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(
             new ProcessLaunchTarget(@"C:\scripts\run.ps1", Arguments: "-Name \"foo bar\" -Count 3"));
 
+        Assert.NotNull(wrappedTarget);
         Assert.Equal(@"-ExecutionPolicy Bypass -File ""C:\scripts\run.ps1"" -Name ""foo bar"" -Count 3", wrappedTarget.Arguments);
     }
 
     [Fact]
-    public void WrapTargetForLaunch_Ps1_ArgumentsWithCmdMetachars_NotEscaped()
+    public void TryWrapForScriptLaunch_Ps1_ArgumentsWithCmdMetachars_NotEscaped()
     {
         // & | % are valid in PS args; they must not be ^-escaped
-        var (wrappedTarget, _) = ProcessLaunchHelper.WrapTargetForLaunch(
+        var wrappedTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(
             new ProcessLaunchTarget(@"C:\scripts\run.ps1", Arguments: "-Url http://a.com?x=1&y=2 -Pct 50%"));
 
+        Assert.NotNull(wrappedTarget);
         Assert.Contains("&y=2", wrappedTarget.Arguments);
         Assert.Contains("50%", wrappedTarget.Arguments);
         Assert.DoesNotContain("^", wrappedTarget.Arguments);
     }
 
     [Fact]
-    public void WrapTargetForLaunch_Ps1_SpecialCharsInPath_DoesNotThrow()
+    public void TryWrapForScriptLaunch_Ps1_SpecialCharsInPath_DoesNotThrow()
     {
         // .ps1 is not launched via cmd.exe, so & in path does not require IsPathSafeForCmd
-        var (wrappedTarget, isWrapped) = ProcessLaunchHelper.WrapTargetForLaunch(
+        var wrappedTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(
             new ProcessLaunchTarget(@"C:\test&evil.ps1"));
 
-        Assert.False(isWrapped);
+        Assert.NotNull(wrappedTarget);
         Assert.Equal("powershell.exe", wrappedTarget.ExePath);
     }
 
     [Fact]
-    public void WrapTargetForLaunch_NonExeNonScript_UsesRundll32ShellExecRunDLL()
+    public void WrapForShellLaunch_UsesRundll32ShellExecRunDLL()
     {
-        var (wrappedTarget, isWrapped) = ProcessLaunchHelper.WrapTargetForLaunch(
+        var wrappedTarget = ProcessLaunchHelper.WrapForShellLaunch(
             new ProcessLaunchTarget(@"C:\docs\report.pdf"));
 
-        Assert.True(isWrapped);
         Assert.Equal("rundll32.exe", wrappedTarget.ExePath);
         Assert.False(wrappedTarget.HideWindow);
         Assert.Equal(@"shell32.dll,ShellExec_RunDLL C:\docs\report.pdf", wrappedTarget.Arguments);
     }
 
     [Fact]
-    public void WrapTargetForLaunch_NonExeNonScript_PathPassedVerbatim()
+    public void WrapForShellLaunch_PathPassedVerbatim()
     {
-        var (wrappedTarget, _) = ProcessLaunchHelper.WrapTargetForLaunch(
+        var wrappedTarget = ProcessLaunchHelper.WrapForShellLaunch(
             new ProcessLaunchTarget(@"C:\my 'docs'\file name.txt"));
 
         Assert.Equal(@"shell32.dll,ShellExec_RunDLL C:\my 'docs'\file name.txt", wrappedTarget.Arguments);
@@ -145,14 +145,38 @@ public class ProcessLaunchHelperTests
     [Theory]
     [InlineData(".cmd")]
     [InlineData(".bat")]
-    public void WrapTargetForLaunch_Script_UsesCmdExe(string ext)
+    public void TryWrapForScriptLaunch_UsesCmdExe(string ext)
     {
-        var (wrappedTarget, isWrapped) = ProcessLaunchHelper.WrapTargetForLaunch(
+        var wrappedTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(
             new ProcessLaunchTarget($@"C:\scripts\run{ext}"));
 
-        Assert.False(isWrapped);
+        Assert.NotNull(wrappedTarget);
         Assert.Equal("cmd.exe", wrappedTarget.ExePath);
         Assert.StartsWith("/c ", wrappedTarget.Arguments);
+    }
+
+    [Fact]
+    public void TryWrapForScriptLaunch_NonScript_ReturnsNull()
+    {
+        Assert.Null(ProcessLaunchHelper.TryWrapForScriptLaunch(new ProcessLaunchTarget(@"C:\app.exe")));
+        Assert.Null(ProcessLaunchHelper.TryWrapForScriptLaunch(new ProcessLaunchTarget(@"C:\docs\report.pdf")));
+    }
+
+    [Theory]
+    [InlineData(".exe", true)]
+    [InlineData(".com", true)]
+    [InlineData(".scr", true)]
+    [InlineData(".pif", true)]
+    [InlineData(".cpl", true)]
+    [InlineData(".cmd", false)]
+    [InlineData(".bat", false)]
+    [InlineData(".ps1", false)]
+    [InlineData(".pdf", false)]
+    [InlineData(".msi", false)]
+    [InlineData(".lnk", false)]
+    public void CanLaunchDirect_ReturnsExpected(string ext, bool expected)
+    {
+        Assert.Equal(expected, ProcessLaunchHelper.CanLaunchDirect(new ProcessLaunchTarget($@"C:\app{ext}")));
     }
 
     // --- ArgumentsTemplate tests ---
@@ -312,6 +336,19 @@ public class ProcessLaunchHelperTests
     }
 
     [Theory]
+    [InlineData(@"C:\path\", @"""%1""", @"""C:\path\\""")] // 1 trailing \ → doubled before closing "
+    [InlineData(@"C:\path\\", @"""%1""", @"""C:\path\\\\""")] // 2 trailing \\ → doubled to \\\\
+    [InlineData(@"C:\path\file", @"""%1""", @"""C:\path\file""")] // no trailing \ → unchanged
+    [InlineData(@"C:\path\", "--opt %1", @"--opt C:\path\")] // unquoted context → trailing \ not doubled
+    [InlineData(@"C:\a\", @"""%1"" ""%1""", @"""C:\a\\"" ""C:\a\\""")] // multiple %1, both followed by "
+    public void DetermineArguments_Template_TrailingBackslashBeforeClosingQuote(
+        string value, string template, string expected)
+    {
+        var app = new AppEntry { AllowPassingArguments = true, ArgumentsTemplate = template };
+        Assert.Equal(expected, ProcessLaunchHelper.DetermineArguments(app, value));
+    }
+
+    [Theory]
     [InlineData("\"", "\\\"")] // Standalone " → \"
     [InlineData("\\\\\"", "\\\\\\\\\\\"")] // Two backslashes before " → four backslashes + \"
     [InlineData(@"C:\path\file", @"C:\path\file")] // Backslashes not followed by " are emitted as-is
@@ -347,7 +384,7 @@ public class ProcessLaunchHelperTests
             ArgumentsTemplate = "--app \"%1\""
         };
 
-        var result = ProcessLaunchHelper.DetermineArguments(app, "https://example.com", null);
+        var result = ProcessLaunchHelper.DetermineArguments(app, "https://example.com");
 
         Assert.Equal("--app \"https://example.com\"", result);
     }

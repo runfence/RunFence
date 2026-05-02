@@ -179,10 +179,7 @@ public class ExeAssociationRegistryReader : IExeAssociationRegistryReader
 
     private string? ResolveExtensionCommand(string extKeyName, RegistryKey? classesBase, RegistryKey? hklmClassesFallback)
     {
-        if (classesBase == null)
-            return null;
-
-        using var extSubKey = classesBase.OpenSubKey(extKeyName);
+        using var extSubKey = classesBase?.OpenSubKey(extKeyName);
         if (extSubKey == null)
             return null;
 
@@ -190,21 +187,12 @@ public class ExeAssociationRegistryReader : IExeAssociationRegistryReader
         if (string.IsNullOrEmpty(progId) || AssociationCommandHelper.IsRunFenceProgId(progId))
             return null;
 
-        using var cmdKey = classesBase.OpenSubKey(progId + @"\shell\open\command");
-        if (cmdKey != null)
-        {
-            var cmd = cmdKey.GetValue(null) as string;
-            if (cmd != null)
-                return cmd;
-        }
+        using var cmdKey = classesBase!.OpenSubKey(progId + @"\shell\open\command");
+        if (cmdKey?.GetValue(null) is string cmd)
+            return cmd;
 
-        if (hklmClassesFallback != null)
-        {
-            using var hklmCmdKey = hklmClassesFallback.OpenSubKey(progId + @"\shell\open\command");
-            return hklmCmdKey?.GetValue(null) as string;
-        }
-
-        return null;
+        using var hklmCmdKey = hklmClassesFallback?.OpenSubKey(progId + @"\shell\open\command");
+        return hklmCmdKey?.GetValue(null) as string;
     }
 
     public bool IsRegisteredProgId(string extensionKey, string className)

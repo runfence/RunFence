@@ -8,12 +8,13 @@ public class AccountLoginRestrictionService(
     ILoggingService log,
     IAccountValidationService accountValidation) : IAccountLoginRestrictionService
 {
+    private const string UserListKeyPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList";
+
     public bool IsAccountHidden(string username)
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList");
+            using var key = Registry.LocalMachine.OpenSubKey(UserListKeyPath);
             var value = key?.GetValue(username);
             if (value is int intValue)
                 return intValue == 0;
@@ -38,8 +39,7 @@ public class AccountLoginRestrictionService(
         {
             if (hidden)
             {
-                using var key = Registry.LocalMachine.CreateSubKey(
-                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList");
+                using var key = Registry.LocalMachine.CreateSubKey(UserListKeyPath);
                 key.SetValue(username, 0, RegistryValueKind.DWord);
                 log.Info($"Set account hidden: {username}");
             }
@@ -47,13 +47,11 @@ public class AccountLoginRestrictionService(
             {
                 // Read-only check first — if the value doesn't exist, it's already not hidden (no-op).
                 // This avoids requiring write access to HKLM when there is nothing to delete.
-                using var readKey = Registry.LocalMachine.OpenSubKey(
-                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList");
+                using var readKey = Registry.LocalMachine.OpenSubKey(UserListKeyPath);
                 if (readKey?.GetValue(username) == null)
                     return;
 
-                using var key = Registry.LocalMachine.OpenSubKey(
-                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList", true);
+                using var key = Registry.LocalMachine.OpenSubKey(UserListKeyPath, true);
                 if (key != null)
                 {
                     key.DeleteValue(username, false);

@@ -28,9 +28,7 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
     {
         var sysDir = systemDir ?? Environment.GetFolderPath(Environment.SpecialFolder.System);
         _gpUsersDir = Path.Combine(sysDir, "GroupPolicyUsers");
-        _scriptsDir = scriptsDir ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "RunFence", "scripts");
+        _scriptsDir = scriptsDir ?? Path.Combine(PathConstants.ProgramDataDir, "scripts");
         _legacyScriptsDir = legacyScriptsDir ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "RunAsManager", "scripts");

@@ -2,15 +2,11 @@ namespace RunFence.Apps.UI;
 
 public static class AppIcons
 {
-    private static Icon? _appIcon;
-
-    public static Icon GetAppIcon()
+    private static readonly Lazy<Icon> _appIcon = new(() =>
     {
-        if (_appIcon != null)
-            return _appIcon;
+        using var stream = typeof(AppIcons).Assembly.GetManifestResourceStream("RunFence.app.ico")!;
+        return new Icon(stream);
+    });
 
-        var assembly = typeof(AppIcons).Assembly;
-        using var stream = assembly.GetManifestResourceStream("RunFence.app.ico")!;
-        return _appIcon = new Icon(stream);
-    }
+    public static Icon GetAppIcon() => _appIcon.Value;
 }

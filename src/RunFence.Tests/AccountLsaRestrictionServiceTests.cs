@@ -17,6 +17,20 @@ public class AccountLsaRestrictionServiceTests : IDisposable
     public AccountLsaRestrictionServiceTests()
     {
         _tempDir = new TempDirectory("RunFence_LsaTest");
+        var lsa = CreateLsaMockWithNoRights();
+        _loginService = new AccountLoginRestrictionService(
+            new GroupPolicyScriptHelper(new LogonScriptIniManager(), _log.Object, systemDir: _tempDir.Path),
+            _log.Object, _accountValidation.Object);
+        _lsaService = new AccountLsaRestrictionService(_log.Object, _accountValidation.Object, lsa.Object);
+    }
+
+    /// <summary>
+    /// Creates an <see cref="ILsaRightsHelper"/> mock with <c>GetSidBytes</c> returning real binary
+    /// SID bytes and <c>EnumerateAccountRights</c> returning an empty list.
+    /// Suitable for read-only tests and as a base for mutation tests.
+    /// </summary>
+    private static Mock<ILsaRightsHelper> CreateLsaMockWithNoRights()
+    {
         var lsa = new Mock<ILsaRightsHelper>();
         lsa.Setup(x => x.GetSidBytes(It.IsAny<string>())).Returns((string s) =>
         {
@@ -26,10 +40,7 @@ public class AccountLsaRestrictionServiceTests : IDisposable
             return b;
         });
         lsa.Setup(x => x.EnumerateAccountRights(It.IsAny<byte[]>())).Returns([]);
-        _loginService = new AccountLoginRestrictionService(
-            new GroupPolicyScriptHelper(new LogonScriptIniManager(), _log.Object, systemDir: _tempDir.Path),
-            _log.Object, _accountValidation.Object);
-        _lsaService = new AccountLsaRestrictionService(_log.Object, _accountValidation.Object, lsa.Object);
+        return lsa;
     }
 
     public void Dispose() => _tempDir.Dispose();
@@ -52,24 +63,6 @@ public class AccountLsaRestrictionServiceTests : IDisposable
         Assert.False(result);
     }
 
-    [Fact]
-    public void IsLocalOnlyBySid_InvalidSid_ReturnsFalse()
-    {
-        // LsaEnumerateAccountRights on a non-existent SID returns no rights (or throws)
-        // The service catches exceptions and returns false
-        var result = _lsaService.IsLocalOnlyBySid("S-1-5-21-0-0-0-99999");
-
-        Assert.False(result);
-    }
-
-    [Fact]
-    public void IsNoBgAutostartBySid_InvalidSid_ReturnsFalse()
-    {
-        var result = _lsaService.IsNoBgAutostartBySid("S-1-5-21-0-0-0-99999");
-
-        Assert.False(result);
-    }
-
     // --- SetLoginBlockedBySid guard tests ---
 
     [Fact]
@@ -87,7 +80,7 @@ public class AccountLsaRestrictionServiceTests : IDisposable
     // so no actual LSA P/Invoke (which requires elevation) is called.
 
     [Fact]
-    public void SetNoBgAutostartBySid_ThenIsNoBgAutostartBySid_ReturnsTrue()
+    public void SetNoBgAutostartBySid_ThenGetNoBgAutostartState_ReturnsTrue()
     {
         // Arrange
         var service = CreateServiceWithInMemoryLsa();
@@ -96,11 +89,11 @@ public class AccountLsaRestrictionServiceTests : IDisposable
         service.SetNoBgAutostartBySid("S-1-5-21-1000-2000-3000-500", blocked: true);
 
         // Assert
-        Assert.True(service.IsNoBgAutostartBySid("S-1-5-21-1000-2000-3000-500"));
+        Assert.True(service.GetNoBgAutostartState("S-1-5-21-1000-2000-3000-500") == true);
     }
 
     [Fact]
-    public void SetNoBgAutostartBySid_UnblockAfterBlock_ReturnsFalse()
+    public void SetNoBgAutostartBySid_UnblockAfterBlock_GetNoBgAutostartState_ReturnsFalse()
     {
         // Arrange
         var service = CreateServiceWithInMemoryLsa();
@@ -110,7 +103,7 @@ public class AccountLsaRestrictionServiceTests : IDisposable
         service.SetNoBgAutostartBySid("S-1-5-21-1000-2000-3000-500", blocked: false);
 
         // Assert
-        Assert.False(service.IsNoBgAutostartBySid("S-1-5-21-1000-2000-3000-500"));
+        Assert.Equal(false, service.GetNoBgAutostartState("S-1-5-21-1000-2000-3000-500"));
     }
 
     // --- SetLocalOnlyBySid validation guard ---
@@ -119,15 +112,7 @@ public class AccountLsaRestrictionServiceTests : IDisposable
     public void SetLocalOnlyBySid_ValidationThrows_DoesNotAddAccountRights()
     {
         // Arrange: validation rejects the call (e.g. last-admin guard fires)
-        var lsa = new Mock<ILsaRightsHelper>();
-        lsa.Setup(l => l.GetSidBytes(It.IsAny<string>()))
-            .Returns((string s) =>
-            {
-                var sid = new SecurityIdentifier(s);
-                var b = new byte[sid.BinaryLength];
-                sid.GetBinaryForm(b, 0);
-                return b;
-            });
+        var lsa = CreateLsaMockWithNoRights();
         var validation = new Mock<IAccountValidationService>();
         validation
             .Setup(v => v.ValidateNotLastAdmin(It.IsAny<string>(), It.IsAny<string>()))
@@ -145,7 +130,7 @@ public class AccountLsaRestrictionServiceTests : IDisposable
     // ── SetLocalOnlyBySid round-trip via mocked ILsaRightsService ────────────
 
     [Fact]
-    public void SetLocalOnlyBySid_ThenIsLocalOnlyBySid_ReturnsTrue()
+    public void SetLocalOnlyBySid_ThenGetLocalOnlyState_ReturnsTrue()
     {
         // Arrange
         var service = CreateServiceWithInMemoryLsa();
@@ -154,11 +139,11 @@ public class AccountLsaRestrictionServiceTests : IDisposable
         service.SetLocalOnlyBySid("S-1-5-21-1000-2000-3000-500", localOnly: true);
 
         // Assert
-        Assert.True(service.IsLocalOnlyBySid("S-1-5-21-1000-2000-3000-500"));
+        Assert.True(service.GetLocalOnlyState("S-1-5-21-1000-2000-3000-500") == true);
     }
 
     [Fact]
-    public void SetLocalOnlyBySid_UnblockAfterBlock_ReturnsFalse()
+    public void SetLocalOnlyBySid_UnblockAfterBlock_GetLocalOnlyState_ReturnsFalse()
     {
         // Arrange
         var service = CreateServiceWithInMemoryLsa();
@@ -168,7 +153,7 @@ public class AccountLsaRestrictionServiceTests : IDisposable
         service.SetLocalOnlyBySid("S-1-5-21-1000-2000-3000-500", localOnly: false);
 
         // Assert
-        Assert.False(service.IsLocalOnlyBySid("S-1-5-21-1000-2000-3000-500"));
+        Assert.Equal(false, service.GetLocalOnlyState("S-1-5-21-1000-2000-3000-500"));
     }
 
     // --- GetNoLogonState / GetNoBgAutostartState partial state ---
@@ -197,15 +182,7 @@ public class AccountLsaRestrictionServiceTests : IDisposable
         // Local-only requires both SeDenyNetworkLogonRight and SeDenyRemoteInteractiveLogonRight.
         // Seeding only the first right produces the "partial" state — neither true nor false.
         var rights = new List<string> { LsaRightsHelper.SeDenyNetworkLogonRight };
-        var lsa = new Mock<ILsaRightsHelper>();
-        lsa.Setup(l => l.GetSidBytes(It.IsAny<string>()))
-            .Returns((string s) =>
-            {
-                var sid = new SecurityIdentifier(s);
-                var b = new byte[sid.BinaryLength];
-                sid.GetBinaryForm(b, 0);
-                return b;
-            });
+        var lsa = CreateLsaMockWithNoRights();
         lsa.Setup(l => l.EnumerateAccountRights(It.IsAny<byte[]>()))
             .Returns(() => rights.ToList());
         var service = new AccountLsaRestrictionService(_log.Object, new Mock<IAccountValidationService>().Object, lsa.Object);
@@ -227,15 +204,7 @@ public class AccountLsaRestrictionServiceTests : IDisposable
     private AccountLsaRestrictionService CreateServiceWithInMemoryLsa()
     {
         var rights = new List<string>();
-        var lsa = new Mock<ILsaRightsHelper>();
-        lsa.Setup(l => l.GetSidBytes(It.IsAny<string>()))
-            .Returns((string s) =>
-            {
-                var sid = new SecurityIdentifier(s);
-                var b = new byte[sid.BinaryLength];
-                sid.GetBinaryForm(b, 0);
-                return b;
-            });
+        var lsa = CreateLsaMockWithNoRights();
         lsa.Setup(l => l.EnumerateAccountRights(It.IsAny<byte[]>()))
             .Returns(() => rights.ToList());
         lsa.Setup(l => l.AddAccountRights(It.IsAny<byte[]>(), It.IsAny<string[]>()))

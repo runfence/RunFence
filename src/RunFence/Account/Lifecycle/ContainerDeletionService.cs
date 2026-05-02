@@ -1,4 +1,3 @@
-using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Launch.Container;
@@ -14,7 +13,7 @@ public class ContainerDeletionService(
     IAppContainerEnvironmentSetup environmentSetup,
     IDatabaseProvider databaseProvider) : IContainerDeletionService
 {
-    public bool DeleteContainer(AppContainerEntry entry, string? containerSid)
+    public async Task<bool> DeleteContainer(AppContainerEntry entry, string? containerSid)
     {
         var database = databaseProvider.GetDatabase();
         try
@@ -30,7 +29,7 @@ public class ContainerDeletionService(
 
         try
         {
-            appContainerService.DeleteProfile(entry.Name, entry.EnableLoopback);
+            await appContainerService.DeleteProfile(entry.Name, entry.EnableLoopback);
         }
         catch (Exception ex)
         {

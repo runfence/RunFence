@@ -3,7 +3,6 @@ using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Persistence;
-using RunFence.Acl;
 using RunFence.SidMigration;
 using Xunit;
 
@@ -32,7 +31,7 @@ public class SidMigrationServiceTests
         sidCleanupHelper
             .Setup(h => h.CleanupSidFromAppData(It.IsAny<string>(), It.IsAny<bool>()))
             .Returns((string sid, bool removeApps) => realCleanupHelper.CleanupSidFromAppData(sid, removeApps));
-        _service = new SidMigrationService(sidResolver.Object, sidCleanupHelper.Object, _aclScan.Object, _sidNameCache.Object, dbProvider);
+        _service = new SidMigrationService(sidResolver.Object, new Mock<IProfilePathResolver>().Object, sidCleanupHelper.Object, _aclScan.Object, _sidNameCache.Object, dbProvider);
     }
 
     // --- BuildMappings tests ---
@@ -1018,10 +1017,9 @@ public class SidMigrationServiceTests
         {
             new() { Sid = string.Empty }
         };
-        var sidNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var localAccounts = new List<LocalUserAccount> { new("SomeUser", NewSid1) };
 
-        var result = _service.BuildMappings(creds, localAccounts, sidNames);
+        var result = _service.BuildMappings(creds, localAccounts);
 
         Assert.Empty(result);
     }

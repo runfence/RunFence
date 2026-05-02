@@ -32,35 +32,37 @@ public class RunAsDosProtectionTests
     }
 
     [Fact]
-    public void IsBlocked_OneDecline_Within15s_ReturnsTrue()
+    public void IsBlocked_OneDecline_ImmediatelyAfterDecline_ReturnsFalse()
     {
         var dos = CreateProtection();
 
         _currentTimestamp = 100;
         dos.RecordDecline();
 
-        _currentTimestamp = 110; // 10s after decline
-        Assert.True(dos.IsBlocked());
-    }
-
-    [Fact]
-    public void IsBlocked_OneDecline_After15s_ReturnsFalse()
-    {
-        var dos = CreateProtection();
-
-        _currentTimestamp = 100;
-        dos.RecordDecline();
-
-        _currentTimestamp = 116; // 16s after decline
         Assert.False(dos.IsBlocked());
     }
 
     [Fact]
-    public void IsBlocked_FourDeclines_Within4min_ReturnsTrue()
+    public void IsBlocked_ThreeDeclinesWithinWindow_ReturnsFalse()
     {
         var dos = CreateProtection();
 
-        // Record 4 declines spread across time but within 4 min window
+        _currentTimestamp = 100;
+        dos.RecordDecline();
+        _currentTimestamp = 101;
+        dos.RecordDecline();
+        _currentTimestamp = 102;
+        dos.RecordDecline();
+
+        Assert.False(dos.IsBlocked());
+    }
+
+    [Fact]
+    public void IsBlocked_FourDeclines_Within2min_ReturnsTrue()
+    {
+        var dos = CreateProtection();
+
+        // Record 4 declines spread across time but within 2 min window
         _currentTimestamp = 0;
         dos.RecordDecline();
         _currentTimestamp = 20;
@@ -70,14 +72,12 @@ public class RunAsDosProtectionTests
         _currentTimestamp = 60;
         dos.RecordDecline();
 
-        // Check at 76s (16s after last decline, so >15s cooldown passed,
-        // but still within 4 min window with 4 declines)
-        _currentTimestamp = 76;
+        _currentTimestamp = 61;
         Assert.True(dos.IsBlocked());
     }
 
     [Fact]
-    public void IsBlocked_FourDeclines_After4min_ReturnsFalse()
+    public void IsBlocked_FourDeclines_After2min_ReturnsFalse()
     {
         var dos = CreateProtection();
 
@@ -90,8 +90,7 @@ public class RunAsDosProtectionTests
         _currentTimestamp = 60;
         dos.RecordDecline();
 
-        // Check at 300s (5 min after window start, >15s after last decline)
-        _currentTimestamp = 300;
+        _currentTimestamp = 180;
         Assert.False(dos.IsBlocked());
     }
 
@@ -110,15 +109,12 @@ public class RunAsDosProtectionTests
         _currentTimestamp = 60;
         dos.RecordDecline();
 
-        _currentTimestamp = 76; // >15s after last decline, still in window
-        Assert.True(dos.IsBlocked()); // 4 declines in 4 min
+        _currentTimestamp = 61;
+        Assert.True(dos.IsBlocked()); // 4 declines in 2 min
 
-        // Advance past window (>240s from first decline at t=0)
-        _currentTimestamp = 300;
+        // Advance past window (>120s from first decline at t=0)
+        _currentTimestamp = 180;
         dos.RecordDecline(); // 5th decline — window resets, count=1
-
-        // 16s after the 5th decline — past 15s cooldown
-        _currentTimestamp = 316;
         Assert.False(dos.IsBlocked()); // only 1 decline in new window
     }
 
@@ -126,8 +122,6 @@ public class RunAsDosProtectionTests
     public void Reset_ClearsAllState()
     {
         var dos = CreateProtection();
-
-        // Record 4 declines to trigger both protection mechanisms
         _currentTimestamp = 0;
         dos.RecordDecline();
         _currentTimestamp = 1;

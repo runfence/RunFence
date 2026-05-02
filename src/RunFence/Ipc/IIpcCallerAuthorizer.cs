@@ -23,13 +23,4 @@ public interface IIpcCallerAuthorizer
     /// </summary>
     bool HasExplicitPerAppAuthorization(string? callerSid, AppEntry app, AppDatabase database);
 
-    bool AuthorizeAgainstList(string? callerIdentity, string? callerSid,
-        IEnumerable<string> allowedList, string logContext, IReadOnlyDictionary<string, string>? sidNames = null,
-        bool identityFromImpersonation = true);
-
-    bool MatchesCaller(string callerIdentity, string? callerSid, string allowedSid,
-        IReadOnlyDictionary<string, string>? sidNames = null);
-
-    bool MatchesCaller(string callerIdentity, string allowedSid,
-        IReadOnlyDictionary<string, string>? sidNames = null);
 }

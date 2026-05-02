@@ -5,7 +5,7 @@ namespace RunFence.Account.UI;
 /// <summary>
 /// Resolves tool executables for a given account SID.
 /// </summary>
-public class AccountToolResolver(ISidResolver sidResolver)
+public class AccountToolResolver(IProfilePathResolver profilePathResolver)
 {
     /// <summary>
     /// Returns wt.exe from the account's WindowsApps directory if installed, otherwise falls back to cmd.exe.
@@ -14,15 +14,19 @@ public class AccountToolResolver(ISidResolver sidResolver)
         => ResolveWindowsAppsExe(sid, "wt.exe") ?? "cmd.exe";
 
     public string? GetProfileRoot(string sid)
-        => SidResolutionHelper.GetCurrentUserSid() == sid
+    {
+        if (SidResolutionHelper.IsSystemSid(sid))
+            return null;
+        return SidResolutionHelper.GetCurrentUserSid() == sid
             ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-            : sidResolver.TryGetProfilePath(sid);
+            : profilePathResolver.TryGetProfilePath(sid);
+    }
 
     public string? ResolveWindowsAppsExe(string sid, string exeName)
     {
         var localAppData = SidResolutionHelper.GetCurrentUserSid() == sid
             ? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
-            : sidResolver.TryGetProfilePath(sid) is { } profilePath
+            : profilePathResolver.TryGetProfilePath(sid) is { } profilePath
                 ? Path.Combine(profilePath, "AppData", "Local")
                 : null;
 

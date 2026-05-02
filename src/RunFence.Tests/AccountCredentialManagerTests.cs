@@ -1,9 +1,8 @@
-using System.Security;
+using System.Runtime.InteropServices;
 using Moq;
 using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Persistence;
 using RunFence.Security;
 using Xunit;
 
@@ -15,110 +14,24 @@ public class AccountCredentialManagerTests : IDisposable
     private const string FakeSid2 = "S-1-5-21-9999999999-9999999999-9999999999-9002";
 
     private readonly AccountCredentialManager _manager;
-    private readonly SessionPersistenceHelper _persistenceHelper;
-    private readonly Mock<ILoggingService> _log;
-    private readonly Mock<ISidNameCacheService> _sidNameCache;
-    private readonly Mock<ICredentialRepository> _credentialRepository;
-    private readonly Mock<IConfigRepository> _configRepository;
+    private readonly ICredentialDecryptionService _credentialDecryption;
     private readonly ProtectedBuffer _pinKey;
-    private readonly byte[] _argonSalt;
 
     public AccountCredentialManagerTests()
     {
-        _log = new Mock<ILoggingService>();
-        _sidNameCache = new Mock<ISidNameCacheService>();
-        _credentialRepository = new Mock<ICredentialRepository>();
-        _configRepository = new Mock<IConfigRepository>();
         var pinKeyBytes = new byte[32];
         new Random(42).NextBytes(pinKeyBytes);
-        _argonSalt = new byte[32];
-        new Random(99).NextBytes(_argonSalt);
         _pinKey = new ProtectedBuffer(pinKeyBytes, protect: false);
 
         var encryptionService = new CredentialEncryptionService();
         var sidResolver = new Mock<ISidResolver>();
-        var credentialDecryption = new CredentialDecryptionService(encryptionService, sidResolver.Object);
-        _manager = new AccountCredentialManager(encryptionService, credentialDecryption);
-        _persistenceHelper = new SessionPersistenceHelper(
-            _credentialRepository.Object, _configRepository.Object, _sidNameCache.Object, _log.Object);
+        _credentialDecryption = new CredentialDecryptionService(encryptionService, sidResolver.Object);
+        _manager = new AccountCredentialManager(encryptionService);
     }
 
     public void Dispose()
     {
         _pinKey.Dispose();
-    }
-
-    [Fact]
-    public void ApplyStaleNameUpdates_StaleDetected_UpdatesCacheAndSaves()
-    {
-        // Arrange
-        var database = new AppDatabase
-        {
-            SidNames =
-            {
-                [FakeSid] = "old_alice"
-            }
-        };
-
-        // Full resolved name is stored as-is (not stripped) per CLAUDE.md SidNames convention
-        var resolutions = new Dictionary<string, string?>
-        {
-            [FakeSid] = "DOMAIN\\alice"
-        };
-
-        // Act
-        var changed = _persistenceHelper.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
-
-        // Assert — stale name update delegated to cache service with full resolved name
-        Assert.True(changed);
-        _sidNameCache.Verify(c => c.UpdateName(FakeSid, "DOMAIN\\alice"), Times.Once);
-        // R2_TL1: SaveConfig must be called when ApplyStaleNameUpdates returns true
-        _configRepository.Verify(r => r.SaveConfig(database, It.IsAny<byte[]>(), _argonSalt), Times.Once);
-    }
-
-    [Fact]
-    public void ApplyStaleNameUpdates_SidAbsentFromSidNamesButResolverReturnsName_UpdatesCacheAndSaves()
-    {
-        // Arrange — R2_TL2: SID not in SidNames, resolver returns non-null name
-        var database = new AppDatabase();
-        // FakeSid2 intentionally absent from SidNames
-
-        var resolutions = new Dictionary<string, string?>
-        {
-            [FakeSid2] = "DOMAIN\\bob"
-        };
-
-        // Act
-        var changed = _persistenceHelper.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
-
-        // Assert — absent SID treated as stale (existing == null != "DOMAIN\\bob"), so it is updated
-        Assert.True(changed);
-        _sidNameCache.Verify(c => c.UpdateName(FakeSid2, "DOMAIN\\bob"), Times.Once);
-        _configRepository.Verify(r => r.SaveConfig(database, It.IsAny<byte[]>(), _argonSalt), Times.Once);
-    }
-
-    [Fact]
-    public void ApplyStaleNameUpdates_NoChange_ReturnsFalse()
-    {
-        // Arrange
-        var database = new AppDatabase
-        {
-            SidNames =
-            {
-                [FakeSid] = "DOMAIN\\alice"
-            }
-        };
-
-        var resolutions = new Dictionary<string, string?>
-        {
-            [FakeSid] = "DOMAIN\\alice" // same full name — no change
-        };
-
-        // Act
-        var changed = _persistenceHelper.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
-
-        // Assert — no change
-        Assert.False(changed);
     }
 
     // --- StoreCreatedUserCredential ---
@@ -128,7 +41,7 @@ public class AccountCredentialManagerTests : IDisposable
     {
         // Arrange
         var store = new CredentialStore();
-        using var password = new SecureString();
+        using var password = new ProtectedString();
         foreach (var c in "pass")
             password.AppendChar(c);
 
@@ -149,7 +62,7 @@ public class AccountCredentialManagerTests : IDisposable
         // Arrange
         var store = new CredentialStore();
         store.Credentials.Add(new CredentialEntry { Sid = FakeSid });
-        using var password = new SecureString();
+        using var password = new ProtectedString();
 
         // Act
         var id = _manager.StoreCreatedUserCredential(FakeSid, password, store, _pinKey);
@@ -166,7 +79,7 @@ public class AccountCredentialManagerTests : IDisposable
     {
         // Arrange
         var store = new CredentialStore();
-        using var password = new SecureString();
+        using var password = new ProtectedString();
         foreach (var c in "pass")
             password.AppendChar(c);
 
@@ -293,31 +206,6 @@ public class AccountCredentialManagerTests : IDisposable
         Assert.Single(store.Credentials);
     }
 
-    [Fact]
-    public void ApplyStaleNameUpdates_NullResolution_Skipped()
-    {
-        // Arrange
-        var database = new AppDatabase
-        {
-            SidNames =
-            {
-                [FakeSid] = "alice"
-            }
-        };
-
-        var resolutions = new Dictionary<string, string?>
-        {
-            [FakeSid] = null // null = resolution failed, skip
-        };
-
-        // Act
-        var changed = _persistenceHelper.ApplyStaleNameUpdates(resolutions, database, _pinKey, _argonSalt);
-
-        // Assert — nothing changed
-        Assert.False(changed);
-        Assert.Equal("alice", database.SidNames[FakeSid]);
-    }
-
     // --- UpdateCredentialPassword ---
 
     [Fact]
@@ -327,7 +215,7 @@ public class AccountCredentialManagerTests : IDisposable
         var originalPassword = new byte[] { 0x11, 0x22, 0x33 };
         var credEntry = new CredentialEntry { Sid = FakeSid, EncryptedPassword = originalPassword };
 
-        using var newPassword = new SecureString();
+        using var newPassword = new ProtectedString();
         foreach (var c in "newpassword")
             newPassword.AppendChar(c);
 
@@ -344,7 +232,7 @@ public class AccountCredentialManagerTests : IDisposable
     {
         // Arrange — even an empty password produces a non-empty ciphertext (AEAD tag + nonce)
         var credEntry = new CredentialEntry { Sid = FakeSid, EncryptedPassword = [] };
-        using var emptyPassword = new SecureString();
+        using var emptyPassword = new ProtectedString();
 
         // Act
         _manager.UpdateCredentialPassword(credEntry, emptyPassword, _pinKey);
@@ -357,4 +245,101 @@ public class AccountCredentialManagerTests : IDisposable
     // with null credEntry) cannot be tested under the non-admin test runner because resolving
     // the interactive user SID requires an active desktop session (explorer.exe running as
     // a different account). This path is covered by manual/integration testing only.
+
+    // --- TryDecryptStoredPassword ---
+
+    [Theory]
+    [InlineData(false)] // no credential entry at all
+    [InlineData(true)]  // credential exists but has empty EncryptedPassword
+    public void TryDecryptStoredPassword_WhenNoStoredPassword_ReturnsFalseAndNull(bool addEmptyEntry)
+    {
+        // Arrange
+        var store = new CredentialStore();
+        if (addEmptyEntry)
+            store.Credentials.Add(new CredentialEntry { Sid = FakeSid, EncryptedPassword = [] });
+
+        // Act
+        var result = _manager.TryDecryptStoredPassword(FakeSid, store, _pinKey, out var password);
+
+        // Assert
+        Assert.False(result);
+        Assert.Null(password);
+    }
+
+    [Fact]
+    public void TryDecryptStoredPassword_WhenPasswordIsStored_ReturnsTrueAndDecryptsCorrectly()
+    {
+        // Arrange
+        var store = new CredentialStore();
+        using var original = new ProtectedString();
+        foreach (var c in "StrongPass!") original.AppendChar(c);
+        original.MakeReadOnly();
+        _manager.StoreCreatedUserCredential(FakeSid, original, store, _pinKey);
+
+        // Act
+        var result = _manager.TryDecryptStoredPassword(FakeSid, store, _pinKey, out var password);
+
+        // Assert
+        Assert.True(result);
+        using var _ = password;
+        Assert.NotNull(password);
+        Assert.Equal("StrongPass!", ProtectedStringToString(password!));
+    }
+
+    [Fact]
+    public void TryDecryptStoredPassword_ForCurrentAccountSid_DecryptsWhereTryDecryptCredentialWouldNot()
+    {
+        // The whole point of TryDecryptStoredPassword: TryDecryptCredential short-circuits for the
+        // current-account SID (returns CurrentAccount status, null password), while
+        // TryDecryptStoredPassword returns the actual stored password regardless of account type.
+        var currentSid = SidResolutionHelper.GetCurrentUserSid();
+
+        // Arrange
+        var store = new CredentialStore();
+        using var original = new ProtectedString();
+        foreach (var c in "AdminPass1") original.AppendChar(c);
+        original.MakeReadOnly();
+        _manager.StoreCreatedUserCredential(currentSid, original, store, _pinKey);
+
+        // Act: run TryDecryptCredential in its own scope so the buffer is re-protected before
+        // TryDecryptStoredPassword opens another scope (nested Unprotect is not supported).
+        CredentialLookupStatus regularStatus;
+        ProtectedString? regularPassword;
+        {
+            using var scope = _pinKey.Unprotect();
+            regularStatus = _credentialDecryption.TryDecryptCredential(currentSid, store, scope.Data, out _, out regularPassword);
+        }
+        var directResult = _manager.TryDecryptStoredPassword(currentSid, store, _pinKey, out var directPassword);
+
+        // Assert: TryDecryptCredential short-circuits, TryDecryptStoredPassword does not
+        Assert.Equal(CredentialLookupStatus.CurrentAccount, regularStatus);
+        Assert.Null(regularPassword);
+        Assert.True(directResult);
+        using var directPasswordDisposable = directPassword;
+        Assert.NotNull(directPasswordDisposable);
+        Assert.Equal("AdminPass1", ProtectedStringToString(directPasswordDisposable!));
+    }
+
+    [Fact]
+    public void TryDecryptStoredPassword_WhenCiphertextIsInvalid_ReturnsFalseAndNull()
+    {
+        var store = new CredentialStore();
+        store.Credentials.Add(new CredentialEntry
+        {
+            Sid = FakeSid,
+            EncryptedPassword = [0x01, 0x02, 0x03]
+        });
+
+        var result = _manager.TryDecryptStoredPassword(FakeSid, store, _pinKey, out var password);
+
+        Assert.False(result);
+        Assert.Null(password);
+    }
+
+    private static string ProtectedStringToString(ProtectedString ss)
+    {
+        var bstr = ss.ToBSTR();
+        try { return Marshal.PtrToStringBSTR(bstr)!; }
+        finally { Marshal.ZeroFreeBSTR(bstr); }
+    }
 }

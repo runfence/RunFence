@@ -305,7 +305,7 @@ public partial class AppContainerEditDialog : Form
             _comCustomListBox.Items.Add(clsid);
     }
 
-    private void OnOkClick(object? sender, EventArgs e)
+    private async void OnOkClick(object? sender, EventArgs e)
     {
         var displayName = _displayNameBox.Text.Trim();
         if (string.IsNullOrEmpty(displayName))
@@ -327,10 +327,13 @@ public partial class AppContainerEditDialog : Form
             .ToList();
 
         var newComClsids = _comCustomListBox.Items.Cast<string>().ToList();
+        var loopbackChecked = _loopbackCheckBox.Checked;
 
         if (_existing != null)
         {
-            var result = _editService.ApplyEditChanges(_existing, displayName, capabilities, _loopbackCheckBox.Checked, newComClsids, isEphemeral);
+            var result = await _editService.ApplyEditChanges(_existing, displayName, capabilities, loopbackChecked, newComClsids, isEphemeral);
+            if (IsDisposed)
+                return;
             if (result.CapabilitiesChanged)
                 MessageBox.Show(
                     "Capability changes will take effect on next app launch.",
@@ -346,24 +349,26 @@ public partial class AppContainerEditDialog : Form
         }
         else
         {
-            var created = _editService.CreateNewContainer(profileName, displayName, isEphemeral, capabilities,
-                _loopbackCheckBox.Checked, newComClsids, out var validationError, out var creationError, out var comErrors);
-            if (created == null)
+            var createResult = await _editService.CreateNewContainer(profileName, displayName, isEphemeral,
+                capabilities, loopbackChecked, newComClsids);
+            if (IsDisposed)
+                return;
+            if (createResult.Entry == null)
             {
-                if (validationError != null)
-                    MessageBox.Show(validationError, "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (createResult.ValidationError != null)
+                    MessageBox.Show(createResult.ValidationError, "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 else
-                    MessageBox.Show($"Failed to create container: {creationError}", "Error",
+                    MessageBox.Show($"Failed to create container: {createResult.CreationError}", "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 DialogResult = DialogResult.None;
                 return;
             }
 
-            if (comErrors.Count > 0)
+            if (createResult.ComErrors.Count > 0)
                 MessageBox.Show(
-                    $"Some COM access entries could not be applied:\n\n{string.Join("\n", comErrors)}",
+                    $"Some COM access entries could not be applied:\n\n{string.Join("\n", createResult.ComErrors)}",
                     "COM Access Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            CreatedEntry = created;
+            CreatedEntry = createResult.Entry;
         }
 
         DialogResult = DialogResult.OK;

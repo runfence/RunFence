@@ -36,6 +36,7 @@ public class AccountPickerStep : WizardStepPage
     private readonly ILocalUserProvider _localUserProvider;
     private readonly List<CredentialEntry> _credentials;
     private readonly ISidResolver _sidResolver;
+    private readonly IProfilePathResolver _profilePathResolver;
     private readonly CredentialFilterHelper _credentialFilterHelper;
     private readonly IReadOnlyDictionary<string, string> _sidNames;
     private readonly Func<bool, IReadOnlyList<WizardStepPage>>? _followingStepsFactory;
@@ -71,6 +72,7 @@ public class AccountPickerStep : WizardStepPage
         ILocalGroupMembershipService groupMembership,
         ILocalUserProvider localUserProvider,
         ISidResolver sidResolver,
+        IProfilePathResolver profilePathResolver,
         CredentialFilterHelper credentialFilterHelper,
         AccountPickerStepOptions options,
         Func<bool, IReadOnlyList<WizardStepPage>>? followingStepsFactory = null,
@@ -81,6 +83,7 @@ public class AccountPickerStep : WizardStepPage
         _localUserProvider = localUserProvider;
         _credentials = options.Credentials;
         _sidResolver = sidResolver;
+        _profilePathResolver = profilePathResolver;
         _credentialFilterHelper = credentialFilterHelper;
         _sidNames = options.SidNames;
         _groupSid = options.GroupSid;
@@ -104,17 +107,22 @@ public class AccountPickerStep : WizardStepPage
     public override string? Validate()
     {
         if (_isLoading) return "Accounts are still loading, please wait.";
-        return _accountListBox.SelectedItem == null ? "Please select an account." : null;
+        if (_accountListBox.SelectedItem == null) return "Please select an account.";
+        // Guard against a transient entry (e.g. loading placeholder) being selected:
+        // CredentialDisplayItem must have a non-empty Sid for a valid existing-account selection.
+        if (_accountListBox.SelectedItem is not CreateAccountItem &&
+            (_accountListBox.SelectedItem is not CredentialDisplayItem cdi ||
+             string.IsNullOrEmpty(cdi.Credential.Sid)))
+            return "Please select a valid account.";
+        return null;
     }
 
     public override void Collect()
     {
         var isCreate = _accountListBox.SelectedItem is CreateAccountItem;
         string? sid = isCreate ? null : (_accountListBox.SelectedItem as CredentialDisplayItem)?.Credential.Sid;
-        // Defensive: sid should always be non-null for an existing account selection (CredentialDisplayItem
-        // always has a Sid set), but guard against edge cases such as a transient entry with an empty Sid.
-        if (sid == null && !isCreate)
-            return;
+        if (string.IsNullOrEmpty(sid) && !isCreate)
+            return; // Validate() would have already blocked advance; this is a last-resort guard.
         _setSelection(sid, isCreate);
     }
 
@@ -232,7 +240,7 @@ public class AccountPickerStep : WizardStepPage
                 continue;
             if (!memberSids.Contains(cred.Sid))
                 continue;
-            _accountListBox.Items.Add(new CredentialDisplayItem(cred, _sidResolver, _sidNames));
+            _accountListBox.Items.Add(new CredentialDisplayItem(cred, _sidResolver, _profilePathResolver, _sidNames));
             representedSids.Add(cred.Sid);
         }
 
@@ -241,7 +249,7 @@ public class AccountPickerStep : WizardStepPage
             if (representedSids.Contains(memberSid))
                 continue;
             var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = memberSid };
-            _accountListBox.Items.Add(new CredentialDisplayItem(transient, _sidResolver, _sidNames, hasStoredCredential: false));
+            _accountListBox.Items.Add(new CredentialDisplayItem(transient, _sidResolver, _profilePathResolver, _sidNames, hasStoredCredential: false));
             representedSids.Add(memberSid);
         }
 
@@ -319,18 +327,21 @@ public class AccountPickerStep : WizardStepPage
         var textBounds = e.Bounds with { X = e.Bounds.X + 4, Width = e.Bounds.Width - 4 };
         const TextFormatFlags textFlags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine;
 
-        if (item is CredentialDisplayItem credItem)
+        switch (item)
         {
-            var indicatorColor = credItem.HasStoredCredential
-                ? Color.FromArgb(0x00, 0x88, 0x00)
-                : Color.FromArgb(0xA0, 0xA0, 0xA0);
-            using var dot = new SolidBrush(indicatorColor);
-            e.Graphics.FillEllipse(dot, e.Bounds.X + 4, e.Bounds.Y + (e.Bounds.Height - 8) / 2, 8, 8);
-            textBounds = e.Bounds with { X = e.Bounds.X + 18, Width = e.Bounds.Width - 18 };
-        }
-        else if (item is string && !isSelected)
-        {
-            textColor = SystemColors.GrayText;
+            case CredentialDisplayItem credItem:
+            {
+                var indicatorColor = credItem.HasStoredCredential
+                    ? Color.FromArgb(0x00, 0x88, 0x00)
+                    : Color.FromArgb(0xA0, 0xA0, 0xA0);
+                using var dot = new SolidBrush(indicatorColor);
+                e.Graphics.FillEllipse(dot, e.Bounds.X + 4, e.Bounds.Y + (e.Bounds.Height - 8) / 2, 8, 8);
+                textBounds = e.Bounds with { X = e.Bounds.X + 18, Width = e.Bounds.Width - 18 };
+                break;
+            }
+            case string when !isSelected:
+                textColor = SystemColors.GrayText;
+                break;
         }
 
         TextRenderer.DrawText(e.Graphics, item.ToString(), listBox.Font, textBounds, textColor, textFlags);

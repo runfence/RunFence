@@ -60,6 +60,8 @@ partial class AboutPanel
 
         SuspendLayout();
         _headerPanel.SuspendLayout();
+        _contentGroupPanel.SuspendLayout();
+        _contentBorderPanel.SuspendLayout();
         _contentPanel.SuspendLayout();
 
         // _headerPanel — accent-colored header matching the nag dialog style
@@ -97,7 +99,7 @@ partial class AboutPanel
         _contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 20)); // 6: spacer
         _contentPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 7: license status
         _contentPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 8: register button
-        _contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 60)); // 9: spacer
+        _contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 20)); // 9: spacer
         _contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));  // 10: separator
         _contentPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 10)); // 11: spacer
         _contentPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // 12: pub key label
@@ -200,14 +202,15 @@ partial class AboutPanel
         _contentBorderPanel.Location = new Point(16, 108);
 
         // AboutPanel
-        Dock = DockStyle.Fill;
         Controls.Add(_contentBorderPanel);
         Controls.Add(_headerPanel);
 
-        _headerPanel.ResumeLayout(false);
-        _headerPanel.PerformLayout();
         _contentPanel.ResumeLayout(false);
         _contentPanel.PerformLayout();
+        _contentGroupPanel.ResumeLayout(false);
+        _contentBorderPanel.ResumeLayout(false);
+        _headerPanel.ResumeLayout(false);
+        _headerPanel.PerformLayout();
         ResumeLayout(false);
         PerformLayout();
     }

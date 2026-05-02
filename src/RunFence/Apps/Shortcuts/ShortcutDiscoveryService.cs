@@ -1,10 +1,12 @@
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Persistence;
 
 namespace RunFence.Apps.Shortcuts;
 
 internal class ShortcutDiscoveryService(
-    IShortcutTraversalScanner scanner)
+    IShortcutTraversalScanner scanner,
+    IDatabaseProvider databaseProvider)
     : IShortcutDiscoveryService
 {
     public List<DiscoveredApp> DiscoverApps()
@@ -14,7 +16,7 @@ internal class ShortcutDiscoveryService(
         foreach (var entry in TraverseShortcuts())
         {
             if (entry.TargetPath != null &&
-                Constants.DiscoverableExtensions.Contains(Path.GetExtension(entry.TargetPath)) &&
+                PathConstants.DiscoverableExtensions.Contains(Path.GetExtension(entry.TargetPath)) &&
                 !seen.ContainsKey(entry.TargetPath) &&
                 !ShortcutClassificationHelper.IsUninstallShortcut(entry.Path, entry.TargetPath) &&
                 !ShortcutClassificationHelper.IsSystemExecutable(entry.TargetPath))
@@ -34,18 +36,45 @@ internal class ShortcutDiscoveryService(
     }
 
     public ShortcutTraversalCache CreateTraversalCache()
-        => new(scanner.ScanShortcuts());
+        => new(scanner.ScanShortcuts(CaptureManagedSids()));
 
-    public IEnumerable<ShortcutTraversalEntry> TraverseShortcuts()
-        => scanner.ScanShortcuts();
+    public ShortcutTraversalCache CreateTraversalCache(HashSet<string>? managedSids)
+        => new(scanner.ScanShortcuts(managedSids));
 
-    public List<string> FindShortcutsWhere(Func<string?, string?, bool> predicate)
+    public ShortcutTraversalCache CreateTraversalCacheIfNeeded(IEnumerable<AppEntry> apps)
+        => apps.Any(a => a.ManageShortcuts)
+            ? CreateTraversalCache()
+            : new ShortcutTraversalCache([]);
+
+    public HashSet<string>? CaptureManagedSids()
     {
-        return TraverseShortcuts()
-            .Where(s => predicate(s.TargetPath, s.Arguments))
-            .Select(s => s.Path)
-            .ToList();
+        try
+        {
+            var database = databaseProvider.GetDatabase();
+            var sids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var account in database.Accounts)
+                if (!string.IsNullOrEmpty(account.Sid))
+                    sids.Add(account.Sid);
+            foreach (var app in database.Apps)
+                if (!string.IsNullOrEmpty(app.AccountSid))
+                    sids.Add(app.AccountSid);
+
+            // Include the interactive user's SID so their profile shortcuts are discovered
+            // even when no account entry has been created for them yet.
+            var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
+            if (interactiveSid != null)
+                sids.Add(interactiveSid);
+
+            return sids;
+        }
+        catch
+        {
+            return null;
+        }
     }
+
+    private IEnumerable<ShortcutTraversalEntry> TraverseShortcuts()
+        => scanner.ScanShortcuts(CaptureManagedSids());
 
     private static void AddExesFromDirectory(Dictionary<string, DiscoveredApp> seen, string dir, SearchOption searchOption)
     {

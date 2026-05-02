@@ -9,12 +9,10 @@ namespace RunFence.Startup;
 
 public class StartupEnforcementService(
     IAclService aclService,
-    IShortcutService shortcutService,
-    IBesideTargetShortcutService besideTargetShortcutService,
     IShortcutDiscoveryService shortcutDiscovery,
     IIconService iconService,
     ILoggingService log,
-    SidDisplayNameResolver displayNameResolver,
+    ShortcutEnforcementHelper shortcutEnforcementHelper,
     IAppContainerService appContainerService)
     : IStartupEnforcementService
 {
@@ -22,14 +20,13 @@ public class StartupEnforcementService(
     {
         log.Info("Starting startup enforcement...");
 
-        var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+        var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
             log.Error($"Launcher not found at: {launcherPath}");
         }
 
         var timestampUpdates = new Dictionary<string, DateTime>();
-        var shortcutApps = new List<AppEntry>();
         var traverseGrants = new List<ContainerTraverseGrant>();
 
         foreach (var app in database.Apps)
@@ -108,9 +105,6 @@ public class StartupEnforcementService(
                         log.Error($"Icon regeneration failed for {app.Name}", ex);
                     }
                 }
-
-                if (app.ManageShortcuts)
-                    shortcutApps.Add(app);
             }
             catch (Exception ex)
             {
@@ -129,46 +123,21 @@ public class StartupEnforcementService(
         }
 
         // Batched shortcut enforcement — single directory scan for all apps
-        if (shortcutApps.Count > 0 && File.Exists(launcherPath))
+        ShortcutTraversalCache? shortcutCache = null;
+        if (database.Apps.Any(a => a.ManageShortcuts) && File.Exists(launcherPath))
         {
             try
             {
-                var shortcutCache = shortcutDiscovery.CreateTraversalCache();
-                shortcutService.EnforceShortcuts(shortcutApps, launcherPath, shortcutCache);
+                shortcutCache = shortcutDiscovery.CreateTraversalCache();
             }
             catch (Exception ex)
             {
-                log.Error("Shortcut enforcement failed", ex);
+                log.Error("Shortcut traversal cache creation failed", ex);
             }
         }
 
-        // Beside-target shortcut enforcement for all non-URL apps
-        if (File.Exists(launcherPath))
-        {
-            try
-            {
-                besideTargetShortcutService.EnforceBesideTargetShortcuts(
-                    database.Apps.Where(a => !a.IsUrlScheme), launcherPath,
-                    app =>
-                    {
-                        // Container apps run under the interactive user
-                        var effectiveSid =
-                            app.AppContainerName != null ? NativeTokenHelper.TryGetInteractiveUserSid()?.Value : app.AccountSid;
-
-                        if (string.IsNullOrEmpty(effectiveSid))
-                            return null;
-                        var username = displayNameResolver.ResolveUsername(effectiveSid, database.SidNames);
-                        if (string.IsNullOrEmpty(username))
-                            return null;
-                        var iconPath = Path.Combine(Constants.ProgramDataIconDir, $"{app.Id}.ico");
-                        return (username, iconPath);
-                    });
-            }
-            catch (Exception ex)
-            {
-                log.Error("Beside-target shortcut enforcement failed", ex);
-            }
-        }
+        shortcutEnforcementHelper.EnforceShortcuts(database, shortcutCache);
+        shortcutEnforcementHelper.EnforceBesideTargetShortcuts(database);
 
         log.Info("Startup enforcement completed.");
         return new EnforcementResult(timestampUpdates, traverseGrants);

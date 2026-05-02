@@ -10,12 +10,13 @@ public class CredentialDisplayItem
     private readonly string _displayName;
 
     public CredentialDisplayItem(CredentialEntry credential, ISidResolver sidResolver,
+        IProfilePathResolver profilePathResolver,
         IReadOnlyDictionary<string, string>? sidNames = null,
         bool hasStoredCredential = true, bool isEphemeral = false)
     {
         Credential = credential;
         HasStoredCredential = hasStoredCredential;
-        var baseName = SidNameResolver.GetDisplayName(credential, sidResolver, sidNames);
+        var baseName = SidNameResolver.GetDisplayName(credential, sidResolver, sidNames, profilePathResolver);
         _displayName = isEphemeral ? $"{baseName} (ephemeral)" : baseName;
     }
 

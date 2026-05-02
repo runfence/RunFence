@@ -10,7 +10,11 @@ public class SingleInstanceService : ISingleInstanceService
 
     public bool TryAcquire()
     {
-        var mutexName = Constants.MutexName;
+#pragma warning disable CS0162 // Unreachable code: IsDebugBuild is const true in Debug builds
+        if (DebugHelper.IsDebugBuild)
+            return true;
+
+        var mutexName = IpcConstants.MutexName;
 
         var security = new MutexSecurity();
         var adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);

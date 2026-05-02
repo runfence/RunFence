@@ -3,6 +3,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Security;
 
 namespace RunFence.TrayIcon;
 
@@ -12,18 +13,21 @@ public class TrayIconManager(
     IIconService iconService,
     IAppIconProvider appIconProvider,
     IDatabaseProvider databaseProvider,
-    TrayMenuDiscoveryBuilder trayMenuDiscoveryBuilder)
-    : IDisposable
+    TrayMenuDiscoveryBuilder trayMenuDiscoveryBuilder,
+    IInputInjectionBlockerService injectionBlocker)
+    : IDisposable, IInputInjectionTraySink
 {
     private ITrayOwner _trayOwner = null!;
     private CredentialStore? _credentialStore;
     private List<StartMenuEntry>? _discoveredEntries;
     private readonly Dictionary<string, Image?> _discoveredIconCache = new(StringComparer.OrdinalIgnoreCase);
+    private Bitmap? _appIconBitmap;
 
     public event Action<AppEntry>? AppLaunchRequested;
     public event Action<string, bool>? FolderBrowserLaunchRequested;
     public event Action<string, bool>? TerminalLaunchRequested;
     public event Action<string, string>? DiscoveredAppLaunchRequested;
+    public event Action? InputInjectionToggleRequested;
 
     public void Initialize(ITrayOwner trayOwner)
     {
@@ -32,6 +36,7 @@ public class TrayIconManager(
         notifyIcon.Icon = appIconProvider.GetAppIcon();
         notifyIcon.Visible = true;
         notifyIcon.MouseClick += OnTrayClick;
+        notifyIcon.BalloonTipClicked += OnBalloonTipClicked;
         RebuildContextMenu();
     }
 
@@ -44,6 +49,9 @@ public class TrayIconManager(
         notifyIcon.Visible = false;
         notifyIcon.Visible = true;
     }
+
+    public void ShowBalloonTip(string text) =>
+        notifyIcon.ShowBalloonTip(5000, "RunFence", text, ToolTipIcon.Warning);
 
     public void UpdateDatabase(CredentialStore credentialStore)
     {
@@ -71,16 +79,24 @@ public class TrayIconManager(
         if (oldMenu != null)
         {
             notifyIcon.ContextMenuStrip = null;
+            // Detach the cached app icon bitmap from the Show item before disposal to prevent
+            // DisposeMenuItemImages from disposing the field-owned _appIconBitmap.
+            if (oldMenu.Items.Count > 0 && oldMenu.Items[0].Image == _appIconBitmap)
+                oldMenu.Items[0].Image = null;
             DisposeMenuItemImages(oldMenu.Items);
             oldMenu.Dispose();
         }
 
         var menu = new ContextMenuStrip { ShowItemToolTips = true };
 
-        var showItem = new ToolStripMenuItem("Show", appIconProvider.GetAppIcon().ToBitmap());
+        var showItem = new ToolStripMenuItem("Show", _appIconBitmap ??= appIconProvider.GetAppIcon().ToBitmap());
         showItem.Click += async (_, _) => await _trayOwner.TryShowWindowAsync();
         menu.Items.Add(showItem);
 
+        var blockInjectionItem = new ToolStripMenuItem("Block Input Injection") { Checked = injectionBlocker.IsEnabled };
+        blockInjectionItem.Click += (_, _) => InputInjectionToggleRequested?.Invoke();
+        menu.Items.Add(blockInjectionItem);
+        
         if (database.Apps.Count > 0)
         {
             menu.Items.Add(new ToolStripSeparator());
@@ -244,9 +260,12 @@ public class TrayIconManager(
     private async void OnTrayClick(object? sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Left)
-        {
             await _trayOwner.TryShowWindowAsync();
-        }
+    }
+
+    private async void OnBalloonTipClicked(object? sender, EventArgs e)
+    {
+        await _trayOwner.TryShowWindowAsync();
     }
 
     public void Dispose()
@@ -256,6 +275,11 @@ public class TrayIconManager(
         if (menu != null)
         {
             notifyIcon.ContextMenuStrip = null;
+            // Detach the cached app icon bitmap from the Show item before disposal so
+            // DisposeMenuItemImages does not dispose the field-owned _appIconBitmap,
+            // which is then disposed explicitly below.
+            if (menu.Items.Count > 0 && menu.Items[0].Image == _appIconBitmap)
+                menu.Items[0].Image = null;
             DisposeMenuItemImages(menu.Items);
             menu.Dispose();
         }
@@ -263,5 +287,8 @@ public class TrayIconManager(
         foreach (var icon in _discoveredIconCache.Values)
             icon?.Dispose();
         _discoveredIconCache.Clear();
+
+        _appIconBitmap?.Dispose();
+        _appIconBitmap = null;
     }
 }

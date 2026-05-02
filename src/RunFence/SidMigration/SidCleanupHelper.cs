@@ -1,3 +1,4 @@
+using RunFence.Core.Helpers;
 using RunFence.Persistence;
 
 namespace RunFence.SidMigration;
@@ -15,7 +16,7 @@ public class SidCleanupHelper(IDatabaseProvider databaseProvider) : ISidCleanupH
         var database = databaseProvider.GetDatabase();
         int removedApps = removeApps
             ? database.Apps.RemoveAll(a =>
-                string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase))
+                SidComparer.SidEquals(a.AccountSid, sid))
             : 0;
 
         // Remove the AccountEntry for this SID (covers IsIpcCaller, tray flags, privilege level, etc.)
@@ -31,9 +32,9 @@ public class SidCleanupHelper(IDatabaseProvider databaseProvider) : ISidCleanupH
         foreach (var app in database.Apps)
         {
             app.AllowedIpcCallers?.RemoveAll(s =>
-                string.Equals(s, sid, StringComparison.OrdinalIgnoreCase));
+                SidComparer.SidEquals(s, sid));
             app.AllowedAclEntries?.RemoveAll(e =>
-                string.Equals(e.Sid, sid, StringComparison.OrdinalIgnoreCase));
+                SidComparer.SidEquals(e.Sid, sid));
         }
 
         database.AccountGroupSnapshots?.Remove(sid);
@@ -55,9 +56,9 @@ public class SidCleanupHelper(IDatabaseProvider databaseProvider) : ISidCleanupH
             foreach (var app in database.Apps)
             {
                 app.AllowedIpcCallers?.RemoveAll(s =>
-                    string.Equals(s, containerSid, StringComparison.OrdinalIgnoreCase));
+                    SidComparer.SidEquals(s, containerSid));
                 app.AllowedAclEntries?.RemoveAll(e =>
-                    string.Equals(e.Sid, containerSid, StringComparison.OrdinalIgnoreCase));
+                    SidComparer.SidEquals(e.Sid, containerSid));
             }
 
             var containerEntry = database.GetAccount(containerSid);

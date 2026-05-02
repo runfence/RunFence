@@ -19,7 +19,7 @@ public class GroupBulkScanOrchestrator(
     IAclService aclService,
     ISidNameCacheService sidNameCache,
     ILoggingService log,
-    IAccountBulkScanHandler bulkScanHandler,
+    IAccountScanResultProcessor bulkScanHandler,
     IDatabaseProvider databaseProvider)
 {
     public async Task ScanAcls(

@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -10,9 +9,9 @@ using RunFence.Wizard.UI;
 
 namespace RunFence.Account.UI.Forms;
 
-/// <remarks>Deps above threshold: Extraction impossible: all 18 deps are already-extracted independent feature handlers (grid edit, context menu, process display, etc.) with no shared mutable state. Extracting a "handler coordinator" would just move the same wiring to another class with the same 18 deps. Reviewed 2026-04-09.</remarks>
+/// <remarks>Deps above threshold: 19 deps: extracting a wiring coordinator would hold the same 18 handler deps plus the coordinator itself, adding indirection without reducing coupling. All deps are independently-extracted handlers with no shared state. Reviewed 2026-04-09.</remarks>
 public partial class AccountsPanel : DataPanel,
-    IAccountsPanelContext,
+    IAccountsPanelContext, IAccountsPanelDataContext, IAccountsPanelOperationContext,
     IGridSortState, IAccountGridCallbacks
 {
     private readonly SessionPersistenceHelper _persistenceHelper;
@@ -22,7 +21,7 @@ public partial class AccountsPanel : DataPanel,
     private Form? _parentForm;
 
     private readonly AccountContainerOrchestrator _containerHandler;
-    private readonly AccountBulkScanHandler? _bulkScanHandler;
+    private readonly IAccountBulkScanHandler? _bulkScanHandler;
 
     // High-level extracted services
     private readonly AccountsPanelTimerCoordinator _timerCoordinator;
@@ -52,20 +51,25 @@ public partial class AccountsPanel : DataPanel,
     public event Action<string>? AppNavigationRequested;
     public event Action<string>? NewAppRequested;
 
-    // IAccountsPanelContext implementation
-    AppDatabase IAccountsPanelContext.Database => Database;
-    CredentialStore IAccountsPanelContext.CredentialStore => CredentialStore;
-    Control IAccountsPanelContext.OwnerControl => this;
-    OperationGuard IAccountsPanelContext.OperationGuard => _operationGuard;
-    bool IAccountsPanelContext.IsRefreshing => IsRefreshing;
-    bool IAccountsPanelContext.RenameInProgress { set => RenameInProgress = value; }
-    DialogResult IAccountsPanelContext.ShowModal(Form dialog) => ShowModalDialog(dialog);
-    void IAccountsPanelContext.SaveAndRefresh(Guid? selectCredentialId, int fallbackIndex) => SaveAndRefresh(selectCredentialId, fallbackIndex);
-    void IAccountsPanelContext.UpdateStatus(string text) => _statusLabel.Text = text;
-    void IAccountsPanelContext.UpdateButtonState() => UpdateButtonState();
-    void IAccountsPanelContext.RefreshGrid() => RefreshGrid();
+    // IAccountsPanelDataContext implementation
+    AppDatabase IAccountsPanelDataContext.Database => Database;
+    CredentialStore IAccountsPanelDataContext.CredentialStore => CredentialStore;
+    ProtectedBuffer IAccountsPanelDataContext.PinDerivedKey => PinDerivedKey;
+    bool IAccountsPanelDataContext.IsRefreshing => IsRefreshing;
 
-    void IAccountsPanelContext.TriggerProcessRefresh(int delayMs)
+    // IAccountsPanelOperationContext implementation
+    Control IAccountsPanelOperationContext.OwnerControl => this;
+    OperationGuard IAccountsPanelOperationContext.OperationGuard => _operationGuard;
+    bool IAccountsPanelOperationContext.RenameInProgress { set => RenameInProgress = value; }
+    DialogResult IAccountsPanelOperationContext.ShowModal(Form dialog) => ShowModalDialog(dialog);
+    void IAccountsPanelOperationContext.SaveAndRefresh(Guid? selectCredentialId, int fallbackIndex) => SaveAndRefresh(selectCredentialId, fallbackIndex);
+    void IAccountsPanelOperationContext.UpdateStatus(string text) => _statusLabel.Text = text;
+    void IAccountsPanelOperationContext.UpdateButtonState() => UpdateButtonState();
+    void IAccountsPanelOperationContext.SetControlsEnabled(bool enabled) => SetControlsEnabled(enabled);
+    void IAccountsPanelOperationContext.SaveLastPrefsPath(string path) => SaveLastPrefsPath(path);
+    void IAccountsPanelOperationContext.RefreshGrid() => RefreshGrid();
+
+    void IAccountsPanelOperationContext.TriggerProcessRefresh(int delayMs)
         => _processDisplayManager.TriggerDelayedRefresh(delayMs);
 
     // IGridSortState implementation
@@ -75,7 +79,7 @@ public partial class AccountsPanel : DataPanel,
 
     // IAccountGridCallbacks implementation
     void IAccountGridCallbacks.ReapplyGlyph() => ReapplyGlyphIfActive(_grid);
-    void IAccountGridCallbacks.SelectFirstRow() => SelectFirstRow(_grid);
+    void IAccountGridCallbacks.SelectFirstRow() => GridSetupHelper.SelectFirstRow(_grid);
     void IAccountGridCallbacks.UpdateButtonState() => UpdateButtonState();
     void IAccountGridCallbacks.SetIsRefreshing() => IsRefreshing = true;
     void IAccountGridCallbacks.ClearIsRefreshing() => IsRefreshing = false;
@@ -101,7 +105,7 @@ public partial class AccountsPanel : DataPanel,
         AccountGridEditHandler gridEditHandler,
         AccountGridTypeAheadHandler typeAheadHandler,
         IRunAsFlowHandler runAsFlowHandler,
-        AccountBulkScanHandler? bulkScanHandler = null,
+        IAccountBulkScanHandler? bulkScanHandler = null,
         WizardLauncher? wizardButtonHandler = null)
         : base(modalCoordinator)
     {
@@ -126,6 +130,7 @@ public partial class AccountsPanel : DataPanel,
 
         InitializeComponent();
 
+        DataGridViewGroupHeaderHelper.SuppressGroupHeaderTooltips<AccountGroupHeader>(_grid);
         _grid.CellMouseEnter += OnGridCellMouseEnter;
         _grid.AlternatingRowsDefaultCellStyle.BackColor = Color.Empty;
         EnableThreeStateSorting(_grid, () => { RefreshGrid(); }, sectioned: true);
@@ -154,6 +159,7 @@ public partial class AccountsPanel : DataPanel,
         _aclManagerButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4DC", Color.FromArgb(0xCC, 0x99, 0x00), 42);
         _scanAclsButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F50D", Color.FromArgb(0x22, 0x88, 0x44), 42);
         _scanAclsButton.Visible = _bulkScanHandler != null;
+        _lowIntegrityAclManagerButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4DC", Color.FromArgb(0x22, 0x88, 0x44), 42);
         _firewallButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F310", Color.FromArgb(0x22, 0x66, 0xCC), 42);
         _firewallButton.ToolTipText = "Internet Allowlist";
         _firewallButton.Visible = _contextMenuOrchestrator.IsFirewallAvailable;
@@ -186,6 +192,13 @@ public partial class AccountsPanel : DataPanel,
         _contextMenuOrchestrator.NewAppRequested += sid => NewAppRequested?.Invoke(sid);
         _contextMenuOrchestrator.DataChangedAndRefresh += () =>
         {
+            DataChanged?.Invoke();
+            RefreshGrid();
+        };
+        _contextMenuOrchestrator.ShowSystemInRunAsToggleRequested += () =>
+        {
+            Database.ShowSystemInRunAs = !Database.ShowSystemInRunAs;
+            _persistenceHelper.SaveConfig(Database, PinDerivedKey, CredentialStore.ArgonSalt);
             DataChanged?.Invoke();
             RefreshGrid();
         };
@@ -231,6 +244,7 @@ public partial class AccountsPanel : DataPanel,
         items.PinDiscoveryToTray.Click += (_, _) => _contextMenuOrchestrator.ToggleDiscoveryTray();
         items.PinTerminalToTray.Click += (_, _) => _contextMenuOrchestrator.ToggleTerminalTray();
         items.ManageAssociations.Click += (_, _) => _contextMenuOrchestrator.ToggleManageAssociations();
+        items.ReceiveInjectedInput.Click += (_, _) => _contextMenuOrchestrator.ToggleReceiveInjectedInput();
         items.CopySid.Click += (_, _) =>
         {
             var sid = GetSelectedSid();
@@ -280,6 +294,7 @@ public partial class AccountsPanel : DataPanel,
         _grid.CellValueChanged += (_, e) => _gridEditHandler.HandleCellValueChanged(e);
         _grid.CellValidating += (_, e) => _gridEditHandler.HandleCellValidating(e);
         _grid.EditingControlShowing += (_, e) => _gridEditHandler.HandleEditingControlShowing(e);
+        _grid.CellPainting += OnGridCellPainting;
 
         // Wire timer coordinator events
         _timerCoordinator.SidChangeDetected += OnSidChangeDetected;
@@ -300,14 +315,21 @@ public partial class AccountsPanel : DataPanel,
         });
     }
 
-    private void OnAclManagerClick(object? sender, EventArgs e)
-        => _contextMenuOrchestrator.OpenAclManager();
-
     private async void OnScanAclsClick(object? sender, EventArgs e)
     {
         if (_bulkScanHandler == null)
             return;
-        await _bulkScanHandler.ScanAcls(this, _scanAclsButton, _statusLabel);
+        var progressReporter = new ScanProgressReporter(_scanAclsButton, _statusLabel);
+        await _bulkScanHandler.ScanAcls(this, progressReporter);
+    }
+
+    private void OnLowIntegrityAclManagerClick(object? sender, EventArgs e)
+        => _containerHandler.OpenLowIntegrityAclManager(FindForm());
+
+    private sealed class ScanProgressReporter(ToolStripButton scanButton, Label statusLabel) : IScanProgressReporter
+    {
+        public void SetScanEnabled(bool enabled) => scanButton.Enabled = enabled;
+        public void SetStatus(string text) => statusLabel.Text = text;
     }
 
     protected override void OnDataSet()
@@ -445,15 +467,15 @@ public partial class AccountsPanel : DataPanel,
 
         var hasAccountRow = accountRow != null;
         var isUnavailable = accountRow?.IsUnavailable == true;
-        var canLaunch = hasAccountRow && !isUnavailable &&
-                        (SidResolutionHelper.CanLaunchWithoutPassword(accountRow?.Sid) || accountRow?.HasStoredPassword == true);
+        var canLaunch = accountRow?.CanLaunch == true;
 
         _openCmdButton.Enabled = canLaunch || containerRow != null;
         _openFolderBrowserButton.Enabled = canLaunch || containerRow != null;
         _aclManagerButton.Enabled =
-            (accountRow != null && !isUnavailable) ||
+            (accountRow != null && !isUnavailable && !SidResolutionHelper.IsSystemSid(accountRow?.Sid)) ||
             (containerRow != null && !string.IsNullOrEmpty(containerRow.ContainerSid));
-        _firewallButton.Enabled = hasAccountRow && !isUnavailable && !string.IsNullOrEmpty(accountRow?.Sid);
+        _firewallButton.Enabled = hasAccountRow && !isUnavailable && !string.IsNullOrEmpty(accountRow?.Sid)
+            && !SidResolutionHelper.IsSystemSid(accountRow?.Sid);
 
         var useWindowsTerminal = accountRow != null && _contextMenuOrchestrator.IsWindowsTerminal(accountRow.Sid);
         _openCmdButton.ToolTipText = useWindowsTerminal
@@ -495,7 +517,7 @@ public partial class AccountsPanel : DataPanel,
 
         _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
         var cell = (DataGridViewCheckBoxCell)row.Cells["colAllowInternet"];
-        var enable = cell.Value is true or CheckState and CheckState.Checked;
+        var enable = cell.Value is true or CheckState.Checked;
 
         _containerHandler.ToggleContainerInternet(containerRow, enable,
             () =>
@@ -530,7 +552,7 @@ public partial class AccountsPanel : DataPanel,
             return;
         var action = _gridInteraction.HandleDoubleClick(_grid.Rows[e.RowIndex]);
         if (action == GridDoubleClickAction.OpenAclManager)
-            OnAclManagerClick(sender, e);
+            _contextMenuOrchestrator.OpenAclManager();
     }
 
     private void OnGridCellMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
@@ -542,10 +564,10 @@ public partial class AccountsPanel : DataPanel,
                 _processDisplayManager.ToggleExpand(r.Sid);
                 break;
             case GridMouseClickResult.RightClickHeaderResult:
-                HandleRightClickRowSelect(_grid, e, _headerContextMenu);
+                GridSetupHelper.HandleRightClickRowSelect(_grid, e, _headerContextMenu);
                 break;
             case GridMouseClickResult.RightClickRowResult:
-                HandleRightClickRowSelect(_grid, e, _contextMenu);
+                GridSetupHelper.HandleRightClickRowSelect(_grid, e, _contextMenu);
                 break;
         }
     }
@@ -558,6 +580,32 @@ public partial class AccountsPanel : DataPanel,
             return;
         var tooltip = _processDisplayManager.GetProcessRowTooltip(processRow) ?? "";
         _grid.Rows[e.RowIndex].Cells[e.ColumnIndex].ToolTipText = tooltip;
+    }
+
+    private void OnGridCellPainting(object? sender, DataGridViewCellPaintingEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.ColumnIndex < 0)
+            return;
+        var colName = _grid.Columns[e.ColumnIndex].Name;
+        if (colName != "Logon" && colName != "colAllowInternet")
+            return;
+        if (_grid.Rows[e.RowIndex].Tag is not AccountRow ar || !SidResolutionHelper.IsSystemSid(ar.Sid))
+            return;
+
+        e.PaintBackground(e.ClipBounds, true);
+        var isChecked = e.Value is true or CheckState.Checked;
+        var state = isChecked ? ButtonState.Checked | ButtonState.Inactive : ButtonState.Inactive;
+        var size = SystemInformation.MenuCheckSize;
+        var rect = new Rectangle(
+            e.CellBounds.X + (e.CellBounds.Width - size.Width) / 2,
+            e.CellBounds.Y + (e.CellBounds.Height - size.Height) / 2,
+            size.Width, size.Height);
+        var graphics = e.Graphics;
+        if (graphics == null)
+            return;
+
+        ControlPaint.DrawCheckBox(graphics, rect, state);
+        e.Handled = true;
     }
 
     private void OnGridKeyPress(object? sender, KeyPressEventArgs e)
@@ -629,7 +677,7 @@ public partial class AccountsPanel : DataPanel,
 
     private void ShowContextMenuAtSelectedRow()
     {
-        ShowContextMenuAtRow(_grid, _contextMenu);
+        GridSetupHelper.ShowContextMenuAtRow(_grid, _contextMenu);
     }
 
     // --- Context menu ---
@@ -642,7 +690,7 @@ public partial class AccountsPanel : DataPanel,
     private async void OnCreateUserClick(object? sender, EventArgs e)
         => await _creationHandler.OpenCreateUserDialog();
 
-    private async void OpenCreateUserDialog(string? prefillUsername = null, string? prefillPassword = null)
+    private async void OpenCreateUserDialog(string? prefillUsername = null, ProtectedString? prefillPassword = null)
         => await _creationHandler.OpenCreateUserDialog(prefillUsername, prefillPassword);
 
     private void OnAddClick(object? sender, EventArgs e)
@@ -671,13 +719,7 @@ public partial class AccountsPanel : DataPanel,
     // --- Import ---
 
     private async void OnImportClick(object? sender, EventArgs e)
-        => await _importUIHandler.HandleImportClickAsync(
-            Database, CredentialStore, PinDerivedKey, FindForm(), this,
-            _operationGuard,
-            text => _statusLabel.Text = text,
-            SetControlsEnabled,
-            UpdateButtonState,
-            SaveLastPrefsPath);
+        => await _importUIHandler.HandleImportClickAsync(this);
 
     // --- Helpers ---
 
@@ -689,7 +731,7 @@ public partial class AccountsPanel : DataPanel,
             if (selectCredId != null)
                 SelectCredentialById(selectCredId.Value);
             else if (fallbackIndex >= 0)
-                SelectRowByIndex(_grid, fallbackIndex);
+                GridSetupHelper.SelectRowByIndex(_grid, fallbackIndex);
             DataChanged?.Invoke();
         });
     }
@@ -710,6 +752,7 @@ public partial class AccountsPanel : DataPanel,
         _openCmdButton.Enabled = enabled;
         _openFolderBrowserButton.Enabled = enabled;
         _aclManagerButton.Enabled = enabled;
+        _lowIntegrityAclManagerButton.Enabled = enabled;
         _copyPasswordButton.Enabled = enabled;
         _accountsButton.Enabled = enabled;
         _refreshButton.Enabled = enabled;
@@ -726,7 +769,7 @@ public partial class AccountsPanel : DataPanel,
         FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
         if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
             return;
-        _runAsFlowHandler.TriggerFromUI(dlg.FileName);
+        _runAsFlowHandler.TriggerFromUI(dlg.FileName, GetSelectedAccountRow()?.Sid);
     }
 
     private void OnRefreshClick(object? sender, EventArgs e)

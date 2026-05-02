@@ -1,6 +1,8 @@
+using RunFence.Acl;
 using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Groups.UI.Forms;
 using RunFence.Infrastructure;
 
@@ -23,9 +25,11 @@ public class GroupActionOrchestrator(
     ISidNameCacheService sidNameCache,
     ISessionProvider sessionProvider,
     ILoggingService log,
+    IAclService aclService,
+    IPathGrantService pathGrantService,
     ISessionSaver? sessionSaver = null)
 {
-    public event Action? DataChanged;
+    public event Action<string?>? DataChanged;
 
     public bool IsAclManagerAvailable => aclManagerLauncher != null;
 
@@ -36,7 +40,7 @@ public class GroupActionOrchestrator(
         using var dlg = new CreateGroupDialog(groupMembership);
         if (modalCoordinator.ShowModal(dlg, owner) != DialogResult.OK)
             return;
-        DataChanged?.Invoke();
+        DataChanged?.Invoke(dlg.CreatedGroupSid);
     }
 
     public void DeleteGroup(string sid, string name)
@@ -59,10 +63,66 @@ public class GroupActionOrchestrator(
             return;
         }
 
-        // OS deletion succeeded — clean up database entries
-        GroupDatabaseHelper.CleanupDeletedGroupData(sid, sessionProvider.GetSession().Database);
+        // OS deletion succeeded — perform three-phase ACL + database cleanup
+        var database = sessionProvider.GetSession().Database;
+        var allApps = database.Apps.ToList();
+
+        // Phase 1a — Revert filesystem ACEs for apps that granted access to the deleted group SID.
+        // Collect affected apps while AllowedAclEntries still contains the deleted SID.
+        var affectedApps = allApps
+            .Where(a => a.RestrictAcl && !a.IsUrlScheme &&
+                        a.AllowedAclEntries?.Any(e =>
+                            SidComparer.SidEquals(e.Sid, sid)) == true)
+            .ToList();
+        foreach (var app in affectedApps)
+        {
+            try
+            {
+                aclService.RevertAcl(app, allApps);
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"Failed to revert ACL for app '{app.Name}' on group deletion: {ex.Message}");
+            }
+        }
+
+        // Phase 1b — Remove traverse/access grants for the deleted group SID.
+        pathGrantService.RemoveAll(sid, updateFileSystem: true);
+
+        // Phase 1c — Remove the deleted group SID from AllowedAclEntries of all apps
+        // (must happen before Phase 3 so reapply does not re-add the deleted group's ACEs).
+        foreach (var app in allApps)
+            app.AllowedAclEntries?.RemoveAll(e =>
+                SidComparer.SidEquals(e.Sid, sid));
+
+        // Phase 2 — Database cleanup (group snapshots, account entry grants).
+        GroupDatabaseHelper.CleanupDeletedGroupData(sid, database);
+
+        // Phase 3 — Reapply ACEs without the deleted group and recompute ancestor ACLs.
+        var appsAfterDeletion = database.Apps.ToList();
+        foreach (var app in affectedApps)
+        {
+            try
+            {
+                aclService.ApplyAcl(app, appsAfterDeletion);
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"Failed to re-apply ACL for app '{app.Name}' after group deletion: {ex.Message}");
+            }
+        }
+
+        try
+        {
+            aclService.RecomputeAllAncestorAcls(appsAfterDeletion);
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"Failed to recompute ancestor ACLs after group deletion: {ex.Message}");
+        }
+
         sessionSaver?.SaveConfig();
-        DataChanged?.Invoke();
+        DataChanged?.Invoke(null);
     }
 
     public void OpenAclManager(string sid, IWin32Window? owner)

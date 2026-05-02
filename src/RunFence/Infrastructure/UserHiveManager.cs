@@ -15,7 +15,7 @@ public class UserHiveManager(ILoggingService log, RegistryKey? hkuOverride = nul
             return null;
 
         using var profileKey = Registry.LocalMachine.OpenSubKey(
-            Constants.ProfileListRegistryKey + "\\" + sid);
+            PathConstants.ProfileListRegistryKey + "\\" + sid);
 
         if (profileKey == null)
         {
@@ -55,29 +55,40 @@ public class UserHiveManager(ILoggingService log, RegistryKey? hkuOverride = nul
 
     private sealed class HiveUnloader(RegistryKey hku, string sid, ILoggingService log) : IDisposable
     {
-        private bool _disposed;
+        private int _disposed;
+
+        ~HiveUnloader()
+        {
+            Dispose(disposing: false);
+        }
 
         /// <remarks>
-        /// MUST be called on a background thread. <c>GC.WaitForPendingFinalizers()</c> blocks
-        /// until all finalizers complete, which can take hundreds of milliseconds and would freeze
-        /// the UI thread. <c>GC.Collect</c> + <c>GC.WaitForPendingFinalizers</c> is required here
-        /// to flush all open <see cref="RegistryKey"/> handles before <c>RegUnLoadKey</c> is called,
-        /// since unfinalized <see cref="RegistryKey"/> objects hold native handles that prevent unload.
+        /// Explicit disposal forces pending registry-key finalizers to run before <c>RegUnLoadKey</c>,
+        /// reducing unload failures from still-open native handles. The finalizer path is best-effort
+        /// cleanup only and intentionally skips the forced collection/finalizer wait.
         /// </remarks>
         public void Dispose()
         {
-            if (_disposed)
+            Dispose(disposing: true);
+            GC.SuppressFinalize(this);
+        }
+
+        private void Dispose(bool disposing)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
                 return;
-            _disposed = true;
 
-            System.Diagnostics.Debug.Assert(
-                !System.Threading.SynchronizationContext.Current?.GetType().Name.Contains("WindowsFormsSynchronizationContext") ?? true,
-                "HiveUnloader.Dispose must not be called on the UI thread — GC.WaitForPendingFinalizers() would freeze the UI.");
+            if (disposing)
+            {
+                System.Diagnostics.Debug.Assert(
+                    !SynchronizationContext.Current?.GetType().Name.Contains("WindowsFormsSynchronizationContext") ?? true,
+                    "HiveUnloader.Dispose must not be called on the UI thread - GC.WaitForPendingFinalizers() would freeze the UI.");
 
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
 
-            var result = UserHiveManager.RegUnLoadKey(hku.Handle, sid);
+            var result = RegUnLoadKey(hku.Handle, sid);
             if (result != 0)
                 log.Warn($"UserHiveManager: RegUnLoadKey failed for SID {sid}, error {result}");
         }

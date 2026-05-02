@@ -25,8 +25,9 @@ partial class CredentialEditDialog
         if (disposing)
         {
             components?.Dispose();
-            _passwordTextBox.Clear();
-            CapturedPasswordText = null;
+            _passwordSecure?.Dispose();
+            CapturedPassword?.Dispose();
+            CapturedPassword = null;
         }
         base.Dispose(disposing);
     }
@@ -45,19 +46,20 @@ partial class CredentialEditDialog
 
         SuspendLayout();
 
-        // _usernameLabel
+        // _usernameLabel (position set in code)
         _usernameLabel.Text = "Username:";
         _usernameLabel.Location = new Point(15, 15);
         _usernameLabel.AutoSize = true;
 
-        // _usernameComboBox (add mode defaults; overridden in code for edit mode)
+        // _usernameComboBox (add mode defaults; overridden in code for edit mode; size set in code)
         _usernameComboBox.Location = new Point(15, 37);
         _usernameComboBox.Size = new Size(330, 23);
         _usernameComboBox.DropDownStyle = ComboBoxStyle.DropDown;
         _usernameComboBox.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
         _usernameComboBox.AutoCompleteSource = AutoCompleteSource.ListItems;
 
-        // _sidTextBox (edit mode only, hidden by default, position set in code)
+        // _sidTextBox (edit mode only, hidden by default; position and size set in code)
+        _sidTextBox.Location = new Point(15, 63);
         _sidTextBox.Size = new Size(330, 23);
         _sidTextBox.ReadOnly = true;
         _sidTextBox.BorderStyle = BorderStyle.None;
@@ -69,19 +71,19 @@ partial class CredentialEditDialog
         _passwordLabel.AutoSize = true;
         _passwordLabel.Location = new Point(15, 67);
 
-        // _passwordTextBox (position set in code)
+        // _passwordTextBox (position and size set in code)
         _passwordTextBox.Location = new Point(15, 89);
         _passwordTextBox.Size = new Size(330, 23);
         _passwordTextBox.UseSystemPasswordChar = true;
 
-        // _statusLabel (position set in code)
-        _statusLabel.Location = new Point(15, 181);
+        // _statusLabel (position and size set in code)
+        _statusLabel.Location = new Point(15, 130);
         _statusLabel.Size = new Size(330, 20);
         _statusLabel.ForeColor = Color.Red;
 
         // _createButton (add mode only, hidden in edit mode; position set in code)
         _createButton.Text = "Create...";
-        _createButton.Location = new Point(100, 211);
+        _createButton.Location = new Point(100, 155);
         _createButton.Size = new Size(75, 28);
         _createButton.FlatStyle = FlatStyle.System;
         _createButton.Enabled = false;
@@ -90,7 +92,7 @@ partial class CredentialEditDialog
 
         // _okButton (position and text set in code)
         _okButton.Text = "OK";
-        _okButton.Location = new Point(185, 211);
+        _okButton.Location = new Point(185, 155);
         _okButton.Size = new Size(75, 28);
         _okButton.FlatStyle = FlatStyle.System;
         _okButton.Enabled = false;
@@ -98,13 +100,13 @@ partial class CredentialEditDialog
 
         // _cancelButton (position set in code)
         _cancelButton.Text = "Cancel";
-        _cancelButton.Location = new Point(270, 211);
+        _cancelButton.Location = new Point(270, 155);
         _cancelButton.DialogResult = DialogResult.Cancel;
         _cancelButton.Size = new Size(75, 28);
         _cancelButton.FlatStyle = FlatStyle.System;
 
         // CredentialEditDialog
-        ClientSize = new Size(360, 254);
+        ClientSize = new Size(360, 200);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

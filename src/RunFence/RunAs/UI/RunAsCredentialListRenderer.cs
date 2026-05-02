@@ -1,5 +1,6 @@
 ﻿using RunFence.Account.UI;
 using RunFence.Account.UI.AppContainer;
+using RunFence.Core;
 using RunFence.RunAs.UI.Forms;
 using RunFence.UI;
 
@@ -57,7 +58,9 @@ public class RunAsCredentialListRenderer
         {
             case CredentialDisplayItem credItem:
             {
-                var icon = credItem.HasStoredCredential ? GetIconKeyStored() : GetIconKeyAdHoc();
+                var icon = credItem.HasStoredCredential || SidResolutionHelper.CanLaunchWithoutPassword(credItem.Credential.Sid)
+                    ? GetIconKeyStored()
+                    : GetIconKeyAdHoc();
                 e.Graphics.DrawImage(icon, e.Bounds.X + 3, e.Bounds.Y + (e.Bounds.Height - icon.Height) / 2);
                 TextRenderer.DrawText(e.Graphics, credItem.ToString(), listBox.Font, textBounds, textColor, textFlags);
                 break;

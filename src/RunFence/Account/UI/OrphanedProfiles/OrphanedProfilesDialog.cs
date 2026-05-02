@@ -156,8 +156,6 @@ public partial class OrphanedProfilesDialog : Form
         else
         {
             _deleteButton.Visible = false;
-            _closeButton.Location = new Point(805, 658);
-            _closeButton.Size = new Size(85, 28);
         }
 
         _reportPanel ??= new OrphanedProfilesReportPanel();

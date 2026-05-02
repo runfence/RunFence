@@ -5,25 +5,20 @@ using RunFence.Core;
 
 namespace RunFence.Licensing;
 
-internal interface IMachineIdProvider
-{
-    string MachineCode { get; }
-    byte[] MachineIdHash { get; }
-}
-
-internal class MachineIdProvider : IMachineIdProvider
+public class MachineIdProvider : IMachineIdProvider
 {
     // SMBIOS UUID spoofing is an accepted risk for this offline-only validation scheme.
     // A determined user can spoof the UUID; we accept this tradeoff for usability.
     private readonly byte[] _machineIdHash;
 
-    public MachineIdProvider(ILoggingService log) : this(GetSmbiosUuid(), log)
+    public MachineIdProvider(ILoggingService log) : this(null, log)
     {
     }
 
-    public MachineIdProvider(string uuidString, ILoggingService? log = null)
+    public MachineIdProvider(string? uuidString, ILoggingService? log = null)
     {
-        _machineIdHash = ComputeHash(uuidString);
+        var uuid = uuidString ?? GetMachineUuid();
+        _machineIdHash = ComputeHash(uuid);
         var rawBase32 = Base32Encode(_machineIdHash);
         if (rawBase32.Length > 20)
         {
@@ -38,7 +33,7 @@ internal class MachineIdProvider : IMachineIdProvider
 
     public byte[] MachineIdHash => (byte[])_machineIdHash.Clone();
 
-    private static string GetSmbiosUuid()
+    private static string GetMachineUuid()
     {
         try
         {

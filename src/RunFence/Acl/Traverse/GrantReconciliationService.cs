@@ -1,5 +1,3 @@
-using System.Security.Principal;
-using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -14,15 +12,11 @@ namespace RunFence.Acl.Traverse;
 /// needed (because a group was removed). Three-phase design for thread safety:
 ///
 /// 1. <see cref="DetectGroupChanges"/> — UI thread, reads group membership, compares with snapshot.
-/// 2. <see cref="ReconcileChangedSids"/> — background thread, does filesystem ACL reads/writes only.
+/// 2. <see cref="ReconcileChangedSids"/> — background thread, delegates per-SID work to <see cref="SidReconciler"/>.
 /// 3. <see cref="ApplyReconciliationResult"/> — UI thread, updates database without concurrent access.
 ///
 /// Also provides <see cref="ReconcileIfGroupsChanged"/> for startup and UI refresh callers.
-///
-/// Automated locations reconciled (per SID):
-///   1. Logon script directory + ancestors — if {SID}_block_login.cmd exists in scripts dir
-///   2. App directory (unlock.cmd parent) — if SID == interactive user SID
-///   3. DragBridge TempRoot + ancestors — if SID has a DragBridge traverse entry
+/// Per-SID reconciled locations are documented in <see cref="SidReconciler"/>.
 /// </summary>
 public class GrantReconciliationService(
     IAclPermissionService aclPermission,
@@ -30,8 +24,7 @@ public class GrantReconciliationService(
     ILoggingService log,
     ISessionSaver sessionSaver,
     IDatabaseProvider databaseProvider,
-    Func<AncestorTraverseGranter> ancestorTraverseGranterFactory,
-    IInteractiveUserResolver interactiveUserResolver)
+    SidReconciler sidReconciler)
 {
     /// <summary>Result of a reconciliation pass over a set of changed SIDs.</summary>
     public record ReconciliationResult(
@@ -65,7 +58,7 @@ public class GrantReconciliationService(
             var sid = sid0;
 
             // Skip AppContainer SIDs — they have fixed group membership
-            if (AclHelper.IsContainerSid(sid))
+            if (AclHelper.IsContainerSid(sid) || AclHelper.IsLowIntegritySid(sid))
                 continue;
 
             // Skip local groups — group membership snapshots don't apply to groups themselves
@@ -120,7 +113,7 @@ public class GrantReconciliationService(
         {
             updatedSnapshots[sid] = newGroups;
             var sidRemovedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            ReconcileTraverseForSid(sid, newGroups, newTraverseEntries, sidRemovedPaths, accountGrants);
+            sidReconciler.ReconcileSid(sid, newGroups, newTraverseEntries, sidRemovedPaths, accountGrants);
             if (sidRemovedPaths.Count > 0)
                 removedTraversePaths[sid] = sidRemovedPaths;
         }
@@ -177,172 +170,5 @@ public class GrantReconciliationService(
         var result = await Task.Run(() => ReconcileChangedSids(changed, accountGrants));
         ApplyReconciliationResult(result);
         return true;
-    }
-
-    private void ReconcileTraverseForSid(
-        string sid,
-        IReadOnlyList<string> newGroups,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
-        HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
-    {
-        try
-        {
-            var identity = new SecurityIdentifier(sid);
-
-            // 1. Logon script directory
-            ReconcileLogonScript(sid, identity, newGroups, newTraverseEntries, removedTraversePaths, accountGrants);
-
-            // 2. App directory (unlock.cmd parent) — interactive user only
-            if (string.Equals(sid, interactiveUserResolver.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
-                ReconcileAppDirectory(sid, identity, newGroups, newTraverseEntries, removedTraversePaths, accountGrants);
-
-            // 3. DragBridge temp root
-            ReconcileDragBridgeTempRoot(sid, identity, newGroups, newTraverseEntries, removedTraversePaths, accountGrants);
-        }
-        catch (Exception ex)
-        {
-            log.Warn($"GrantReconciliationService: reconciliation failed for '{sid}': {ex.Message}");
-        }
-    }
-
-    private void ReconcileLogonScript(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
-        HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants = null)
-    {
-        var scriptsDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "RunFence", "scripts");
-        var scriptFile = Path.Combine(scriptsDir, $"{sid}_block_login.cmd");
-        ReconcileTraverseLocation(sid, identity, groupSids, scriptsDir, scriptFile,
-            newTraverseEntries, removedTraversePaths, accountGrants);
-    }
-
-    private void ReconcileAppDirectory(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
-        HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants = null)
-    {
-        var appDir = Path.GetDirectoryName(Constants.UnlockCmdPath);
-        if (string.IsNullOrEmpty(appDir))
-            return;
-        ReconcileTraverseLocation(sid, identity, groupSids, appDir, null,
-            newTraverseEntries, removedTraversePaths, accountGrants);
-    }
-
-    private void ReconcileDragBridgeTempRoot(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
-        HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants = null)
-    {
-        var tempRoot = Path.Combine(Constants.ProgramDataDir, Constants.DragBridgeTempDir);
-        ReconcileTraverseLocation(sid, identity, groupSids, tempRoot, null,
-            newTraverseEntries, removedTraversePaths, accountGrants);
-    }
-
-    private void ReconcileTraverseLocation(
-        string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        string dirPath, string? prerequisiteFilePath,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
-        HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
-    {
-        if (!Directory.Exists(dirPath))
-            return;
-        if (prerequisiteFilePath != null && !File.Exists(prerequisiteFilePath))
-            return;
-
-        var granter = ancestorTraverseGranterFactory();
-        var (appliedPaths, anyAceAdded) = granter.GrantOnPathAndAncestors(dirPath, identity, groupSids: groupSids);
-        if (anyAceAdded)
-        {
-            if (!newTraverseEntries.TryGetValue(sid, out var entries))
-            {
-                entries = [];
-                newTraverseEntries[sid] = entries;
-            }
-
-            entries.Add((dirPath, appliedPaths));
-        }
-
-        CheckRedundantTraverse(sid, dirPath, groupSids, granter, removedTraversePaths, accountGrants);
-    }
-
-    /// <summary>
-    /// Checks if an existing traverse entry for <paramref name="sid"/> on <paramref name="path"/>
-    /// is now redundant because the SID's groups provide traverse rights on all applied paths
-    /// without needing the SID's own direct ACE. If redundant, adds to <paramref name="removedTraversePaths"/>
-    /// and reverts the SID's direct traverse ACEs.
-    /// </summary>
-    private void CheckRedundantTraverse(
-        string sid,
-        string path,
-        IReadOnlyList<string> groupSids,
-        AncestorTraverseGranter granter,
-        HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
-    {
-        if (accountGrants == null || groupSids.Count == 0)
-            return;
-        if (!accountGrants.TryGetValue(sid, out var entries))
-            return;
-
-        var traverseRights = TraverseRightsHelper.TraverseRights;
-
-        var normalizedPath = Path.GetFullPath(path);
-        foreach (var entry in entries)
-        {
-            if (!entry.IsTraverseOnly)
-                continue;
-            if (!string.Equals(Path.GetFullPath(entry.Path), normalizedPath, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            // Check if groups alone provide traverse on all applied paths (without the SID's own ACE).
-            var pathsToCheck = entry.AllAppliedPaths ?? [entry.Path];
-            bool allCoveredByGroups = true;
-
-            foreach (var appliedPath in pathsToCheck)
-            {
-                try
-                {
-                    if (!Directory.Exists(appliedPath))
-                        continue;
-                    var dirSecurity = new DirectoryInfo(appliedPath).GetAccessControl();
-                    // Pass empty string as accountSid so only group SIDs are checked —
-                    // this verifies groups alone provide access without the direct ACE.
-                    if (!aclPermission.HasEffectiveRights(dirSecurity, "", groupSids, traverseRights))
-                    {
-                        allCoveredByGroups = false;
-                        break;
-                    }
-                }
-                catch
-                {
-                    allCoveredByGroups = false;
-                    break;
-                }
-            }
-
-            if (allCoveredByGroups)
-            {
-                removedTraversePaths.Add(normalizedPath);
-
-                // Revert the SID's direct traverse ACEs on NTFS
-                var identity = new SecurityIdentifier(sid);
-                foreach (var appliedPath in pathsToCheck)
-                {
-                    try
-                    {
-                        granter.RemoveAce(appliedPath, identity);
-                    }
-                    catch (Exception ex)
-                    {
-                        log.Warn($"Failed to remove redundant traverse ACE on '{appliedPath}': {ex.Message}");
-                    }
-                }
-            }
-
-            break; // Only one traverse entry per path
-        }
     }
 }

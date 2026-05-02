@@ -1,6 +1,5 @@
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launch.Tokens;
 
 namespace RunFence.Launch;
 
@@ -8,7 +7,12 @@ public record AccountLaunchIdentity(string Sid) : LaunchIdentity
 {
     public override string Sid { get; } = Sid;
     public PrivilegeLevel? PrivilegeLevel { get; init; }
+    /// <summary>
+    /// When non-null, caller retains ownership and must dispose after the launch call returns.
+    /// When null, <c>ProcessLauncher</c> looks up credentials internally and disposes them.
+    /// </summary>
     public LaunchCredentials? Credentials { get; init; }
+    public AssociationResolutionPolicy AssociationResolutionPolicy { get; init; } = AssociationResolutionPolicy.RequireSameAccount;
 
     public static AccountLaunchIdentity CurrentAccountBasic =>
         new(SidResolutionHelper.GetCurrentUserSid()) { PrivilegeLevel = Core.Models.PrivilegeLevel.Basic };

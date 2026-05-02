@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -18,12 +17,11 @@ public class DragBridgeProcessLauncher(
     IDragBridgeLauncher launcher,
     ILoggingService log,
     IUiThreadInvoker uiThreadInvoker,
-    string dragBridgeExePath = "")
+    IKernelObjectMandatoryLabelService mandatoryLabelService,
+    string dragBridgeExePath)
     : IDragBridgeProcessLauncher
 {
-    private readonly string _dragBridgeExePath = dragBridgeExePath.Length > 0
-        ? dragBridgeExePath
-        : Path.Combine(AppContext.BaseDirectory, Constants.DragBridgeExeName);
+    private readonly string _dragBridgeExePath = dragBridgeExePath;
 
     private string? _currentSid;
     private string? _interactiveSid;
@@ -59,7 +57,10 @@ public class DragBridgeProcessLauncher(
         process?.Dispose();
     }
 
-    public NamedPipeServerStream CreatePipeServer(string pipeName, SecurityIdentifier targetUserSid)
+    public NamedPipeServerStream CreatePipeServer(
+        string pipeName,
+        SecurityIdentifier targetUserSid,
+        bool allowLowIntegrityClient)
     {
         var pipeSecurity = new PipeSecurity();
         var adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
@@ -68,37 +69,37 @@ public class DragBridgeProcessLauncher(
         var networkSid = new SecurityIdentifier(WellKnownSidType.NetworkSid, null);
         pipeSecurity.AddAccessRule(new PipeAccessRule(networkSid, PipeAccessRights.FullControl, AccessControlType.Deny));
 
-        return NamedPipeServerStreamAcl.Create(
+        var pipe = NamedPipeServerStreamAcl.Create(
             pipeName, PipeDirection.InOut, maxNumberOfServerInstances: 1,
             PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance,
             256 * 1024, 256 * 1024, pipeSecurity);
+
+        if (allowLowIntegrityClient)
+        {
+            try { mandatoryLabelService.ApplyLowIntegrityLabel(pipe.SafePipeHandle.DangerousGetHandle()); }
+            catch { pipe.Dispose(); throw; }
+        }
+
+        return pipe;
     }
 
     public ProcessInfo? LaunchForSid(WindowOwnerInfo ownerInfo, IReadOnlyList<string> args,
         INotificationService notifications)
     {
         var sid = ownerInfo.Sid;
-        ProcessInfo? process = null;
+        var privilegeLevel = DragBridgeLaunchPolicy.ResolvePrivilegeLevel(ownerInfo);
+        ProcessInfo? process;
 
         if (_currentSid != null && string.Equals(sid.Value, _currentSid, StringComparison.OrdinalIgnoreCase))
         {
-            var privilegeLevel = ownerInfo.IntegrityLevel switch
-            {
-                <= NativeTokenHelper.MandatoryLevelLow => PrivilegeLevel.LowIntegrity,
-                <= NativeTokenHelper.MandatoryLevelMedium => PrivilegeLevel.Basic,
-                _ => PrivilegeLevel.HighestAllowed,
-            };
             process = launcher.LaunchDirect(_dragBridgeExePath, args, privilegeLevel);
             if (process == null)
                 return null;
         }
         else if (_interactiveSid != null && string.Equals(sid.Value, _interactiveSid, StringComparison.OrdinalIgnoreCase))
         {
-            // When target window is elevated (High IL or above), pass HighestAllowed so the bridge
-            // process is not restricted below the target window's integrity level.
-            var elevated = ownerInfo.IntegrityLevel > NativeTokenHelper.MandatoryLevelMedium;
-            process = launcher.LaunchDeElevated(_dragBridgeExePath, args, elevated ? PrivilegeLevel.HighestAllowed : (PrivilegeLevel?)null);
+            process = launcher.LaunchDeElevated(_dragBridgeExePath, args, privilegeLevel);
             if (process == null)
                 return null;
         }
@@ -107,7 +108,7 @@ public class DragBridgeProcessLauncher(
         {
             try
             {
-                process = launcher.LaunchManaged(_dragBridgeExePath, sid.Value, args);
+                process = launcher.LaunchManaged(_dragBridgeExePath, sid.Value, args, privilegeLevel);
             }
             catch (Exception ex)
             {
@@ -142,11 +143,8 @@ public class DragBridgeProcessLauncher(
         {
             ProcessNative.GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out var clientPid);
 
-            if (expectedProcess != null)
-                return clientPid == (uint)expectedProcess.Id;
-
-            // For de-elevated/managed launches (no process handle), verify exe path instead.
-            // A non-admin user cannot replace the binary at the install directory.
+            // Always verify the exe path to guard against PID recycling, even when we have
+            // the original process handle from a direct launch.
             using var handle = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, clientPid);
             if (handle.IsInvalid)
                 return false;
@@ -156,7 +154,14 @@ public class DragBridgeProcessLauncher(
             if (!ProcessNative.QueryFullProcessImageName(handle, 0, sb, ref size))
                 return false;
 
-            return string.Equals(sb.ToString(), _dragBridgeExePath, StringComparison.OrdinalIgnoreCase);
+            if (!string.Equals(sb.ToString(), _dragBridgeExePath, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            // For direct launches (where we hold a process handle), additionally confirm the PID matches.
+            if (expectedProcess != null)
+                return clientPid == (uint)expectedProcess.Id;
+
+            return true;
         }
         catch
         {

@@ -9,28 +9,27 @@ public class ShortcutService(
     ILoggingService log,
     IShortcutProtectionService protection,
     IShortcutComHelper shortcutHelper,
-    IInteractiveUserDesktopProvider interactiveUserDesktopProvider)
+    IInteractiveUserDesktopProvider interactiveUserDesktopProvider,
+    ShortcutFinder finder)
     : IShortcutService
 {
-    private readonly record struct ManagedShortcut(string Path, string TargetPath, string? Arguments);
-
     public void ReplaceShortcuts(AppEntry app, string launcherPath, string iconPath, ShortcutTraversalCache cache)
     {
         var shortcuts = app.IsFolder
-            ? FindShortcutsForFolder(app.ExePath, cache)
-            : FindShortcutsForExe(app.ExePath, cache);
+            ? finder.FindShortcutsForFolder(app.ExePath, cache)
+            : finder.FindShortcutsForExe(app.ExePath, cache);
 
         ReplaceShortcutsFromList(app, launcherPath, iconPath, shortcuts, cache);
 
-        var (_, byLauncherAppId) = ScanAllShortcuts(cache);
+        var (_, byLauncherAppId) = finder.ScanAllShortcuts(cache);
         if (byLauncherAppId.TryGetValue(app.Id, out var managedShortcuts))
             EnforceManagedShortcuts(app, launcherPath, iconPath, managedShortcuts, cache);
     }
 
     public void SaveShortcut(AppEntry app, string shortcutPath)
     {
-        var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
-        var iconPath = Path.Combine(Constants.ProgramDataIconDir, $"{app.Id}.ico");
+        var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
+        var iconPath = Path.Combine(PathConstants.ProgramDataIconDir, $"{app.Id}.ico");
         shortcutHelper.WithShortcut(shortcutPath, sc =>
         {
             sc.TargetPath = launcherPath;
@@ -44,7 +43,7 @@ public class ShortcutService(
 
     public void RevertShortcuts(AppEntry app, ShortcutTraversalCache cache)
     {
-        var shortcuts = FindShortcutsForLauncher(app.Id, cache);
+        var shortcuts = finder.FindShortcutsForLauncher(app.Id, cache);
 
         foreach (var shortcutPath in shortcuts)
         {
@@ -82,7 +81,7 @@ public class ShortcutService(
         if (appList.Count == 0)
             return;
 
-        var (byTarget, byLauncherAppId) = ScanAllShortcuts(cache);
+        var (byTarget, byLauncherAppId) = finder.ScanAllShortcuts(cache);
 
         foreach (var app in appList)
         {
@@ -94,12 +93,12 @@ public class ShortcutService(
             var shortcutList = shortcuts != null ? new List<string>(shortcuts) : new List<string>();
 
             if (app.IsFolder)
-                shortcutList = FindShortcutsForFolder(app.ExePath, cache);
+                shortcutList = finder.FindShortcutsForFolder(app.ExePath, cache);
 
             byLauncherAppId.TryGetValue(app.Id, out var existingManaged);
             var managedList = existingManaged ?? [];
             var managedPaths = managedList.Select(s => s.Path).ToList();
-            var iconPath = Path.Combine(Constants.ProgramDataIconDir, $"{app.Id}.ico");
+            var iconPath = Path.Combine(PathConstants.ProgramDataIconDir, $"{app.Id}.ico");
 
             bool hasNewShortcuts = shortcutList.Any(s =>
                 !managedPaths.Contains(s, StringComparer.OrdinalIgnoreCase));
@@ -124,7 +123,7 @@ public class ShortcutService(
         AppEntry app,
         string launcherPath,
         string? iconPath,
-        IReadOnlyList<ManagedShortcut> managedList,
+        IReadOnlyList<ShortcutFinder.ManagedShortcut> managedList,
         ShortcutTraversalCache cache)
     {
         foreach (var managedShortcut in managedList)
@@ -261,9 +260,8 @@ public class ShortcutService(
         {
             var oldWorkingDirectory = (string?)sc.WorkingDirectory;
             sc.TargetPath = launcherPath;
-            if (ShortcutPathHelper.IsSamePath(
-                    oldWorkingDirectory ?? "",
-                    ShortcutPathHelper.GetLauncherWorkingDirectory(oldTargetPath)))
+            string right = ShortcutPathHelper.GetLauncherWorkingDirectory(oldTargetPath);
+            if (PathHelper.IsSamePath(oldWorkingDirectory ?? "", right))
                 sc.WorkingDirectory = ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath);
             arguments = sc.Arguments;
             if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
@@ -288,8 +286,8 @@ public class ShortcutService(
         return result;
     }
 
-    private bool ManagedShortcutNeedsRepair(ManagedShortcut managedShortcut, string launcherPath)
-        => !ShortcutPathHelper.IsSamePath(managedShortcut.TargetPath, launcherPath);
+    private bool ManagedShortcutNeedsRepair(ShortcutFinder.ManagedShortcut managedShortcut, string launcherPath)
+        => !PathHelper.IsSamePath(managedShortcut.TargetPath, launcherPath);
 
     private bool IsTaskBarPath(string shortcutPath)
     {
@@ -307,31 +305,6 @@ public class ShortcutService(
         {
             return false;
         }
-    }
-
-    private List<string> FindShortcutsForExe(string exePath, ShortcutTraversalCache cache)
-    {
-        var normalized = Path.GetFullPath(exePath);
-        return cache.FindWhere((target, _) =>
-        {
-            if (target == null)
-                return false;
-            try
-            {
-                return string.Equals(Path.GetFullPath(target), normalized, StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
-        });
-    }
-
-    private List<string> FindShortcutsForFolder(string folderPath, ShortcutTraversalCache cache)
-    {
-        var normalizedFolder = Path.GetFullPath(folderPath).TrimEnd(Path.DirectorySeparatorChar);
-        return cache.FindWhere((target, args) =>
-            ShortcutClassificationHelper.IsFolderShortcutTarget(target, args, normalizedFolder));
     }
 
     private ShortcutWriteResult ReplaceShortcut(string shortcutPath, AppEntry app, string launcherPath, string iconPath)
@@ -361,59 +334,5 @@ public class ShortcutService(
                 log.Error($"Failed to replace shortcut: {shortcutPath}", ex);
             }
         }
-    }
-
-    private (Dictionary<string, List<string>> byTarget, Dictionary<string, List<ManagedShortcut>> byLauncherAppId)
-        ScanAllShortcuts(ShortcutTraversalCache cache)
-    {
-        var byTarget = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        var byLauncherAppId = new Dictionary<string, List<ManagedShortcut>>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var entry in cache.Entries)
-        {
-            var lnk = entry.Path;
-            var target = entry.TargetPath;
-            var args = entry.Arguments;
-            if (target == null)
-                continue;
-
-            string normalizedTarget;
-            try { normalizedTarget = Path.GetFullPath(target); }
-            catch { normalizedTarget = target; }
-
-            if (!byTarget.TryGetValue(normalizedTarget, out var targetList))
-            {
-                targetList = [];
-                byTarget[normalizedTarget] = targetList;
-            }
-
-            targetList.Add(lnk);
-
-            if (target.EndsWith(Constants.LauncherExeName, StringComparison.OrdinalIgnoreCase)
-                && !string.IsNullOrEmpty(args))
-            {
-                var spaceIndex = args.IndexOf(' ');
-                var appId = spaceIndex < 0 ? args : args[..spaceIndex];
-
-                if (!byLauncherAppId.TryGetValue(appId, out var idList))
-                {
-                    idList = [];
-                    byLauncherAppId[appId] = idList;
-                }
-
-                idList.Add(new ManagedShortcut(lnk, target, args));
-            }
-        }
-
-        return (byTarget, byLauncherAppId);
-    }
-
-    private List<string> FindShortcutsForLauncher(string appId, ShortcutTraversalCache cache)
-    {
-        return cache.FindWhere((target, args) =>
-            target != null &&
-            target.EndsWith(Constants.LauncherExeName, StringComparison.OrdinalIgnoreCase) &&
-            args != null &&
-            (args == appId || args.StartsWith(appId + " ")));
     }
 }

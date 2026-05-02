@@ -23,61 +23,63 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
             var sidCounts = new Dictionary<string, OrphanedSid>(StringComparer.OrdinalIgnoreCase);
 
             // Privileges (SeBackup/SeRestore/SeTakeOwnership) are enabled once at startup.
-            foreach (var (path, _, security) in traverser.Traverse(rootPaths, new Progress<long>(scanned => onProgress.Report((scanned, sidCounts.Count))), ct))
-            {
-                // Collect SIDs from explicit ACEs
-                var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
-                foreach (FileSystemAccessRule rule in rules)
+            TraverseWithSecurityInfo(rootPaths, new Progress<long>(scanned => onProgress.Report((scanned, sidCounts.Count))), ct,
+                (path, _, security) =>
                 {
-                    if (rule.IdentityReference is SecurityIdentifier sid)
+                    // Collect SIDs from explicit ACEs
+                    var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
+                    foreach (FileSystemAccessRule rule in rules)
                     {
-                        var sidStr = sid.Value;
-                        if (!sidStr.StartsWith("S-1-5-21-", StringComparison.Ordinal))
-                            continue;
-
-                        if (!sidCounts.TryGetValue(sidStr, out var entry))
+                        if (rule.IdentityReference is SecurityIdentifier sid)
                         {
-                            entry = new OrphanedSid { Sid = sidStr };
-                            sidCounts[sidStr] = entry;
-                        }
+                            var sidStr = sid.Value;
+                            if (!sidStr.StartsWith("S-1-5-21-", StringComparison.Ordinal))
+                                continue;
 
-                        if (entry.SamplePaths.Count < OrphanedSid.MaxSamplePaths &&
-                            (entry.SamplePaths.Count == 0 || entry.SamplePaths[^1] != path))
-                            entry.SamplePaths.Add(path);
-                        entry.AceCount++;
-                    }
-                }
-
-                // Collect owner SID
-                try
-                {
-                    var owner = security.GetOwner(typeof(SecurityIdentifier));
-                    if (owner is SecurityIdentifier ownerSid)
-                    {
-                        var ownerStr = ownerSid.Value;
-                        if (ownerStr.StartsWith("S-1-5-21-", StringComparison.Ordinal))
-                        {
-                            if (!sidCounts.TryGetValue(ownerStr, out var entry))
+                            if (!sidCounts.TryGetValue(sidStr, out var entry))
                             {
-                                entry = new OrphanedSid { Sid = ownerStr };
-                                sidCounts[ownerStr] = entry;
+                                entry = new OrphanedSid { Sid = sidStr };
+                                sidCounts[sidStr] = entry;
                             }
 
                             if (entry.SamplePaths.Count < OrphanedSid.MaxSamplePaths &&
                                 (entry.SamplePaths.Count == 0 || entry.SamplePaths[^1] != path))
                                 entry.SamplePaths.Add(path);
-                            entry.OwnerCount++;
+                            entry.AceCount++;
                         }
                     }
-                }
-                catch
-                {
-                } // skip unreadable ACL entries
-            }
+
+                    // Collect owner SID
+                    try
+                    {
+                        var owner = security.GetOwner(typeof(SecurityIdentifier));
+                        if (owner is SecurityIdentifier ownerSid)
+                        {
+                            var ownerStr = ownerSid.Value;
+                            if (ownerStr.StartsWith("S-1-5-21-", StringComparison.Ordinal))
+                            {
+                                if (!sidCounts.TryGetValue(ownerStr, out var entry))
+                                {
+                                    entry = new OrphanedSid { Sid = ownerStr };
+                                    sidCounts[ownerStr] = entry;
+                                }
+
+                                if (entry.SamplePaths.Count < OrphanedSid.MaxSamplePaths &&
+                                    (entry.SamplePaths.Count == 0 || entry.SamplePaths[^1] != path))
+                                    entry.SamplePaths.Add(path);
+                                entry.OwnerCount++;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                    } // skip unreadable ACL entries
+                });
 
             // Resolve each unique SID — filter to orphaned only
             var failedDomainPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var orphanedList = new List<OrphanedSid>();
+            int orphanedTaskCount = 0;
 
             foreach (var (sidStr, orphanedSid) in sidCounts)
             {
@@ -109,7 +111,11 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                     {
                         isOrphaned = true;
                         if (!completed)
+                        {
+                            log.Warn($"SidAclScanService: SID resolution timed out for {sidStr} (domain prefix {domainPrefix}); treating as orphaned.");
                             failedDomainPrefixes.Add(domainPrefix);
+                            orphanedTaskCount++;
+                        }
                     }
                     else
                     {
@@ -121,28 +127,29 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                     orphanedList.Add(orphanedSid);
             }
 
+            if (orphanedTaskCount > 0)
+                log.Warn($"SidAclScanService: {orphanedTaskCount} SID resolution task(s) timed out and were left running in the background. Affected domain prefix(es): {string.Join(", ", failedDomainPrefixes)}");
+
             return orphanedList;
         }, ct);
     }
 
-    // Note: DiscoverOrphanedSidsAsync and ScanAsync share a similar structural pattern
-    // (traverse ACLs, accumulate per-SID counts/matches, report progress). Extraction into
-    // a shared helper is not practical because the accumulators differ in type and semantics:
-    // DiscoverOrphanedSids builds OrphanedSid objects with sample paths + resolution; ScanAsync
-    // builds SidMigrationMatch objects with per-SID ACE counts and owner SIDs.
     public async Task<List<SidMigrationMatch>> ScanAsync(
         IReadOnlyList<string> rootPaths,
         IReadOnlyList<SidMigrationMapping> mappings,
+        IReadOnlyList<string> sidsToDelete,
         IProgress<(long scanned, long found)> onProgress,
         CancellationToken ct)
     {
-        var oldSids = new HashSet<string>(mappings.Select(m => m.OldSid), StringComparer.OrdinalIgnoreCase);
-        var oldSidObjects = new HashSet<SecurityIdentifier>();
-        foreach (var s in oldSids)
+        var migrateSids = new HashSet<string>(mappings.Select(m => m.OldSid), StringComparer.OrdinalIgnoreCase);
+        var aceSids = new HashSet<string>(migrateSids, StringComparer.OrdinalIgnoreCase);
+        aceSids.UnionWith(sidsToDelete);
+        var aceSidObjects = new HashSet<SecurityIdentifier>();
+        foreach (var s in aceSids)
         {
             try
             {
-                oldSidObjects.Add(new SecurityIdentifier(s));
+                aceSidObjects.Add(new SecurityIdentifier(s));
             }
             catch
             {
@@ -155,49 +162,50 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
             long foundCount = 0;
 
             // Privileges (SeBackup/SeRestore/SeTakeOwnership) are enabled once at startup.
-            foreach (var (path, isDirectory, security) in traverser.Traverse(rootPaths, new Progress<long>(scanned => onProgress.Report((scanned, foundCount))), ct))
-            {
-                var aceCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                string? ownerOldSid = null;
-                var matchType = SidMigrationMatchType.None;
-
-                var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
-                foreach (FileSystemAccessRule rule in rules)
+            TraverseWithSecurityInfo(rootPaths, new Progress<long>(scanned => onProgress.Report((scanned, foundCount))), ct,
+                (path, isDirectory, security) =>
                 {
-                    if (rule.IdentityReference is SecurityIdentifier sid && oldSidObjects.Contains(sid))
+                    var aceCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    string? ownerOldSid = null;
+                    var matchType = SidMigrationMatchType.None;
+
+                    var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
+                    foreach (FileSystemAccessRule rule in rules)
                     {
-                        matchType |= SidMigrationMatchType.Ace;
-                        aceCounts.TryGetValue(sid.Value, out var count);
-                        aceCounts[sid.Value] = count + 1;
+                        if (rule.IdentityReference is SecurityIdentifier sid && aceSidObjects.Contains(sid))
+                        {
+                            matchType |= SidMigrationMatchType.Ace;
+                            aceCounts.TryGetValue(sid.Value, out var count);
+                            aceCounts[sid.Value] = count + 1;
+                        }
                     }
-                }
 
-                try
-                {
-                    var owner = security.GetOwner(typeof(SecurityIdentifier));
-                    if (owner is SecurityIdentifier ownerSid && oldSids.Contains(ownerSid.Value))
+                    try
                     {
-                        matchType |= SidMigrationMatchType.Owner;
-                        ownerOldSid = ownerSid.Value;
+                        var owner = security.GetOwner(typeof(SecurityIdentifier));
+                        if (owner is SecurityIdentifier ownerSid && migrateSids.Contains(ownerSid.Value))
+                        {
+                            matchType |= SidMigrationMatchType.Owner;
+                            ownerOldSid = ownerSid.Value;
+                        }
                     }
-                }
-                catch
-                {
-                }
-
-                if (matchType != SidMigrationMatchType.None)
-                {
-                    matches.Add(new SidMigrationMatch
+                    catch
                     {
-                        Path = path,
-                        IsDirectory = isDirectory,
-                        MatchType = matchType,
-                        AceCountByOldSid = aceCounts,
-                        OwnerOldSid = ownerOldSid
-                    });
-                    foundCount++;
-                }
-            }
+                    }
+
+                    if (matchType != SidMigrationMatchType.None)
+                    {
+                        matches.Add(new SidMigrationMatch
+                        {
+                            Path = path,
+                            IsDirectory = isDirectory,
+                            MatchType = matchType,
+                            AceCountByOldSid = aceCounts,
+                            OwnerOldSid = ownerOldSid
+                        });
+                        foundCount++;
+                    }
+                });
 
             return matches;
         }, ct);
@@ -206,12 +214,14 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
     public async Task<(long applied, long errors)> ApplyAsync(
         IReadOnlyList<SidMigrationMatch> hits,
         IReadOnlyList<SidMigrationMapping> mappings,
+        IReadOnlyList<string> sidsToDelete,
         IProgress<MigrationProgress> onProgress,
         CancellationToken ct)
     {
         var sidMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var m in mappings)
             sidMap[m.OldSid] = m.NewSid;
+        var deleteSids = new HashSet<string>(sidsToDelete, StringComparer.OrdinalIgnoreCase);
 
         return await Task.Run(() =>
         {
@@ -246,10 +256,13 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                     {
                         var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
                         var replacements = new List<(FileSystemAccessRule old, FileSystemAccessRule replacement)>();
+                        var removals = new List<FileSystemAccessRule>();
                         foreach (FileSystemAccessRule rule in rules)
                         {
-                            if (rule.IdentityReference is SecurityIdentifier oldSid &&
-                                sidMap.TryGetValue(oldSid.Value, out var newSidStr))
+                            if (rule.IdentityReference is not SecurityIdentifier oldSid)
+                                continue;
+
+                            if (sidMap.TryGetValue(oldSid.Value, out var newSidStr))
                             {
                                 var newSid = new SecurityIdentifier(newSidStr);
                                 replacements.Add((rule, new FileSystemAccessRule(
@@ -257,7 +270,14 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                                     rule.InheritanceFlags, rule.PropagationFlags,
                                     rule.AccessControlType)));
                             }
+                            else if (deleteSids.Contains(oldSid.Value))
+                            {
+                                removals.Add(rule);
+                            }
                         }
+
+                        foreach (var removal in removals)
+                            security.RemoveAccessRuleSpecific(removal);
 
                         foreach (var (old, replacement) in replacements)
                         {
@@ -290,5 +310,15 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
 
             return (applied, errors);
         }, ct);
+    }
+
+    private void TraverseWithSecurityInfo(
+        IReadOnlyList<string> rootPaths,
+        IProgress<long> progress,
+        CancellationToken ct,
+        Action<string, bool, FileSystemSecurity> process)
+    {
+        foreach (var (path, isFolder, security) in traverser.Traverse(rootPaths, progress, ct))
+            process(path, isFolder, security);
     }
 }

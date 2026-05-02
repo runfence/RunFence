@@ -13,29 +13,33 @@ public class DefaultBrowserManager(
     IDatabaseProvider databaseProvider,
     IHandlerMappingService handlerMappingService,
     IAppHandlerRegistrationService handlerRegistrationService,
-    ShellHelper shellHelper,
+    IShellHelper shellHelper,
     ILoggingService log)
 {
     /// <summary>
     /// Toggles the default browser registration for <paramref name="app"/>:
     /// removes all four browser handler keys if the app is already the default, or registers
     /// them (and opens Default Apps settings) if it is not.
+    /// Returns a registration message to show the user when registering as default browser,
+    /// or null when unregistering.
     /// </summary>
-    public void SetDefaultBrowser(AppEntry app)
+    public string? SetDefaultBrowser(AppEntry app)
     {
         var database = databaseProvider.GetDatabase();
         var allMappings = handlerMappingService.GetAllHandlerMappings(database);
 
-        if (AppEntryHelper.IsDefaultBrowser(app.Id, allMappings))
+        if (handlerMappingService.IsDefaultBrowser(app.Id, allMappings))
         {
             foreach (var key in AppEntryHelper.BrowserKeys)
                 handlerMappingService.RemoveHandlerMapping(key, app.Id, database);
             var updatedEffective = handlerMappingService.GetEffectiveHandlerMappings(database);
             handlerRegistrationService.Sync(updatedEffective, database.Apps);
+            return null;
         }
         else
         {
             if (!app.AllowPassingArguments)
+                // By design: browser handler requires argument passing for URL forwarding
                 app.AllowPassingArguments = true;
 
             foreach (var key in AppEntryHelper.BrowserKeys)
@@ -48,10 +52,6 @@ public class DefaultBrowserManager(
             // AssociationAutoSetService.GetEffectiveAutoSetMappings for all DefaultAppsOnly keys.
             handlerRegistrationService.Sync(updatedEffective, database.Apps);
 
-            MessageBox.Show(
-                $"Registered as \"{Constants.HandlerRegisteredAppName}\".\n\n" +
-                "The Default Apps settings will now open. Find \"RunFence\" in the browser list and set it as default.",
-                "Default Browser", MessageBoxButtons.OK, MessageBoxIcon.Information);
             try
             {
                 shellHelper.OpenDefaultAppsSettings();
@@ -60,6 +60,9 @@ public class DefaultBrowserManager(
             {
                 log.Warn($"Failed to open Default Apps settings: {ex.Message}");
             }
+
+            return $"Registered as \"{PathConstants.HandlerRegisteredAppName}\".\n\n" +
+                   "The Default Apps settings will now open. Find \"RunFence\" in the browser list and set it as default.";
         }
     }
 }

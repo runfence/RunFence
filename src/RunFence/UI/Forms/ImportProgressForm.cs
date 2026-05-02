@@ -8,10 +8,7 @@ public partial class ImportProgressForm : Form
         _logTextBox.Font = new Font("Consolas", 9f);
         _okButton.Click += (_, _) => Close();
         FormClosed += (_, _) => Dispose();
-        if (owner != null)
-            Show(owner);
-        else
-            Show();
+        Owner = owner as Form;
     }
 
     public void AppendLog(string text)

@@ -13,7 +13,7 @@ public class DragBridgeCopyFlow(
     INotificationService notifications,
     ILoggingService log,
     ICapturedFileStore capturedFileStore,
-    int pipeConnectTimeoutMs = Constants.DragBridgePipeConnectTimeoutMs)
+    int pipeConnectTimeoutMs = IpcConstants.DragBridgePipeConnectTimeoutMs)
 {
     /// <summary>
     /// Returns the captured file paths and source SID, expiring after 5 minutes.
@@ -80,7 +80,10 @@ public class DragBridgeCopyFlow(
         WindowOwnerInfo ownerInfo, Point cursorPos, nint restoreHwnd, CancellationToken ct)
     {
         var pipeName = $"RunFence-DragBridge-{Guid.NewGuid():N}";
-        var pipeServer = processLauncher.CreatePipeServer(pipeName, ownerInfo.Sid);
+        var pipeServer = processLauncher.CreatePipeServer(
+            pipeName,
+            ownerInfo.Sid,
+            allowLowIntegrityClient: DragBridgeLaunchPolicy.RequiresLowIntegrityPipe(ownerInfo));
         bool success = false;
         try
         {

@@ -5,6 +5,7 @@ using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 using Xunit;
 
@@ -22,17 +23,21 @@ public class AclServiceTests
     public AclServiceTests()
     {
         _log = new Mock<ILoggingService>();
-        _localUserProvider = new CachingLocalUserProvider(_log.Object);
+        _localUserProvider = new CachingLocalUserProvider(_log.Object, new LocalSamSidResolver(_log.Object));
         _service = CreateService(_log.Object, _localUserProvider);
     }
 
     private static AclService CreateService(ILoggingService log, CachingLocalUserProvider localUserProvider,
-        IDatabaseProvider? databaseProvider = null)
+        IDatabaseProvider? databaseProvider = null,
+        Mock<IPathGrantService>? pathGrantService = null)
     {
         var resolvedDatabaseProvider = databaseProvider ?? new LambdaDatabaseProvider(() => new AppDatabase());
-        var denyService = new AclDenyModeService(log, localUserProvider, resolvedDatabaseProvider, new Mock<IInteractiveUserResolver>().Object);
-        var allowService = new AclAllowModeService(log, localUserProvider);
-        return new AclService(log, denyService, allowService, resolvedDatabaseProvider);
+        var containerLookup = new ContainerLookupHelper(resolvedDatabaseProvider);
+        var aclAccessor = new AclAccessor();
+        var denyService = new AclDenyModeService(log, localUserProvider, containerLookup, new Mock<IInteractiveUserResolver>().Object, aclAccessor);
+        var allowService = new AclAllowModeService(log, localUserProvider, aclAccessor);
+        pathGrantService ??= new Mock<IPathGrantService>();
+        return new AclService(log, denyService, allowService, containerLookup, pathGrantService.Object);
     }
 
     private static AppEntry CreateApp(string id, string name, string exePath,
@@ -52,7 +57,7 @@ public class AclServiceTests
     [Fact]
     public void IsBlockedPath_DynamicBlockedPaths_ReturnsTrue()
     {
-        var blockedPaths = Constants.GetBlockedAclPaths();
+        var blockedPaths = PathConstants.GetBlockedAclPaths();
         foreach (var path in blockedPaths)
         {
             Assert.True(_service.IsBlockedPath(path), $"Expected '{path}' to be blocked.");
@@ -108,7 +113,7 @@ public class AclServiceTests
     [Fact]
     public void ResolveAclTargetPath_FolderTarget_MaxDepth_DoesNotExceedRoot()
     {
-        var app = CreateApp("t0001", "Test", @"C:\test.exe", AclTarget.Folder, folderAclDepth: Constants.MaxFolderAclDepth);
+        var app = CreateApp("t0001", "Test", @"C:\test.exe", AclTarget.Folder, folderAclDepth: PathConstants.MaxFolderAclDepth);
         var result = _service.ResolveAclTargetPath(app);
         Assert.True(Path.IsPathRooted(result));
     }
@@ -117,7 +122,7 @@ public class AclServiceTests
     public void ResolveAclTargetPath_FolderTarget_DepthExceedsMax_IsClamped()
     {
         var app = CreateApp("t0001", "Test", @"C:\A\B\C\D\E\F\test.exe", AclTarget.Folder, folderAclDepth: 100);
-        var clampedApp = CreateApp("t0002", "Clamped", @"C:\A\B\C\D\E\F\test.exe", AclTarget.Folder, folderAclDepth: Constants.MaxFolderAclDepth);
+        var clampedApp = CreateApp("t0002", "Clamped", @"C:\A\B\C\D\E\F\test.exe", AclTarget.Folder, folderAclDepth: PathConstants.MaxFolderAclDepth);
 
         var result = _service.ResolveAclTargetPath(app);
         var clampedResult = _service.ResolveAclTargetPath(clampedApp);
@@ -128,7 +133,7 @@ public class AclServiceTests
     [Fact]
     public void GetBlockedAclPaths_ReturnsNonEmptyArray()
     {
-        var paths = Constants.GetBlockedAclPaths();
+        var paths = PathConstants.GetBlockedAclPaths();
         Assert.NotEmpty(paths);
     }
 
@@ -294,7 +299,6 @@ public class AclServiceTests
     [Fact]
     public void GetAllowedSidsForPath_RevertedAppExcluded_DifferentCredentials()
     {
-        var app1 = CreateApp("a0001", "App1", @"C:\Apps\tool.exe", accountSid: Sid1);
         var app2 = CreateApp("a0002", "App2", @"C:\Apps\tool.exe", accountSid: Sid2);
 
         var remainingApps = new List<AppEntry> { app2 };
@@ -410,35 +414,6 @@ public class AclServiceTests
         _service.ApplyAcl(app, allApps);
 
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Applied ACL"))), Times.Never);
-    }
-
-    // --- Local user cache tests ---
-
-    [Fact]
-    public void GetLocalUserAccounts_ReturnsCachedInstance_WithinTtl()
-    {
-        // Arrange & Act
-        var first = _localUserProvider.GetLocalUserAccounts();
-        var second = _localUserProvider.GetLocalUserAccounts();
-
-        // Assert — same cached instance returned; callers treat result as read-only
-        Assert.Same(first, second);
-    }
-
-    [Fact]
-    public void InvalidateCache_CausesRefresh()
-    {
-        // Arrange
-        var first = _localUserProvider.GetLocalUserAccounts();
-        int originalCount = first.Count;
-
-        // Act
-        _localUserProvider.InvalidateCache();
-        var second = _localUserProvider.GetLocalUserAccounts();
-
-        // Assert — re-enumeration produces the same user data (not a stale copy)
-        Assert.Equal(originalCount, second.Count);
-        Assert.Equal(first, second);
     }
 
     // --- Allow mode routing tests ---
@@ -628,13 +603,24 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var service = CreateService(_log.Object, _localUserProvider, new LambdaDatabaseProvider(() => db));
+        var pathGrantService = new Mock<IPathGrantService>();
+        var service = CreateService(
+            _log.Object,
+            _localUserProvider,
+            new LambdaDatabaseProvider(() => db),
+            pathGrantService);
         var app = CreateApp("c0001", "BrowserApp", exePath, accountSid: "",
             aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
 
         service.ApplyAcl(app, new List<AppEntry> { app });
 
+        pathGrantService.Verify(p => p.EnsureAccess(
+            containerSid,
+            exePath,
+            FileSystemRights.ReadAndExecute,
+            null,
+            false), Times.Once);
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Granted") && s.Contains(containerSid))), Times.Once);
     }
 
@@ -649,7 +635,12 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var service = CreateService(_log.Object, _localUserProvider, new LambdaDatabaseProvider(() => db));
+        var pathGrantService = new Mock<IPathGrantService>();
+        var service = CreateService(
+            _log.Object,
+            _localUserProvider,
+            new LambdaDatabaseProvider(() => db),
+            pathGrantService);
         var app = CreateApp("c0001", "BrowserApp", exePath,
             accountSid: Sid1, aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
@@ -658,6 +649,11 @@ public class AclServiceTests
         service.ApplyAcl(app, new List<AppEntry> { app });
         service.RevertAcl(app, new List<AppEntry> { app });
 
+        pathGrantService.Verify(p => p.RemoveGrant(
+            containerSid,
+            exePath,
+            false,
+            true), Times.Once);
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Revoked") && s.Contains(containerSid))), Times.Once);
     }
 
@@ -685,10 +681,13 @@ public class AclServiceTests
         var interactiveResolver = new Mock<IInteractiveUserResolver>();
         interactiveResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
 
+        var containerLookup = new ContainerLookupHelper(new LambdaDatabaseProvider(() => new AppDatabase()));
+        var aclAccessor = new AclAccessor();
         var denyService = new AclDenyModeService(_log.Object, _localUserProvider,
-            new LambdaDatabaseProvider(() => new AppDatabase()), interactiveResolver.Object);
-        var service = new AclService(_log.Object, denyService, new AclAllowModeService(_log.Object, _localUserProvider),
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            containerLookup, interactiveResolver.Object, aclAccessor);
+        var service = new AclService(_log.Object, denyService, new AclAllowModeService(_log.Object, _localUserProvider, aclAccessor),
+            new ContainerLookupHelper(new LambdaDatabaseProvider(() => new AppDatabase())),
+            new Mock<IPathGrantService>().Object);
 
         var app = CreateApp("c0001", "ContainerApp", @"C:\Apps\tool.exe", accountSid: "", aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";

@@ -22,7 +22,7 @@ public class DragBridgePasteHandlerTests : IDisposable
     private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
     private readonly Mock<IPathGrantService> _pathGrantService = new();
-    private readonly SidDisplayNameResolver _displayNameResolver = new(new Mock<ISidResolver>().Object);
+    private readonly SidDisplayNameResolver _displayNameResolver = new(new Mock<ISidResolver>().Object, new Mock<IProfilePathResolver>().Object);
 
     private readonly List<string> _tempFiles = new();
     private readonly List<string> _tempDirs = new();
@@ -52,7 +52,8 @@ public class DragBridgePasteHandlerTests : IDisposable
         _uiThreadInvoker.Object,
         _aclPermission.Object,
         _pathGrantService.Object,
-        _displayNameResolver);
+        _displayNameResolver,
+        new DragBridgeChoiceCache());
 
     private string CreateTempFile()
     {
@@ -185,7 +186,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         // Arrange: a file inside a dir; user chooses GrantFolderAccess
         var dir = CreateTempDir();
         var file = Path.Combine(dir, "test.txt");
-        File.WriteAllText(file, "data");
+        await File.WriteAllTextAsync(file, "data");
         _tempFiles.Add(file);
 
         _aclPermission.Setup(a => a.NeedsPermissionGrant(file, SourceSid, FileSystemRights.Read))
@@ -245,7 +246,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         // Arrange: GrantFolderAccess is NOT remembered — second call prompts again
         var dir = CreateTempDir();
         var file = Path.Combine(dir, "test.txt");
-        File.WriteAllText(file, "data");
+        await File.WriteAllTextAsync(file, "data");
         _tempFiles.Add(file);
 
         _aclPermission.Setup(a => a.NeedsPermissionGrant(file, SourceSid, FileSystemRights.Read))
@@ -420,7 +421,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         var handler = CreateHandler();
 
         var cts = new CancellationTokenSource();
-        cts.Cancel();
+        await cts.CancelAsync();
 
         // Act
         var (result, _, granted) = await handler.ResolveFileAccessAsync(

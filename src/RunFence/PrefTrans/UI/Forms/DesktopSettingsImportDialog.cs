@@ -16,13 +16,13 @@ public static class DesktopSettingsImportDialog
         dlg.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*";
         dlg.DefaultExt = "json";
         dlg.FileName = "settings.json";
-        dlg.InitialDirectory = Constants.ProgramDataDir;
+        dlg.InitialDirectory = PathConstants.ProgramDataDir;
 
         if (!string.IsNullOrEmpty(lastPrefsFilePath))
         {
             try
             {
-                dlg.InitialDirectory = Path.GetDirectoryName(lastPrefsFilePath) ?? Constants.ProgramDataDir;
+                dlg.InitialDirectory = Path.GetDirectoryName(lastPrefsFilePath) ?? PathConstants.ProgramDataDir;
                 dlg.FileName = Path.GetFileName(lastPrefsFilePath);
             }
             catch

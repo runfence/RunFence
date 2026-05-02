@@ -7,7 +7,7 @@ namespace RunFence.Account.UI;
 /// in the accounts grid, including the toggle glyph, tree lines, cell suppression,
 /// and per-process icon + text rendering.
 /// </summary>
-public class AccountProcessRowPainter(AccountGridProcessExpander expander)
+public class AccountProcessRowPainter(AccountGridProcessExpander expander, IShortcutIconHelper iconHelper)
 {
     private DataGridView _grid = null!;
     private IGridSortState _sortState = null!;
@@ -16,6 +16,7 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander)
     // null = not loaded, _iconLoadingPlaceholder = loading in progress, any other Image = ready
     private static readonly Image _iconLoadingPlaceholder = new Bitmap(1, 1);
     private readonly Dictionary<string, Image?> _processIconCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, List<DataGridViewRow>> _pathToRows = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Clears the process icon cache to release GDI resources. Called on full grid refresh so
@@ -29,6 +30,7 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander)
                 img.Dispose();
         }
         _processIconCache.Clear();
+        _pathToRows.Clear();
     }
 
     public void Initialize(DataGridView grid, IGridSortState sortState, bool hasProcessService)
@@ -73,6 +75,14 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander)
         var exePath = processRow.Process.ExecutablePath;
         if (exePath != null)
         {
+            if (!_pathToRows.TryGetValue(exePath, out var rowList))
+            {
+                rowList = new List<DataGridViewRow>();
+                _pathToRows[exePath] = rowList;
+            }
+            if (!rowList.Contains(row))
+                rowList.Add(row);
+
             if (!_processIconCache.TryGetValue(exePath, out var icon))
             {
                 _processIconCache[exePath] = _iconLoadingPlaceholder;
@@ -80,16 +90,18 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander)
                 // Task.Run without cancellation is intentional: icon extraction is fast and short-lived.
                 // Cancelling mid-extraction would leave the cache slot in an indeterminate state.
                 // The grid disposal check in ContinueWith prevents UI access after the grid is closed.
-                Task.Run(() => ShortcutIconHelper.ExtractIcon(capturedPath, iconSize)).ContinueWith(t =>
+                Task.Run(() => iconHelper.ExtractIcon(capturedPath, iconSize)).ContinueWith(t =>
                 {
                     _processIconCache[capturedPath] = t.IsFaulted ? null : t.Result;
                     if (_grid.IsDisposed)
                         return;
-                    foreach (DataGridViewRow r in _grid.Rows)
+                    if (_pathToRows.TryGetValue(capturedPath, out var rows))
                     {
-                        if (r.Tag is ProcessRow { Process.ExecutablePath: not null } pr &&
-                            string.Equals(pr.Process.ExecutablePath, capturedPath, StringComparison.OrdinalIgnoreCase))
-                            _grid.InvalidateRow(r.Index);
+                        foreach (var r in rows)
+                        {
+                            if (r.Index >= 0 && !r.IsNewRow)
+                                _grid.InvalidateRow(r.Index);
+                        }
                     }
                 }, TaskScheduler.FromCurrentSynchronizationContext());
             }

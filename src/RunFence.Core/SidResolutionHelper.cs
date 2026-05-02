@@ -38,11 +38,28 @@ public static class SidResolutionHelper
            string.Equals(sid, _interactiveUserSid, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Returns true if the given SID is the Windows SYSTEM account (S-1-5-18).
+    /// Safe to call with null — returns false.
+    /// </summary>
+    public static bool IsSystemSid(string? sid)
+        => string.Equals(sid, SidConstants.SystemSid, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Returns true if the given SID can launch apps without a stored password:
-    /// either the current account, or the interactive user (explorer token).
+    /// the current account, the interactive user (explorer token), or the SYSTEM account.
     /// </summary>
     public static bool CanLaunchWithoutPassword(string? sid)
-        => string.Equals(sid, CurrentUserSid, StringComparison.OrdinalIgnoreCase) || IsInteractiveUserSid(sid);
+        => string.Equals(sid, CurrentUserSid, StringComparison.OrdinalIgnoreCase)
+           || IsInteractiveUserSid(sid)
+           || IsSystemSid(sid);
+
+    /// <summary>
+    /// Returns true if RunFence must use Job Object tracking to distinguish its own launched processes
+    /// from unrelated processes running under the same SID (SYSTEM and interactive user both have many
+    /// independent processes that are not RunFence-owned).
+    /// Safe to call with null — returns false.
+    /// </summary>
+    public static bool NeedsProcessJobTracking(string? sid) => IsSystemSid(sid) || IsInteractiveUserSid(sid);
 
     /// <summary>
     /// Returns true when the interactive desktop user is the same account as the current elevated process.

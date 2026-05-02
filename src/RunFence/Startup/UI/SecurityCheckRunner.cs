@@ -1,6 +1,5 @@
 using RunFence.Core;
 using RunFence.Infrastructure;
-using RunFence.Startup;
 using RunFence.Startup.UI.Forms;
 
 namespace RunFence.Startup.UI;

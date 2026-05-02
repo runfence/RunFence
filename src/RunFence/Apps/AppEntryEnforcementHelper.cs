@@ -19,6 +19,7 @@ public class AppEntryEnforcementHelper(
     IIconService iconService,
     ISidNameCacheService sidNameCache,
     IInteractiveUserDesktopProvider desktopProvider,
+    IInteractiveUserSidResolver interactiveUserSidResolver,
     ILoggingService log)
 {
     /// <summary>
@@ -47,7 +48,7 @@ public class AppEntryEnforcementHelper(
         else if (app.IsFolder)
             app.LastKnownExeTimestamp = null;
 
-        var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+        var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         if (app.ManageShortcuts && File.Exists(launcherPath))
             shortcutService.ReplaceShortcuts(app, launcherPath, iconPath, shortcutCache);
 
@@ -55,9 +56,9 @@ public class AppEntryEnforcementHelper(
         {
             // For AppContainer apps, the container runs under the interactive user
             var effectiveSid = app.AppContainerName != null
-                ? NativeTokenHelper.TryGetInteractiveUserSid()?.Value
+                ? interactiveUserSidResolver.GetInteractiveUserSid()
                 : app.AccountSid;
-            if (effectiveSid != null)
+            if (!string.IsNullOrEmpty(effectiveSid))
             {
                 var username = sidNameCache.GetDisplayName(effectiveSid);
                 // Only create the shortcut when a real name was resolved (not just the raw SID)
@@ -68,7 +69,7 @@ public class AppEntryEnforcementHelper(
             {
                 // Beside-target shortcut skipped because the interactive user (explorer.exe) is not
                 // running. The shortcut will be created on the next enforcement cycle.
-                log.Warn($"AppEntryEnforcementHelper: interactive user not available, skipping beside-target shortcut for {app.Name}");
+                log.Warn($"AppEntryEnforcementHelper: interactive user SID unavailable; skipping AppContainer beside-target shortcut for '{app.Name}'.");
             }
         }
     }

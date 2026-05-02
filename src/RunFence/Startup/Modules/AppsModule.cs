@@ -1,6 +1,8 @@
 using Autofac;
 using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
+using RunFence.Apps.UI.Forms;
+using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
 
@@ -16,13 +18,19 @@ public class AppsModule : Module
 
         builder.RegisterType<InteractiveUserAssociationReader>().As<IInteractiveUserAssociationReader>().InstancePerDependency();
         builder.RegisterType<ContextMenuService>().As<IContextMenuService>().SingleInstance();
+        builder.RegisterType<ShortcutOperationRunner>().As<IShortcutOperationRunner>().SingleInstance();
+        builder.RegisterType<AutoStartShortcutStore>().As<IAutoStartShortcutStore>().SingleInstance();
         builder.RegisterType<AutoStartService>().As<IAutoStartService>().SingleInstance();
+        builder.RegisterType<ShortcutIconHelper>().As<IShortcutIconHelper>().SingleInstance();
         builder.RegisterType<ShortcutComHelper>().As<IShortcutComHelper>().SingleInstance();
         builder.RegisterType<ShortcutProtectionService>().As<IShortcutProtectionService>().SingleInstance();
         builder.RegisterType<BesideTargetShortcutService>().As<IBesideTargetShortcutService>().SingleInstance();
         builder.RegisterType<ShortcutTraversalScanner>().As<IShortcutTraversalScanner>().SingleInstance();
         builder.RegisterType<ShortcutDiscoveryService>().As<IShortcutDiscoveryService>().SingleInstance();
+        builder.RegisterType<ShortcutFinder>().AsSelf().SingleInstance();
         builder.RegisterType<ShortcutService>().As<IShortcutService>().SingleInstance();
-        builder.RegisterType<IconService>().As<IIconService>().SingleInstance();
+        builder.RegisterType<IconService>().As<IIconService>().SingleInstance()
+            .WithParameter(new NamedParameter("iconDir", PathConstants.ProgramDataIconDir));
+        builder.RegisterType<HandlerAssociationsSection>().AsSelf().InstancePerDependency();
     }
 }

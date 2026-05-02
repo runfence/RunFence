@@ -122,7 +122,7 @@ public class OrphanedProfileService(
         var entries = new List<(string, string)>();
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(Constants.ProfileListRegistryKey);
+            using var key = Registry.LocalMachine.OpenSubKey(PathConstants.ProfileListRegistryKey);
             if (key == null)
                 return entries;
 
@@ -225,7 +225,7 @@ public class OrphanedProfileService(
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(Constants.ProfileListRegistryKey, writable: true);
+            using var key = Registry.LocalMachine.OpenSubKey(PathConstants.ProfileListRegistryKey, writable: true);
             if (key == null)
                 return;
             key.DeleteSubKeyTree(sid, throwOnMissingSubKey: false);

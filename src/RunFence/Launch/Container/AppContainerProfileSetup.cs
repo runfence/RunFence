@@ -9,7 +9,7 @@ namespace RunFence.Launch.Container;
 /// Handles AppContainer profile creation and token virtualization setup.
 /// All methods are best-effort and log warnings on failure.
 /// </summary>
-public class AppContainerProfileSetup(ILoggingService log, IAppContainerEnvironmentSetup environmentSetup)
+public class AppContainerProfileSetup(ILoggingService log, IAppContainerEnvironmentSetup environmentSetup) : IAppContainerProfileSetup
 {
     /// <summary>
     /// Creates the AppContainer profile under the interactive user's HKCU by impersonating

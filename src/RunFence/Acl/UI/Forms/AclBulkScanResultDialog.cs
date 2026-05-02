@@ -1,6 +1,5 @@
 using RunFence.Account;
 using RunFence.Apps.UI;
-using RunFence.UI.Forms;
 
 namespace RunFence.Acl.UI.Forms;
 
@@ -25,8 +24,6 @@ public partial class AclBulkScanResultDialog : Form
         _results = results;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
-        DataPanel.ConfigureReadOnlyGrid(_grid);
-        _grid.ReadOnly = false;
         PopulateGrid(sidNameCache);
     }
 
@@ -44,7 +41,7 @@ public partial class AclBulkScanResultDialog : Form
 
     private void OnGridCellContentClick(object? sender, DataGridViewCellEventArgs e)
     {
-        if (e.RowIndex >= 0 && e.ColumnIndex == _grid.Columns["Select"]?.Index)
+        if (e.RowIndex >= 0 && e.ColumnIndex == _grid.Columns["colSelect"]?.Index)
             _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
     }
 
@@ -56,7 +53,7 @@ public partial class AclBulkScanResultDialog : Form
         foreach (DataGridViewRow row in _grid.Rows)
         {
             if (row.Tag is string sid &&
-                row.Cells["Select"].Value is true &&
+                row.Cells["colSelect"].Value is true &&
                 _results.TryGetValue(sid, out var result))
             {
                 SelectedResults[sid] = result;

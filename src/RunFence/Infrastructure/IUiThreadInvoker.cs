@@ -24,11 +24,4 @@ public interface IUiThreadInvoker
     }
 
     void BeginInvoke(Action action);
-
-    /// <summary>
-    /// Runs <paramref name="action"/> on the UI thread. Executes directly if already on the
-    /// UI thread; probes responsiveness from a background thread and uses blocking
-    /// <see cref="Invoke{T}"/> if the UI is pumping, or <see cref="BeginInvoke"/> if it is blocked.
-    /// </summary>
-    void RunOnUiThread(Action action);
 }

@@ -10,10 +10,6 @@ public class LicensingModule : Module
 {
     protected override void Load(ContainerBuilder builder)
     {
-        builder.RegisterType<MachineIdProvider>()
-            .As<IMachineIdProvider>()
-            .SingleInstance();
-
         builder.RegisterType<LicenseValidator>()
             .UsingConstructor()
             .AsSelf()

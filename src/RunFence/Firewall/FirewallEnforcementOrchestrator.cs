@@ -7,7 +7,7 @@ public class FirewallEnforcementOrchestrator(
     ILoggingService log,
     FirewallResolvedDomainCache domainCache,
     FirewallEnforcementRetryState retryState,
-    FirewallAccountRuleApplier accountRuleApplier,
+    IFirewallAccountRuleApplier accountRuleApplier,
     IFirewallCleanupService cleanupService,
     IGlobalIcmpPendingDomainProcessor globalIcmpPendingDomainProcessor,
     IGlobalIcmpEnforcementTrigger globalIcmpEnforcementTrigger)

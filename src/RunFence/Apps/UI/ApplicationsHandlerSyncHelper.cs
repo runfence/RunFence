@@ -29,12 +29,18 @@ public class ApplicationsHandlerSyncHelper(
     }
 
     /// <summary>
+    /// Returns true when <paramref name="appId"/> has all four browser handler keys registered.
+    /// </summary>
+    public bool IsDefaultBrowser(string appId)
+        => handlerMappingService.IsDefaultBrowser(appId, GetAllMappings());
+
+    /// <summary>
     /// Opens the handler associations management dialog.
     /// </summary>
     public void OpenAssociationsDialog(IWin32Window owner, Action saveDatabase)
     {
         var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-        var interactiveUsername = interactiveSid != null ? sidNameCache.GetDisplayName(interactiveSid) ?? "User" : "User";
+        var interactiveUsername = interactiveSid != null ? sidNameCache.GetDisplayName(interactiveSid) : "User";
 
         using var dlg = handlerMappingsDialogFactory();
         dlg.Initialize(() => databaseProvider.GetDatabase(), saveDatabase, interactiveUsername);

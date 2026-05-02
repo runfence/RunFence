@@ -2,7 +2,6 @@ using Moq;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
-using RunFence.Launch.Container;
 using Xunit;
 
 namespace RunFence.Tests;

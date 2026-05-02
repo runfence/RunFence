@@ -72,4 +72,47 @@ public class WfpFilterHelperService(ILoggingService log) : IWfpFilterHelper
                 ProcessNative.LocalFree(sdPtr);
         }
     }
+
+    public void AddFilterGlobal(
+        IntPtr engineHandle,
+        int maxConditionCount,
+        Guid filterKey,
+        bool isIPv6,
+        string filterName,
+        string logPrefix,
+        Func<IntPtr, List<IntPtr>, int> writeConditions)
+    {
+        var marshalAllocs = new List<IntPtr>();
+        try
+        {
+            var condArrayPtr = Marshal.AllocHGlobal(maxConditionCount * 40);
+            marshalAllocs.Add(condArrayPtr);
+            WfpFilterStructHelper.ZeroMemory(condArrayPtr, maxConditionCount * 40);
+
+            var actualCondCount = writeConditions(condArrayPtr, marshalAllocs);
+            if (actualCondCount == 0)
+                return;
+
+            var filterPtr = Marshal.AllocHGlobal(200);
+            marshalAllocs.Add(filterPtr);
+            WfpFilterStructHelper.ZeroMemory(filterPtr, 200);
+            var namePtr = Marshal.StringToHGlobalUni(filterName);
+            marshalAllocs.Add(namePtr);
+
+            WfpFilterStructHelper.WriteFilter(filterPtr, filterKey, isIPv6,
+                condArrayPtr, (uint)actualCondCount, namePtr, WfpNative.FWP_ACTION_BLOCK);
+
+            var addRc = WfpNative.FwpmFilterAdd0(engineHandle, filterPtr, IntPtr.Zero, out _);
+            if (addRc != WfpNative.ERROR_SUCCESS)
+                log.Warn($"{logPrefix}: FwpmFilterAdd0 failed (0x{addRc:X8})");
+        }
+        finally
+        {
+            foreach (var ptr in marshalAllocs)
+            {
+                if (ptr != IntPtr.Zero)
+                    Marshal.FreeHGlobal(ptr);
+            }
+        }
+    }
 }

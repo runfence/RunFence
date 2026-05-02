@@ -7,68 +7,6 @@ namespace RunFence.Account;
 
 public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
 {
-    private const uint PolicyViewLocalInformation = 0x00000001;
-    private const uint PolicyLookupNames = 0x00000800;
-    private const uint PolicyCreateAccount = 0x00000010;
-    private const uint StatusObjectNameNotFound = 0xC0000034;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LSA_UNICODE_STRING
-    {
-        public ushort Length;
-        public ushort MaximumLength;
-        public IntPtr Buffer;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LSA_OBJECT_ATTRIBUTES
-    {
-        public uint Length;
-        public IntPtr RootDirectory;
-        public IntPtr ObjectName;
-        public uint Attributes;
-        public IntPtr SecurityDescriptor;
-        public IntPtr SecurityQualityOfService;
-    }
-
-    [DllImport("advapi32.dll", PreserveSig = true)]
-    private static extern uint LsaOpenPolicy(
-        IntPtr SystemName,
-        ref LSA_OBJECT_ATTRIBUTES ObjectAttributes,
-        uint DesiredAccess,
-        out IntPtr PolicyHandle);
-
-    [DllImport("advapi32.dll", PreserveSig = true)]
-    private static extern uint LsaAddAccountRights(
-        IntPtr PolicyHandle,
-        byte[] AccountSid,
-        LSA_UNICODE_STRING[] UserRights,
-        uint CountOfRights);
-
-    [DllImport("advapi32.dll", PreserveSig = true)]
-    private static extern uint LsaRemoveAccountRights(
-        IntPtr PolicyHandle,
-        byte[] AccountSid,
-        [MarshalAs(UnmanagedType.U1)] bool AllRights,
-        LSA_UNICODE_STRING[] UserRights,
-        uint CountOfRights);
-
-    [DllImport("advapi32.dll", PreserveSig = true)]
-    private static extern uint LsaEnumerateAccountRights(
-        IntPtr PolicyHandle,
-        byte[] AccountSid,
-        out IntPtr UserRights,
-        out uint CountOfRights);
-
-    [DllImport("advapi32.dll", PreserveSig = true)]
-    private static extern uint LsaClose(IntPtr PolicyHandle);
-
-    [DllImport("advapi32.dll", PreserveSig = true)]
-    private static extern uint LsaNtStatusToWinError(uint Status);
-
-    [DllImport("advapi32.dll", PreserveSig = true)]
-    private static extern uint LsaFreeMemory(IntPtr Buffer);
-
     public const string SeDenyNetworkLogonRight = "SeDenyNetworkLogonRight";
     public const string SeDenyRemoteInteractiveLogonRight = "SeDenyRemoteInteractiveLogonRight";
     public const string SeDenyBatchLogonRight = "SeDenyBatchLogonRight";
@@ -104,10 +42,10 @@ public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
     public List<string> EnumerateAccountRights(byte[] sidBytes)
     {
         var rights = new List<string>();
-        WithLsaPolicy(PolicyLookupNames | PolicyViewLocalInformation, policyHandle =>
+        WithLsaPolicy(LsaRightsNative.PolicyLookupNames | LsaRightsNative.PolicyViewLocalInformation, policyHandle =>
         {
-            var status = LsaEnumerateAccountRights(policyHandle, sidBytes, out var rightsPtr, out var count);
-            if (status == StatusObjectNameNotFound)
+            var status = LsaRightsNative.LsaEnumerateAccountRights(policyHandle, sidBytes, out var rightsPtr, out var count);
+            if (status == LsaRightsNative.StatusObjectNameNotFound)
                 return; // No rights assigned
             if (status != 0)
                 ThrowLsaError("LsaEnumerateAccountRights", status);
@@ -115,17 +53,17 @@ public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
             try
             {
                 var ptr = rightsPtr;
-                var structSize = Marshal.SizeOf<LSA_UNICODE_STRING>();
+                var structSize = Marshal.SizeOf<LsaRightsNative.LSA_UNICODE_STRING>();
                 for (uint i = 0; i < count; i++)
                 {
-                    var lsaStr = Marshal.PtrToStructure<LSA_UNICODE_STRING>(ptr);
+                    var lsaStr = Marshal.PtrToStructure<LsaRightsNative.LSA_UNICODE_STRING>(ptr);
                     rights.Add(Marshal.PtrToStringUni(lsaStr.Buffer, lsaStr.Length / sizeof(char)));
                     ptr += structSize;
                 }
             }
             finally
             {
-                LsaFreeMemory(rightsPtr);
+                LsaRightsNative.LsaFreeMemory(rightsPtr);
             }
         });
         return rights;
@@ -133,12 +71,12 @@ public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
 
     public void AddAccountRights(byte[] sidBytes, string[] rights)
     {
-        WithLsaPolicy(PolicyLookupNames | PolicyCreateAccount, policyHandle =>
+        WithLsaPolicy(LsaRightsNative.PolicyLookupNames | LsaRightsNative.PolicyCreateAccount, policyHandle =>
         {
             var lsaRights = CreateLsaStrings(rights);
             try
             {
-                var status = LsaAddAccountRights(policyHandle, sidBytes, lsaRights, (uint)lsaRights.Length);
+                var status = LsaRightsNative.LsaAddAccountRights(policyHandle, sidBytes, lsaRights, (uint)lsaRights.Length);
                 if (status != 0)
                     ThrowLsaError("LsaAddAccountRights", status);
             }
@@ -151,14 +89,14 @@ public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
 
     public void RemoveAccountRights(byte[] sidBytes, string[] rights)
     {
-        WithLsaPolicy(PolicyLookupNames, policyHandle =>
+        WithLsaPolicy(LsaRightsNative.PolicyLookupNames, policyHandle =>
         {
             var lsaRights = CreateLsaStrings(rights);
             try
             {
-                var status = LsaRemoveAccountRights(policyHandle, sidBytes, false, lsaRights, (uint)lsaRights.Length);
+                var status = LsaRightsNative.LsaRemoveAccountRights(policyHandle, sidBytes, false, lsaRights, (uint)lsaRights.Length);
                 // StatusObjectNameNotFound is OK — rights weren't assigned
-                if (status != 0 && status != StatusObjectNameNotFound)
+                if (status != 0 && status != LsaRightsNative.StatusObjectNameNotFound)
                     ThrowLsaError("LsaRemoveAccountRights", status);
             }
             finally
@@ -168,10 +106,10 @@ public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
         });
     }
 
-    private void WithLsaPolicy(uint desiredAccess, Action<IntPtr> action)
+    private static void WithLsaPolicy(uint desiredAccess, Action<IntPtr> action)
     {
-        var attrs = new LSA_OBJECT_ATTRIBUTES();
-        var status = LsaOpenPolicy(IntPtr.Zero, ref attrs, desiredAccess, out var policyHandle);
+        var attrs = new LsaRightsNative.LSA_OBJECT_ATTRIBUTES();
+        var status = LsaRightsNative.LsaOpenPolicy(IntPtr.Zero, ref attrs, desiredAccess, out var policyHandle);
         if (status != 0)
             ThrowLsaError("LsaOpenPolicy", status);
 
@@ -181,22 +119,22 @@ public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
         }
         finally
         {
-            LsaClose(policyHandle);
+            LsaRightsNative.LsaClose(policyHandle);
         }
     }
 
-    private void ThrowLsaError(string functionName, uint status)
+    private static void ThrowLsaError(string functionName, uint status)
     {
         throw new InvalidOperationException(
-            $"{functionName} failed: {new Win32Exception((int)LsaNtStatusToWinError(status)).Message}");
+            $"{functionName} failed: {new Win32Exception((int)LsaRightsNative.LsaNtStatusToWinError(status)).Message}");
     }
 
-    private LSA_UNICODE_STRING[] CreateLsaStrings(string[] rights)
+    private static LsaRightsNative.LSA_UNICODE_STRING[] CreateLsaStrings(string[] rights)
     {
-        var result = new LSA_UNICODE_STRING[rights.Length];
+        var result = new LsaRightsNative.LSA_UNICODE_STRING[rights.Length];
         for (int i = 0; i < rights.Length; i++)
         {
-            result[i] = new LSA_UNICODE_STRING
+            result[i] = new LsaRightsNative.LSA_UNICODE_STRING
             {
                 Length = (ushort)(rights[i].Length * sizeof(char)),
                 MaximumLength = (ushort)((rights[i].Length + 1) * sizeof(char)),
@@ -207,7 +145,7 @@ public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
         return result;
     }
 
-    private void FreeLsaStrings(LSA_UNICODE_STRING[] strings)
+    private static void FreeLsaStrings(LsaRightsNative.LSA_UNICODE_STRING[] strings)
     {
         foreach (var s in strings)
         {

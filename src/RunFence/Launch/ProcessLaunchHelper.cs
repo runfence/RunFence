@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -6,10 +7,31 @@ namespace RunFence.Launch;
 
 /// <summary>
 /// Static helpers for process launch argument/working-directory resolution, URL validation,
-/// cmd.exe metacharacter escaping, and target wrapping. Shared between callers in the launch pipeline.
+/// cmd.exe metacharacter escaping, target wrapping, and <see cref="ProcessStartInfo"/> construction.
+/// Shared between callers in the launch pipeline.
 /// </summary>
 public static class ProcessLaunchHelper
 {
+    /// <summary>
+    /// Builds a <see cref="ProcessStartInfo"/> from a <see cref="ProcessLaunchTarget"/>.
+    /// Sets <see cref="ProcessStartInfo.UseShellExecute"/> to <c>false</c> and applies
+    /// all environment variables from <see cref="ProcessLaunchTarget.EnvironmentVariables"/>.
+    /// </summary>
+    public static ProcessStartInfo BuildProcessStartInfo(ProcessLaunchTarget target)
+    {
+        var psi = new ProcessStartInfo(target.ExePath)
+        {
+            Arguments = target.Arguments ?? string.Empty,
+            WorkingDirectory = target.WorkingDirectory ?? string.Empty,
+            UseShellExecute = false,
+            CreateNoWindow = target.HideWindow
+        };
+        if (target.EnvironmentVariables != null)
+            foreach (var (key, value) in target.EnvironmentVariables)
+                psi.Environment[key] = value;
+        return psi;
+    }
+
     private static readonly HashSet<string> ScriptExtensions = new(StringComparer.OrdinalIgnoreCase)
         { ".cmd", ".bat" };
 
@@ -17,27 +39,24 @@ public static class ProcessLaunchHelper
         { ".exe", ".com", ".scr", ".pif", ".cpl" };
 
     /// <summary>
-    /// Wraps the target for launch when the target is not a native executable.
-    /// Scripts (.cmd, .bat) are wrapped with <c>cmd.exe /c</c>; other non-exe types are wrapped
-    /// with <c>rundll32.exe shell32.dll,ShellExec_RunDLL</c>. Native executables are returned as-is.
+    /// Returns the effective working directory for a launch: <paramref name="workingDirectory"/>
+    /// when non-empty, otherwise the directory containing <paramref name="filePath"/>.
+    /// Falls back to the Windows directory when <paramref name="filePath"/> has no directory component.
     /// </summary>
-    /// <returns>
-    /// The (possibly wrapped) target and a flag indicating whether the launched process result
-    /// should be discarded — true when the target was wrapped with ShellExec_RunDLL (non-exe,
-    /// non-script files), false for native executables and scripts.
-    /// </returns>
-    public static (ProcessLaunchTarget Target, bool IsWrapped) WrapTargetForLaunch(ProcessLaunchTarget target)
+    public static string EnsureWorkingDirectory(string filePath, string? workingDirectory)
+        => string.IsNullOrEmpty(workingDirectory)
+            ? Path.GetDirectoryName(filePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.Windows)
+            : workingDirectory;
+
+    /// <summary>
+    /// Returns a wrapped <see cref="ProcessLaunchTarget"/> for script files (.cmd and .bat via
+    /// <c>cmd.exe /c</c>; .ps1 via <c>powershell.exe -ExecutionPolicy Bypass -File</c>),
+    /// or <c>null</c> when the target is not a recognised script extension.
+    /// </summary>
+    public static ProcessLaunchTarget? TryWrapForScriptLaunch(ProcessLaunchTarget target)
     {
         var ext = Path.GetExtension(target.ExePath);
-        var isExe = ExeExtensions.Contains(ext);
-        if (isExe)
-            return (target, false);
-
         var filePath = target.ExePath;
-
-        var workingDirectory = string.IsNullOrEmpty(target.WorkingDirectory)
-            ? Path.GetDirectoryName(filePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.Windows)
-            : target.WorkingDirectory;
 
         if (ScriptExtensions.Contains(ext))
         {
@@ -54,39 +73,59 @@ public static class ProcessLaunchHelper
                 argsString = " " + EscapeCmdMetacharacters(target.Arguments);
             }
 
-            return (new ProcessLaunchTarget(
+            return new ProcessLaunchTarget(
                 ExePath: "cmd.exe",
                 Arguments: $"/c \"{filePath}\"{argsString}",
                 HideWindow: target.HideWindow,
-                WorkingDirectory: workingDirectory,
+                WorkingDirectory: EnsureWorkingDirectory(filePath, target.WorkingDirectory),
                 EnvironmentVariables: target.EnvironmentVariables
-            ), false);
+            );
         }
 
         if (string.Equals(ext, ".ps1", StringComparison.OrdinalIgnoreCase))
         {
             // PowerShell is launched directly via CreateProcess — not through cmd.exe.
             // Arguments are parsed by PowerShell's own parser; cmd.exe escaping/validation must not be applied.
+            // No argument sanitization is needed here: PowerShell -File mode treats everything after the script
+            // path as literal script parameters and does NOT interpret shell metacharacters like ;, |, & as
+            // operators (unlike -Command mode). Malformed arguments simply cause the script to receive
+            // unexpected parameters, which results in a launch failure — already handled by the caller.
             var argsString = string.IsNullOrEmpty(target.Arguments) ? "" : " " + target.Arguments;
 
-            return (new ProcessLaunchTarget(
+            return new ProcessLaunchTarget(
                 ExePath: "powershell.exe",
                 Arguments: $"-ExecutionPolicy Bypass -File \"{filePath}\"{argsString}",
                 HideWindow: target.HideWindow,
-                WorkingDirectory: workingDirectory,
+                WorkingDirectory: EnsureWorkingDirectory(filePath, target.WorkingDirectory),
                 EnvironmentVariables: target.EnvironmentVariables
-            ), false);
+            );
         }
 
-        // Non-exe, non-script: use rundll32 shell32.dll,ShellExec_RunDLL.
-        // Calls ShellExecuteEx internally — no file open, so locked files work fine.
-        // lpCmdLine is passed verbatim as lpFile; no quoting needed or supported.
-        return (new ProcessLaunchTarget(
+        return null;
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> when the target can be launched directly — i.e. it is a native
+    /// executable or a script (.cmd, .bat, .ps1) that is wrapped by <see cref="TryWrapForScriptLaunch"/>.
+    /// Returns <c>false</c> for all other file types that require Windows association resolution.
+    /// </summary>
+    public static bool CanLaunchDirect(ProcessLaunchTarget target) => ExeExtensions.Contains(Path.GetExtension(target.ExePath));
+
+    /// <summary>
+    /// Wraps the target via <c>rundll32.exe shell32.dll,ShellExec_RunDLL</c>.
+    /// Calls ShellExecuteEx internally — no file open, so locked files work fine.
+    /// lpCmdLine is passed verbatim as lpFile; no quoting needed or supported.
+    /// </summary>
+    /// <remarks>Call only when <see cref="CanLaunchDirect"/> returns <c>false</c>.</remarks>
+    public static ProcessLaunchTarget WrapForShellLaunch(ProcessLaunchTarget target)
+    {
+        var filePath = target.ExePath;
+        return new ProcessLaunchTarget(
             ExePath: "rundll32.exe",
             Arguments: "shell32.dll,ShellExec_RunDLL " + filePath,
-            WorkingDirectory: workingDirectory,
+            WorkingDirectory: EnsureWorkingDirectory(filePath, target.WorkingDirectory),
             EnvironmentVariables: target.EnvironmentVariables
-        ), true);
+        );
     }
 
     /// <summary>
@@ -138,7 +177,7 @@ public static class ProcessLaunchHelper
                 if (template.Contains("%1"))
                 {
                     var sanitized = SanitizeForSubstitution(launcherArguments);
-                    return template.Replace("%1", sanitized);
+                    return SubstituteIntoTemplate(template, sanitized);
                 }
 
                 // Append mode: add space when template ends with alphanumeric or closing quote
@@ -152,6 +191,36 @@ public static class ProcessLaunchHelper
         }
 
         return string.IsNullOrEmpty(app.DefaultArguments) ? null : app.DefaultArguments;
+    }
+
+    // Substitutes sanitized into every %1 occurrence in template.
+    // When %1 is immediately followed by " in the template, trailing backslashes in sanitized
+    // are doubled so they don't escape the closing quote (MSVC CRT rule: N backslashes before "
+    // → N/2 literal backslashes when N is even; (N-1)/2 backslashes + literal " when N is odd).
+    private static string SubstituteIntoTemplate(string template, string sanitized)
+    {
+        var sb = new StringBuilder(template.Length + sanitized.Length * 2);
+        var pos = 0;
+        while (pos < template.Length)
+        {
+            var idx = template.IndexOf("%1", pos, StringComparison.Ordinal);
+            if (idx < 0)
+            {
+                sb.Append(template, pos, template.Length - pos);
+                break;
+            }
+            sb.Append(template, pos, idx - pos);
+            sb.Append(sanitized);
+            if (idx + 2 < template.Length && template[idx + 2] == '"')
+            {
+                var trailing = 0;
+                for (var i = sanitized.Length - 1; i >= 0 && sanitized[i] == '\\'; i--)
+                    trailing++;
+                sb.Append('\\', trailing);
+            }
+            pos = idx + 2;
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -230,7 +299,7 @@ public static class ProcessLaunchHelper
         var colonIndex = url.IndexOf(':');
         var scheme = url[..colonIndex].ToLowerInvariant();
 
-        if (Constants.BlockedUrlSchemes.Contains(scheme))
+        if (PathConstants.BlockedUrlSchemes.Contains(scheme))
         {
             error = $"URL scheme '{scheme}' is not allowed for security reasons.";
             return false;

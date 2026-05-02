@@ -5,6 +5,7 @@ using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch.Container;
@@ -16,7 +17,7 @@ namespace RunFence.Startup;
 /// cleans up expired ephemeral accounts and containers, and grants the interactive
 /// desktop user access to the unlock directory.
 /// </summary>
-/// <remarks>Deps above threshold: 6 sequential startup steps with <c>_sessionProvider</c>+<c>_sessionSaver</c>+<c>_log</c> shared across all. Extracting individual steps into classes would create 6 classes each needing the 3 shared deps plus their own 1-2, increasing total wiring and file count with no decoupling (steps must still run in sequence from one orchestrator). Reviewed 2026-04-08.</remarks>
+/// <remarks>Deps above threshold: 11 deps, 135 lines: extracting cleanup methods (3 methods, 4 deps) creates a 60-line class that still needs session/save/log (3 deps shared with remaining class). Net: 2 classes × 8 deps each vs 1 × 11 — more total wiring for 135 lines of sequential logic. Reviewed 2026-04-08.</remarks>
 public class StartupEnforcementRunner(
     IStartupEnforcementService startupEnforcementService,
     ISessionProvider sessionProvider,
@@ -42,7 +43,7 @@ public class StartupEnforcementRunner(
             return;
 
         var db = sessionProvider.GetSession().Database;
-        if (string.Equals(currentIuSid, db.Settings.LastInteractiveUserSid, StringComparison.OrdinalIgnoreCase))
+        if (SidComparer.SidEquals(currentIuSid, db.Settings.LastInteractiveUserSid))
             return;
 
         // Derive SIDs in parallel (P/Invoke calls are the slow part),
@@ -108,22 +109,27 @@ public class StartupEnforcementRunner(
             sessionSaver.SaveConfig();
     }
 
-    public void ProcessExpiredContainersAtStartup()
+    public Task ProcessExpiredContainersAtStartup()
         => ephemeralContainerService.ProcessExpiredContainersAtStartup();
 
     public void GrantUnlockDirAccess()
     {
-        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
+        var interactiveSid = interactiveUserResolver.GetInteractiveUserSid();
         if (string.IsNullOrEmpty(interactiveSid))
             return;
 
-        var unlockDir = Path.GetDirectoryName(Constants.UnlockCmdPath);
+        var unlockDir = Path.GetDirectoryName(PathConstants.UnlockCmdPath);
         if (string.IsNullOrEmpty(unlockDir))
             return;
 
         var result = pathGrantService.EnsureAccess(interactiveSid, unlockDir,
-            FileSystemRights.ReadAndExecute, confirm: null);
-        if (result.DatabaseModified)
+            FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
+        var lowIntegrityResult = pathGrantService.EnsureAccess(AclHelper.LowIntegritySid, unlockDir,
+            FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
+        var allApplicationPackagesResult = pathGrantService.EnsureAccess(AclHelper.AllApplicationPackagesSid, unlockDir,
+            FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
+        if (result.DatabaseModified || lowIntegrityResult.DatabaseModified ||
+            allApplicationPackagesResult.DatabaseModified)
             sessionSaver.SaveConfig();
     }
 

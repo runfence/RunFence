@@ -37,7 +37,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
     private readonly IPathGrantService _service;
 
     private static readonly IUiThreadInvoker SyncInvoker =
-        new LambdaUiThreadInvoker(a => a(), a => a(), a => a());
+        new LambdaUiThreadInvoker(a => a(), a => a());
 
     public PathGrantServiceIntegrationTests()
     {
@@ -45,21 +45,30 @@ public class PathGrantServiceIntegrationTests : IDisposable
         _aclPermission.Setup(a => a.ResolveAccountGroupSids(TestSid)).Returns([]);
 
         var acl = new AclAccessor();
-        var ntfsHelper = new GrantNtfsHelper(acl, _log.Object);
+        var pathInfo = new FileSystemPathInfo();
+        var grantAceService = new GrantAceService(acl, pathInfo);
+        var fileOwnerService = new FileOwnerService(_log.Object, pathInfo);
+        var pathExistenceService = new PathExistenceService(acl);
+        var mandatoryLabelService = new MandatoryLabelService(_log.Object, pathInfo);
         var traverseAcl = new TraverseAcl();
-        var ancestorGranter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object, traverseAcl);
+        var ancestorGranter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object, traverseAcl, pathInfo);
         var iuResolver = new Mock<IInteractiveUserResolver>();
         iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
 
         var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => _database), SyncInvoker);
-        var grantCore = new GrantCoreOperations(ntfsHelper, dbAccessor, _log.Object);
+        var grantCore = new GrantCoreOperations(grantAceService, fileOwnerService,
+            dbAccessor, _log.Object, pathInfo);
         var traverseCore = new TraverseCoreOperations(traverseAcl,
-            ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object);
+            ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, pathInfo);
         var containerIuSync = new ContainerInteractiveUserSync(grantCore, traverseCore,
-            iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object);
-        var syncService = new PathGrantSyncService(dbAccessor, ntfsHelper, _log.Object);
-        _service = new PathGrantService(grantCore, traverseCore, ntfsHelper,
-            iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, syncService);
+            iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, pathInfo);
+        var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
+            mandatoryLabelService, dbAccessor);
+        var syncService = new PathGrantSyncService(dbAccessor, grantAceService, _log.Object, pathInfo);
+        _service = new PathGrantService(grantCore, traverseCore, grantAceService,
+            fileOwnerService, pathExistenceService, mandatoryLabelService,
+            iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, lowIlSync, syncService,
+            pathInfo);
     }
 
     public void Dispose()
@@ -104,6 +113,47 @@ public class PathGrantServiceIntegrationTests : IDisposable
             rule.InheritanceFlags == InheritanceFlags.None);
     }
 
+    private static IReadOnlyList<FileSystemAccessRule> GetExplicitAccessRules(string path)
+    {
+        var security = new DirectorySecurity(path, AccessControlSections.Access);
+        return security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToList();
+    }
+
+    private static int FindExplicitRuleIndex(
+        IReadOnlyList<FileSystemAccessRule> rules,
+        SecurityIdentifier sid,
+        AccessControlType type,
+        Func<FileSystemAccessRule, bool>? predicate = null)
+    {
+        for (var i = 0; i < rules.Count; i++)
+        {
+            var rule = rules[i];
+            if (rule.AccessControlType == type &&
+                rule.IdentityReference.Equals(sid) &&
+                (predicate == null || predicate(rule)))
+                return i;
+        }
+
+        return -1;
+    }
+
+    private static void AssertExplicitDenyAcesPrecedeExplicitAllowAces(IReadOnlyList<FileSystemAccessRule> rules)
+    {
+        var seenAllow = false;
+        foreach (var rule in rules)
+        {
+            if (rule.AccessControlType == AccessControlType.Allow)
+            {
+                seenAllow = true;
+                continue;
+            }
+
+            Assert.False(seenAllow, "Explicit Deny ACEs must precede explicit Allow ACEs.");
+        }
+    }
+
     // --- AddGrant ---
 
     [Fact]
@@ -124,7 +174,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Assert: DB entry recorded
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.NotNull(grants);
-        Assert.Contains(grants, e => string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && !e.IsDeny && !e.IsTraverseOnly);
+        Assert.Contains(grants, e => string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: false, IsTraverseOnly: false });
 
         Assert.True(result.GrantAdded);
         Assert.True(result.DatabaseModified);
@@ -148,7 +198,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Assert: DB entry with IsDeny=true
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.NotNull(grants);
-        Assert.Contains(grants, e => string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e.IsDeny && !e.IsTraverseOnly);
+        Assert.Contains(grants, e => string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: true, IsTraverseOnly: false });
     }
 
     [Fact]
@@ -168,10 +218,10 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Assert: only one non-traverse grant entry (no new entry added)
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.NotNull(grants);
-        Assert.Single(grants, e => !e.IsTraverseOnly && !e.IsDeny);
+        Assert.Single(grants, e => e is { IsTraverseOnly: false, IsDeny: false });
 
         // Assert: SavedRights updated in-place
-        var entry = grants.First(e => !e.IsTraverseOnly && !e.IsDeny);
+        var entry = grants.First(e => e is { IsTraverseOnly: false, IsDeny: false });
         Assert.True(entry.SavedRights?.Execute);
 
         Assert.False(result.GrantAdded); // no new DB entry
@@ -201,7 +251,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Assert: grant DB entry removed; traverse entry for parent is also cleaned (no other grants)
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.DoesNotContain(grants ?? [], e =>
-            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && !e.IsDeny && !e.IsTraverseOnly);
+            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: false, IsTraverseOnly: false });
     }
 
     [Fact]
@@ -241,7 +291,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
             "Expected NTFS ACE to be preserved when updateFileSystem=false");
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.DoesNotContain(grants ?? [], e =>
-            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && !e.IsDeny && !e.IsTraverseOnly);
+            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: false, IsTraverseOnly: false });
     }
 
     // --- AddTraverse ---
@@ -273,6 +323,74 @@ public class PathGrantServiceIntegrationTests : IDisposable
 
         Assert.NotEmpty(visitedPaths);
         Assert.True(modified);
+    }
+
+    [Fact]
+    public void TraverseAcl_NativeSetEntriesInAclWrite_PreservesCanonicalAceOrder()
+    {
+        // Arrange: seed an explicit Deny and an explicit Allow, then add traverse through
+        // TraverseAcl's native SetEntriesInAcl + SetFileSecurity path.
+        var subDir = Path.Combine(_tempDir.Path, "traverse_canonical");
+        Directory.CreateDirectory(subDir);
+
+        var sid = new SecurityIdentifier(TestSid);
+        var everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+        var security = new DirectorySecurity(subDir, AccessControlSections.Access);
+        security.AddAccessRule(new FileSystemAccessRule(
+            sid,
+            FileSystemRights.Delete,
+            InheritanceFlags.None,
+            PropagationFlags.None,
+            AccessControlType.Deny));
+        security.AddAccessRule(new FileSystemAccessRule(
+            everyoneSid,
+            FileSystemRights.ReadAttributes,
+            InheritanceFlags.None,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        new DirectoryInfo(subDir).SetAccessControl(security);
+
+        var traverseAcl = new TraverseAcl();
+
+        // Act
+        traverseAcl.AddAllowAce(subDir, sid);
+
+        // Assert
+        var afterAddSecurity = new DirectorySecurity(subDir, AccessControlSections.Access);
+        Assert.True(afterAddSecurity.AreAccessRulesCanonical);
+
+        var afterAddRules = GetExplicitAccessRules(subDir);
+        var denyIndex = FindExplicitRuleIndex(afterAddRules, sid, AccessControlType.Deny);
+        var traverseIndex = FindExplicitRuleIndex(afterAddRules, sid, AccessControlType.Allow, rule =>
+            rule.FileSystemRights == TraverseRightsHelper.TraverseRights &&
+            rule.InheritanceFlags == InheritanceFlags.None);
+        var everyoneAllowIndex = FindExplicitRuleIndex(afterAddRules, everyoneSid, AccessControlType.Allow);
+
+        AssertExplicitDenyAcesPrecedeExplicitAllowAces(afterAddRules);
+        Assert.NotEqual(-1, denyIndex);
+        Assert.NotEqual(-1, traverseIndex);
+        Assert.NotEqual(-1, everyoneAllowIndex);
+        Assert.True(denyIndex < traverseIndex);
+
+        // Act: removal uses TraverseAcl's SetFileSecurity path after FileSystemSecurity mutation.
+        traverseAcl.RemoveTraverseOnlyAce(subDir, sid);
+
+        // Assert: the remaining DACL stays canonical and the original Deny remains before Allow.
+        var afterRemoveSecurity = new DirectorySecurity(subDir, AccessControlSections.Access);
+        Assert.True(afterRemoveSecurity.AreAccessRulesCanonical);
+
+        var afterRemoveRules = GetExplicitAccessRules(subDir);
+        denyIndex = FindExplicitRuleIndex(afterRemoveRules, sid, AccessControlType.Deny);
+        traverseIndex = FindExplicitRuleIndex(afterRemoveRules, sid, AccessControlType.Allow, rule =>
+            rule.FileSystemRights == TraverseRightsHelper.TraverseRights &&
+            rule.InheritanceFlags == InheritanceFlags.None);
+        everyoneAllowIndex = FindExplicitRuleIndex(afterRemoveRules, everyoneSid, AccessControlType.Allow);
+
+        AssertExplicitDenyAcesPrecedeExplicitAllowAces(afterRemoveRules);
+        Assert.NotEqual(-1, denyIndex);
+        Assert.Equal(-1, traverseIndex);
+        Assert.NotEqual(-1, everyoneAllowIndex);
+        Assert.True(denyIndex < everyoneAllowIndex);
     }
 
     [Fact]
@@ -317,7 +435,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.NotNull(grants);
         Assert.Contains(grants, e =>
-            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && !e.IsDeny && !e.IsTraverseOnly);
+            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: false, IsTraverseOnly: false });
     }
 
     [Fact]
@@ -337,7 +455,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.NotNull(grants);
         Assert.Contains(grants, e =>
-            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e.IsDeny && !e.IsTraverseOnly);
+            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: true, IsTraverseOnly: false });
     }
 
     [Fact]
@@ -388,7 +506,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.NotNull(grants);
         var entry = grants.FirstOrDefault(e =>
-            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && !e.IsDeny && !e.IsTraverseOnly);
+            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: false, IsTraverseOnly: false });
         Assert.NotNull(entry);
         Assert.NotNull(entry.SavedRights);
         Assert.True(entry.SavedRights!.Execute, "Execute should be set after UpdateGrant");
@@ -441,5 +559,50 @@ public class PathGrantServiceIntegrationTests : IDisposable
 
         // Assert
         Assert.Equal(PathAclStatus.Unavailable, status);
+    }
+
+    // --- F-75: Partial-weakening of deny conflict ---
+
+    [Fact]
+    public void EnsureAccess_PartialDenyConflict_ReducesDenyEntry()
+    {
+        // Arrange: TestSid has a deny entry blocking Read AND Execute on a file.
+        // EnsureAccess is called for Read-only access.
+        // The deny conflict resolution should detect that denying Read conflicts with the
+        // requested Read access, and reduce the deny entry to deny Execute only (keeping only
+        // the non-conflicting deny rights).
+        var file = Path.Combine(_tempDir.Path, "partial_deny_conflict.txt");
+        File.WriteAllText(file, "test");
+
+        // Add a deny entry with both Read and Execute denied
+        _service.AddGrant(TestSid, file, isDeny: true,
+            new SavedRightsState(Execute: true, Write: true, Read: true, Special: true, Own: false));
+
+        // Verify deny entry exists
+        var grants = _database.GetAccount(TestSid)?.Grants;
+        Assert.NotNull(grants);
+        Assert.Contains(grants, e =>
+            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e.IsDeny);
+
+        // Act: EnsureAccess for Read-only, with a confirm that always allows
+        // The deny entry conflicts (denies Read), so ResolveDenyConflict is triggered.
+        // After resolution: deny Read removed (requested) → deny entry reduced to Execute-only.
+        _service.EnsureAccess(TestSid, file,
+            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false),
+            confirm: (_, _) => true);
+
+        // Assert: deny entry still exists but with reduced rights (Execute denied only, not Read)
+        var updatedGrants = _database.GetAccount(TestSid)?.Grants;
+        Assert.NotNull(updatedGrants);
+        var denyEntry = updatedGrants.FirstOrDefault(e =>
+            string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e.IsDeny);
+        Assert.NotNull(denyEntry);
+        // The deny entry should be weakened: Read no longer denied (was granted), Execute may remain
+        // The exact state depends on ResolveDenyConflict's reduction logic:
+        // newDenyRead = denyState.Read && !requestedAllow.Read = true && !true = false
+        // newDenyExecute = denyState.Execute && !requestedAllow.Execute = true && !false = true
+        // So deny entry should remain with Execute=true, Read=false
+        Assert.True(denyEntry.SavedRights?.Execute, "Execute should remain denied after partial weakening");
+        Assert.False(denyEntry.SavedRights?.Read == true, "Read should no longer be denied after granting Read access");
     }
 }

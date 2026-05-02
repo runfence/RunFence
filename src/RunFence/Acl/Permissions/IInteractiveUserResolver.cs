@@ -1,4 +1,4 @@
-using RunFence.Core;
+using RunFence.Infrastructure;
 
 namespace RunFence.Acl.Permissions;
 
@@ -7,7 +7,7 @@ public interface IInteractiveUserResolver
     string? GetInteractiveUserSid();
 }
 
-public class DefaultInteractiveUserResolver : IInteractiveUserResolver
+public class DefaultInteractiveUserResolver(IInteractiveUserSidResolver interactiveUserSidResolver) : IInteractiveUserResolver
 {
-    public string? GetInteractiveUserSid() => SidResolutionHelper.GetInteractiveUserSid();
+    public string? GetInteractiveUserSid() => interactiveUserSidResolver.GetInteractiveUserSid();
 }

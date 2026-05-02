@@ -14,7 +14,7 @@ public class FirewallAllowlistImportExportService
     /// Reads the file at <paramref name="path"/> and returns its lines split by type
     /// (allowlist lines vs. localhost port lines). Returns null on file read failure.
     /// </summary>
-    public FileImportResult? ImportFromFile(string path)
+    public FileImportResult ImportFromFile(string path)
     {
         string[] lines;
         try

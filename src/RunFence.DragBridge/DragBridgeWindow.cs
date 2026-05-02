@@ -1,7 +1,5 @@
-using System.Drawing.Drawing2D;
 using System.IO.Pipes;
 using RunFence.Core;
-using RunFence.Core.Ipc;
 using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.DragBridge;
@@ -22,7 +20,7 @@ public class DragBridgeWindow : Form
     private readonly Timer _autoCloseTimer;
     private readonly Timer _topmostTimer;
     private readonly ToolTip _toolTip;
-    private readonly NamedPipeClientStream? _pipe;
+    private readonly DragBridgePipeClient _pipeClient;
 
     private List<string>? _filePaths; // null = connecting; [] = empty/receive; [...] = has files
     private bool _filesResolved = true; // true = safe to drag; false = need resolve request first
@@ -39,17 +37,8 @@ public class DragBridgeWindow : Form
     private bool _isDragging; // true while DoDragDrop is executing
     private bool _droppedOnSelf; // set in OnDragDrop when a self-drop is detected
 
-    private enum IconKind
-    {
-        SingleFile,
-        MultiFile,
-        SingleFolder,
-        MultiFolder
-    }
-
     public DragBridgeWindow(NamedPipeClientStream pipe, int cursorX, int cursorY, int runFencePid = 0, nint restoreHwnd = 0)
     {
-        _pipe = pipe;
         _cursorX = cursorX;
         _cursorY = cursorY;
         _runFencePid = runFencePid;
@@ -82,7 +71,40 @@ public class DragBridgeWindow : Form
         _toolTip = new ToolTip { AutoPopDelay = 10_000, InitialDelay = 400 };
         UpdateTooltip();
 
-        _ = ReceiveAndRunAsync();
+        _pipeClient = new DragBridgePipeClient(pipe, uiInvoker: this);
+        _pipeClient.InitialFilesReceived += (files, resolved) =>
+        {
+            _filePaths = files;
+            // Empty = drop mode (no files yet), pre-resolved = main app confirmed access.
+            // Otherwise start unresolved so the first drag triggers a resolve request.
+            _filesResolved = files.Count == 0 || resolved;
+            UpdateBackColor();
+            UpdateTooltip();
+            ResetAutoCloseTimer();
+            Invalidate();
+        };
+        _pipeClient.ResolveSucceeded += files =>
+        {
+            _filePaths = files;
+            _filesResolved = true;
+            UpdateBackColor();
+            UpdateTooltip();
+            ResetAutoCloseTimer();
+            Invalidate();
+        };
+        _pipeClient.ResolveCancelled += Close;
+        _pipeClient.DropSent += files =>
+        {
+            _filePaths = files;
+            _filesResolved = true; // dropped by window user — no resolution needed
+            UpdateBackColor();
+            UpdateTooltip();
+            Invalidate();
+            Close(); // close immediately after files are received
+        };
+        _pipeClient.ResolvePendingCleared += () => _resolvePending = false;
+
+        _ = _pipeClient.ReceiveAndRunAsync();
     }
 
     protected override void OnLoad(EventArgs e)
@@ -103,67 +125,6 @@ public class DragBridgeWindow : Form
         _topmostTimer.Start();
     }
 
-    private async Task ReceiveAndRunAsync()
-    {
-        try
-        {
-            // Read initial file list from main app (pipe already connected)
-            var initial = await DragBridgeProtocol.ReadAsync(_pipe!);
-            var initialFiles = initial?.FilePaths ?? [];
-            if (!IsDisposed)
-                BeginInvoke(() =>
-                {
-                    _filePaths = initialFiles;
-                    // Empty = drop mode (no files yet), pre-resolved = main app confirmed access.
-                    // Otherwise start unresolved so the first drag triggers a resolve request.
-                    _filesResolved = initialFiles.Count == 0 || (initial?.FilesResolved ?? false);
-                    UpdateBackColor();
-                    UpdateTooltip();
-                    ResetAutoCloseTimer();
-                    Invalidate();
-                });
-
-            // Background loop: read resolve responses from main app
-            while (true)
-            {
-                var response = await DragBridgeProtocol.ReadAsync(_pipe!);
-                if (response == null)
-                    break; // main app closed pipe
-                if (!IsDisposed)
-                    BeginInvoke(() =>
-                    {
-                        _resolvePending = false;
-                        if (response.FilePaths.Count > 0)
-                        {
-                            // Resolution succeeded — update files, now safe to drag
-                            _filePaths = response.FilePaths;
-                            _filesResolved = true;
-                            UpdateBackColor();
-                            UpdateTooltip();
-                            ResetAutoCloseTimer();
-                            Invalidate();
-                        }
-                        else
-                        {
-                            // User cancelled the dialog — close the window
-                            Close();
-                        }
-                    });
-            }
-        }
-        catch (IOException)
-        {
-        } // main app closed pipe — normal
-        catch (ObjectDisposedException)
-        {
-        }
-        catch
-        {
-            if (!IsDisposed)
-                BeginInvoke(Close);
-        }
-    }
-
     // --- Drop handling ---
 
     private void OnDragEnter(object? sender, DragEventArgs e)
@@ -180,46 +141,7 @@ public class DragBridgeWindow : Form
             return;
         }
 
-        _ = SendDropAsync([.. files]);
-    }
-
-    private async Task SendDropAsync(List<string> files)
-    {
-        try
-        {
-            if (_pipe?.IsConnected == true)
-                await DragBridgeProtocol.WriteAsync(_pipe,
-                    new DragBridgeData { FilePaths = files }); // MessageType=FileList (default)
-        }
-        catch
-        {
-        }
-
-        if (!IsDisposed)
-            BeginInvoke(() =>
-            {
-                _filePaths = files;
-                _filesResolved = true; // dropped by window user — no resolution needed
-                UpdateBackColor();
-                UpdateTooltip();
-                Invalidate();
-                Close(); // close immediately after files are received
-            });
-    }
-
-    private async Task SendResolveRequestAsync()
-    {
-        try
-        {
-            if (_pipe?.IsConnected == true)
-                await DragBridgeProtocol.WriteAsync(_pipe,
-                    new DragBridgeData { MessageType = DragBridgeMessageType.ResolveRequest });
-        }
-        catch
-        {
-            if (!IsDisposed)
-                BeginInvoke(() => _resolvePending = false);
-        }
+        _ = _pipeClient.SendDropAsync([.. files]);
     }
 
     // --- Mouse drag (send-only when has files; both buttons; resolution-aware) ---
@@ -259,7 +181,7 @@ public class DragBridgeWindow : Form
             {
                 _resolvePending = true;
                 ResetAutoCloseTimer();
-                _ = SendResolveRequestAsync();
+                _ = _pipeClient.SendResolveRequestAsync();
             }
 
             return;
@@ -311,101 +233,8 @@ public class DragBridgeWindow : Form
 
     // --- Painting ---
 
-    private void OnPaint(object? sender, PaintEventArgs e)
-    {
-        var g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        var r = ClientRectangle;
-        // cx/cy are the center of the DPI-scaled window (ClientSize is set to 64*scale in OnLoad).
-        // Icon shape offsets (e.g. cx+4, cy-12) are fixed pixel values, not DPI-scaled —
-        // icons appear smaller relative to the window circle at higher DPI but remain centered.
-        int cx = r.Width / 2, cy = r.Height / 2;
-
-        if (_filePaths is { Count: > 0 })
-        {
-            using var brush = new SolidBrush(Color.FromArgb(0, 100, 200));
-            g.FillEllipse(brush, 2, 2, r.Width - 4, r.Height - 4);
-
-            using var iconBrush = new SolidBrush(Color.White);
-            DrawContentIcon(g, iconBrush, cx, cy, DetermineIconKind(_filePaths));
-        }
-        else
-        {
-            using var brush = new SolidBrush(Color.FromArgb(0, 160, 80));
-            g.FillEllipse(brush, 2, 2, r.Width - 4, r.Height - 4);
-
-            using var arrowBrush = new SolidBrush(Color.White);
-            var arrowPts = new[]
-            {
-                new Point(cx, cy + 14),
-                new Point(cx - 10, cy),
-                new Point(cx - 4, cy),
-                new Point(cx - 4, cy - 14),
-                new Point(cx + 4, cy - 14),
-                new Point(cx + 4, cy),
-                new Point(cx + 10, cy)
-            };
-            g.FillPolygon(arrowBrush, arrowPts);
-        }
-    }
-
-    private static void DrawContentIcon(Graphics g, SolidBrush brush, int cx, int cy, IconKind kind)
-    {
-        switch (kind)
-        {
-            case IconKind.MultiFile:
-                DrawPageShape(g, brush, cx + 4, cy - 4);
-                DrawPageShape(g, brush, cx, cy);
-                break;
-            case IconKind.SingleFolder:
-                DrawFolderShape(g, brush, cx, cy);
-                break;
-            case IconKind.MultiFolder:
-                DrawFolderShape(g, brush, cx + 4, cy - 3);
-                DrawFolderShape(g, brush, cx, cy);
-                break;
-            default: // SingleFile
-                DrawPageShape(g, brush, cx, cy);
-                break;
-        }
-    }
-
-    private static void DrawPageShape(Graphics g, SolidBrush brush, float dx, float dy)
-    {
-        // Rectangle with folded top-right corner: L-shaped notch exposes blue background as the fold
-        var pts = new PointF[]
-        {
-            new(dx - 7, dy - 12), // TL
-            new(dx + 4, dy - 12), // fold start (top)
-            new(dx + 4, dy - 7), // fold inner corner
-            new(dx + 8, dy - 7), // fold outer corner
-            new(dx + 8, dy + 12), // BR
-            new(dx - 7, dy + 12), // BL
-        };
-        g.FillPolygon(brush, pts);
-    }
-
-    private static void DrawFolderShape(Graphics g, SolidBrush brush, float dx, float dy)
-    {
-        // Tab (top part of folder)
-        g.FillRectangle(brush, dx - 9, dy - 13, 8, 4);
-        // Body
-        g.FillRectangle(brush, dx - 9, dy - 9, 18, 20);
-    }
-
-    private static IconKind DetermineIconKind(List<string> paths)
-    {
-        bool allFolders = paths.All(Directory.Exists);
-        bool anyFolder = paths.Any(Directory.Exists);
-        return (anyFolder, allFolders, paths.Count > 1) switch
-        {
-            (false, _, false) => IconKind.SingleFile,
-            (false, _, true) => IconKind.MultiFile,
-            (true, true, false) => IconKind.SingleFolder,
-            (true, true, true) => IconKind.MultiFolder,
-            _ => IconKind.MultiFile,  // mixed: some folders, some non-folders
-        };
-    }
+    private void OnPaint(object? sender, PaintEventArgs e) =>
+        DragBridgeIconRenderer.Paint(e.Graphics, ClientRectangle, _filePaths);
 
     private bool BelongsToRunFence(nint hwnd)
     {
@@ -437,19 +266,16 @@ public class DragBridgeWindow : Form
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == WM_MOUSEACTIVATE)
+        switch (m.Msg)
         {
-            // Don't activate DragBridge when the user clicks it while another window is active.
-            // This keeps the current foreground window (e.g. the app the user just switched to)
-            // focused: _hasActiveFocus stays false → OnFormClosing skips SetForegroundWindow →
-            // the OS leaves whatever window was active before the click still in the foreground.
-            m.Result = MA_NOACTIVATE;
-            return;
-        }
-
-        if (m.Msg == WM_ACTIVATE)
-        {
-            if ((m.WParam.ToInt32() & 0xFFFF) != WA_INACTIVE)
+            case WM_MOUSEACTIVATE:
+                // Don't activate DragBridge when the user clicks it while another window is active.
+                // This keeps the current foreground window (e.g. the app the user just switched to)
+                // focused: _hasActiveFocus stays false → OnFormClosing skips SetForegroundWindow →
+                // the OS leaves whatever window was active before the click still in the foreground.
+                m.Result = MA_NOACTIVATE;
+                return;
+            case WM_ACTIVATE when (m.WParam.ToInt32() & 0xFFFF) != WA_INACTIVE:
             {
                 // Gaining focus: lParam is the handle of the window losing activation.
                 // Skip RunFence's own windows — they appear between the user's real target window
@@ -459,11 +285,11 @@ public class DragBridgeWindow : Form
                 if (m.LParam != 0 && !BelongsToRunFence(m.LParam))
                     _previousForegroundWindow = m.LParam;
                 _hasActiveFocus = true;
+                break;
             }
-            else
-            {
+            case WM_ACTIVATE:
                 _hasActiveFocus = false;
-            }
+                break;
         }
 
         base.WndProc(ref m);
@@ -478,7 +304,7 @@ public class DragBridgeWindow : Form
             _topmostTimer.Stop();
             _topmostTimer.Dispose();
             _toolTip.Dispose();
-            _pipe?.Dispose();
+            _pipeClient.Dispose();
         }
 
         base.Dispose(disposing);

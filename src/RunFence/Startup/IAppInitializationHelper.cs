@@ -27,16 +27,9 @@ public interface IAppInitializationHelper
     bool NormalizeAccountSids(IList<AppEntry> apps, string currentAccountSid);
 
     /// <summary>
-    /// Pre-populates AllowedIpcCallers with the current process owner SID and the interactive
-    /// desktop user SID (explorer.exe owner), used on first run and reset flows.
-    /// </summary>
-    void PopulateDefaultIpcCallers(AppDatabase database);
-
-    /// <summary>
     /// Initializes a freshly created <see cref="AppDatabase"/> for first-run and reset flows:
-    /// populates default IPC callers then ensures the interactive user SID name is recorded.
-    /// Combines <see cref="PopulateDefaultIpcCallers"/> and <see cref="EnsureInteractiveUserSidName"/>
-    /// in the correct sequence so callers cannot accidentally omit the second step.
+    /// populates default IPC callers, ensures the interactive user SID name is recorded,
+    /// and ensures the SYSTEM account entry is present with the correct privilege level.
     /// </summary>
     void InitializeNewDatabase(AppDatabase database);
 }

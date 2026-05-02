@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+// ReSharper disable UnusedMember.Global
 
 namespace RunFence.Security;
 
@@ -32,7 +33,7 @@ public static class WindowsHelloInterop
 
             var interop = (IUserConsentVerifierInterop)Marshal.GetObjectForIUnknown(factoryPtr);
 
-            var msg = message ?? string.Empty;
+            var msg = message;
             ThrowIfFailed(WindowsCreateString(msg, msg.Length, out messageHString));
 
             var asyncIid = typeof(IAsyncOperation_VerificationResult).GUID;

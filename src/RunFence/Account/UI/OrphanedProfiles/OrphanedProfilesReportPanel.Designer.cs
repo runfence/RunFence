@@ -10,6 +10,9 @@ partial class OrphanedProfilesReportPanel
 
     private Label _summaryLabel;
     private ListView _resultListView;
+    private ColumnHeader _pathHeader;
+    private ColumnHeader _statusHeader;
+    private ColumnHeader _errorHeader;
     private Button _copyButton;
 
     public OrphanedProfilesReportPanel()
@@ -28,9 +31,13 @@ partial class OrphanedProfilesReportPanel
     {
         _summaryLabel = new Label();
         _resultListView = new ListView();
+        _pathHeader = new ColumnHeader();
+        _statusHeader = new ColumnHeader();
+        _errorHeader = new ColumnHeader();
         _copyButton = new Button();
 
         SuspendLayout();
+        Size = new Size(900, 640);
 
         // _summaryLabel
         _summaryLabel.Location = new Point(15, 10);
@@ -46,9 +53,20 @@ partial class OrphanedProfilesReportPanel
         _resultListView.HeaderStyle = ColumnHeaderStyle.Nonclickable;
         _resultListView.ShowGroups = true;
         _resultListView.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-        _resultListView.Columns.Add("Path", 540);
-        _resultListView.Columns.Add("Status", 100);
-        _resultListView.Columns.Add("Error", 200);
+
+        // _pathHeader
+        _pathHeader.Text = "Path";
+        _pathHeader.Width = 540;
+
+        // _statusHeader
+        _statusHeader.Text = "Status";
+        _statusHeader.Width = 100;
+
+        // _errorHeader
+        _errorHeader.Text = "Error";
+        _errorHeader.Width = 200;
+
+        _resultListView.Columns.AddRange(new ColumnHeader[] { _pathHeader, _statusHeader, _errorHeader });
 
         // _copyButton
         _copyButton.Text = "Copy to Clipboard";

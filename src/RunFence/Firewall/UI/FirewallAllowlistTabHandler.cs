@@ -147,9 +147,10 @@ public class FirewallAllowlistTabHandler
         => _domainResolver.ResolveEntryAsync(entry);
 
     /// <summary>
-    /// Adds entries from <paramref name="selected"/> that are not already in the list and within
-    /// the license limit. Returns a <see cref="BlockedConnectionAddResult"/> with the newly added
-    /// entries and the count of entries that were truncated due to the license limit.
+    /// Adds entries from <paramref name="selected"/> that pass validation, are not already in the
+    /// list, and are within the license limit. Entries that fail validation are silently skipped.
+    /// Returns a <see cref="BlockedConnectionAddResult"/> with the newly added entries and the
+    /// count of entries that were truncated due to the license limit.
     /// </summary>
     public BlockedConnectionAddResult AddEntriesFromBlockedConnections(
         IEnumerable<FirewallAllowlistEntry> selected)
@@ -158,6 +159,8 @@ public class FirewallAllowlistTabHandler
         int truncatedCount = 0;
         foreach (var entry in selected)
         {
+            if (_validator.ValidateEntry(entry.Value) == null)
+                continue;
             if (!_validator.CheckLicenseLimit(_entries.Count))
             {
                 truncatedCount++;

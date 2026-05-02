@@ -4,19 +4,27 @@ using RunFence.Acl.UI.Forms;
 using RunFence.Apps.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Persistence;
-using RunFence.UI;
+using RunFence.Launching.Resolution;
 using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI;
 
 /// <summary>
-/// Handles PopulateFromExisting and OnOkClick validation/build logic for <see cref="AppEditDialog"/>.
-/// Decouples complex data-mapping and validation from the dialog form class.
+/// Handles AppEditDialog validation/build logic.
 /// </summary>
-public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver sidResolver)
+public class AppEditDialogController
 {
+    private readonly AppEntryBuilder _entryBuilder;
+    private readonly IExecutablePathResolver _executablePathResolver;
     private AppEditAccountSwitchHandler _switchHandler = null!;
+
+    internal AppEditDialogController(
+        AppEntryBuilder entryBuilder,
+        IExecutablePathResolver executablePathResolver)
+    {
+        _entryBuilder = entryBuilder;
+        _executablePathResolver = executablePathResolver;
+    }
 
     /// <summary>
     /// Binds the controller to the per-dialog switch handler. Must be called before any operations.
@@ -24,94 +32,6 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
     public void Initialize(AppEditAccountSwitchHandler switchHandler)
     {
         _switchHandler = switchHandler;
-    }
-
-    /// <summary>
-    /// Populates non-combo dialog controls from an existing app entry.
-    /// ACL section, env vars, and IPC callers are populated here.
-    /// Account/config combo selection is NOT done here — the caller must apply
-    /// PrivilegeLevel to the combobox before selecting the account combo
-    /// (the switch handler captures prior privilege level on container selection).
-    /// </summary>
-    public PopulateFromExistingResult PopulateNonComboState(
-        AppEntry app,
-        AclConfigSection aclSection,
-        IpcCallerSection ipcSection,
-        EnvVarsSection envVarsSection)
-    {
-        aclSection.PopulateFromExisting(app);
-
-        if (app.EnvironmentVariables?.Count > 0)
-            envVarsSection.SetItems(app.EnvironmentVariables);
-
-        bool overrideIpcCallers = false;
-        if (app.AllowedIpcCallers != null)
-        {
-            overrideIpcCallers = true;
-            ipcSection.SetCallers(app.AllowedIpcCallers);
-            ipcSection.SetEnabled(true);
-        }
-
-        return new PopulateFromExistingResult(OverrideIpcCallers: overrideIpcCallers,
-            SelectedPrivilegeLevel: app.PrivilegeLevel);
-    }
-
-    /// <summary>
-    /// Selects the account combo item matching the app entry.
-    /// Must be called AFTER PrivilegeLevel combobox is set
-    /// (the switch handler captures the prior mode on container selection).
-    /// </summary>
-    public void SelectAccountComboForExisting(
-        AppEntry app,
-        IReadOnlyDictionary<string, string>? sidNames,
-        ComboBox accountComboBox)
-    {
-        accountComboBox.SelectedIndex = -1;
-
-        if (app.AppContainerName != null)
-        {
-            AppEditDialogPopulator.SelectComboItem<AppContainerDisplayItem>(accountComboBox,
-                ci => string.Equals(ci.Container.Name, app.AppContainerName, StringComparison.OrdinalIgnoreCase));
-        }
-        else
-        {
-            var found = AppEditDialogPopulator.SelectComboItem<CredentialDisplayItem>(accountComboBox,
-                item => string.Equals(item.Credential.Sid, app.AccountSid, StringComparison.OrdinalIgnoreCase));
-
-            if (!found)
-            {
-                var fallbackEntry = new CredentialEntry { Sid = app.AccountSid };
-                var fallbackItem = new CredentialDisplayItem(fallbackEntry, sidResolver, sidNames);
-                accountComboBox.Items.Add(fallbackItem);
-                accountComboBox.SelectedItem = fallbackItem;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Selects the config combo item and sets ACL path state for an existing app entry.
-    /// </summary>
-    public void SelectConfigAndAclPath(
-        AppEntry app,
-        IAppConfigService appConfigService,
-        AclConfigSection aclSection,
-        ComboBox configComboBox,
-        bool hasLoadedConfigs)
-    {
-        // SetExePath rebuilds the folder depth combo + updates ACL state;
-        // SelectFolderDepth must come after to override the default depth.
-        aclSection.SetExePath(app.ExePath, app.IsFolder);
-        aclSection.SelectFolderDepth(app.FolderAclDepth);
-
-        if (hasLoadedConfigs)
-        {
-            var currentPath = appConfigService.GetConfigPath(app.Id);
-            configComboBox.SelectedIndex = 0;
-            if (currentPath != null)
-                AppEditDialogPopulator.SelectComboItem<ConfigComboItem>(configComboBox,
-                    item => string.Equals(item.Path, currentPath, StringComparison.OrdinalIgnoreCase),
-                    startIndex: 1);
-        }
     }
 
     /// <summary>
@@ -137,10 +57,15 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
             isFolder = true;
         }
 
+        if (!isFolder && !PathHelper.IsUrlScheme(filePath))
+            filePath = _executablePathResolver.TryResolvePath(
+                filePath,
+                ExecutablePathResolutionContext.CurrentProcess()) ?? filePath;
+
         var selectedAccount = (state.SelectedAccountItem as CredentialDisplayItem)?.Credential;
         var selectedContainer = state.SelectedAccountItem as AppContainerDisplayItem;
 
-        var error = entryBuilder.Validate(state.NameText, filePath, isFolder,
+        var error = _entryBuilder.Validate(state.NameText, filePath, isFolder,
             selectedAccount, state.ManageShortcuts, existingApps, existing?.Id,
             appContainerName: selectedContainer?.Container.Name);
         if (error != null)
@@ -165,6 +90,9 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
             return null;
         }
 
+        if (!isFolder && !PathHelper.IsUrlScheme(filePath) && !File.Exists(filePath))
+            state.StatusText = "Warning: file not found.";
+
         List<string>? ipcCallers = state.OverrideIpcCallers
             ? ipcSection.GetCallers()
             : null;
@@ -180,7 +108,7 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
             : state.SelectedPrivilegeLevel;
 
         var argsTemplate = state.ArgumentsTemplateText;
-        return entryBuilder.Build(new AppEntryBuildOptions(
+        return _entryBuilder.Build(new AppEntryBuildOptions(
             Name: state.NameText,
             ExePath: filePath,
             IsFolder: isFolder,
@@ -204,10 +132,7 @@ public class AppEditDialogController(AppEntryBuilder entryBuilder, ISidResolver 
             AppContainerName: appContainerName,
             EnvironmentVariables: envVarsSection.GetItems(),
             ArgumentsTemplate: string.IsNullOrEmpty(argsTemplate) ? null : argsTemplate,
+            PathPrefixes: state.AppPathPrefixes?.ToList(),
             ExistingApps: existingApps));
     }
 }
-
-public record PopulateFromExistingResult(
-    bool OverrideIpcCallers,
-    PrivilegeLevel? SelectedPrivilegeLevel);

@@ -1,8 +1,9 @@
-using System.Security;
 using RunFence.Account.UI.Forms;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
+using RunFence.UI;
 
 namespace RunFence.Account.UI;
 
@@ -15,19 +16,39 @@ public class EditAccountDialogCreateHandler(
 {
     public record CreateAccountRequest(
         string Username,
-        string PasswordText,
-        string ConfirmPasswordText,
+        ProtectedString Password,
+        ProtectedString ConfirmPassword,
         bool IsEphemeral,
         List<(string Sid, string Name)> CheckedGroups,
         List<(string Sid, string Name)> UncheckedGroups,
         bool AllowLogon,
         bool AllowNetworkLogin,
         bool AllowBgAutorun,
-        int CurrentHiddenCount);
+        int CurrentHiddenCount)
+    {
+        /// <summary>
+        /// Creates a standard isolated account request: removed from Users group, no logon/network/bg,
+        /// hidden count zero. Used by wizard templates that create sandboxed isolated accounts.
+        /// The caller's <paramref name="password"/> can be safely disposed after this method returns;
+        /// independent copies are stored in the returned request.
+        /// </summary>
+        public static CreateAccountRequest ForIsolatedAccount(string username, ProtectedString password, bool isEphemeral = false)
+            => new(
+                Username: username,
+                Password: password.Copy(),
+                ConfirmPassword: password.Copy(),
+                IsEphemeral: isEphemeral,
+                CheckedGroups: [],
+                UncheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
+                AllowLogon: false,
+                AllowNetworkLogin: false,
+                AllowBgAutorun: false,
+                CurrentHiddenCount: 0);
+    }
 
     public record CreateAccountResult(
         string Sid,
-        SecureString Password,
+        ProtectedString Password,
         string Username,
         bool IsEphemeral,
         List<string> Errors);
@@ -59,7 +80,7 @@ public class EditAccountDialogCreateHandler(
             return null;
         }
 
-        if (request.PasswordText.Length > 0 && request.PasswordText != request.ConfirmPasswordText)
+        if (request.Password.Length > 0 && !ProtectedString.ContentEqual(request.Password, request.ConfirmPassword))
         {
             LastValidationError = "Passwords do not match.";
             return null;
@@ -69,7 +90,7 @@ public class EditAccountDialogCreateHandler(
         string sid;
         try
         {
-            sid = windowsAccountService.CreateLocalUser(request.Username, request.PasswordText);
+            sid = windowsAccountService.CreateLocalUser(request.Username, request.Password);
         }
         catch (Exception ex)
         {
@@ -154,11 +175,8 @@ public class EditAccountDialogCreateHandler(
             }
         }
 
-        // Build CreatedPassword SecureString (caller owns disposal)
-        var password = new SecureString();
-        foreach (char c in request.PasswordText)
-            password.AppendChar(c);
-        password.MakeReadOnly();
+        // Build CreatedPassword as independent copy (caller owns disposal)
+        var password = request.Password.Copy();
 
         return new CreateAccountResult(sid, password, request.Username, request.IsEphemeral, errors);
     }

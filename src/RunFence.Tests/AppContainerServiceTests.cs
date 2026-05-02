@@ -1,6 +1,7 @@
 using Moq;
 using RunFence.Acl;
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Launch.Container;
 using RunFence.Launch.Tokens;
 using Xunit;
@@ -19,7 +20,7 @@ public class AppContainerServiceTests
         var explorerTokenProvider = new Mock<IExplorerTokenProvider>();
         var sidProvider = new AppContainerSidProvider();
         return new AppContainerService(log.Object, pathGrantService.Object, profileSetup, dataFolderService,
-            () => new AppContainerComAccessService(log.Object), explorerTokenProvider.Object, sidProvider);
+            new AppContainerComAccessService(log.Object), explorerTokenProvider.Object, sidProvider);
     }
 
     [Fact]
@@ -27,7 +28,7 @@ public class AppContainerServiceTests
     {
         var result = AppContainerPaths.GetContainersRootPath();
 
-        Assert.Equal(Path.Combine(Constants.ProgramDataDir, "AC"), result);
+        Assert.Equal(Path.Combine(PathConstants.ProgramDataDir, "AC"), result);
     }
 
     [Theory]
@@ -109,29 +110,60 @@ public class AppContainerServiceTests
         Assert.Equal(AppContainerPaths.GetContainerDataPath("ram_browser"), result);
     }
 
+    [Fact]
+    public void EnsureDataFolderTraverse_ExistingDataRoot_TracksFullControlGrantBeforeTraverse()
+    {
+        var log = new Mock<ILoggingService>();
+        var pathGrantService = new Mock<IPathGrantService>();
+        var service = new AppContainerDataFolderService(log.Object, pathGrantService.Object);
+        var entry = new AppContainerEntry { Name = "ram_data_acl_test_" + Guid.NewGuid().ToString("N") };
+        var containerSid = "S-1-15-2-99-1-2-3-4-5-6";
+        var dataPath = AppContainerPaths.GetContainerDataPath(entry.Name);
+
+        Directory.CreateDirectory(dataPath);
+        try
+        {
+            service.EnsureDataFolderTraverse(entry, containerSid);
+
+            pathGrantService.Verify(p => p.AddGrant(
+                containerSid,
+                dataPath,
+                false,
+                It.Is<SavedRightsState>(r =>
+                    r.Read && r.Execute && r.Write && r.Special && !r.Own),
+                null), Times.Once);
+            pathGrantService.Verify(p => p.AddTraverse(containerSid, dataPath), Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(dataPath))
+                Directory.Delete(dataPath, recursive: true);
+        }
+    }
+
     // --- DeleteProfile (non-existent profile) ---
 
     [Fact]
-    public void DeleteProfile_NonExistentProfile_DoesNotThrow()
+    public async Task DeleteProfile_NonExistentProfile_DoesNotThrow()
     {
         // DeleteProfile should log a warning but not throw when the OS profile doesn't exist.
         // DeleteAppContainerProfile returns a non-zero HRESULT for missing profiles, which is logged.
         var service = CreateService();
 
-        var exception = Record.Exception(() => service.DeleteProfile("ram_nonexistent_profile_xyz_test"));
+        var exception = await Record.ExceptionAsync(() => service.DeleteProfile("ram_nonexistent_profile_xyz_test"));
 
         Assert.Null(exception);
     }
 
     [Fact]
-    public void ProfileExists_NonExistentProfile_ReturnsFalse_AfterDeleteProfile()
+    public async Task ProfileExists_NonExistentProfile_ReturnsFalse_AfterDeleteProfile()
     {
         // After deleting a profile that doesn't exist, ProfileExists should return false
         // (same as if it was never created). This verifies that DeleteProfile + ProfileExists
         // are consistent even when the profile was not present.
         var service = CreateService();
 
-        service.DeleteProfile("ram_never_created_xyz_test");
+        await service.DeleteProfile("ram_never_created_xyz_test");
         var exists = service.ProfileExists("ram_never_created_xyz_test");
 
         Assert.False(exists);

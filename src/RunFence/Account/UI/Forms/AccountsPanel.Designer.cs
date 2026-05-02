@@ -25,6 +25,7 @@ partial class AccountsPanel
     private ToolStripButton _createContainerButton;
     private ToolStripButton _aclManagerButton;
     private ToolStripButton _scanAclsButton;
+    private ToolStripButton _lowIntegrityAclManagerButton;
     private ToolStripButton _firewallButton;
     private ToolStripButton _wizardButton;
     private ToolStripButton _runAsButton;
@@ -32,18 +33,18 @@ partial class AccountsPanel
     private ToolStripSeparator _toolStripSep2;
     private ContextMenuStrip _contextMenu;
     private ContextMenuStrip _headerContextMenu;
-    private DataGridViewCheckBoxColumn _allowInternetCol;
+    private DataGridViewCheckBoxColumn colAllowInternet;
     private ToolStripMenuItem _hdrAdd;
     private ToolStripMenuItem _hdrCreateUser;
     private ToolStripMenuItem _hdrCreateContainer;
     private Panel _statusPanel;
-    private DataGridViewCheckBoxColumn _importCol;
-    private DataGridViewTextBoxColumn _accountCol;
-    private DataGridViewImageColumn _credentialCol;
-    private DataGridViewCheckBoxColumn _logonCol;
-    private DataGridViewTextBoxColumn _appsCol;
-    private DataGridViewTextBoxColumn _profilePathCol;
-    private DataGridViewTextBoxColumn _sidCol;
+    private DataGridViewCheckBoxColumn Import;
+    private DataGridViewTextBoxColumn Account;
+    private DataGridViewImageColumn Credential;
+    private DataGridViewCheckBoxColumn Logon;
+    private DataGridViewTextBoxColumn Apps;
+    private DataGridViewTextBoxColumn ProfilePath;
+    private DataGridViewTextBoxColumn SID;
 
     private AccountsPanel() { InitializeComponent(); }
 
@@ -81,6 +82,7 @@ partial class AccountsPanel
         _createContainerButton = new ToolStripButton();
         _aclManagerButton = new ToolStripButton();
         _scanAclsButton = new ToolStripButton();
+        _lowIntegrityAclManagerButton = new ToolStripButton();
         _firewallButton = new ToolStripButton();
         _wizardButton = new ToolStripButton();
         _runAsButton = new ToolStripButton();
@@ -92,79 +94,81 @@ partial class AccountsPanel
         _hdrCreateUser = new ToolStripMenuItem();
         _hdrCreateContainer = new ToolStripMenuItem();
         _statusLabel = new Label();
+        _statusPanel = new Panel();
 
         ((ISupportInitialize)_grid).BeginInit();
         _toolStrip.SuspendLayout();
         _contextMenu.SuspendLayout();
         _headerContextMenu.SuspendLayout();
+        _statusPanel.SuspendLayout();
         SuspendLayout();
 
         // _grid columns
-        _importCol = new DataGridViewCheckBoxColumn();
-        _importCol.Name = "Import";
-        _importCol.HeaderText = "For Import";
-        _importCol.FillWeight = 12;
-        _importCol.Visible = false;
-        _importCol.SortMode = DataGridViewColumnSortMode.NotSortable;
+        Import = new DataGridViewCheckBoxColumn();
+        Import.Name = "Import";
+        Import.HeaderText = "For Import";
+        Import.FillWeight = 12;
+        Import.Visible = false;
+        Import.SortMode = DataGridViewColumnSortMode.NotSortable;
 
-        _accountCol = new DataGridViewTextBoxColumn();
-        _accountCol.Name = "Account";
-        _accountCol.HeaderText = "Account";
-        _accountCol.FillWeight = 22;
+        Account = new DataGridViewTextBoxColumn();
+        Account.Name = "Account";
+        Account.HeaderText = "Account";
+        Account.FillWeight = 22;
 
-        _credentialCol = new DataGridViewImageColumn();
-        _credentialCol.Name = "Credential";
-        _credentialCol.HeaderText = "";
-        _credentialCol.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
-        _credentialCol.Width = 28;
-        _credentialCol.ReadOnly = true;
-        _credentialCol.ImageLayout = DataGridViewImageCellLayout.Zoom;
-        _credentialCol.SortMode = DataGridViewColumnSortMode.NotSortable;
-        _credentialCol.ToolTipText = "Credential";
-        _credentialCol.Visible = false;
+        Credential = new DataGridViewImageColumn();
+        Credential.Name = "Credential";
+        Credential.HeaderText = "";
+        Credential.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+        Credential.Width = 28;
+        Credential.ReadOnly = true;
+        Credential.ImageLayout = DataGridViewImageCellLayout.Zoom;
+        Credential.SortMode = DataGridViewColumnSortMode.NotSortable;
+        Credential.ToolTipText = "Credential";
+        Credential.Visible = false;
 
-        _logonCol = new DataGridViewCheckBoxColumn();
-        _logonCol.Name = "Logon";
-        _logonCol.HeaderText = "Logon";
-        _logonCol.FillWeight = 10;
-        _logonCol.SortMode = DataGridViewColumnSortMode.NotSortable;
-        _logonCol.ToolTipText = "Allow interactive logon. Unchecked = hide from logon screen and run a logoff script.\nIndeterminate = only one of the two conditions is set.";
+        Logon = new DataGridViewCheckBoxColumn();
+        Logon.Name = "Logon";
+        Logon.HeaderText = "Logon";
+        Logon.FillWeight = 10;
+        Logon.SortMode = DataGridViewColumnSortMode.NotSortable;
+        Logon.ToolTipText = "Allow interactive logon. Unchecked = hide from logon screen and run a logoff script.\nIndeterminate = only one of the two conditions is set.";
 
-        _allowInternetCol = new DataGridViewCheckBoxColumn();
-        _allowInternetCol.Name = "colAllowInternet";
-        _allowInternetCol.HeaderText = "Internet";
-        _allowInternetCol.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
-        _allowInternetCol.Width = 65;
-        _allowInternetCol.ReadOnly = false;
-        _allowInternetCol.SortMode = DataGridViewColumnSortMode.NotSortable;
-        _allowInternetCol.ToolTipText = "Allow outbound internet traffic for this account.\nUncheck to block all internet-bound outbound traffic.";
+        colAllowInternet = new DataGridViewCheckBoxColumn();
+        colAllowInternet.Name = "colAllowInternet";
+        colAllowInternet.HeaderText = "Internet";
+        colAllowInternet.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+        colAllowInternet.Width = 65;
+        colAllowInternet.ReadOnly = false;
+        colAllowInternet.SortMode = DataGridViewColumnSortMode.NotSortable;
+        colAllowInternet.ToolTipText = "Allow outbound internet traffic for this account.\nUncheck to block all internet-bound outbound traffic.";
 
-        _appsCol = new DataGridViewTextBoxColumn();
-        _appsCol.Name = "Apps";
-        _appsCol.HeaderText = "Apps";
-        _appsCol.FillWeight = 18;
-        _appsCol.ReadOnly = true;
+        Apps = new DataGridViewTextBoxColumn();
+        Apps.Name = "Apps";
+        Apps.HeaderText = "Apps";
+        Apps.FillWeight = 18;
+        Apps.ReadOnly = true;
 
-        _profilePathCol = new DataGridViewTextBoxColumn();
-        _profilePathCol.Name = "ProfilePath";
-        _profilePathCol.HeaderText = "Profile Path";
-        _profilePathCol.FillWeight = 18;
-        _profilePathCol.ReadOnly = true;
-        _profilePathCol.ToolTipText = "Profile folder path";
+        ProfilePath = new DataGridViewTextBoxColumn();
+        ProfilePath.Name = "ProfilePath";
+        ProfilePath.HeaderText = "Profile Path";
+        ProfilePath.FillWeight = 18;
+        ProfilePath.ReadOnly = true;
+        ProfilePath.ToolTipText = "Profile folder path";
 
-        _sidCol = new DataGridViewTextBoxColumn();
-        _sidCol.Name = "SID";
-        _sidCol.HeaderText = "SID";
-        _sidCol.FillWeight = 14;
-        _sidCol.MinimumWidth = 60;
-        _sidCol.ReadOnly = true;
+        SID = new DataGridViewTextBoxColumn();
+        SID.Name = "SID";
+        SID.HeaderText = "SID";
+        SID.FillWeight = 14;
+        SID.MinimumWidth = 60;
+        SID.ReadOnly = true;
 
         _grid.Columns.AddRange(new DataGridViewColumn[]
-            { _importCol, _credentialCol, _accountCol, _logonCol, _allowInternetCol, _appsCol, _profilePathCol, _sidCol });
+            { Import, Credential, Account, Logon, colAllowInternet, Apps, ProfilePath, SID });
 
-        // _grid — shared visual styling from DataPanel, then unlock for editable checkboxes
-        ConfigureReadOnlyGrid(_grid);
-        _grid.ReadOnly = false;
+        // _grid
+        _grid.Dock = DockStyle.Fill;
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.SelectionChanged += OnGridSelectionChanged;
         _grid.CellDoubleClick += OnGridCellDoubleClick;
         _grid.CellMouseClick += OnGridCellMouseClick;
@@ -179,6 +183,7 @@ partial class AccountsPanel
         {
             _refreshButton, _wizardButton, _createUserButton, _createContainerButton, _addButton,
             _toolStripSep1, _openCmdButton, _openFolderBrowserButton, _aclManagerButton, _firewallButton, _toolStripSep2, _scanAclsButton,
+            _lowIntegrityAclManagerButton,
             _runAsButton, _copyPasswordButton, _accountsButton, _deleteProfilesButton, _migrateSidsButton, _importButton
         });
 
@@ -221,6 +226,11 @@ partial class AccountsPanel
         _scanAclsButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _scanAclsButton.ToolTipText = "Scan ACLs";
         _scanAclsButton.Click += OnScanAclsClick;
+
+        // _lowIntegrityAclManagerButton
+        _lowIntegrityAclManagerButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+        _lowIntegrityAclManagerButton.ToolTipText = "Low Integrity ACL Manager";
+        _lowIntegrityAclManagerButton.Click += OnLowIntegrityAclManagerClick;
 
         // _firewallButton
         _firewallButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
@@ -290,14 +300,12 @@ partial class AccountsPanel
         _statusLabel.Dock = DockStyle.Fill;
         _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
 
-        _statusPanel = new Panel();
         _statusPanel.Dock = DockStyle.Bottom;
         _statusPanel.Height = 25;
         _statusPanel.Padding = new Padding(5, 2, 5, 2);
         _statusPanel.Controls.Add(_statusLabel);
 
         // AccountsPanel
-        Dock = DockStyle.Fill;
         Controls.Add(_grid);
         Controls.Add(_statusPanel);
         Controls.Add(_toolStrip);
@@ -307,6 +315,7 @@ partial class AccountsPanel
         _toolStrip.PerformLayout();
         _contextMenu.ResumeLayout(false);
         _headerContextMenu.ResumeLayout(false);
+        _statusPanel.ResumeLayout(false);
         ResumeLayout(false);
         PerformLayout();
     }

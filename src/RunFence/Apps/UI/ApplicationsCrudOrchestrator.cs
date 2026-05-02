@@ -39,6 +39,7 @@ public class ApplicationsCrudOrchestrator(
     ILicenseService licenseService)
 {
     private IApplicationsPanelContext _context = null!;
+    private Task<ShortcutTraversalCache>? _scanTask;
 
     public void Initialize(IApplicationsPanelContext context)
     {
@@ -77,20 +78,16 @@ public class ApplicationsCrudOrchestrator(
 
         using (dlg)
         {
-            dlg.ApplyRequested += () =>
+            dlg.ApplyRequested += async () =>
             {
                 if (!licenseService.CanAddApp(_context.Database.Apps.Count))
-                {
-                    MessageBox.Show(licenseService.GetRestrictionMessage(EvaluationFeature.Apps, _context.Database.Apps.Count),
-                        "License Limit", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
+                    throw new OperationCanceledException(licenseService.GetRestrictionMessage(EvaluationFeature.Apps, _context.Database.Apps.Count));
 
                 appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
                 try
                 {
                     _context.Database.Apps.Add(dlg.Result);
-                    var shortcutCache = CreateShortcutCacheIfNeeded(dlg.Result);
+                    var shortcutCache = await CreateShortcutCacheIfNeeded(dlg.Result);
                     ApplyChanges(dlg.Result, shortcutCache);
                     _context.SaveAndRefresh(dlg.Result.Id, targetedSave: true);
                     if (permissionPrompter.PromptAndGrant(dlg, dlg.Result))
@@ -145,12 +142,12 @@ public class ApplicationsCrudOrchestrator(
 
         using (dlg)
         {
-            dlg.ApplyRequested += () =>
+            dlg.ApplyRequested += async () =>
             {
                 var index = _context.Database.Apps.FindIndex(a => a.Id == app.Id);
                 if (index >= 0)
                 {
-                    var shortcutCache = CreateShortcutCacheIfNeeded(app, dlg.Result);
+                    var shortcutCache = await CreateShortcutCacheIfNeeded(app, dlg.Result);
                     RevertChanges(app, shortcutCache);
                     _context.Database.Apps[index] = dlg.Result;
                     appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
@@ -185,9 +182,9 @@ public class ApplicationsCrudOrchestrator(
                 dlg.Close();
             };
 
-            dlg.RemoveRequested += () =>
+            dlg.RemoveRequested += async () =>
             {
-                var shortcutCache = CreateShortcutCacheIfNeeded(app);
+                var shortcutCache = await CreateShortcutCacheIfNeeded(app);
                 RevertChanges(app, shortcutCache);
                 _context.Database.Apps.Remove(app);
                 appConfigService.RemoveApp(app.Id);
@@ -202,7 +199,7 @@ public class ApplicationsCrudOrchestrator(
     }
 
     /// <summary>Removes the currently selected app entry after confirmation.</summary>
-    public void RemoveSelected()
+    public async Task RemoveSelected()
     {
         var grid = _context.Grid;
         if (grid.SelectedRows.Count == 0)
@@ -215,7 +212,7 @@ public class ApplicationsCrudOrchestrator(
 
         if (MessageBox.Show(removeMessage, "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
         {
-            var shortcutCache = CreateShortcutCacheIfNeeded(app);
+            var shortcutCache = await CreateShortcutCacheIfNeeded(app);
             RevertChanges(app, shortcutCache);
             _context.Database.Apps.Remove(app);
             appConfigService.RemoveApp(app.Id);
@@ -255,8 +252,30 @@ public class ApplicationsCrudOrchestrator(
         }
     }
 
-    private ShortcutTraversalCache CreateShortcutCacheIfNeeded(params AppEntry[] apps)
-        => apps.Any(a => a.ManageShortcuts)
-            ? shortcutDiscovery.CreateTraversalCache()
-            : new ShortcutTraversalCache([]);
+    /// <remarks>
+    /// Concurrent calls share a single in-progress scan — if a scan is already running, awaits the
+    /// existing task rather than starting a second scan. The field is cleared after the task completes
+    /// so subsequent calls start a fresh scan. Managed SIDs are captured on the UI thread before the
+    /// background scan starts to avoid accessing the live database from the thread pool.
+    /// </remarks>
+    private async Task<ShortcutTraversalCache> CreateShortcutCacheIfNeeded(params AppEntry[] apps)
+    {
+        if (!apps.Any(a => a.ManageShortcuts))
+            return new ShortcutTraversalCache([]);
+
+        if (_scanTask == null)
+        {
+            var managedSids = shortcutDiscovery.CaptureManagedSids();
+            _scanTask = Task.Run(() => shortcutDiscovery.CreateTraversalCache(managedSids));
+        }
+
+        try
+        {
+            return await _scanTask;
+        }
+        finally
+        {
+            _scanTask = null;
+        }
+    }
 }

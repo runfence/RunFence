@@ -7,10 +7,12 @@ namespace RunFence.Firewall;
 /// Manages COM-based firewall rules: internet block, LAN block, and local address rules.
 /// Handles add/update/remove of <see cref="FirewallRuleInfo"/> entries and rollback on failure.
 /// </summary>
+/// <remarks>Methods above threshold: 17 methods: extracting rollback methods (3 methods) into a separate class would duplicate the <see cref="IFirewallRuleManager"/> COM interaction and rule-lookup helpers needed by both apply and rollback paths. Same COM object, same rule naming, same error handling. Reviewed 2026-04-09.</remarks>
 public class FirewallComRuleApplier(
     IFirewallRuleManager ruleManager,
     FirewallAddressExclusionBuilder addressBuilder,
     ILoggingService log)
+    : IFirewallComRuleApplier
 {
     private const int DirectionOutbound = 2;
     private const int ActionBlock = 0;
@@ -137,7 +139,6 @@ public class FirewallComRuleApplier(
 
     public void RollBackAccountRules(
         string sid,
-        FirewallAccountSettings rollbackSettings,
         IReadOnlyList<FirewallRuleInfo> capturedRules)
     {
         RestoreWindowsFirewallRules(sid, capturedRules);

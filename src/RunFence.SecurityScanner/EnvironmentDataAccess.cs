@@ -63,7 +63,7 @@ public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<s
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey($@"{Constants.ProfileListRegistryKey}\{sid}");
+            using var key = Registry.LocalMachine.OpenSubKey($@"{PathConstants.ProfileListRegistryKey}\{sid}");
             var raw = key?.GetValue("ProfileImagePath") as string;
             return string.IsNullOrEmpty(raw) ? null : SecurityScanner.ExpandEnvVars(raw);
         }
@@ -141,7 +141,7 @@ public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<s
         var profiles = new List<(string, string?)>();
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(Constants.ProfileListRegistryKey);
+            using var key = Registry.LocalMachine.OpenSubKey(PathConstants.ProfileListRegistryKey);
             if (key == null)
                 return profiles;
 

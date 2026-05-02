@@ -17,12 +17,14 @@ public interface ISidMigrationService
     Task<List<SidMigrationMatch>> ScanAsync(
         IReadOnlyList<string> rootPaths,
         IReadOnlyList<SidMigrationMapping> mappings,
+        IReadOnlyList<string> sidsToDelete,
         IProgress<(long scanned, long found)> onProgress,
         CancellationToken ct);
 
     Task<(long applied, long errors)> ApplyAsync(
         IReadOnlyList<SidMigrationMatch> hits,
         IReadOnlyList<SidMigrationMapping> mappings,
+        IReadOnlyList<string> sidsToDelete,
         IProgress<MigrationProgress> onProgress,
         CancellationToken ct);
 

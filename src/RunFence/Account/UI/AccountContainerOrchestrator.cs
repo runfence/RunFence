@@ -1,6 +1,5 @@
 using RunFence.Account.Lifecycle;
 using RunFence.Account.UI.AppContainer;
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch.Container;
@@ -16,7 +15,7 @@ public class AccountContainerOrchestrator(
     AccountAclManagerLauncher aclManagerLauncher,
     ILicenseService licenseService,
     ContainerDeletionCleanupHelper cleanupHelper,
-    ShellHelper shellHelper,
+    IShellHelper shellHelper,
     ISessionProvider sessionProvider)
 {
     public static readonly string[] InternetCapabilitySids = ["S-1-15-3-1", "S-1-15-3-2"];
@@ -48,13 +47,13 @@ public class AccountContainerOrchestrator(
                 "AppContainer Security Reminder", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
-    public void EditContainer(ContainerRow row, IWin32Window? parent, Action onSaved)
+    public async Task EditContainer(ContainerRow row, IWin32Window? parent, Action onSaved)
     {
         using var dlg = new AppContainerEditDialog(row.Container, containerEditService);
         if (modalCoordinator.ShowModal(dlg, parent) != DialogResult.OK)
         {
             if (dlg.DeleteRequested)
-                DeleteContainer(row, onSaved);
+                await DeleteContainer(row, onSaved);
             return;
         }
 
@@ -63,7 +62,7 @@ public class AccountContainerOrchestrator(
         onSaved();
     }
 
-    public void DeleteContainer(ContainerRow row, Action onSaved)
+    public async Task DeleteContainer(ContainerRow row, Action onSaved)
     {
         var session = sessionProvider.GetSession();
         var db = session.Database;
@@ -90,7 +89,7 @@ public class AccountContainerOrchestrator(
         var allAppsSnapshot = db.Apps.ToList();
         var remainingApps = db.Apps.Where(a => !containerApps.Contains(a)).ToList();
 
-        if (!containerDeletion.DeleteContainer(container, row.ContainerSid))
+        if (!await containerDeletion.DeleteContainer(container, row.ContainerSid))
         {
             MessageBox.Show("Delete failed: unable to remove AppContainer profile.", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -168,5 +167,10 @@ public class AccountContainerOrchestrator(
     public void OpenAclManager(AccountRow row, IWin32Window? parent)
     {
         aclManagerLauncher.OpenAclManager(row, parent);
+    }
+
+    public void OpenLowIntegrityAclManager(IWin32Window? parent)
+    {
+        aclManagerLauncher.OpenLowIntegrityAclManager(parent);
     }
 }

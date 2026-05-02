@@ -1,6 +1,8 @@
 using Autofac;
+using Autofac.Extras.Ordering;
 using RunFence.Infrastructure;
 using RunFence.Security;
+using RunFence.Startup;
 using RunFence.Startup.UI;
 
 namespace RunFence.Startup.Modules;
@@ -21,8 +23,13 @@ public class SecurityModule : Module
             .As<IAutoLockTimerService>()
             .SingleInstance();
 
+        builder.RegisterType<UnlockProcessLauncher>()
+            .As<IUnlockProcessLauncher>()
+            .SingleInstance();
+
         builder.RegisterType<LockManager>()
             .As<ILockManager>()
+            .As<ILockUiEventSource>()
             .AsSelf()
             .SingleInstance();
 
@@ -30,6 +37,11 @@ public class SecurityModule : Module
             .As<IAppStateProvider>()
             .As<IAppLockControl>()
             .As<IDataChangeNotifier>()
+            .As<IApplicationDataChangeSource>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ShortcutEnforcementHelper>()
             .AsSelf()
             .SingleInstance();
 
@@ -47,6 +59,12 @@ public class SecurityModule : Module
 
         builder.RegisterType<SecurityCheckRunner>()
             .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<InputInjectionBlockerService>()
+            .As<IInputInjectionBlockerService>()
+            .As<IRequiresInitialization>()
+            .OrderBy(4)
             .SingleInstance();
     }
 }

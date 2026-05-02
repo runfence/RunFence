@@ -5,24 +5,18 @@ using RunFence.Infrastructure;
 using InfraWindowNative = RunFence.Infrastructure.WindowNative;
 using RunFence.Launch;
 using RunFence.Licensing;
-using RunFence.Licensing.UI.Forms;
-using RunFence.Persistence.UI;
 using RunFence.Startup.UI;
 using RunFence.TrayIcon;
 
 namespace RunFence.UI;
 
 /// <summary>
-/// Manages tray icon, show/hide, auto-lock timer, Alt+Escape hotkey, idle monitoring, and
-/// discovery scheduling. Extracted from <see cref="RunFence.UI.Forms.MainForm"/> to reduce its
-/// dependency count. Communicates with the form via <see cref="IMainFormVisibility"/>.
+/// Manages tray icon, title/tooltip, hotkey registration, idle monitoring, discovery scheduling,
+/// and tray launch wiring. Show-window/unlock request handling is delegated to
+/// <see cref="MainFormWindowRequestHandler"/>; background auto-lock coordination is delegated
+/// to <see cref="MainFormBackgroundAutoLockCoordinator"/>. Communicates with the form via
+/// <see cref="IMainFormVisibility"/>.
 /// </summary>
-/// <remarks>
-/// Dependency count (11): at threshold but no actionable split exists. Each dep covers a
-/// distinct concern: lock manager, tray launch, notify icon, tray icon manager, idle monitor,
-/// discovery refresh, session, config orchestrator, license, launch facade, hotkey service —
-/// all interacting with the tray lifecycle. Reviewed 2026-04-16.
-/// </remarks>
 public class MainFormTrayHandler(
     LockManager lockManager,
     TrayLaunchHandler trayLaunchHandler,
@@ -31,18 +25,17 @@ public class MainFormTrayHandler(
     IIdleMonitorService idleMonitor,
     DiscoveryRefreshManager discoveryRefreshManager,
     SessionContext session,
-    ConfigManagementOrchestrator configManagementOrchestrator,
     ILicenseService licenseService,
-    ILaunchFacade launchFacade,
-    IGlobalHotkeyService hotkeyService)
-    : IDisposable
+    IGlobalHotkeyService hotkeyService,
+    MainFormWindowRequestHandler windowRequestHandler,
+    MainFormBackgroundAutoLockCoordinator autoLockCoordinator)
+    : IDisposable, ITrayBalloonService
 {
     private const int AltEscapeHotkeyId = 0xAE01;
     private const int MOD_ALT = 0x0001;
     private const int VK_ESCAPE = 0x1B;
 
     private IMainFormVisibility _form = null!;
-    private bool _startupComplete;
     private bool _disposed;
 
     /// <summary>
@@ -60,6 +53,10 @@ public class MainFormTrayHandler(
     public void Initialize(IMainFormVisibility form, Control formAsControl)
     {
         _form = form;
+
+        windowRequestHandler.Initialize(form);
+        windowRequestHandler.TitleUpdateNeeded += UpdateTitleAndTooltip;
+        autoLockCoordinator.Initialize(form);
 
         trayIconManager.Initialize((ITrayOwner)form);
         trayIconManager.AppLaunchRequested += trayLaunchHandler.LaunchApp;
@@ -81,6 +78,7 @@ public class MainFormTrayHandler(
         };
 
         licenseService.LicenseStatusChanged += OnLicenseStatusChanged;
+        UpdateTitleAndTooltip();
     }
 
     public void HandleFormLoad()
@@ -94,87 +92,15 @@ public class MainFormTrayHandler(
         Dispose();
     }
 
-    public void SetStartupComplete() => _startupComplete = true;
-
-    public void HandleResize()
-    {
-        if (LockManager.IsUnlocking || IsShowingWindow)
-            return;
-
-        if (_form.WindowState == FormWindowState.Minimized)
-            HideToTray();
-        else
-            LockManager.StopAutoLockTimer();
-    }
-
-    public void HideToTray()
-    {
-        if (LockManager.IsUnlocking || IsShowingWindow)
-            return;
-        _form.Hide();
-        if (licenseService.IsLicensed)
-            LockManager.StartAutoLockTimer();
-    }
-
-    public void ShowAndActivate()
-    {
-        _form.ShowInTaskbar = true;
-        IsShowingWindow = true;
-        try
-        {
-            // Reset to Normal before Show so the form never appears in minimized state.
-            _form.WindowState = FormWindowState.Normal;
-            _form.Show();
-        }
-        finally
-        {
-            IsShowingWindow = false;
-        }
-
-        ForceForeground();
-    }
-
-    public void ShowAndActivateForUnlock()
-    {
-        // Show before setting WindowState — prevents brief minimized flash when unlocking
-        _form.ShowInTaskbar = true;
-        _form.Show();
-        _form.WindowState = FormWindowState.Normal;
-        ForceForeground();
-    }
-
-    public async Task TryShowWindowAsync()
-    {
-        if (!_startupComplete)
-            return;
-        var wasLocked = LockManager.IsLocked;
-        await LockManager.TryShowWindowAsync();
-        if (wasLocked && !LockManager.IsLocked)
-            configManagementOrchestrator.ScheduleAvailabilityCheck();
-        if (!LockManager.IsLocked)
-        {
-            ShowNagIfNeeded();
-            ForceForeground();
-        }
-    }
-
-    public void ShowNagIfNeeded()
-    {
-        if (!licenseService.ShouldShowNag(DateTime.Now))
-            return;
-        using var dlg = new EvaluationNagDialog(licenseService, launchFacade);
-        dlg.ShowDialog((Control)_form);
-        if (licenseService.IsLicensed)
-            UpdateTitleAndTooltip();
-        else
-            licenseService.RecordNagShown(DateTime.Now);
-    }
-
     public void UpdateTitleAndTooltip()
     {
-        var isLicensed = licenseService.IsLicensed;
-        _form.Title = isLicensed ? "RunFence" : "RunFence (Evaluation)";
-        notifyIcon.Text = isLicensed ? "RunFence" : "RunFence (Evaluation)";
+        var title = licenseService.IsLicensed ? "RunFence" : "RunFence (Evaluation)";
+        if (DebugHelper.UseAdminOperationMocks)
+            title += " [NON-ELEVATED]";
+        if (!string.IsNullOrEmpty(DebugHelper.AppId))
+            title += $" [{DebugHelper.AppId}]";
+        _form.Title = title;
+        notifyIcon.Text = title;
     }
 
     public void UpdateTray()
@@ -197,9 +123,16 @@ public class MainFormTrayHandler(
 
     public void ResetIdleTimer() => idleMonitor.ResetIdleTimer();
 
-    public bool IsShowingWindow { get; private set; }
-
     public void RestoreIconVisibility() => trayIconManager.RestoreIconVisibility();
+
+    public void ShowBalloonTip(string text) => trayIconManager.ShowBalloonTip(text);
+
+    public void ShowWarning(string text)
+    {
+        if (_form == null! || _form.IsDisposed || !_form.IsHandleCreated)
+            return;
+        _form.BeginInvokeOnUiThread(() => trayIconManager.ShowBalloonTip(text));
+    }
 
     private void OnAltEscapeHotkey(int id)
     {
@@ -208,7 +141,7 @@ public class MainFormTrayHandler(
         if (InfraWindowNative.GetForegroundWindow() != _form.Handle)
             return;
         // Defer to avoid modifying the hotkey list during the LL hook's foreach iteration.
-        _form.BeginInvokeOnUiThread(HideToTray);
+        _form.BeginInvokeOnUiThread(autoLockCoordinator.HideToTray);
     }
 
     private void OnLicenseStatusChanged()
@@ -221,10 +154,7 @@ public class MainFormTrayHandler(
                 return;
             UpdateTitleAndTooltip();
             ConfigureIdleMonitor();
-            if (!licenseService.IsLicensed)
-                LockManager.StopAutoLockTimer();
-            else if (_form.WindowState == FormWindowState.Minimized)
-                LockManager.StartAutoLockTimer();
+            autoLockCoordinator.HandleLicenseChanged();
             LicenseChangedRefreshNeeded?.Invoke(); // tells MainForm to call optionsPanel.SetData
         });
     }
@@ -234,6 +164,8 @@ public class MainFormTrayHandler(
         if (_disposed)
             return;
         _disposed = true;
+        windowRequestHandler.TitleUpdateNeeded -= UpdateTitleAndTooltip;
+        windowRequestHandler.CancelStartup();
         licenseService.LicenseStatusChanged -= OnLicenseStatusChanged;
         hotkeyService.HotkeyPressed -= OnAltEscapeHotkey;
         hotkeyService.Unregister(AltEscapeHotkeyId);
@@ -241,11 +173,5 @@ public class MainFormTrayHandler(
         notifyIcon.Visible = false;
         notifyIcon.Dispose();
         discoveryRefreshManager.Dispose();
-    }
-
-    private void ForceForeground()
-    {
-        WindowForegroundHelper.ForceToForeground(_form.Handle);
-        _form.BringToFront();
     }
 }

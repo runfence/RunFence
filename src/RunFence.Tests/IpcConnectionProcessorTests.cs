@@ -67,7 +67,7 @@ public class IpcConnectionProcessorTests
 
     private static async Task<IpcResponse?> ReadResponseAsync(NamedPipeClientStream client)
     {
-        var buffer = new byte[Constants.MaxPipeMessageSize];
+        var buffer = new byte[IpcConstants.MaxPipeMessageSize];
         int bytesRead;
         try
         {
@@ -110,8 +110,8 @@ public class IpcConnectionProcessorTests
         }
         finally
         {
-            client.Dispose();
-            server.Dispose();
+            await client.DisposeAsync();
+            await server.DisposeAsync();
         }
     }
 
@@ -257,7 +257,7 @@ public class IpcConnectionProcessorTests
     [Fact]
     public async Task MultiChunkMessage_ReassembledCorrectly()
     {
-        // Arrange: build a message whose JSON exceeds Constants.MaxPipeMessageSize (64 KB).
+        // Arrange: build a message whose JSON exceeds IpcConstants.MaxPipeMessageSize (64 KB).
         // AssembleMessage reads into a byte[MaxPipeMessageSize] buffer; if the message is
         // larger, IsMessageComplete = false after the first read and the while-loop reads
         // additional chunks until the full message is assembled. This test sends a message
@@ -278,9 +278,9 @@ public class IpcConnectionProcessorTests
         var message = new IpcMessage { Command = IpcCommands.Launch, AppId = longAppId };
         var json = JsonSerializer.Serialize(message, JsonDefaults.Options);
         var bytes = Encoding.UTF8.GetBytes(json);
-        Assert.True(bytes.Length > Constants.MaxPipeMessageSize,
-            $"Test requires message > {Constants.MaxPipeMessageSize} bytes; got {bytes.Length}");
-        Assert.True(bytes.Length <= 2L * Constants.MaxPipeMessageSize,
+        Assert.True(bytes.Length > IpcConstants.MaxPipeMessageSize,
+            $"Test requires message > {IpcConstants.MaxPipeMessageSize} bytes; got {bytes.Length}");
+        Assert.True(bytes.Length <= 2L * IpcConstants.MaxPipeMessageSize,
             "Message must not exceed the 2× overflow limit in AssembleMessage");
 
         var response = await ExchangeAsync(processor, message, Dispatch);

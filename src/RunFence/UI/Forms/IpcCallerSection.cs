@@ -11,7 +11,7 @@ namespace RunFence.UI.Forms;
 /// </summary>
 public partial class IpcCallerSection : UserControl
 {
-    private readonly Func<List<LocalUserAccount>> _getLocalUsers;
+    private readonly Func<IReadOnlyList<LocalUserAccount>> _getLocalUsers;
     private readonly SidDisplayNameResolver _displayNameResolver;
     private readonly ISidEntryHelper _sidEntryHelper;
     private Func<Form, DialogResult>? _showModalDialog;
@@ -33,7 +33,7 @@ public partial class IpcCallerSection : UserControl
         _descLabel.Visible = true;
     }
 
-    public IpcCallerSection(Func<List<LocalUserAccount>> getLocalUsers, ISidEntryHelper sidEntryHelper,
+    public IpcCallerSection(Func<IReadOnlyList<LocalUserAccount>> getLocalUsers, ISidEntryHelper sidEntryHelper,
         SidDisplayNameResolver displayNameResolver)
     {
         _getLocalUsers = getLocalUsers;

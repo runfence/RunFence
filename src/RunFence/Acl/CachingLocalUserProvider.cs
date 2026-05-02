@@ -7,25 +7,25 @@ namespace RunFence.Acl;
 
 /// <summary>
 /// Caches local Windows user accounts with a 30-second TTL. Thread-safe.
-/// Uses NetUserEnum (level 0) for fast local user enumeration and NetUserGetInfo(level 23)
-/// to read the SID directly from the local SAM buffer, avoiding per-user name-resolution calls.
+/// Uses NetUserEnum (level 0) for fast local user enumeration and the shared local SAM SID
+/// resolver to avoid per-user name-resolution calls.
 /// </summary>
-public class CachingLocalUserProvider(ILoggingService log) : ILocalUserProvider
+public class CachingLocalUserProvider(ILoggingService log, ILocalSamSidResolver localSamSidResolver) : ILocalUserProvider
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
 
     private readonly object _cacheLock = new();
-    private List<LocalUserAccount>? _cachedLocalUsers;
+    private IReadOnlyList<LocalUserAccount>? _cachedLocalUsers;
     private DateTime _cacheTimestamp;
 
-    public List<LocalUserAccount> GetLocalUserAccounts()
+    public IReadOnlyList<LocalUserAccount> GetLocalUserAccounts()
     {
         lock (_cacheLock)
         {
             if (_cachedLocalUsers != null && DateTime.UtcNow - _cacheTimestamp < CacheTtl)
                 return _cachedLocalUsers;
 
-            _cachedLocalUsers = EnumerateLocalUsers();
+            _cachedLocalUsers = EnumerateLocalUsers().AsReadOnly();
             _cacheTimestamp = DateTime.UtcNow;
             return _cachedLocalUsers;
         }
@@ -81,7 +81,7 @@ public class CachingLocalUserProvider(ILoggingService log) : ILocalUserProvider
                     if (string.IsNullOrWhiteSpace(name))
                         continue;
 
-                    if (!TryGetLocalUserSid(name, out var sidString))
+                    if (!localSamSidResolver.TryGetLocalUserSid(name, out var sidString))
                         continue;
 
                     users.Add(new LocalUserAccount(name, sidString));
@@ -94,54 +94,5 @@ public class CachingLocalUserProvider(ILoggingService log) : ILocalUserProvider
         } while (result == CachingLocalUserProviderNative.ErrorMoreData);
 
         return users;
-    }
-
-    private bool TryGetLocalUserSid(string name, out string sidString)
-    {
-        sidString = string.Empty;
-
-        var status = GroupMembershipNative.NetUserGetInfo(null, name, 23, out var bufPtr);
-        if (status != CachingLocalUserProviderNative.NerrSuccess || bufPtr == IntPtr.Zero)
-        {
-            if (bufPtr != IntPtr.Zero)
-                GroupMembershipNative.NetApiBufferFree(bufPtr);
-
-            log.Warn($"NetUserGetInfo(level 23) failed for user '{name}': error {status}");
-            return false;
-        }
-
-        try
-        {
-            var info = Marshal.PtrToStructure<CachingLocalUserProviderNative.USER_INFO_23>(bufPtr);
-
-            if ((info.usri23_flags & GroupMembershipNative.UF_ACCOUNTDISABLE) != 0)
-                return false;
-
-            if (info.usri23_user_sid == IntPtr.Zero)
-            {
-                log.Warn($"NetUserGetInfo(level 23) returned a null SID for user '{name}'");
-                return false;
-            }
-
-            if (!CachingLocalUserProviderNative.ConvertSidToStringSidW(info.usri23_user_sid, out var stringSidPtr))
-            {
-                log.Warn($"ConvertSidToStringSidW failed for user '{name}': error {Marshal.GetLastWin32Error()}");
-                return false;
-            }
-
-            try
-            {
-                sidString = Marshal.PtrToStringUni(stringSidPtr) ?? string.Empty;
-                return !string.IsNullOrWhiteSpace(sidString);
-            }
-            finally
-            {
-                ProcessNative.LocalFree(stringSidPtr);
-            }
-        }
-        finally
-        {
-            GroupMembershipNative.NetApiBufferFree(bufPtr);
-        }
     }
 }

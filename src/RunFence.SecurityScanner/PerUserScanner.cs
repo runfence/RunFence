@@ -15,7 +15,7 @@ public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclChe
         bool skipInteractive = ctx.InteractiveUserSid != null &&
                                string.Equals(ctx.InteractiveUserSid, ctx.CurrentUserSid, StringComparison.OrdinalIgnoreCase);
 
-        var excludedForCurrentUser = BuildPerUserExcluded(ctx.AdminSids, ctx.CurrentUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
+        var excludedForCurrentUser = BuildPerUserExcluded(ctx.AdminSids, ctx.CurrentUserSid, ctx.InteractiveUserSid);
 
         // Current user startup folder
         var currentUserStartup = dataAccess.GetCurrentUserStartupPath();
@@ -34,7 +34,7 @@ public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclChe
         // Interactive user startup folder and logon scripts
         if (!skipInteractive && ctx.InteractiveUserSid != null)
         {
-            var excludedForInteractive = BuildPerUserExcluded(ctx.AdminSids, ctx.InteractiveUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
+            var excludedForInteractive = BuildPerUserExcluded(ctx.AdminSids, ctx.InteractiveUserSid, ctx.InteractiveUserSid);
 
             var profilePath = dataAccess.GetInteractiveUserProfilePath(ctx.InteractiveUserSid);
             if (!string.IsNullOrEmpty(profilePath))
@@ -77,7 +77,7 @@ public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclChe
 
         if (!skipInteractive && ctx.InteractiveUserSid != null)
         {
-            var hkuExcluded = BuildPerUserExcluded(ctx.AdminSids, ctx.InteractiveUserSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
+            var hkuExcluded = BuildPerUserExcluded(ctx.AdminSids, ctx.InteractiveUserSid, ctx.InteractiveUserSid);
             var hkuRunPath = $@"{ctx.InteractiveUserSid}\{RunKeyPath}";
             var hkuRunOncePath = $@"{ctx.InteractiveUserSid}\{RunOnceKeyPath}";
             aclCheck.CheckRegistryKey(Registry.Users, hkuRunPath, $@"HKU\{ctx.InteractiveUserSid}\...\Run",
@@ -113,7 +113,7 @@ public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclChe
                 if (string.Equals(userSid, ctx.InteractiveUserSid, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var excluded = BuildPerUserExcluded(ctx.AdminSids, userSid, ctx.CurrentUserSid, ctx.InteractiveUserSid);
+                var excluded = BuildPerUserExcluded(ctx.AdminSids, userSid, ctx.InteractiveUserSid);
 
                 if (!string.IsNullOrEmpty(profilePath))
                 {
@@ -260,7 +260,7 @@ public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclChe
     }
 
     private static HashSet<string> BuildPerUserExcluded(HashSet<string> adminSids, string? ownerSid,
-        string? currentUserSid, string? interactiveUserSid)
+        string? interactiveUserSid)
     {
         var excluded = new HashSet<string>(adminSids, StringComparer.OrdinalIgnoreCase);
         if (ownerSid != null)

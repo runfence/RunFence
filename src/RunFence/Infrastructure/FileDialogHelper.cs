@@ -1,5 +1,7 @@
 using Microsoft.Win32;
 using RunFence.Core;
+using FileDialog = System.Windows.Forms.FileDialog;
+using FileDialogCustomPlace = System.Windows.Forms.FileDialogCustomPlace;
 
 namespace RunFence.Infrastructure;
 
@@ -23,14 +25,14 @@ public static class FileDialogHelper
         }
 
         TryAdd(dlg, Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\");
-        TryAdd(dlg, Constants.ProgramDataDir);
+        TryAdd(dlg, PathConstants.ProgramDataDir);
     }
 
     private static string? TryGetProfilePath(string sid)
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey($@"{Constants.ProfileListRegistryKey}\{sid}");
+            using var key = Registry.LocalMachine.OpenSubKey($@"{PathConstants.ProfileListRegistryKey}\{sid}");
             var raw = key?.GetValue("ProfileImagePath") as string;
             return string.IsNullOrEmpty(raw) ? null : Environment.ExpandEnvironmentVariables(raw);
         }

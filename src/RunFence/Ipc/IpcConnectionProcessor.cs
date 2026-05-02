@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
@@ -13,7 +14,7 @@ namespace RunFence.Ipc;
 /// </summary>
 public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor identityExtractor)
 {
-    private readonly Dictionary<string, DateTime> _lastRequestByCaller = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTime> _lastRequestByCaller = new(StringComparer.OrdinalIgnoreCase);
     private static readonly byte[] RateLimitedBytes = [IpcCommands.RateLimitedSignal];
 
     public async Task ProcessConnectionAsync(
@@ -47,7 +48,7 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
             .Where(kvp => (now - kvp.Value).TotalSeconds > 10)
             .Select(kvp => kvp.Key)
             .ToList())
-            _lastRequestByCaller.Remove(staleKey);
+            _lastRequestByCaller.TryRemove(staleKey, out _);
 
         if (_lastRequestByCaller.TryGetValue(rateLimitKey, out var last)
             && (now - last).TotalMilliseconds < 100)
@@ -87,8 +88,8 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
                     : context;
 
                 // Suppress ExecutionContext flow before invoking the handler.
-                // ImpersonateNamedPipeClient (called inside RunAsClient above) sets the
-                // Win32 thread token AND may contaminate the managed SecurityContext inside
+                // ImpersonateNamedPipeClient (called inside WindowsIpcIdentityExtractor.Extract)
+                // sets the Win32 thread token AND may contaminate the managed SecurityContext inside
                 // ExecutionContext. RevertToSelf reverts the Win32 token but does NOT
                 // necessarily revert the managed SecurityContext. Without suppression,
                 // Control.Invoke captures the contaminated SecurityContext via
@@ -127,13 +128,13 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
     /// </summary>
     private async Task<(byte[] buffer, int bytesRead)> AssembleMessage(NamedPipeServerStream pipe, CancellationToken ct)
     {
-        var buffer = new byte[Constants.MaxPipeMessageSize];
+        var buffer = new byte[IpcConstants.MaxPipeMessageSize];
         int bytesRead = await pipe.ReadAsync(buffer, ct);
 
         if (pipe.IsMessageComplete)
             return (buffer, bytesRead);
 
-        const long maxAssembledSize = 2L * Constants.MaxPipeMessageSize;
+        const long maxAssembledSize = 2L * IpcConstants.MaxPipeMessageSize;
         using var ms = new MemoryStream();
         ms.Write(buffer, 0, bytesRead);
         bool overflow = false;

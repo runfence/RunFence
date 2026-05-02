@@ -1,3 +1,4 @@
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.Persistence;
@@ -32,12 +33,16 @@ public class AppConfigIndex(IGrantConfigTracker grantTracker) : IAppFilter
         return new AppDatabase
         {
             Apps = mainApps,
-            Settings = database.Settings,
+            Settings = database.Settings.Clone(),
             LastPrefsFilePath = database.LastPrefsFilePath,
             SidNames = database.SidNames,
             AppContainers = database.AppContainers,
+            SharedContainerTraverseGrants = database.SharedContainerTraverseGrants
+                .Where(e => grantTracker.IsInMainConfig(WellKnownSecuritySids.AllApplicationPackagesSid, e))
+                .ToList(),
             Accounts = FilterAccountsForMainConfig(database.Accounts),
             AccountGroupSnapshots = database.AccountGroupSnapshots,
+            ShowSystemInRunAs = database.ShowSystemInRunAs,
         };
     }
 
@@ -61,8 +66,6 @@ public class AppConfigIndex(IGrantConfigTracker grantTracker) : IAppFilter
     // --- Query ---
 
     public string? GetConfigPath(string appId) => _appConfigMap.GetValueOrDefault(appId);
-
-    public bool ContainsApp(string appId) => _appConfigMap.ContainsKey(appId);
 
     public bool ContainsLoadedPath(string normalizedPath) =>
         _loadedPaths.Any(p => string.Equals(p, normalizedPath, StringComparison.OrdinalIgnoreCase));

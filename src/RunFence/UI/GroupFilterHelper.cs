@@ -1,5 +1,4 @@
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 
 namespace RunFence.UI;
 
@@ -32,23 +31,6 @@ public static class GroupFilterHelper
         "System Managed Accounts Group",
         "Device Owners",
     };
-
-    /// <summary>
-    /// Returns true if the account with the given SID is a member of the Administrators group.
-    /// Returns false on failure (e.g., unresolvable SID).
-    /// </summary>
-    public static bool IsAdminAccount(string sid, ILocalGroupMembershipService groupMembership)
-    {
-        try
-        {
-            return groupMembership.GetGroupsForUser(sid)
-                .Any(g => string.Equals(g.Sid, AdministratorsSid, StringComparison.OrdinalIgnoreCase));
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
     /// <summary>
     /// Returns an ordering key for a group SID: Users first (0), Administrators second (1), rest last (2).

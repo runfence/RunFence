@@ -17,7 +17,7 @@ public partial class MigrationMappingStep : UserControl
     private readonly ILocalUserProvider _localUserProvider;
     private readonly ILoggingService _log;
     private readonly IEnumerable<OrphanedSid> _orphanedSids;
-    private readonly ISidResolver _sidResolver;
+    private readonly IProfilePathResolver _profilePathResolver;
     private readonly ISidNameCacheService _sidNameCache;
 
     private SidMigrationMappingBuilder? _builder;
@@ -28,7 +28,7 @@ public partial class MigrationMappingStep : UserControl
         ILocalUserProvider localUserProvider,
         ILoggingService log,
         IEnumerable<OrphanedSid> orphanedSids,
-        ISidResolver sidResolver,
+        IProfilePathResolver profilePathResolver,
         ISidNameCacheService sidNameCache)
     {
         _session = session;
@@ -36,7 +36,7 @@ public partial class MigrationMappingStep : UserControl
         _localUserProvider = localUserProvider;
         _log = log;
         _orphanedSids = orphanedSids;
-        _sidResolver = sidResolver;
+        _profilePathResolver = profilePathResolver;
         _sidNameCache = sidNameCache;
         InitializeComponent();
     }
@@ -44,8 +44,9 @@ public partial class MigrationMappingStep : UserControl
     public void BeginAsync(Action onReady, Action onFailed)
     {
         var logic = new SidMigrationMappingLogic(
-            _session, _sidMigrationService, _localUserProvider, _orphanedSids, _sidResolver, _sidNameCache);
-        _builder = new SidMigrationMappingBuilder(logic, _log, _orphanedSids);
+            _session, _sidMigrationService, _localUserProvider, _orphanedSids, _sidNameCache);
+        var validator = new SidMigrationMappingValidator(_profilePathResolver);
+        _builder = new SidMigrationMappingBuilder(logic, validator, _log, _orphanedSids);
         _builder.Ready += () =>
         {
             if (_builder.Content != null)
@@ -56,9 +57,17 @@ public partial class MigrationMappingStep : UserControl
         _ = _builder.BuildMappingsAsync(_loadingLabel);
     }
 
-    public List<SidMigrationMapping> CollectMappings()
-        => _builder?.CollectMappingsFromGrid() ?? new List<SidMigrationMapping>();
+    public bool TryCollectMappings(out List<SidMigrationMapping> mappings)
+    {
+        if (_builder == null)
+        {
+            mappings = [];
+            return true;
+        }
+
+        return _builder.TryCollectMappingsFromGrid(out mappings);
+    }
 
     public List<string> CollectDeleteSids()
-        => _builder?.CollectDeleteSidsFromGrid() ?? new List<string>();
+        => _builder?.CollectDeleteSidsFromGrid() ?? [];
 }

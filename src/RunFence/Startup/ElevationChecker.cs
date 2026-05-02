@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Security.Principal;
+using RunFence.Core;
 using RunFence.Startup.UI;
 
 namespace RunFence.Startup;
@@ -14,7 +14,7 @@ public class ElevationChecker(IStartupUI ui)
     {
         var identity = WindowsIdentity.GetCurrent();
         var principal = new WindowsPrincipal(identity);
-        if (!principal.IsInRole(WindowsBuiltInRole.Administrator) && !Debugger.IsAttached)
+        if (!principal.IsInRole(WindowsBuiltInRole.Administrator) && !DebugHelper.IsDebugBuild)
         {
             ui.ShowError("RunFence must be run as Administrator.", "Elevation Required");
             return false;

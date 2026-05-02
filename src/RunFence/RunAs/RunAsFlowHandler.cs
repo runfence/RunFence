@@ -1,7 +1,9 @@
+using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Ipc;
 using RunFence.Infrastructure;
 using RunFence.Ipc;
+using RunFence.Launch;
 
 namespace RunFence.RunAs;
 
@@ -19,7 +21,7 @@ public class RunAsFlowHandler(
     RunAsDosProtection dosProtection,
     IIpcCallerAuthorizer authorizer,
     IIdleMonitorService idleMonitor,
-    RunAsShortcutHelper shortcutHelper)
+    ShortcutTargetResolver shortcutTargetResolver)
     : IRunAsFlowHandler
 {
     private static readonly char[] PathSeparators = ['\\', '/'];
@@ -30,9 +32,9 @@ public class RunAsFlowHandler(
     /// <summary>Returns true if the AppId looks like a file path (contains path separators).</summary>
     public static bool IsRunAsRequest(string appId) => appId.IndexOfAny(PathSeparators) >= 0;
 
-    public void TriggerFromUI(string filePath)
+    public void TriggerFromUI(string filePath, string? initialAccountSid = null)
     {
-        if (appState.IsShuttingDown || appLock.IsUnlockPolling || appState.IsModalOpen || appState.IsOperationInProgress)
+        if (appState.IsShuttingDown || appState.IsModalOpen || appState.IsOperationInProgress)
             return;
         if (Interlocked.CompareExchange(ref _runAsInProgress, 1, 0) != 0)
             return;
@@ -41,9 +43,7 @@ public class RunAsFlowHandler(
             Interlocked.Exchange(ref _runAsInProgress, 0);
             return;
         }
-        bool isFolder = Directory.Exists(filePath);
-        bool fileExists = isFolder || File.Exists(filePath);
-        _ = HandleRunAsOnUIThreadAsync(filePath, null, null, isAdmin: true, isFolder, fileExists);
+        _ = HandleRunAsOnUIThreadAsync(filePath, null, null, initialAccountSid, isAdmin: true, useSecureDesktop: false);
     }
 
     public IpcResponse HandleRunAs(IpcMessage message, IpcCallerContext context)
@@ -75,7 +75,7 @@ public class RunAsFlowHandler(
         // Fast rejection checks
         if (appState.IsShuttingDown)
             return new IpcResponse { Success = false, ErrorMessage = "Shutting down." };
-        if (appLock.IsUnlockPolling || appState.IsModalOpen || appState.IsOperationInProgress)
+        if (!appLock.IsUnlockPolling && (appState.IsModalOpen || appState.IsOperationInProgress))
             return new IpcResponse { Success = false, ErrorMessage = "Busy." };
 
         // Atomic claim: prevents TOCTOU race between pipe thread check and UI thread execution
@@ -88,15 +88,12 @@ public class RunAsFlowHandler(
             return new IpcResponse { Success = false, ErrorMessage = "Too many requests." };
         }
 
-        // IO check on pipe thread (before BeginInvoke) to avoid blocking UI thread with filesystem calls.
-        bool isFolder = Directory.Exists(filePath);
-        bool fileExists = isFolder || File.Exists(filePath);
-
         // DEFERRED: post to UI thread, return immediately
         try
         {
             uiThreadInvoker.BeginInvoke(() =>
-                _ = HandleRunAsOnUIThreadAsync(filePath, message.Arguments, message.WorkingDirectory, context.IsAdmin, isFolder, fileExists));
+                _ = HandleRunAsOnUIThreadAsync(filePath, message.Arguments, message.WorkingDirectory,
+                    initialAccountSid: null, context.IsAdmin, useSecureDesktop: true));
         }
         catch
         {
@@ -108,40 +105,57 @@ public class RunAsFlowHandler(
     }
 
     private async Task HandleRunAsOnUIThreadAsync(string filePath, string? arguments, string? launcherWorkingDirectory,
-        bool isAdmin, bool isFolder, bool fileExists)
+        string? initialAccountSid, bool isAdmin, bool useSecureDesktop)
     {
         bool unlockedForRunAs = false;
         try
         {
-            var originalPath = filePath;
-            if (!shortcutHelper.TryHandleLnkPath(ref filePath, ref arguments,
-                    out var originalLnkPath, out var shortcutContext, appState.Database.Apps))
+            if (appState.IsShuttingDown)
+                return;
+            if (appState.IsModalOpen || appState.IsOperationInProgress)
                 return;
 
-            // If TryHandleLnkPath resolved a .lnk to a different target, recheck existence on the resolved path.
-            if (!string.Equals(filePath, originalPath, StringComparison.OrdinalIgnoreCase))
+            ShortcutContext? shortcutContext = null;
+            bool isFolder;
+
+            if (filePath.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
+            {
+                var resolved = shortcutTargetResolver.TryResolveShortcut(filePath, appState.Database.Apps);
+                if (resolved == null)
+                {
+                    MessageBox.Show(
+                        "Could not resolve shortcut target.\n\nThe shortcut may be broken or reference a removed app entry.",
+                        "RunFence", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                shortcutContext = resolved.Value.Context;
+                filePath = resolved.Value.ResolvedPath;
+                if (!string.IsNullOrEmpty(resolved.Value.ShortcutArgs) && string.IsNullOrEmpty(arguments))
+                    arguments = resolved.Value.ShortcutArgs;
+                if (!string.IsNullOrEmpty(resolved.Value.ShortcutWorkingDirectory) && string.IsNullOrEmpty(launcherWorkingDirectory))
+                    launcherWorkingDirectory = resolved.Value.ShortcutWorkingDirectory;
+                isFolder = Directory.Exists(filePath);
+            }
+            else
             {
                 isFolder = Directory.Exists(filePath);
-                fileExists = isFolder || File.Exists(filePath);
             }
 
-            if (!fileExists)
-            {
-                MessageBox.Show($"Path not found:\n{filePath}", "RunFence",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
+            var originalLnkPath = shortcutContext?.OriginalLnkPath;
 
-            using var result = await dialogPresenter.ShowRunAsDialogAsync(filePath, arguments, shortcutContext, isAdmin,
-                unlocked => unlockedForRunAs = unlocked);
+            var mainForm = Application.OpenForms.Count > 0 ? Application.OpenForms[0] : null;
+            bool restoreMainFormAfterDialog = useSecureDesktop
+                && mainForm is { Visible: true, WindowState: not FormWindowState.Minimized };
+
+            using var result = await dialogPresenter.ShowRunAsDialogAsync(filePath, arguments, shortcutContext,
+                initialAccountSid, isAdmin, unlocked => unlockedForRunAs = unlocked, useSecureDesktop);
 
             if (result == null)
                 return;
 
-            // After returning from the secure desktop, the main form loses foreground.
-            // Restore it so any subsequent MessageBox.Show dialogs appear in front.
-            var mainForm = Application.OpenForms.Count > 0 ? Application.OpenForms[0] : null;
-            if (mainForm != null)
+            // After returning from the secure desktop (IPC path), a visible main form loses foreground.
+            // Restore only that state; minimized/background requests must stay out of the way.
+            if (restoreMainFormAfterDialog && mainForm != null)
             {
                 WindowForegroundHelper.ForceToForeground(mainForm.Handle);
                 mainForm.BringToFront();

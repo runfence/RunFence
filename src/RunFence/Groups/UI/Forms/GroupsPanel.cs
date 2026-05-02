@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using RunFence.Account;
 using RunFence.Core;
-using RunFence.Groups.UI;
 using RunFence.Infrastructure;
 using RunFence.UI;
 using RunFence.UI.Forms;
@@ -24,6 +23,7 @@ public partial class GroupsPanel : DataPanel
     private Form? _parentForm;
     private FormWindowState _lastFormWindowState;
     private bool _isMembersLoading;
+    private bool _membersGridFocusedBeforeDisable;
 
     public event Action? GroupsChanged;
 
@@ -76,15 +76,17 @@ public partial class GroupsPanel : DataPanel
         _gridPopulator.Initialize(_groupsGrid, _membersGrid, _membersHeaderLabel);
         _scanAclsButton.Visible = _contextMenuHandler.IsBulkScanAvailable;
 
-        _contextMenuHandler.DataChanged += () =>
+        _contextMenuHandler.DataChanged += createdSid =>
         {
+            if (createdSid != null)
+                _gridPopulator.SetPreferredSelection(createdSid);
             GroupsChanged?.Invoke();
             RefreshGridAndDescription();
         };
 
         // Wire refresh controller callbacks
-        _refreshController.Initialize(GetSelectedGroupSid, () => IsRefreshing);
-        _refreshController.IsRefreshingChanged += isRefreshing => IsRefreshing = isRefreshing;
+        _refreshController.Initialize(GetSelectedGroupSid);
+        _refreshController.IsRefreshingChanged += _ => UpdateButtonState();
         _refreshController.IsMembersLoadingChanged += isMembersLoading =>
         {
             _isMembersLoading = isMembersLoading;
@@ -161,13 +163,16 @@ public partial class GroupsPanel : DataPanel
 
     protected override void OnDataSet()
     {
-        RefreshGridAndDescription();
-        _refreshController.StartRefreshTimer();
+        if (Visible && IsParentFormVisible())
+        {
+            RefreshGridAndDescription();
+            _refreshController.StartRefreshTimer();
+        }
     }
 
     public override void RefreshOnActivation()
     {
-        if (IsRefreshing)
+        if (_refreshController.IsRefreshing)
             return;
         RefreshGridAndDescription();
     }
@@ -183,7 +188,7 @@ public partial class GroupsPanel : DataPanel
                 _splitterInitialized = true;
             }
 
-            _refreshController.ResumeTimer();
+            _refreshController.StartRefreshTimer();
             RefreshOnActivation();
         }
         else
@@ -221,7 +226,16 @@ public partial class GroupsPanel : DataPanel
         _ctxCopySid.Enabled = hasSelection;
         _addMemberButton.Enabled = hasSelection && !_isMembersLoading;
         _removeMemberButton.Enabled = _membersGrid.SelectedRows.Count > 0 && !_isMembersLoading;
-        _membersGrid.Enabled = !_isMembersLoading;
+
+        var membersEnabled = !_isMembersLoading;
+        if (!membersEnabled && _membersGrid.Enabled)
+            _membersGridFocusedBeforeDisable = _membersGrid.ContainsFocus;
+        _membersGrid.Enabled = membersEnabled;
+        if (membersEnabled && _membersGridFocusedBeforeDisable)
+        {
+            _membersGridFocusedBeforeDisable = false;
+            _membersGrid.Focus();
+        }
     }
 
     private async void RefreshMembersGrid()
@@ -262,7 +276,7 @@ public partial class GroupsPanel : DataPanel
 
     private async void OnGroupsGridSelectionChanged(object? sender, EventArgs e)
     {
-        if (IsRefreshing)
+        if (_refreshController.IsRefreshing)
             return;
 
         var sid = GetSelectedGroupSid();
@@ -364,7 +378,7 @@ public partial class GroupsPanel : DataPanel
         if (sid == null)
             return;
         var groupName = _groupsGrid.SelectedRows.Count > 0
-            ? _groupsGrid.SelectedRows[0].Cells["Name"].Value as string ?? ""
+            ? _groupsGrid.SelectedRows[0].Cells["GroupName"].Value as string ?? ""
             : "";
         var existingMemberSids = _membersGrid.Rows
             .Cast<DataGridViewRow>()

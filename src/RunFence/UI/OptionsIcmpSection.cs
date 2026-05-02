@@ -56,6 +56,7 @@ public class OptionsIcmpSection(
                     _blockIcmpCheckBox.Checked = !newValue;
                     appStateProvider.Database.Settings.BlockIcmpWhenInternetBlocked = !newValue;
                     _blockIcmpCheckBox.CheckedChanged += OnBlockIcmpChanged;
+                    _saveSettings();
                     MessageBox.Show($"Failed to apply ICMP block setting: {ex.Message}", "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 });

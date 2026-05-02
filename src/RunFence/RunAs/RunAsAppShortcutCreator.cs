@@ -16,12 +16,14 @@ public class RunAsAppShortcutCreator(
     IShortcutService shortcutService,
     IBesideTargetShortcutService besideTargetShortcutService,
     ISessionProvider sessionProvider,
+    IInteractiveUserSidResolver interactiveUserSidResolver,
     ILoggingService log)
 {
     /// <summary>
     /// Creates a beside-target shortcut for the app, using a badged icon and the interactive
     /// or credential-based user display name. Silently skips if the launcher exe is not found
     /// or the user name cannot be resolved to a display name distinct from the raw SID.
+    /// Logs when an AppContainer shortcut is skipped because the interactive SID is unavailable.
     /// </summary>
     public void CreateBesideTargetShortcut(AppEntry app)
     {
@@ -29,14 +31,16 @@ public class RunAsAppShortcutCreator(
         {
             var session = sessionProvider.GetSession();
             var iconPath = iconService.CreateBadgedIcon(app);
-            var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+            var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
             if (!File.Exists(launcherPath))
                 return;
 
             string? effectiveSid;
             if (app.AppContainerName != null)
             {
-                effectiveSid = NativeTokenHelper.TryGetInteractiveUserSid()?.Value;
+                effectiveSid = interactiveUserSidResolver.GetInteractiveUserSid();
+                if (string.IsNullOrEmpty(effectiveSid))
+                    log.Warn($"RunAsAppShortcutCreator: interactive user SID unavailable; skipping AppContainer beside-target shortcut for '{app.Name}'.");
             }
             else
             {
@@ -83,8 +87,8 @@ public class RunAsAppShortcutCreator(
     {
         try
         {
-            var launcherPath = Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
-            var iconPath = Path.Combine(Constants.ProgramDataIconDir, $"{appId}.ico");
+            var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
+            var iconPath = Path.Combine(PathConstants.ProgramDataIconDir, $"{appId}.ico");
             shortcutService.UpdateShortcutToLauncher(
                 originalLnkPath, appId, launcherPath,
                 File.Exists(iconPath) ? iconPath : null);

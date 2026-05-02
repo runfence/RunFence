@@ -76,7 +76,6 @@ public class IdleMonitorService : IIdleMonitorService
         {
             _log.Info($"Idle timeout reached after {_timeoutMinutes} minutes");
             IdleTimeoutReached?.Invoke();
-            ScheduleNextCheck();
         }
         else
         {

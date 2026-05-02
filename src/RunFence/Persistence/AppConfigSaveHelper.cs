@@ -1,3 +1,4 @@
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.Persistence;
@@ -22,6 +23,10 @@ public class AppConfigSaveHelper(
                 {
                     Apps = appsForConfig,
                     Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, configPath),
+                    SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
+                        WellKnownSecuritySids.AllApplicationPackagesSid,
+                        database.SharedContainerTraverseGrants,
+                        configPath),
                     HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(configPath)
                 },
                 configPath, pinDerivedKey, argonSalt);
@@ -40,6 +45,10 @@ public class AppConfigSaveHelper(
             {
                 Apps = apps,
                 Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, normalizedPath),
+                SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
+                    WellKnownSecuritySids.AllApplicationPackagesSid,
+                    database.SharedContainerTraverseGrants,
+                    normalizedPath),
                 HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(normalizedPath)
             },
             normalizedPath, pinDerivedKey, argonSalt);
@@ -57,6 +66,10 @@ public class AppConfigSaveHelper(
                 {
                     Apps = apps,
                     Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, path),
+                    SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
+                        WellKnownSecuritySids.AllApplicationPackagesSid,
+                        database.SharedContainerTraverseGrants,
+                        path),
                     HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(path)
                 },
                 path, pinDerivedKey, argonSalt);
@@ -72,16 +85,20 @@ public class AppConfigSaveHelper(
             {
                 Apps = c.Apps,
                 Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, c.Path),
+                SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
+                    WellKnownSecuritySids.AllApplicationPackagesSid,
+                    database.SharedContainerTraverseGrants,
+                    c.Path),
                 HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(c.Path)
             })).ToList();
 
         databaseService.SaveCredentialStoreAndAllConfigs(store, database, newPinDerivedKey, configs);
     }
 
-    public void SaveImportedConfig(string path, List<AppEntry> apps,
+    public void SaveImportedConfig(string path, AppConfig config,
         byte[] pinDerivedKey, byte[] argonSalt)
     {
         var normalized = Path.GetFullPath(path);
-        databaseService.SaveAppConfig(new AppConfig { Apps = apps }, normalized, pinDerivedKey, argonSalt);
+        databaseService.SaveAppConfig(config, normalized, pinDerivedKey, argonSalt);
     }
 }

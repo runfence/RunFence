@@ -8,9 +8,6 @@ public record AppInitDllEntry(RegistrySecurity? Security, string DisplayPath, Li
 public record RegistryDllEntry(string KeyDisplayPath, RegistrySecurity? Security, List<string> DllPaths, string NavigationTarget);
 
 public record ScheduledTaskInfo(
-    string TaskPath,
-    string FolderPath,
-    string TaskName,
     List<string> ExePaths,
     bool IsPerUserTask,
     string? UserSid);

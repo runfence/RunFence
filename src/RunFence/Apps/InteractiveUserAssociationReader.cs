@@ -11,39 +11,30 @@ namespace RunFence.Apps;
 /// Scans the interactive user's HKCU to find association overrides for import as direct handler mappings.
 /// Cache is per-instance (one instance per dialog).
 /// </summary>
-public class InteractiveUserAssociationReader : IInteractiveUserAssociationReader
+public class InteractiveUserAssociationReader(
+    IUserHiveManager hiveManager,
+    IInteractiveUserResolver interactiveUserResolver,
+    RegistryKey? hkuOverride = null,
+    RegistryKey? hklmOverride = null)
+    : IInteractiveUserAssociationReader
 {
-    private readonly IUserHiveManager _hiveManager;
-    private readonly IInteractiveUserResolver _interactiveUserResolver;
-    private readonly RegistryKey _hku;
-    private readonly RegistryKey _hklm;
+    private readonly RegistryKey _hku = hkuOverride ?? Registry.Users;
+    private readonly RegistryKey _hklm = hklmOverride ?? Registry.LocalMachine;
     private IReadOnlyList<InteractiveAssociationEntry>? _cache;
-
-    public InteractiveUserAssociationReader(
-        IUserHiveManager hiveManager,
-        IInteractiveUserResolver interactiveUserResolver,
-        RegistryKey? hkuOverride = null,
-        RegistryKey? hklmOverride = null)
-    {
-        _hiveManager = hiveManager;
-        _interactiveUserResolver = interactiveUserResolver;
-        _hku = hkuOverride ?? Registry.Users;
-        _hklm = hklmOverride ?? Registry.LocalMachine;
-    }
 
     public IReadOnlyList<InteractiveAssociationEntry> GetInteractiveUserAssociations()
     {
         if (_cache != null)
             return _cache;
 
-        var sid = _interactiveUserResolver.GetInteractiveUserSid();
+        var sid = interactiveUserResolver.GetInteractiveUserSid();
         if (string.IsNullOrEmpty(sid))
         {
             _cache = [];
             return _cache;
         }
 
-        using var hiveHandle = _hiveManager.EnsureHiveLoaded(sid);
+        using var hiveHandle = hiveManager.EnsureHiveLoaded(sid);
 
         var results = new Dictionary<string, InteractiveAssociationEntry>(StringComparer.OrdinalIgnoreCase);
 
@@ -107,11 +98,11 @@ public class InteractiveUserAssociationReader : IInteractiveUserAssociationReade
 
     public DirectHandlerEntry? GetAssociationHandler(string key)
     {
-        var sid = _interactiveUserResolver.GetInteractiveUserSid();
+        var sid = interactiveUserResolver.GetInteractiveUserSid();
         if (string.IsNullOrEmpty(sid))
             return null;
 
-        using var hiveHandle = _hiveManager.EnsureHiveLoaded(sid);
+        using var hiveHandle = hiveManager.EnsureHiveLoaded(sid);
 
         using var hkuClasses = _hku.OpenSubKey($@"{sid}\Software\Classes");
         using var hklmClasses = _hklm.OpenSubKey(@"Software\Classes");
@@ -121,19 +112,17 @@ public class InteractiveUserAssociationReader : IInteractiveUserAssociationReade
             var entry = ResolveExtension(key, sid, hkuClasses, hklmClasses);
             return entry;
         }
-        else
-        {
-            using var protocolKey = hkuClasses?.OpenSubKey(key);
-            if (protocolKey?.GetValue("URL Protocol") == null)
-                return null;
 
-            using var cmdKey = protocolKey.OpenSubKey(@"shell\open\command");
-            var command = cmdKey?.GetValue(null) as string;
-            if (string.IsNullOrEmpty(command) || IsRunFenceCommand(command))
-                return null;
+        using var protocolKey = hkuClasses?.OpenSubKey(key);
+        if (protocolKey?.GetValue("URL Protocol") == null)
+            return null;
 
-            return new DirectHandlerEntry { Command = command };
-        }
+        using var cmdKey = protocolKey.OpenSubKey(@"shell\open\command");
+        var command = cmdKey?.GetValue(null) as string;
+        if (string.IsNullOrEmpty(command) || IsRunFenceCommand(command))
+            return null;
+
+        return new DirectHandlerEntry { Command = command };
     }
 
     private DirectHandlerEntry? ResolveExtension(string key, string sid,
@@ -165,12 +154,9 @@ public class InteractiveUserAssociationReader : IInteractiveUserAssociationReade
         RegistryKey? hkuClasses, RegistryKey? hklmClasses)
     {
         // Check if progId exists as class in HKLM (stable, machine-wide)
-        if (hklmClasses != null)
-        {
-            using var hklmProgIdKey = hklmClasses.OpenSubKey($@"{progId}\shell\open\command");
-            if (hklmProgIdKey != null)
-                return new DirectHandlerEntry { ClassName = progId };
-        }
+        using var hklmProgIdKey = hklmClasses?.OpenSubKey($@"{progId}\shell\open\command");
+        if (hklmProgIdKey != null)
+            return new DirectHandlerEntry { ClassName = progId };
 
         // Try to resolve command from HKCU
         if (hkuClasses != null)
@@ -185,14 +171,7 @@ public class InteractiveUserAssociationReader : IInteractiveUserAssociationReade
     }
 
     private bool IsRunFenceCommand(string command)
-    {
-        var exePath = AssociationRegistryCommandParser.ExtractExeFromCommand(command);
-        if (string.IsNullOrEmpty(exePath))
-            return false;
-
-        var exeName = Path.GetFileName(exePath);
-        return string.Equals(exeName, Constants.LauncherExeName, StringComparison.OrdinalIgnoreCase);
-    }
+        => AssociationCommandHelper.IsRunFenceLauncherCommand(command);
 
     private static InteractiveAssociationEntry BuildEntry(string key, DirectHandlerEntry handler)
     {

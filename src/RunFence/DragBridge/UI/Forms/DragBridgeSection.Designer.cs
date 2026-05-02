@@ -51,10 +51,12 @@ partial class DragBridgeSection
         _hotkeyLabel.Text = "Hotkey:";
         _hotkeyLabel.Location = new Point(88, 27);
         _hotkeyLabel.AutoSize = true;
+        _hotkeyLabel.Anchor = AnchorStyles.Left | AnchorStyles.Top;
 
         // _hotkeyBox
         _hotkeyBox.Location = new Point(148, 23);
         _hotkeyBox.Size = new Size(105, 23);
+        _hotkeyBox.Anchor = AnchorStyles.Left | AnchorStyles.Top;
         _hotkeyBox.ReadOnly = true;
         _hotkeyBox.Enabled = false;
         _hotkeyBox.KeyDown += OnHotkeyKeyDown;
@@ -65,7 +67,6 @@ partial class DragBridgeSection
         // the parent must use AutoScaleMode.Font to provide the correct scaling context.
         AutoScaleMode = AutoScaleMode.Inherit;
         Margin = Padding.Empty;
-        Height = 55;
         Controls.Add(_groupBox);
 
         _groupBox.ResumeLayout(false);

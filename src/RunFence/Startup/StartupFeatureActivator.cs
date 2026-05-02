@@ -1,4 +1,5 @@
 using RunFence.Apps;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
@@ -19,9 +20,9 @@ public class StartupFeatureActivator(
     IHandlerMappingService handlerMappingService,
     WizardLauncher wizardLauncher,
     ISessionProvider sessionProvider,
-    IStartupOptions startupOptions,
+    StartupOptions startupOptions,
     LockManager lockManager,
-    ILicenseService licenseService,
+    IStartupUnlockGrant startupUnlockGrant,
     IEvaluationLimitHelper evaluationLimitHelper)
 {
     public void ActivateContextMenus(AppDatabase database)
@@ -40,7 +41,7 @@ public class StartupFeatureActivator(
 
     public void LaunchFirstRunWizardIfNeeded(MainForm mainForm)
     {
-        if (startupOptions.IsBackground)
+        if (startupOptions.IsBackground || startupOptions.PinBypassed || DebugHelper.IsDebugBuild)
             return;
         var session = sessionProvider.GetSession();
         var credCount = evaluationLimitHelper.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
@@ -50,12 +51,21 @@ public class StartupFeatureActivator(
 
     public void ConfigureBackgroundMode(MainForm mainForm)
     {
-        if (!startupOptions.IsBackground)
+        if (!startupOptions.IsBackground && !startupOptions.PinBypassed)
             return;
+
         mainForm.SuppressInitialVisibility = true;
         mainForm.WindowState = FormWindowState.Minimized;
         mainForm.ShowInTaskbar = false;
-        if (licenseService.IsLicensed)
-            lockManager.StartAutoLockTimer();
+
+        void HandleCreated(object? sender, EventArgs e)
+        {
+            mainForm.HandleCreated -= HandleCreated;
+            if (startupOptions.GrantStartupRunAsUnlock)
+                startupUnlockGrant.Grant();
+            lockManager.LockWindow();
+        }
+
+        mainForm.HandleCreated += HandleCreated;
     }
 }

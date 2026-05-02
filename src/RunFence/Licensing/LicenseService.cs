@@ -12,7 +12,6 @@ public interface ILicenseService
     void Initialize();
     LicenseInfo GetLicenseInfo();
     LicenseActivationResult ActivateLicense(string key);
-    void DeactivateLicense();
     bool ShouldShowNag(DateTime now);
     void RecordNagShown(DateTime now);
     bool CanAddApp(int currentCount);
@@ -38,7 +37,7 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
 
     public LicenseService(IMachineIdProvider machineIdProvider, LicenseValidator validator,
         ILoggingService log)
-        : this(machineIdProvider, validator, Constants.LicenseFilePath, Constants.LicenseRegistryKey, log)
+        : this(machineIdProvider, validator, PathConstants.LicenseFilePath, PathConstants.LicenseRegistryKey, log)
     {
     }
 
@@ -152,7 +151,7 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(_registryKeyPath);
-            key?.SetValue(Constants.LastNagShownValueName, now.ToString("o"));
+            key.SetValue(PathConstants.LastNagShownValueName, now.ToString("o"));
         }
         catch
         {
@@ -160,34 +159,34 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
     }
 
     public bool CanAddApp(int currentCount) =>
-        IsLicensed || currentCount < Constants.EvaluationMaxApps;
+        IsLicensed || currentCount < EvaluationConstants.EvaluationMaxApps;
 
     public bool CanCreateContainer(int currentCount) =>
-        IsLicensed || currentCount < Constants.EvaluationMaxContainers;
+        IsLicensed || currentCount < EvaluationConstants.EvaluationMaxContainers;
 
     public bool CanHideAccount(int currentHiddenCount) =>
-        IsLicensed || currentHiddenCount < Constants.EvaluationMaxHiddenAccounts;
+        IsLicensed || currentHiddenCount < EvaluationConstants.EvaluationMaxHiddenAccounts;
 
     public bool CanAddCredential(int currentCredentialCount) =>
-        IsLicensed || currentCredentialCount < Constants.EvaluationMaxCredentials;
+        IsLicensed || currentCredentialCount < EvaluationConstants.EvaluationMaxCredentials;
 
     public bool CanAddFirewallAllowlistEntry(int currentCount) =>
-        IsLicensed || currentCount < Constants.EvaluationMaxFirewallAllowlistEntries;
+        IsLicensed || currentCount < EvaluationConstants.EvaluationMaxFirewallAllowlistEntries;
 
     public string? GetRestrictionMessage(EvaluationFeature feature, int currentCount)
     {
         return feature switch
         {
             EvaluationFeature.Apps when !CanAddApp(currentCount) =>
-                $"Evaluation mode allows up to {Constants.EvaluationMaxApps} app entries. Activate a license to remove this limit.",
+                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxApps} app entries. Activate a license to remove this limit.",
             EvaluationFeature.Containers when !CanCreateContainer(currentCount) =>
-                $"Evaluation mode allows up to {Constants.EvaluationMaxContainers} AppContainer profiles. Activate a license to remove this limit.",
+                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxContainers} AppContainer profiles. Activate a license to remove this limit.",
             EvaluationFeature.HiddenAccounts when !CanHideAccount(currentCount) =>
-                $"Evaluation mode allows up to {Constants.EvaluationMaxHiddenAccounts} hidden accounts. Activate a license to remove this limit.",
+                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxHiddenAccounts} hidden accounts. Activate a license to remove this limit.",
             EvaluationFeature.Credentials when !CanAddCredential(currentCount) =>
-                $"Evaluation mode allows up to {Constants.EvaluationMaxCredentials} stored credentials. Activate a license to remove this limit.",
+                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxCredentials} stored credentials. Activate a license to remove this limit.",
             EvaluationFeature.FirewallAllowlist when !CanAddFirewallAllowlistEntry(currentCount) =>
-                $"Evaluation mode allows up to {Constants.EvaluationMaxFirewallAllowlistEntries} firewall allowlist entries. Activate a license to remove this limit.",
+                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxFirewallAllowlistEntries} firewall allowlist entries. Activate a license to remove this limit.",
             _ => null
         };
     }
@@ -227,10 +226,18 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         Directory.CreateDirectory(dir);
         var tmp = _licenseFilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         File.WriteAllText(tmp, key);
-        if (File.Exists(_licenseFilePath))
-            File.Replace(tmp, _licenseFilePath, _licenseFilePath + ".bak");
-        else
-            File.Move(tmp, _licenseFilePath);
+        try
+        {
+            if (File.Exists(_licenseFilePath))
+                File.Replace(tmp, _licenseFilePath, _licenseFilePath + ".bak");
+            else
+                File.Move(tmp, _licenseFilePath);
+        }
+        catch
+        {
+            try { File.Delete(tmp); } catch { }
+            throw;
+        }
     }
 
     private void DeleteLicenseFile()
@@ -250,7 +257,7 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(_registryKeyPath);
-            if (key?.GetValue(Constants.LastNagShownValueName) is string value && DateTime.TryParse(value, out var date))
+            if (key?.GetValue(PathConstants.LastNagShownValueName) is string value && DateTime.TryParse(value, out var date))
                 return date;
         }
         catch

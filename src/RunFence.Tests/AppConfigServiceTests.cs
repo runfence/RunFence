@@ -44,10 +44,19 @@ public class AppConfigServiceTests : IDisposable
 
     public void Dispose() => _tempDir.Dispose();
 
-    private string CreateConfigFile(List<AppEntry>? apps = null)
+    private string CreateConfigFile(List<AppEntry>? apps = null,
+        Dictionary<string, HandlerMappingEntry>? handlerMappings = null,
+        List<AppConfigAccountEntry>? accounts = null,
+        List<GrantedPathEntry>? sharedContainerTraverseGrants = null)
     {
         var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
-        var config = new AppConfig { Apps = apps ?? [] };
+        var config = new AppConfig
+        {
+            Apps = apps ?? [],
+            HandlerMappings = handlerMappings,
+            Accounts = accounts,
+            SharedContainerTraverseGrants = sharedContainerTraverseGrants
+        };
         _dbService.Setup(d => d.LoadAppConfig(path, _pinKey)).Returns(config);
         // Create a stub file so File.Exists checks pass
         File.WriteAllText(path, "stub");
@@ -120,7 +129,7 @@ public class AppConfigServiceTests : IDisposable
     [Fact]
     public void LoadAdditionalConfig_RejectsAppDataPaths()
     {
-        var roamingPath = Path.Combine(Constants.RoamingAppDataDir, "test.ramc");
+        var roamingPath = Path.Combine(PathConstants.RoamingAppDataDir, "test.ramc");
 
         Assert.Throws<ArgumentException>(() =>
             _service.LoadAdditionalConfig(roamingPath, new AppDatabase(), _pinKey));
@@ -129,7 +138,7 @@ public class AppConfigServiceTests : IDisposable
     [Fact]
     public void LoadAdditionalConfig_RejectsLocalAppDataPaths()
     {
-        var localPath = Path.Combine(Constants.LocalAppDataDir, "test.ramc");
+        var localPath = Path.Combine(PathConstants.LocalAppDataDir, "test.ramc");
 
         Assert.Throws<ArgumentException>(() =>
             _service.LoadAdditionalConfig(localPath, new AppDatabase(), _pinKey));
@@ -219,10 +228,11 @@ public class AppConfigServiceTests : IDisposable
         };
         var database = new AppDatabase
         {
-            Settings = new AppSettings { EnableLogging = true },
+            Settings = new AppSettings { LogVerbosity = LogVerbosity.Debug },
             LastPrefsFilePath = @"C:\settings.json",
             AppContainers = [container],
             AccountGroupSnapshots = groupSnapshot,
+            ShowSystemInRunAs = true,
             SidNames =
             {
                 ["S-1-5-21-5"] = "TestUser"
@@ -237,7 +247,8 @@ public class AppConfigServiceTests : IDisposable
 
         var filtered = _index.FilterForMainConfig(database);
 
-        Assert.Same(database.Settings, filtered.Settings);
+        Assert.NotSame(database.Settings, filtered.Settings); // Settings is cloned to prevent shared mutation
+        Assert.Equal(database.Settings.LogVerbosity, filtered.Settings.LogVerbosity);
         Assert.Equal(database.LastPrefsFilePath, filtered.LastPrefsFilePath);
         Assert.Same(database.SidNames, filtered.SidNames);
         Assert.Same(database.AppContainers, filtered.AppContainers);
@@ -253,6 +264,42 @@ public class AppConfigServiceTests : IDisposable
         // Grant entry preserved (belongs to main config)
         Assert.Single(filtered.GetAccount("S-1-5-21-9")!.Grants);
         Assert.Equal(@"C:\foo", filtered.GetAccount("S-1-5-21-9")!.Grants[0].Path);
+        // ShowSystemInRunAs preserved
+        Assert.Equal(database.ShowSystemInRunAs, filtered.ShowSystemInRunAs);
+    }
+
+    // --- GetConfigForExport ---
+
+    [Fact]
+    public void GetConfigForExport_ReturnsAppsGrantsAndHandlerMappings()
+    {
+        // Arrange: load an additional config with one app, one grant, and one handler mapping
+        var sid = "S-1-5-21-1-1-1-2001";
+        var appId = AppEntry.GenerateId();
+        var app = new AppEntry { Id = appId, Name = "ExportApp" };
+        var grantEntry = new GrantedPathEntry { Path = @"C:\exported" };
+        var mapping = new HandlerMappingEntry(appId);
+        var path = CreateConfigFile(
+            apps: [app],
+            handlerMappings: new Dictionary<string, HandlerMappingEntry> { [".xyz"] = mapping },
+            accounts: [new AppConfigAccountEntry { Sid = sid, Grants = [grantEntry] }]);
+        var database = new AppDatabase();
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        // Act
+        var exported = _service.GetConfigForExport(path, database);
+
+        // Assert: all three data groups are present
+        Assert.Single(exported.Apps);
+        Assert.Equal(appId, exported.Apps[0].Id);
+        Assert.NotNull(exported.Accounts);
+        Assert.Single(exported.Accounts);
+        Assert.Equal(sid, exported.Accounts[0].Sid);
+        Assert.Single(exported.Accounts[0].Grants);
+        Assert.Equal(@"C:\exported", exported.Accounts[0].Grants[0].Path);
+        Assert.NotNull(exported.HandlerMappings);
+        Assert.True(exported.HandlerMappings.ContainsKey(".xyz"));
+        Assert.Equal(appId, exported.HandlerMappings[".xyz"].AppId);
     }
 
     // --- Grant tracking ---
@@ -262,13 +309,7 @@ public class AppConfigServiceTests : IDisposable
     {
         var sid = "S-1-5-21-1-1-1-1001";
         var grantEntry = new GrantedPathEntry { Path = @"C:\foo" };
-        var config = new AppConfig
-        {
-            Accounts = [new AppConfigAccountEntry { Sid = sid, Grants = [grantEntry] }]
-        };
-        var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
-        _dbService.Setup(d => d.LoadAppConfig(path, _pinKey)).Returns(config);
-        File.WriteAllText(path, "stub");
+        var path = CreateConfigFile(accounts: [new AppConfigAccountEntry { Sid = sid, Grants = [grantEntry] }]);
         var database = new AppDatabase();
 
         _service.LoadAdditionalConfig(path, database, _pinKey);
@@ -286,13 +327,7 @@ public class AppConfigServiceTests : IDisposable
     {
         var sid = "S-1-5-21-1-1-1-1001";
         var grantEntry = new GrantedPathEntry { Path = @"C:\foo" };
-        var config = new AppConfig
-        {
-            Accounts = [new AppConfigAccountEntry { Sid = sid, Grants = [grantEntry] }]
-        };
-        var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
-        _dbService.Setup(d => d.LoadAppConfig(path, _pinKey)).Returns(config);
-        File.WriteAllText(path, "stub");
+        var path = CreateConfigFile(accounts: [new AppConfigAccountEntry { Sid = sid, Grants = [grantEntry] }]);
         var database = new AppDatabase();
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
@@ -309,13 +344,7 @@ public class AppConfigServiceTests : IDisposable
         var sid = "S-1-5-21-1-1-1-1001";
         var additionalGrant = new GrantedPathEntry { Path = @"C:\additional" };
         var mainGrant = new GrantedPathEntry { Path = @"C:\main" };
-        var config = new AppConfig
-        {
-            Accounts = [new AppConfigAccountEntry { Sid = sid, Grants = [additionalGrant] }]
-        };
-        var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
-        _dbService.Setup(d => d.LoadAppConfig(path, _pinKey)).Returns(config);
-        File.WriteAllText(path, "stub");
+        var path = CreateConfigFile(accounts: [new AppConfigAccountEntry { Sid = sid, Grants = [additionalGrant] }]);
         var database = new AppDatabase();
         database.GetOrCreateAccount(sid).Grants.Add(mainGrant);
         _service.LoadAdditionalConfig(path, database, _pinKey);
@@ -327,6 +356,57 @@ public class AppConfigServiceTests : IDisposable
         // Only the main-config grant should survive filtering
         Assert.Single(grants);
         Assert.Equal(@"C:\main", grants[0].Path);
+    }
+
+    [Fact]
+    public void LoadAdditionalConfig_MergesSharedContainerTraverseGrantsIntoDatabase()
+    {
+        var sharedEntry = new GrantedPathEntry { Path = @"C:\shared", IsTraverseOnly = true };
+        var path = CreateConfigFile(sharedContainerTraverseGrants: [sharedEntry]);
+        var database = new AppDatabase();
+
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        Assert.Single(database.SharedContainerTraverseGrants);
+        Assert.Equal(@"C:\shared", database.SharedContainerTraverseGrants[0].Path);
+        Assert.Equal(Path.GetFullPath(path), _grantTracker.GetGrantConfigPath(
+            WellKnownSecuritySids.AllApplicationPackagesSid,
+            sharedEntry));
+    }
+
+    [Fact]
+    public void UnloadConfig_RemovesSharedContainerTraverseGrantsFromDatabase()
+    {
+        var sharedEntry = new GrantedPathEntry { Path = @"C:\shared", IsTraverseOnly = true };
+        var path = CreateConfigFile(sharedContainerTraverseGrants: [sharedEntry]);
+        var database = new AppDatabase();
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        _service.UnloadConfig(path, database);
+
+        Assert.Empty(database.SharedContainerTraverseGrants);
+        Assert.Null(_grantTracker.GetGrantConfigPath(
+            WellKnownSecuritySids.AllApplicationPackagesSid,
+            sharedEntry));
+    }
+
+    [Fact]
+    public void SaveConfigForApp_AdditionalConfig_IncludesSharedContainerTraverseGrants()
+    {
+        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
+        var sharedEntry = new GrantedPathEntry { Path = @"C:\shared", IsTraverseOnly = true };
+        var path = CreateConfigFile([app], sharedContainerTraverseGrants: [sharedEntry]);
+        var database = new AppDatabase();
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        _service.SaveConfigForApp(app.Id, database, _pinKey, _argonSalt);
+
+        _dbService.Verify(d => d.SaveAppConfig(
+            It.Is<AppConfig>(c =>
+                c.SharedContainerTraverseGrants != null &&
+                c.SharedContainerTraverseGrants.Single().Path == @"C:\shared"),
+            Path.GetFullPath(path),
+            _pinKey, _argonSalt), Times.Once);
     }
 
     [Fact]
@@ -367,7 +447,7 @@ public class AppConfigServiceTests : IDisposable
     {
         var appId = AppEntry.GenerateId();
         var app = new AppEntry { Id = appId, Name = "App" };
-        var path = CreateConfigFileWithMappings([app], new Dictionary<string, HandlerMappingEntry> { [".pdf"] = new HandlerMappingEntry(appId) });
+        var path = CreateConfigFile([app], new Dictionary<string, HandlerMappingEntry> { [".pdf"] = new HandlerMappingEntry(appId) });
         var database = new AppDatabase();
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
@@ -435,7 +515,7 @@ public class AppConfigServiceTests : IDisposable
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "Imported" };
         var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
 
-        _service.SaveImportedConfig(path, [app], _pinKey, _argonSalt);
+        _service.SaveImportedConfig(path, new AppConfig { Apps = [app] }, _pinKey, _argonSalt);
 
         _dbService.Verify(d => d.SaveAppConfig(
             It.Is<AppConfig>(c => c.Apps.Any(a => a.Id == app.Id)),
@@ -555,17 +635,6 @@ public class AppConfigServiceTests : IDisposable
         Assert.Equal(Path.GetFullPath(path3), paths[2]);
     }
 
-    // --- Handler Mapping helpers ---
-
-    private string CreateConfigFileWithMappings(List<AppEntry>? apps, Dictionary<string, HandlerMappingEntry>? handlerMappings)
-    {
-        var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
-        var config = new AppConfig { Apps = apps ?? [], HandlerMappings = handlerMappings };
-        _dbService.Setup(d => d.LoadAppConfig(path, _pinKey)).Returns(config);
-        File.WriteAllText(path, "stub");
-        return path;
-    }
-
     // --- GetEffectiveHandlerMappings ---
 
     [Fact]
@@ -578,7 +647,7 @@ public class AppConfigServiceTests : IDisposable
             Apps = [mainApp],
             Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { [".pdf"] = new HandlerMappingEntry(mainApp.Id) } }
         };
-        var extraPath = CreateConfigFileWithMappings([extraApp],
+        var extraPath = CreateConfigFile([extraApp],
             new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(extraApp.Id) });
         _service.LoadAdditionalConfig(extraPath, database, _pinKey);
 
@@ -599,7 +668,7 @@ public class AppConfigServiceTests : IDisposable
             Apps = [mainApp],
             Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(mainApp.Id) } }
         };
-        var extraPath = CreateConfigFileWithMappings([extraApp],
+        var extraPath = CreateConfigFile([extraApp],
             new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(extraApp.Id) });
         _service.LoadAdditionalConfig(extraPath, database, _pinKey);
 
@@ -622,7 +691,7 @@ public class AppConfigServiceTests : IDisposable
             Apps = [mainApp],
             Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(mainApp.Id) } }
         };
-        var extraPath = CreateConfigFileWithMappings([extraApp],
+        var extraPath = CreateConfigFile([extraApp],
             new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(extraApp.Id) });
         _service.LoadAdditionalConfig(extraPath, database, _pinKey);
 
@@ -645,7 +714,7 @@ public class AppConfigServiceTests : IDisposable
             Apps = [mainApp],
             Settings = { HandlerMappings = new Dictionary<string, HandlerMappingEntry> { [".pdf"] = new HandlerMappingEntry(mainApp.Id) } }
         };
-        var extraPath = CreateConfigFileWithMappings([extraApp],
+        var extraPath = CreateConfigFile([extraApp],
             new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(extraApp.Id) });
         _service.LoadAdditionalConfig(extraPath, database, _pinKey);
 
@@ -767,7 +836,7 @@ public class AppConfigServiceTests : IDisposable
         var appA = new AppEntry { Id = AppEntry.GenerateId(), Name = "AppA" };
         var appB = new AppEntry { Id = AppEntry.GenerateId(), Name = "AppB" };
         var database = new AppDatabase();
-        var path = CreateConfigFileWithMappings([appA, appB],
+        var path = CreateConfigFile([appA, appB],
             new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(appA.Id), [".pdf"] = new HandlerMappingEntry(appB.Id) });
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
@@ -784,7 +853,7 @@ public class AppConfigServiceTests : IDisposable
     {
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
         var database = new AppDatabase();
-        var path = CreateConfigFileWithMappings([app],
+        var path = CreateConfigFile([app],
             new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(app.Id) });
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
@@ -801,7 +870,7 @@ public class AppConfigServiceTests : IDisposable
     {
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
         var database = new AppDatabase();
-        var path = CreateConfigFileWithMappings([app],
+        var path = CreateConfigFile([app],
             new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(app.Id) });
 
         _service.LoadAdditionalConfig(path, database, _pinKey);
@@ -815,7 +884,7 @@ public class AppConfigServiceTests : IDisposable
     {
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
         var database = new AppDatabase();
-        var path = CreateConfigFileWithMappings([app],
+        var path = CreateConfigFile([app],
             new Dictionary<string, HandlerMappingEntry> { ["http"] = new HandlerMappingEntry(app.Id) });
         _service.LoadAdditionalConfig(path, database, _pinKey);
 

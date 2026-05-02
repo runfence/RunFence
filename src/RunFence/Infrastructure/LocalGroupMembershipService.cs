@@ -88,9 +88,7 @@ public class LocalGroupMembershipService(
                 return [];
 
             var name = localUserProvider.GetLocalUserAccounts()
-                .FirstOrDefault(u => string.Equals(u.Sid, sid, StringComparison.OrdinalIgnoreCase))?.Username;
-            if (name == null)
-                name = sidResolver.TryResolveName(sid);
+                .FirstOrDefault(u => string.Equals(u.Sid, sid, StringComparison.OrdinalIgnoreCase))?.Username ?? sidResolver.TryResolveName(sid);
             if (name == null)
                 return [];
 
@@ -148,7 +146,7 @@ public class LocalGroupMembershipService(
             using var searcher = new PrincipalSearcher(queryFilter);
             var groups = new List<LocalUserAccount>();
             var allPrincipals = groupMembership.GetLocalGroups(
-                () => searcher.FindAll().Cast<Principal>().ToList());
+                () => searcher.FindAll().ToList());
             foreach (var principal in allPrincipals)
             {
                 try
@@ -272,7 +270,7 @@ public class LocalGroupMembershipService(
 
             var members = new List<LocalUserAccount>();
             var allPrincipals = groupMembership.GetMembersOfGroup(groupSid,
-                () => group.Members.Cast<Principal>().ToList());
+                () => group.Members.ToList());
             foreach (var principal in allPrincipals)
             {
                 try

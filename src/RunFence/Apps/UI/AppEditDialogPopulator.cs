@@ -10,20 +10,19 @@ using RunFence.UI;
 namespace RunFence.Apps.UI;
 
 /// <summary>
-/// Handles combo box population and item search for <see cref="AppEditDialog"/>.
-/// Consolidates repeated combo-search patterns into a single generic helper.
+/// Builds account and config combo-box items for <see cref="AppEditDialog"/>.
 /// </summary>
 public class AppEditDialogPopulator(
     IAppConfigService appConfigService,
     ISidResolver sidResolver,
+    IProfilePathResolver profilePathResolver,
     CredentialFilterHelper credentialFilterHelper)
 {
     /// <summary>
-    /// Populates the account combo box with credentials (filtered to resolvable accounts)
+    /// Builds account combo-box items from credentials (filtered to resolvable accounts)
     /// and AppContainer items separated by a visual divider.
     /// </summary>
-    public void PopulateAccountCombo(
-        ComboBox combo,
+    public IReadOnlyList<object> BuildAccountItems(
         List<CredentialEntry> credentials,
         IReadOnlyDictionary<string, string>? sidNames,
         AppEntry? existing,
@@ -33,10 +32,11 @@ public class AppEditDialogPopulator(
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase)
                             ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var representedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var items = new List<object>();
         foreach (var cred in credentialFilterHelper.FilterResolvableCredentials(credentials, sidNames, existing))
         {
             var isEphemeral = !string.IsNullOrEmpty(cred.Sid) && ephemeralSids.Contains(cred.Sid);
-            combo.Items.Add(new CredentialDisplayItem(cred, sidResolver, sidNames, isEphemeral: isEphemeral));
+            items.Add(new CredentialDisplayItem(cred, sidResolver, profilePathResolver, sidNames, isEphemeral: isEphemeral));
             if (!string.IsNullOrEmpty(cred.Sid))
                 representedSids.Add(cred.Sid);
         }
@@ -46,45 +46,28 @@ public class AppEditDialogPopulator(
         if (interactiveSid != null && !representedSids.Contains(interactiveSid))
         {
             var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = interactiveSid };
-            combo.Items.Add(new CredentialDisplayItem(transient, sidResolver, sidNames,
+            items.Add(new CredentialDisplayItem(transient, sidResolver, profilePathResolver, sidNames,
                 isEphemeral: ephemeralSids.Contains(interactiveSid)));
         }
 
         if (database?.AppContainers.Count > 0)
         {
-            combo.Items.Add(new ContainerSeparatorItem());
+            items.Add(new ContainerSeparatorItem());
             foreach (var container in database.AppContainers.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
-                combo.Items.Add(new AppContainerDisplayItem(container, container.Sid));
+                items.Add(new AppContainerDisplayItem(container, container.Sid));
         }
+
+        return items.AsReadOnly();
     }
 
     /// <summary>
-    /// Populates the config combo box with the main config entry and all loaded additional config paths.
+    /// Builds config combo-box items with the main config entry and all loaded additional config paths.
     /// </summary>
-    public void PopulateConfigCombo(ComboBox combo)
+    public IReadOnlyList<ConfigComboItem> BuildConfigItems()
     {
-        combo.Items.Add(new ConfigComboItem(null));
+        var items = new List<ConfigComboItem> { new(null) };
         foreach (var path in appConfigService.GetLoadedConfigPaths())
-            combo.Items.Add(new ConfigComboItem(path));
-        combo.SelectedIndex = 0;
-    }
-
-    /// <summary>
-    /// Selects the first combo item of type <typeparamref name="T"/> matching the predicate,
-    /// starting from <paramref name="startIndex"/>. Returns true if found.
-    /// </summary>
-    public static bool SelectComboItem<T>(ComboBox combo, Func<T, bool> match, int startIndex = 0)
-        where T : class
-    {
-        for (int i = startIndex; i < combo.Items.Count; i++)
-        {
-            if (combo.Items[i] is T item && match(item))
-            {
-                combo.SelectedIndex = i;
-                return true;
-            }
-        }
-
-        return false;
+            items.Add(new ConfigComboItem(path));
+        return items.AsReadOnly();
     }
 }

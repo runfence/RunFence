@@ -1,4 +1,6 @@
 using Autofac;
+using Autofac.Core.Activators.Reflection;
+using BindingFlags = System.Reflection.BindingFlags;
 using RunFence.RunAs;
 using RunFence.RunAs.UI;
 using RunFence.RunAs.UI.Forms;
@@ -7,17 +9,21 @@ namespace RunFence.Startup.Modules;
 
 public class RunAsModule : Module
 {
+    private static readonly IConstructorFinder AllInstanceConstructors =
+        new DefaultConstructorFinder(type => type.GetConstructors(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
+
     protected override void Load(ContainerBuilder builder)
     {
         builder.RegisterType<RunAsFlowHandler>()
             .As<IRunAsFlowHandler>()
             .SingleInstance();
 
-        builder.RegisterType<RunAsShortcutHelper>()
+        builder.RegisterType<RunAsDialogPresenter>()
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<RunAsDialogPresenter>()
+        builder.RegisterType<RunAsPostDialogRouter>()
             .AsSelf()
             .SingleInstance();
 
@@ -26,7 +32,7 @@ public class RunAsModule : Module
             .SingleInstance();
 
         builder.RegisterType<RunAsLaunchDispatcher>()
-            .AsSelf()
+            .As<IRunAsLaunchDispatcher>()
             .SingleInstance();
 
         builder.RegisterType<RunAsResultProcessor>()
@@ -37,12 +43,16 @@ public class RunAsModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<RunAsUserAccountCreator>()
+        builder.RegisterType<RunAsCredentialCreator>()
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<RunAsUserAccountCreator>()
+            .As<IRunAsUserAccountCreator>()
+            .SingleInstance();
+
         builder.RegisterType<RunAsContainerCreator>()
-            .AsSelf()
+            .As<IRunAsContainerCreator>()
             .SingleInstance();
 
         builder.RegisterType<RunAsLaunchErrorHandler>()
@@ -50,6 +60,10 @@ public class RunAsModule : Module
             .SingleInstance();
 
         builder.RegisterType<RunAsAppShortcutCreator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AppEntryPersistenceOrchestrator>()
             .AsSelf()
             .SingleInstance();
 
@@ -102,6 +116,7 @@ public class RunAsModule : Module
             .InstancePerDependency();
 
         builder.RegisterType<RunAsDialog>()
+            .FindConstructorsWith(AllInstanceConstructors)
             .AsSelf()
             .InstancePerDependency();
     }

@@ -13,7 +13,7 @@ public class AssociationCommandHelperTests : IDisposable
     public AssociationCommandHelperTests()
     {
         _testSubKey = $@"Software\RunFenceTests\CmdHelper_{Guid.NewGuid():N}";
-        _root = Registry.CurrentUser.CreateSubKey(_testSubKey)!;
+        _root = Registry.CurrentUser.CreateSubKey(_testSubKey);
     }
 
     public void Dispose()
@@ -23,41 +23,91 @@ public class AssociationCommandHelperTests : IDisposable
         catch { }
     }
 
-    // --- SubstituteArgument ---
+    // --- Materialization ---
 
-    [Fact]
-    public void SubstituteArgument_WithPercent1_ReplacesIt()
+    [Theory]
+    [InlineData("%1")]
+    [InlineData("%L")]
+    [InlineData("%l")]
+    [InlineData("%V")]
+    [InlineData("%v")]
+    [InlineData("%U")]
+    [InlineData("%u")]
+    [InlineData("%*")]
+    public void TryMaterializeCommand_WithSupportedPlaceholder_ReplacesItWithoutAppendingDuplicate(string placeholder)
     {
-        var result = AssociationCommandHelper.SubstituteArgument(@"C:\prog.exe %1", "https://example.com");
+        var success = AssociationCommandHelper.TryMaterializeCommand(
+            $@"C:\prog.exe --first={placeholder} --second={placeholder}",
+            "https://example.com",
+            out var result,
+            out var rejectionReason);
 
-        Assert.Equal(@"C:\prog.exe https://example.com", result);
+        Assert.True(success);
+        Assert.Equal(string.Empty, rejectionReason);
+        Assert.True(result.UsedSupportedPlaceholder);
+        Assert.Equal(@"C:\prog.exe", result.ExePath);
+        Assert.Equal(@"--first=https://example.com --second=https://example.com", result.Arguments);
+        Assert.Equal(@"C:\prog.exe --first=https://example.com --second=https://example.com", result.MaterializedCommand);
     }
 
     [Fact]
-    public void SubstituteArgument_WithoutPercent1_Appends()
+    public void TryMaterializeCommand_WithoutSupportedPlaceholder_AppendsQuotedArgument()
     {
-        var result = AssociationCommandHelper.SubstituteArgument(@"C:\prog.exe", "https://example.com");
+        var success = AssociationCommandHelper.TryMaterializeCommand(
+            @"C:\prog.exe --open",
+            @"C:\Docs\My File.pdf",
+            out var result,
+            out var rejectionReason);
 
-        Assert.Equal(@"C:\prog.exe https://example.com", result);
+        Assert.True(success);
+        Assert.Equal(string.Empty, rejectionReason);
+        Assert.False(result.UsedSupportedPlaceholder);
+        Assert.Equal(@"C:\prog.exe", result.ExePath);
+        Assert.Equal(@"--open ""C:\Docs\My File.pdf""", result.Arguments);
     }
 
     [Fact]
-    public void SubstituteArgument_ExpandsEnvironmentVariables()
+    public void TryMaterializeCommand_ExpandsEnvironmentVariables()
     {
         // SystemRoot is always set on Windows
-        var result = AssociationCommandHelper.SubstituteArgument(@"%SystemRoot%\system32\notepad.exe", null);
+        var success = AssociationCommandHelper.TryMaterializeCommand(
+            @"%SystemRoot%\system32\notepad.exe",
+            null,
+            out var result,
+            out var rejectionReason);
 
         var expected = Environment.ExpandEnvironmentVariables(@"%SystemRoot%\system32\notepad.exe");
-        Assert.Equal(expected, result);
-        Assert.DoesNotContain("%SystemRoot%", result, StringComparison.OrdinalIgnoreCase);
+        Assert.True(success);
+        Assert.Equal(string.Empty, rejectionReason);
+        Assert.Equal(expected, result.MaterializedCommand);
+        Assert.DoesNotContain("%SystemRoot%", result.MaterializedCommand, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void SubstituteArgument_NullArgs_ReplacesPercent1WithEmpty()
+    public void TryMaterializeCommand_NullArgs_ReplacesSupportedPlaceholderWithEmpty()
     {
-        var result = AssociationCommandHelper.SubstituteArgument(@"C:\prog.exe %1 --end", null);
+        var success = AssociationCommandHelper.TryMaterializeCommand(
+            @"C:\prog.exe %1 --end",
+            null,
+            out var result,
+            out var rejectionReason);
 
-        Assert.Equal(@"C:\prog.exe  --end", result);
+        Assert.True(success);
+        Assert.Equal(string.Empty, rejectionReason);
+        Assert.Equal(@"--end", result.Arguments);
+    }
+
+    [Fact]
+    public void TryMaterializeCommand_UnsupportedAssociationPlaceholder_IsRejected()
+    {
+        var success = AssociationCommandHelper.TryMaterializeCommand(
+            @"C:\prog.exe %2",
+            "https://example.com",
+            out _,
+            out var rejectionReason);
+
+        Assert.False(success);
+        Assert.Equal("command contains unsupported association placeholder '%2'", rejectionReason);
     }
 
     // --- IsRunFenceProgId ---
@@ -65,9 +115,9 @@ public class AssociationCommandHelperTests : IDisposable
     [Fact]
     public void IsRunFenceProgId_WithRunFencePrefix_ReturnsTrue()
     {
-        Assert.True(AssociationCommandHelper.IsRunFenceProgId("RunFence_http"));
-        Assert.True(AssociationCommandHelper.IsRunFenceProgId("RunFence_.pdf"));
-        Assert.True(AssociationCommandHelper.IsRunFenceProgId("RUNFENCE_HTTP")); // case-insensitive
+        Assert.True(AssociationCommandHelper.IsRunFenceProgId(PathConstants.HandlerProgIdPrefix + "http"));
+        Assert.True(AssociationCommandHelper.IsRunFenceProgId(PathConstants.HandlerProgIdPrefix + ".pdf"));
+        Assert.True(AssociationCommandHelper.IsRunFenceProgId(PathConstants.HandlerProgIdPrefix.ToUpperInvariant() + "HTTP")); // case-insensitive
     }
 
     [Fact]
@@ -87,15 +137,15 @@ public class AssociationCommandHelperTests : IDisposable
     // --- RestoreFromFallback ---
 
     private RegistryKey CreateAssocKey(string name)
-        => _root.CreateSubKey(name)!;
+        => _root.CreateSubKey(name);
 
     [Fact]
     public void RestoreFromFallback_Extension_NonEmptyFallback_RestoresDefaultValue()
     {
         // Arrange: set up .pdf key with RunFenceFallback = "Acrobat.Document.DC"
         using var key = CreateAssocKey(".pdf");
-        key.SetValue(null, Constants.HandlerProgIdPrefix + ".pdf");
-        key.SetValue(Constants.RunFenceFallbackValueName, "Acrobat.Document.DC");
+        key.SetValue(null, PathConstants.HandlerProgIdPrefix + ".pdf");
+        key.SetValue(PathConstants.RunFenceFallbackValueName, "Acrobat.Document.DC");
 
         // Act
         var result = AssociationCommandHelper.RestoreFromFallback(key, ".pdf");
@@ -103,7 +153,7 @@ public class AssociationCommandHelperTests : IDisposable
         // Assert: returned fallback value, default restored, RunFenceFallback deleted
         Assert.Equal("Acrobat.Document.DC", result);
         Assert.Equal("Acrobat.Document.DC", key.GetValue(null) as string);
-        Assert.Null(key.GetValue(Constants.RunFenceFallbackValueName));
+        Assert.Null(key.GetValue(PathConstants.RunFenceFallbackValueName));
     }
 
     [Fact]
@@ -111,10 +161,10 @@ public class AssociationCommandHelperTests : IDisposable
     {
         // Arrange: .xyz had no previous default, so RunFenceFallback is empty string
         using var key = CreateAssocKey(".xyz");
-        key.SetValue(null, Constants.HandlerProgIdPrefix + ".xyz");
-        key.SetValue(Constants.RunFenceFallbackValueName, string.Empty);
+        key.SetValue(null, PathConstants.HandlerProgIdPrefix + ".xyz");
+        key.SetValue(PathConstants.RunFenceFallbackValueName, string.Empty);
         // Pre-existing sub-key like OpenWithProgids should be preserved
-        using (var subKey = key.CreateSubKey("OpenWithProgids")) { }
+        using (key.CreateSubKey("OpenWithProgids")) { }
 
         // Act
         var result = AssociationCommandHelper.RestoreFromFallback(key, ".xyz");
@@ -122,7 +172,7 @@ public class AssociationCommandHelperTests : IDisposable
         // Assert: default value deleted (no previous), RunFenceFallback deleted, sub-key preserved
         Assert.Equal(string.Empty, result);
         Assert.Null(key.GetValue(null) as string);
-        Assert.Null(key.GetValue(Constants.RunFenceFallbackValueName));
+        Assert.Null(key.GetValue(PathConstants.RunFenceFallbackValueName));
         using var subKeyAfter = key.OpenSubKey("OpenWithProgids");
         Assert.NotNull(subKeyAfter);
     }
@@ -134,8 +184,8 @@ public class AssociationCommandHelperTests : IDisposable
         // RunFenceFallback stores original default ProgId; shell\open\command was added by RunFence.
         const string originalProgId = "Acrobat.Document.DC";
         using var key = CreateAssocKey(".pdf");
-        key.SetValue(null, Constants.HandlerProgIdPrefix + ".pdf");
-        key.SetValue(Constants.RunFenceFallbackValueName, originalProgId);
+        key.SetValue(null, PathConstants.HandlerProgIdPrefix + ".pdf");
+        key.SetValue(PathConstants.RunFenceFallbackValueName, originalProgId);
         using (var cmdKey = key.CreateSubKey(@"shell\open\command"))
             cmdKey.SetValue(null, @"""C:\custom.exe"" ""%1""");
         // Add shell\edit sibling to verify it is preserved
@@ -165,8 +215,8 @@ public class AssociationCommandHelperTests : IDisposable
     {
         // Arrange: extension key with only a default value and RunFenceFallback — no shell\open\command
         using var key = CreateAssocKey(".txt");
-        key.SetValue(null, Constants.HandlerProgIdPrefix + ".txt");
-        key.SetValue(Constants.RunFenceFallbackValueName, "txtfile");
+        key.SetValue(null, PathConstants.HandlerProgIdPrefix + ".txt");
+        key.SetValue(PathConstants.RunFenceFallbackValueName, "txtfile");
 
         // Act
         var result = AssociationCommandHelper.RestoreFromFallback(key, ".txt");
@@ -184,8 +234,8 @@ public class AssociationCommandHelperTests : IDisposable
         const string originalCommand = @"""C:\Mail\client.exe"" %1";
         using var key = CreateAssocKey("mailto");
         using (var cmdKey = key.CreateSubKey(@"shell\open\command"))
-            cmdKey.SetValue(null, $"\"{Constants.HandlerProgIdPrefix}mailto\" --resolve \"mailto\" %1");
-        key.SetValue(Constants.RunFenceFallbackValueName, originalCommand);
+            cmdKey.SetValue(null, $"\"{PathConstants.HandlerProgIdPrefix}mailto\" --resolve \"mailto\" %1");
+        key.SetValue(PathConstants.RunFenceFallbackValueName, originalCommand);
         key.SetValue("URL Protocol", string.Empty);
 
         // Act
@@ -195,7 +245,7 @@ public class AssociationCommandHelperTests : IDisposable
         Assert.Equal(originalCommand, result);
         using var commandKey = key.OpenSubKey(@"shell\open\command");
         Assert.Equal(originalCommand, commandKey?.GetValue(null) as string);
-        Assert.Null(key.GetValue(Constants.RunFenceFallbackValueName));
+        Assert.Null(key.GetValue(PathConstants.RunFenceFallbackValueName));
     }
 
     [Fact]
@@ -203,8 +253,8 @@ public class AssociationCommandHelperTests : IDisposable
     {
         // Arrange: protocol previously had no command (RunFenceFallback = "")
         using var key = CreateAssocKey("myproto");
-        key.CreateSubKey(@"shell\open\command")!.Dispose();
-        key.SetValue(Constants.RunFenceFallbackValueName, string.Empty);
+        key.CreateSubKey(@"shell\open\command").Dispose();
+        key.SetValue(PathConstants.RunFenceFallbackValueName, string.Empty);
         key.SetValue("URL Protocol", string.Empty);
         // A sibling key that should NOT be deleted
         using (key.CreateSubKey("SomeOtherKey")) { }
@@ -216,7 +266,7 @@ public class AssociationCommandHelperTests : IDisposable
         Assert.Equal(string.Empty, result);
         Assert.Null(key.OpenSubKey("shell"));
         Assert.Null(key.GetValue("URL Protocol"));
-        Assert.Null(key.GetValue(Constants.RunFenceFallbackValueName));
+        Assert.Null(key.GetValue(PathConstants.RunFenceFallbackValueName));
         using var siblingKey = key.OpenSubKey("SomeOtherKey");
         Assert.NotNull(siblingKey); // parent key preserved with siblings
     }
@@ -241,13 +291,13 @@ public class AssociationCommandHelperTests : IDisposable
     {
         // Arrange
         using var key = CreateAssocKey(".test");
-        key.SetValue(Constants.RunFenceFallbackValueName, "SomeProgId");
-        key.SetValue(null, Constants.HandlerProgIdPrefix + ".test");
+        key.SetValue(PathConstants.RunFenceFallbackValueName, "SomeProgId");
+        key.SetValue(null, PathConstants.HandlerProgIdPrefix + ".test");
 
         // Act
         AssociationCommandHelper.RestoreFromFallback(key, ".test");
 
         // Assert: RunFenceFallback is always deleted when it existed
-        Assert.Null(key.GetValue(Constants.RunFenceFallbackValueName));
+        Assert.Null(key.GetValue(PathConstants.RunFenceFallbackValueName));
     }
 }

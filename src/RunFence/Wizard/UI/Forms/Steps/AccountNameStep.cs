@@ -1,3 +1,6 @@
+using RunFence.Account.UI;
+using RunFence.Core;
+
 namespace RunFence.Wizard.UI.Forms.Steps;
 
 /// <summary>
@@ -6,7 +9,7 @@ namespace RunFence.Wizard.UI.Forms.Steps;
 /// </summary>
 public class AccountNameStep : WizardStepPage
 {
-    private readonly Action<string, string> _setNameAndPassword;
+    private readonly Action<string, ProtectedString> _setNameAndPassword;
     private readonly bool _showPassword;
     private readonly bool _requirePassword;
     private readonly int _maxNameLength;
@@ -17,9 +20,10 @@ public class AccountNameStep : WizardStepPage
     private Label _passwordLabel = null!;
     private TextBox _passwordTextBox = null!;
     private Label _descriptionLabel = null!;
+    private SecurePasswordBox? _passwordSecure;
 
     public AccountNameStep(
-        Action<string, string> setNameAndPassword,
+        Action<string, ProtectedString> setNameAndPassword,
         bool showPassword = false,
         int maxNameLength = 20,
         string? description = null,
@@ -49,14 +53,14 @@ public class AccountNameStep : WizardStepPage
             return "Account name cannot end with a period.";
         if (_accountExists?.Invoke(name) == true)
             return "An account with this name already exists.";
-        if (_requirePassword && _showPassword && _passwordTextBox.Text.Length == 0)
+        if (_requirePassword && _showPassword && _passwordSecure!.IsEmpty)
             return "A password is required so you can log in with Win+L.";
         return null;
     }
 
     public override void Collect()
     {
-        var password = _showPassword ? _passwordTextBox.Text : string.Empty;
+        var password = _showPassword ? _passwordSecure!.GetPassword() : ProtectedString.CreateEmpty();
         _setNameAndPassword(_usernameTextBox.Text.Trim(), password);
     }
 
@@ -109,9 +113,11 @@ public class AccountNameStep : WizardStepPage
         {
             Font = new Font("Segoe UI", 10),
             Dock = DockStyle.Top,
-            UseSystemPasswordChar = true,
             Visible = _showPassword
         };
+
+        if (_showPassword)
+            _passwordSecure = new SecurePasswordBox(_passwordTextBox);
 
         // Add in reverse order so Dock=Top stacks top-to-bottom
         if (_showPassword)

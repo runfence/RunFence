@@ -1,21 +1,16 @@
 using System.ComponentModel;
 using System.DirectoryServices.AccountManagement;
 using System.Runtime.InteropServices;
-using System.Security;
 using RunFence.Core;
 
 namespace RunFence.Account;
 
 public class AccountPasswordService(ILoggingService log) : IAccountPasswordService
 {
-    public void ChangeAccountPassword(string sid, SecureString oldPassword, string newPassword)
+    public void ChangeAccountPassword(string sid, ProtectedString oldPassword, ProtectedString newPassword)
     {
-        // Asymmetry by design: the old password is received as SecureString and marshaled
-        // directly to unmanaged memory to minimize exposure in the managed heap.
-        // The new password is accepted as a plain string because RunFence isolated accounts
-        // are admin-controlled — the credential is not an end-user secret requiring the same
-        // level of in-memory protection.
         IntPtr oldPtr = IntPtr.Zero;
+        IntPtr newPtr = IntPtr.Zero;
         try
         {
             using var context = new PrincipalContext(ContextType.Machine);
@@ -23,10 +18,9 @@ public class AccountPasswordService(ILoggingService log) : IAccountPasswordServi
             if (user == null)
                 throw new InvalidOperationException($"Account not found for SID {sid}.");
 
-            // Marshal old password to unmanaged memory and pass the pointer directly to
-            // NetUserChangePassword — no managed string is created for the old password.
-            oldPtr = Marshal.SecureStringToGlobalAllocUnicode(oldPassword);
-            int result = AccountPasswordNative.NetUserChangePassword(Environment.MachineName, user.SamAccountName, oldPtr, newPassword);
+            oldPtr = oldPassword.AllocUnicode();
+            newPtr = newPassword.AllocUnicode();
+            int result = AccountPasswordNative.NetUserChangePassword(Environment.MachineName, user.SamAccountName, oldPtr, newPtr);
             if (result != 0)
                 throw new Win32Exception(result);
 
@@ -49,11 +43,15 @@ public class AccountPasswordService(ILoggingService log) : IAccountPasswordServi
         {
             if (oldPtr != IntPtr.Zero)
                 Marshal.ZeroFreeGlobalAllocUnicode(oldPtr);
+            if (newPtr != IntPtr.Zero)
+                Marshal.ZeroFreeGlobalAllocUnicode(newPtr);
         }
     }
 
-    public void AdminResetAccountPassword(string sid, string newPassword)
+    public void AdminResetAccountPassword(string sid, ProtectedString newPassword)
     {
+        IntPtr passwordPtr = IntPtr.Zero;
+        IntPtr structPtr = IntPtr.Zero;
         try
         {
             using var context = new PrincipalContext(ContextType.Machine);
@@ -61,11 +59,21 @@ public class AccountPasswordService(ILoggingService log) : IAccountPasswordServi
             if (user == null)
                 throw new InvalidOperationException($"Account not found for SID {sid}.");
 
-            user.SetPassword(newPassword);
-            user.Save();
+            passwordPtr = newPassword.AllocUnicode();
+            structPtr = Marshal.AllocHGlobal(IntPtr.Size);
+            Marshal.WriteIntPtr(structPtr, passwordPtr);
+
+            int result = WindowsAccountNative.NetUserSetInfo(null, user.SamAccountName, 1003, structPtr, out _);
+            if (result != 0)
+                throw new Win32Exception(result);
+
             log.Info($"Admin-reset password for account with SID {sid}");
         }
         catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Win32Exception)
         {
             throw;
         }
@@ -73,6 +81,13 @@ public class AccountPasswordService(ILoggingService log) : IAccountPasswordServi
         {
             log.Error($"Failed to admin-reset password for SID {sid}", ex);
             throw new InvalidOperationException($"Failed to reset password: {ex.Message}", ex);
+        }
+        finally
+        {
+            if (passwordPtr != IntPtr.Zero)
+                Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
+            if (structPtr != IntPtr.Zero)
+                Marshal.FreeHGlobal(structPtr);
         }
     }
 }

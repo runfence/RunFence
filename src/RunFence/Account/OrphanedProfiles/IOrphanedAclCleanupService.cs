@@ -1,6 +1,6 @@
 namespace RunFence.Account.OrphanedProfiles;
 
-public record AclCleanupProgress(string CurrentPath, int ObjectsFixed, int ObjectsScanned);
+public record AclCleanupProgress(string CurrentPath, int ObjectsFixed);
 
 public interface IOrphanedAclCleanupService
 {

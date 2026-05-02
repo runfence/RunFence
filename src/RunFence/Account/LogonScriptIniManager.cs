@@ -223,7 +223,7 @@ public partial class LogonScriptIniManager
         // the INI section parser. scripts.ini is different and requires UTF-16 LE BOM.
         File.WriteAllLines(tmpPath, lines, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         if (File.Exists(gptPath))
-            File.Replace(tmpPath, gptPath, gptPath + ".bak");
+            File.Replace(tmpPath, gptPath, null);
         else
             File.Move(tmpPath, gptPath);
     }
@@ -273,7 +273,7 @@ public partial class LogonScriptIniManager
         // scripts.ini must be UTF-16 LE with BOM for Group Policy to read it
         File.WriteAllLines(tmpPath, lines, new UnicodeEncoding(bigEndian: false, byteOrderMark: true));
         if (File.Exists(targetPath))
-            File.Replace(tmpPath, targetPath, targetPath + ".bak");
+            File.Replace(tmpPath, targetPath, null);
         else
             File.Move(tmpPath, targetPath);
     }

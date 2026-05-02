@@ -1,3 +1,4 @@
+using RunFence.Acl;
 using RunFence.Core.Models;
 using RunFence.Persistence;
 
@@ -173,12 +174,17 @@ public class AclManagerPendingChanges
         if (IsPendingTraverseAdd(normalizedPath))
             return true;
         var entries = database.GetAccount(sid)?.Grants;
-        return entries != null &&
-               entries.Any(e => e.IsTraverseOnly &&
-                                string.Equals(e.Path, normalizedPath, StringComparison.OrdinalIgnoreCase) &&
-                                !IsPendingTraverseRemove(normalizedPath) &&
-                                (!checkUntrack || !IsUntrackTraverse(normalizedPath)));
+        return TraverseEntryExists(entries, normalizedPath, checkUntrack) ||
+               AclHelper.IsSpecificContainerSid(sid) &&
+               TraverseEntryExists(database.SharedContainerTraverseGrants, normalizedPath, checkUntrack);
     }
+
+    private bool TraverseEntryExists(IEnumerable<GrantedPathEntry>? entries, string normalizedPath, bool checkUntrack) =>
+        entries != null &&
+        entries.Any(e => e.IsTraverseOnly &&
+                         string.Equals(e.Path, normalizedPath, StringComparison.OrdinalIgnoreCase) &&
+                         !IsPendingTraverseRemove(normalizedPath) &&
+                         (!checkUntrack || !IsUntrackTraverse(normalizedPath)));
 
     public void Clear()
     {
@@ -193,28 +199,4 @@ public class AclManagerPendingChanges
         PendingConfigMoves.Clear();
         PendingTraverseConfigMoves.Clear();
     }
-}
-
-/// <summary>
-/// Represents a pending modification to an existing grant entry, capturing both the original state
-/// needed to correctly revert or reset ownership during apply and the new desired state to apply
-/// without mutating the live DB entry prematurely.
-/// </summary>
-/// <param name="Entry">The live DB entry (not mutated until Apply).</param>
-/// <param name="WasIsDeny">The IsDeny value from NTFS before any mode switch.</param>
-/// <param name="WasOwn">The Own value at the time the entry was first tracked as a modification.</param>
-/// <param name="NewIsDeny">The desired IsDeny value to apply; equals entry.IsDeny for pure rights-only changes.</param>
-/// <param name="NewRights">The desired SavedRights to apply; null means no pending rights change (entry.SavedRights remains in effect).</param>
-public record PendingModification(GrantedPathEntry Entry, bool WasIsDeny, bool WasOwn, bool NewIsDeny, SavedRightsState? NewRights);
-
-/// <summary>
-/// Case-insensitive comparer for (Path, IsDeny) grant path keys.
-/// </summary>
-public sealed class GrantPathKeyComparer : IEqualityComparer<(string Path, bool IsDeny)>
-{
-    public bool Equals((string Path, bool IsDeny) x, (string Path, bool IsDeny) y) =>
-        string.Equals(x.Path, y.Path, StringComparison.OrdinalIgnoreCase) && x.IsDeny == y.IsDeny;
-
-    public int GetHashCode((string Path, bool IsDeny) obj) =>
-        HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Path), obj.IsDeny);
 }

@@ -1,12 +1,11 @@
 using RunFence.Core;
-using RunFence.Infrastructure;
 using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Groups.UI;
 
 /// <summary>
-/// Owns the 5-second refresh timer and the grid refresh task logic for <see cref="Forms.GroupsPanel"/>:
-/// manages <c>_isMembersLoading</c> state, coordinates group and member population, and raises
+/// Owns the 5-second refresh timer, the <see cref="IsRefreshing"/> state, and the grid refresh task
+/// logic for <see cref="Forms.GroupsPanel"/>: coordinates group and member population, and raises
 /// <see cref="RefreshCompleted"/> so the panel can update the description field without an inner
 /// async void that swallows exceptions.
 /// </summary>
@@ -15,9 +14,7 @@ public class GroupRefreshController(
     ILoggingService log) : IDisposable
 {
     private Timer? _refreshTimer;
-    private bool _refreshInProgress;
     private Func<string?> _getSelectedGroupSid = null!;
-    private Func<bool> _isRefreshing = null!;
 
     /// <summary>
     /// Raised on the UI thread after any refresh completes (timer-triggered or manual).
@@ -26,7 +23,7 @@ public class GroupRefreshController(
     public event Action<string?>? RefreshCompleted;
 
     /// <summary>
-    /// Raised when <c>IsRefreshing</c> state changes; the panel should update its <c>IsRefreshing</c> flag accordingly.
+    /// Raised when <see cref="IsRefreshing"/> state changes; the panel should call <c>UpdateButtonState</c> accordingly.
     /// </summary>
     public event Action<bool>? IsRefreshingChanged;
 
@@ -36,25 +33,31 @@ public class GroupRefreshController(
     public event Action<bool>? IsMembersLoadingChanged;
 
     /// <summary>
+    /// True while a refresh operation is in progress. Used as a reentrancy guard.
+    /// </summary>
+    public bool IsRefreshing { get; private set; }
+
+    /// <summary>
     /// Wires the panel callbacks required before any refresh operations.
     /// Must be called before <see cref="StartRefreshTimer"/> or <see cref="RefreshNow"/>.
     /// </summary>
-    public void Initialize(Func<string?> getSelectedGroupSid, Func<bool> isRefreshing)
+    public void Initialize(Func<string?> getSelectedGroupSid)
     {
         _getSelectedGroupSid = getSelectedGroupSid;
-        _isRefreshing = isRefreshing;
     }
 
     /// <summary>
-    /// Starts the 5-second auto-refresh timer if not already running.
+    /// Starts or resumes the 5-second auto-refresh timer.
+    /// Creates the timer on first call; subsequent calls (e.g. after <see cref="StopTimer"/>) restart it.
     /// </summary>
     public void StartRefreshTimer()
     {
-        if (_refreshTimer != null)
-            return;
-        log.Info("GroupRefreshController: starting group refresh timer.");
-        _refreshTimer = new Timer { Interval = 5000 };
-        _refreshTimer.Tick += OnRefreshTimerTick;
+        if (_refreshTimer == null)
+        {
+            log.Info("GroupRefreshController: starting group refresh timer.");
+            _refreshTimer = new Timer { Interval = 5000 };
+            _refreshTimer.Tick += OnRefreshTimerTick;
+        }
         _refreshTimer.Start();
     }
 
@@ -62,11 +65,6 @@ public class GroupRefreshController(
     /// Stops the auto-refresh timer (e.g., when the panel becomes hidden).
     /// </summary>
     public void StopTimer() => _refreshTimer?.Stop();
-
-    /// <summary>
-    /// Resumes the auto-refresh timer (e.g., when the panel becomes visible again).
-    /// </summary>
-    public void ResumeTimer() => _refreshTimer?.Start();
 
     /// <summary>
     /// Stops and disposes the refresh timer.
@@ -83,7 +81,7 @@ public class GroupRefreshController(
     /// </summary>
     public async Task RefreshNow()
     {
-        if (_isRefreshing())
+        if (IsRefreshing)
             return;
         await RefreshGridCore();
         RefreshCompleted?.Invoke(_getSelectedGroupSid());
@@ -91,43 +89,36 @@ public class GroupRefreshController(
 
     private void OnRefreshTimerTick(object? sender, EventArgs e)
     {
-        if (_isRefreshing())
+        if (IsRefreshing)
             return;
         RefreshGroupsOnly();
     }
 
     private async void RefreshGroupsOnly()
     {
-        if (_isRefreshing() || _refreshInProgress) return;
-        _refreshInProgress = true;
+        if (IsRefreshing) return;
+        IsRefreshing = true;
+        IsRefreshingChanged?.Invoke(true);
+        var sidBeforeRefresh = _getSelectedGroupSid();
         try
         {
-            IsRefreshingChanged?.Invoke(true);
-            IsMembersLoadingChanged?.Invoke(true);
-            var sidBeforeRefresh = _getSelectedGroupSid();
-            try
-            {
-                await gridPopulator.PopulateGroups();
-            }
-            finally
-            {
-                IsRefreshingChanged?.Invoke(false);
-                IsMembersLoadingChanged?.Invoke(false);
-            }
-
-            var currentSid = _getSelectedGroupSid();
-            if (currentSid != sidBeforeRefresh)
-                IsMembersLoadingChanged?.Invoke(true);
-            RefreshCompleted?.Invoke(currentSid);
+            await gridPopulator.PopulateGroups();
         }
         finally
         {
-            _refreshInProgress = false;
+            IsRefreshing = false;
+            IsRefreshingChanged?.Invoke(false);
         }
+
+        var currentSid = _getSelectedGroupSid();
+        if (currentSid != sidBeforeRefresh)
+            IsMembersLoadingChanged?.Invoke(true);
+        RefreshCompleted?.Invoke(currentSid);
     }
 
     private async Task RefreshGridCore()
     {
+        IsRefreshing = true;
         IsRefreshingChanged?.Invoke(true);
         IsMembersLoadingChanged?.Invoke(true);
         var sidBeforeRefresh = _getSelectedGroupSid();
@@ -138,15 +129,27 @@ public class GroupRefreshController(
                 ? gridPopulator.PopulateMembers(sidBeforeRefresh)
                 : Task.CompletedTask;
             await Task.WhenAll(groupsTask, membersTask);
+            // On initial load (no prior selection), PopulateGroups selects the first group but
+            // skips member loading. Explicitly load members for the newly-selected group.
+            if (sidBeforeRefresh == null)
+            {
+                var initialSid = _getSelectedGroupSid();
+                if (initialSid != null)
+                    await gridPopulator.PopulateMembers(initialSid);
+            }
         }
         finally
         {
+            IsRefreshing = false;
             IsRefreshingChanged?.Invoke(false);
             IsMembersLoadingChanged?.Invoke(false);
         }
 
         var currentSid = _getSelectedGroupSid();
-        if (currentSid != sidBeforeRefresh)
+        // Only signal pending member load when there was a prior selection and it changed
+        // (means RefreshCompleted will call RefreshMembersGrid for the new SID).
+        // When sidBeforeRefresh was null (initial load), members were already loaded above.
+        if (sidBeforeRefresh != null && currentSid != sidBeforeRefresh)
             IsMembersLoadingChanged?.Invoke(true);
     }
 }

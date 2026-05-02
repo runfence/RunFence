@@ -1,9 +1,9 @@
-using System.Security;
+using RunFence.Core;
 
 namespace RunFence.Security;
 
 public interface ICredentialEncryptionService
 {
-    byte[] Encrypt(SecureString password, byte[] pinDerivedKey);
-    SecureString Decrypt(byte[] encryptedPassword, byte[] pinDerivedKey);
+    byte[] Encrypt(ProtectedString password, byte[] pinDerivedKey);
+    ProtectedString Decrypt(byte[] encryptedPassword, byte[] pinDerivedKey);
 }

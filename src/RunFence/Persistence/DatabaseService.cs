@@ -3,14 +3,15 @@ using System.Text;
 using System.Text.Json;
 using RunFence.Core;
 using RunFence.Core.Models;
+// ReSharper disable NullCoalescingConditionIsAlwaysNotNullAccordingToAPIContract
 
 namespace RunFence.Persistence;
 
 public class DatabaseService(
     ILoggingService log,
     IConfigPaths configPaths,
-    IAppFilter? appFilter = null,
-    bool allowPlaintextConfig = false)
+    IAppFilter? appFilter,
+    bool allowPlaintextConfig)
     : IDatabaseService
 {
     private readonly Lock _saveLock = new();
@@ -23,32 +24,38 @@ public class DatabaseService(
     public AppDatabase LoadConfig(byte[] pinDerivedKey)
     {
         var path = ConfigFilePath;
+
+        AppDatabase db;
         if (!File.Exists(path))
         {
             log.Info("Config file not found, returning empty database.");
-            return new AppDatabase();
-        }
-
-        var raw = File.ReadAllBytes(path);
-
-        byte[] json;
-        if (ConfigEncryptionHelper.HasEncryptionHeader(raw))
-        {
-            json = ConfigEncryptionHelper.DecryptConfig(raw, pinDerivedKey, ConfigFileType.MainConfig);
-        }
-        else if (allowPlaintextConfig)
-        {
-            json = raw;
+            db = new AppDatabase();
         }
         else
         {
-            throw new CryptographicException("Config file is not encrypted.");
+            var raw = File.ReadAllBytes(path);
+
+            byte[] json;
+            if (ConfigEncryptionHelper.HasEncryptionHeader(raw))
+            {
+                json = ConfigEncryptionHelper.DecryptConfig(raw, pinDerivedKey, ConfigFileType.MainConfig);
+            }
+            else if (allowPlaintextConfig)
+            {
+                json = raw;
+            }
+            else
+            {
+                throw new CryptographicException("Config file is not encrypted.");
+            }
+
+            db = JsonSerializer.Deserialize<AppDatabase>(json, JsonDefaults.Options) ?? new AppDatabase();
+            db.Apps ??= [];
+            db.Accounts ??= [];
+            db.Settings ??= new();
         }
 
-        var db = JsonSerializer.Deserialize<AppDatabase>(json, JsonDefaults.Options) ?? new AppDatabase();
-        db.Apps ??= [];
-        db.Accounts ??= [];
-        db.Settings ??= new();
+        WellKnownAccountDefaults.Apply(db);
         return db;
     }
 
@@ -103,7 +110,7 @@ public class DatabaseService(
         var store = JsonSerializer.Deserialize<CredentialStore>(json, JsonDefaults.Options)
                     ?? throw new JsonException("Failed to deserialize credential store.");
 
-        if (store.ArgonSalt == null || store.ArgonSalt.Length != Constants.Argon2SaltSize)
+        if (store.ArgonSalt is not { Length: Constants.Argon2SaltSize })
             throw new JsonException("Credential store has invalid Argon2 salt.");
         if (store.EncryptedCanary == null || store.EncryptedCanary.Length == 0)
             throw new JsonException("Credential store has missing canary.");

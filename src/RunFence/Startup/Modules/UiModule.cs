@@ -1,4 +1,7 @@
 using Autofac;
+using Autofac.Core.Activators.Reflection;
+using Autofac.Extras.Ordering;
+using BindingFlags = System.Reflection.BindingFlags;
 using RunFence.Account.UI;
 using RunFence.Account.UI.Forms;
 using RunFence.Acl;
@@ -6,13 +9,15 @@ using RunFence.Acl.UI;
 using RunFence.Apps;
 using RunFence.Apps.UI;
 using RunFence.Apps.UI.Forms;
+using RunFence.Core;
 using RunFence.DragBridge.UI.Forms;
 using RunFence.Groups.UI;
 using RunFence.Groups.UI.Forms;
-using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Licensing.UI.Forms;
 using RunFence.Persistence.UI.Forms;
+using RunFence.Startup;
+using RunFence.Startup.UI;
 using RunFence.TrayIcon;
 using RunFence.UI;
 using RunFence.UI.Forms;
@@ -21,17 +26,23 @@ namespace RunFence.Startup.Modules;
 
 public class UiModule : Module
 {
+    private static readonly IConstructorFinder AllInstanceConstructors =
+        new DefaultConstructorFinder(type => type.GetConstructors(
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
+
     protected override void Load(ContainerBuilder builder)
     {
         builder.RegisterType<MainForm>()
             .As<ITrayOwner>()
+            .As<IMainFormDataRefreshTarget>()
+            .As<IMainFormLockTarget>()
+            .As<IStartupFormLifetime>()
             .AsSelf()
             .SingleInstance();
 
         builder.Register(c =>
             {
                 var lazyForm = c.Resolve<Lazy<MainForm>>();
-                var log = c.Resolve<ILoggingService>();
                 return new LambdaUiThreadInvoker(
                     a =>
                     {
@@ -43,28 +54,7 @@ public class UiModule : Module
                         }
                         form.Invoke(a);
                     },
-                    a => lazyForm.Value.BeginInvoke(a),
-                    a =>
-                    {
-                        var form = lazyForm.Value;
-                        if (!form.InvokeRequired)
-                        {
-                            a();
-                            return;
-                        }
-                        // Probe whether the UI thread is pumping: post a no-op and wait up to
-                        // 1 s. If it completes, the thread is responsive and Invoke is safe.
-                        // If it times out, the UI thread is blocked — fall back to BeginInvoke.
-                        using var probe = new ManualResetEventSlim(false);
-                        form.BeginInvoke(() => { try { probe.Set(); } catch (ObjectDisposedException) { } });
-                        if (probe.Wait(1000))
-                            form.Invoke(a);
-                        else
-                        {
-                            log.Warn($"RunOnUiThread: UI thread blocked, falling back to BeginInvoke.\n{new System.Diagnostics.StackTrace()}");
-                            form.BeginInvoke(a);
-                        }
-                    });
+                    a => lazyForm.Value.BeginInvoke(a));
             })
             .As<IUiThreadInvoker>()
             .SingleInstance();
@@ -79,15 +69,32 @@ public class UiModule : Module
             .As<IExeAssociationRegistryReader>()
             .InstancePerDependency();
 
-        builder.RegisterType<AppEditBrowseHelper>().AsSelf().InstancePerDependency();
-        builder.RegisterType<AppEditAssociationHandler>().AsSelf().InstancePerDependency();
-        builder.RegisterType<AppEditAccountSwitchHandler>().AsSelf().InstancePerDependency();
-        builder.RegisterType<AppEditDialogController>().AsSelf().InstancePerDependency();
-        builder.RegisterType<AppEditPopulator>().AsSelf().InstancePerDependency();
-        builder.RegisterType<AppEditDialogPopulator>().AsSelf().InstancePerDependency();
-        builder.RegisterType<AppEditDialog>()
+        builder.RegisterType<AppEditBrowseHelper>()
+            .FindConstructorsWith(AllInstanceConstructors)
             .AsSelf()
             .InstancePerDependency();
+        builder.RegisterType<AppEditAssociationHandler>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditDialogSaveHandler>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditAccountSwitchHandler>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditDialogController>()
+            .FindConstructorsWith(AllInstanceConstructors)
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<AppEditPopulator>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditDialogPopulator>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditDialogInitializer>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditDialog>()
+            .FindConstructorsWith(AllInstanceConstructors)
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<ApplicationsPanelLaunchHandler>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ApplicationsPanelSaveHelper>()
+            .AsSelf()
+            .SingleInstance();
 
         builder.RegisterType<ApplicationsCrudOrchestrator>()
             .AsSelf()
@@ -113,16 +120,16 @@ public class UiModule : Module
             .AsSelf()
             .InstancePerDependency();
 
-        builder.RegisterType<HandlerMappingEditDirectDialog>()
-            .AsSelf()
-            .InstancePerDependency();
-
-        builder.RegisterType<HandlerMappingEditAppDialog>()
-            .AsSelf()
-            .InstancePerDependency();
-
         builder.RegisterType<HandlerMappingGridBuilder>()
             .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<MessageBoxService>()
+            .As<IMessageBoxService>()
+            .SingleInstance();
+
+        builder.RegisterType<MessageBoxHandlerMappingNotifier>()
+            .As<IHandlerMappingNotifier>()
             .SingleInstance();
 
         builder.RegisterType<HandlerMappingMutationHandler>()
@@ -133,11 +140,7 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<DirectHandlerResolver>()
-            .AsSelf()
-            .InstancePerDependency();
-
-        builder.RegisterType<HandlerMappingsController>()
+        builder.RegisterType<HandlerMappingDialogHelper>()
             .AsSelf()
             .InstancePerDependency();
 
@@ -160,11 +163,14 @@ public class UiModule : Module
         builder.RegisterType<AccountsPanel>()
             .AsSelf()
             .As<IAccountsPanelContext>()
+            .As<IAccountsPanelDataContext>()
+            .As<IAccountsPanelOperationContext>()
             .As<IGridSortState>()
             .As<IAccountGridCallbacks>()
             .SingleInstance();
 
         builder.RegisterType<ApplicationsPanel>()
+            .As<IWizardRequestSource>()
             .AsSelf()
             .SingleInstance();
 
@@ -196,7 +202,15 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<OptionsAutoFeatureHandler>()
+        builder.RegisterType<StartWithoutPinPromptService>()
+            .As<IStartWithoutPinPromptService>()
+            .SingleInstance();
+
+        builder.RegisterType<StartWithoutPinRotationRunner>()
+            .As<IStartWithoutPinRotationRunner>()
+            .SingleInstance();
+
+        builder.RegisterType<OptionsStartWithoutPinHandler>()
             .AsSelf()
             .SingleInstance();
 
@@ -254,6 +268,7 @@ public class UiModule : Module
             .SingleInstance();
 
         builder.RegisterType<TrayIconManager>()
+            .As<IInputInjectionTraySink>()
             .AsSelf()
             .SingleInstance();
 
@@ -262,6 +277,7 @@ public class UiModule : Module
             .SingleInstance();
 
         builder.RegisterType<OptionsPanel>()
+            .As<IDragBridgeSettingsChangeSource>()
             .AsSelf()
             .SingleInstance();
 
@@ -306,6 +322,7 @@ public class UiModule : Module
 
         builder.RegisterType<AccountBulkScanHandler>()
             .As<IAccountBulkScanHandler>()
+            .As<IAccountScanResultProcessor>()
             .AsSelf()
             .SingleInstance();
 
@@ -321,8 +338,24 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<MainFormTrayHandler>()
+        builder.RegisterType<MainFormWindowRequestHandler>()
+            .As<IElevatedUnlockRequestHandler>()
+            .As<IOperationUnlockRequestHandler>()
+            .As<IShowWindowRequestHandler>()
             .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<MainFormBackgroundAutoLockCoordinator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<MainFormTrayHandler>()
+            .As<ITrayBalloonService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<WinFormsUiTimerFactory>()
+            .As<IUiTimerFactory>()
             .SingleInstance();
 
         builder.RegisterType<TrayLaunchHandler>()
@@ -347,12 +380,59 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<AppLifecycleEventWirer>()
-            .AsSelf()
+        builder.RegisterType<DragBridgeEventWirer>()
+            .As<IStartupEventWirer>()
+            .OrderBy(5)
+            .SingleInstance();
+
+        builder.RegisterType<InputInjectionBlockerEventWirer>()
+            .As<IStartupEventWirer>()
+            .OrderBy(6)
+            .SingleInstance();
+
+        builder.RegisterType<DataRefreshStartupEventWirer>()
+            .As<IStartupEventWirer>()
+            .OrderBy(0)
+            .SingleInstance();
+
+        builder.RegisterType<LicenseTitleStartupEventWirer>()
+            .As<IStartupEventWirer>()
+            .OrderBy(1)
+            .SingleInstance();
+
+        builder.RegisterType<LockUiStartupEventWirer>()
+            .As<IStartupEventWirer>()
+            .OrderBy(2)
+            .SingleInstance();
+
+        builder.RegisterType<WizardStartupEventWirer>()
+            .As<IStartupEventWirer>()
+            .OrderBy(3)
+            .SingleInstance();
+
+        builder.RegisterType<SessionSwitchStartupEventWirer>()
+            .As<IStartupEventWirer>()
+            .OrderBy(4)
+            .SingleInstance();
+
+        builder.RegisterType<MessageBoxReencryptionWarningPresenter>()
+            .As<IReencryptionWarningPresenter>()
+            .SingleInstance();
+
+        builder.RegisterType<SystemSessionSwitchEventSource>()
+            .As<ISessionSwitchEventSource>()
             .SingleInstance();
 
         builder.RegisterType<StartupIpcBootstrapper>()
             .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountConfigTransferOrchestrator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<UserConfirmationService>()
+            .As<IUserConfirmationService>()
             .SingleInstance();
     }
 }

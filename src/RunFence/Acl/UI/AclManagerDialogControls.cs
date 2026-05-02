@@ -4,7 +4,8 @@ namespace RunFence.Acl.UI;
 
 /// <summary>
 /// Bundles control references from <see cref="AclManagerDialog"/> for passing to
-/// <see cref="AclManagerSelectionHandler"/> and <see cref="AclManagerModificationHandler"/>
+/// <see cref="AclManagerSelectionHandler"/>, <see cref="AclManagerModificationHandler"/>,
+/// <see cref="AclManagerPathActionHelper"/>, and <see cref="AclManagerMouseEventHandler"/>
 /// without exposing individual dialog fields.
 /// </summary>
 public class AclManagerDialogControls
@@ -19,7 +20,6 @@ public class AclManagerDialogControls
     public required ToolStripButton FixAclsButton { get; init; }
     public required Button ApplyButton { get; init; }
     public required ToolStripLabel ScanStatusLabel { get; init; }
-    public required ToolStripProgressBar ProgressBar { get; init; }
 
     // Grants context menu
     public required ToolStripMenuItem CtxAddFile { get; init; }

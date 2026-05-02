@@ -1,6 +1,5 @@
 using Microsoft.Win32;
 using PrefTrans.Native;
-using PrefTrans.Services;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;

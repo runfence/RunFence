@@ -1,4 +1,4 @@
-using RunFence.PinHelper;
+namespace RunFence.PinHelper;
 
 internal static class Program
 {

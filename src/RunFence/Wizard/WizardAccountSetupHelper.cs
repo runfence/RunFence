@@ -1,4 +1,4 @@
-using System.Security;
+using RunFence.Core;
 using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Infrastructure;
@@ -31,7 +31,7 @@ public class WizardAccountSetupHelper(
     public record SetupRequest(
         string Sid,
         string Username,
-        SecureString Password,
+        ProtectedString Password,
         bool StoreCredential,
         bool IsEphemeral,
         PrivilegeLevel PrivilegeLevel,

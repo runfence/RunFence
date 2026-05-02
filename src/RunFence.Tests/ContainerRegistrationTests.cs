@@ -3,6 +3,7 @@ using RunFence.Apps.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Launch;
 using RunFence.SidMigration;
 using RunFence.Startup;
 using RunFence.UI.Forms;
@@ -28,6 +29,10 @@ public class ContainerRegistrationTests
             {
                 using var foundationContainer = ContainerRegistrationBuilder.BuildFoundationContainer();
 
+                // Verify foundation-scope startup orchestration resolves before session exists.
+                // Program.Main resolves StartupOrchestrator from the foundation container.
+                foundationContainer.Resolve<StartupOrchestrator>();
+
                 using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
                 var session = new SessionContext
                 {
@@ -37,7 +42,7 @@ public class ContainerRegistrationTests
                 };
 
                 using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
-                    foundationContainer, session, new StartupOptions(false));
+                    foundationContainer, session, new StartupOptions(false, false));
 
                 // Resolve IRequiresInitialization services (same as Program.cs does
                 // before MainForm — verifies LicenseService, GlobalHotkeyService, etc.)
@@ -55,6 +60,7 @@ public class ContainerRegistrationTests
                 // these escape the MainForm transitive resolution above and would otherwise hide
                 // scope mismatches (e.g. a SingleInstance in foundation depending on a session-scope type).
                 using var appEditDialog = sessionScope.Resolve<AppEditDialog>();
+                sessionScope.Resolve<ILaunchTargetResolver>();
                 sessionScope.Resolve<InAppMigrationHandler>();
             }
             catch (Exception ex)

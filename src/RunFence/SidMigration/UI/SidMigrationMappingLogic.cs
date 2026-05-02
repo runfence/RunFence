@@ -1,5 +1,4 @@
 using RunFence.Account;
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
@@ -14,7 +13,6 @@ public class SidMigrationMappingLogic(
     ISidMigrationService sidMigrationService,
     ILocalUserProvider localUserProvider,
     IEnumerable<OrphanedSid> orphanedSids,
-    ISidResolver sidResolver,
     ISidNameCacheService sidNameCache)
 {
     public async Task<Dictionary<string, (string guessedName, string? newSid)>> BuildMappingsAsync()
@@ -39,8 +37,7 @@ public class SidMigrationMappingLogic(
                 {
                     if (!result.ContainsKey(orphan.Sid))
                     {
-                        var name = orphan.GuessedName
-                                   ?? (sidNames != null && sidNames.TryGetValue(orphan.Sid, out var mapName) ? mapName : null)
+                        var name = (sidNames != null && sidNames.TryGetValue(orphan.Sid, out var mapName) ? mapName : null)
                                    ?? "(unknown)";
                         result[orphan.Sid] = (name, null);
                     }
@@ -65,9 +62,4 @@ public class SidMigrationMappingLogic(
 
     public IEnumerable<string> GetLocalUserSids() =>
         localUserProvider.GetLocalUserAccounts().Select(u => u.Sid);
-
-    public string ResolveDisplayNameForUnknown(string oldSid) =>
-        sidResolver.TryResolveNameFromRegistry(oldSid) is { } regName
-            ? $"{regName} ({oldSid})"
-            : "(unknown)";
 }

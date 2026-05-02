@@ -30,7 +30,7 @@ public class RunAsAccountSettingsApplierTests
     private RunAsAccountSettingsApplier CreateApplier()
         => new(_appState.Object, new SessionContext(), _databaseService.Object, _log.Object,
             _settingsTransferService.Object,
-            new FirewallApplyHelper(_firewallSettingsApplier.Object, _log.Object));
+            new FirewallApplyHelper(_firewallSettingsApplier.Object, new DynamicPortRangeChecker(_log.Object, new Mock<IUserConfirmationService>().Object), _log.Object));
 
     // ── ApplyLaunchDefaults ─────────────────────────────────────────────────
 

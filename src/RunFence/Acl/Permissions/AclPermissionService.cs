@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
-using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Infrastructure;
 
@@ -46,10 +45,11 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
 
     public List<string> ResolveAccountGroupSids(string accountSid)
     {
-        // AppContainer SIDs (S-1-15-2-*) are not user accounts — they have a fixed, well-known
-        // group membership and NetUserGetLocalGroups does not apply to them.
-        if (AclHelper.IsContainerSid(accountSid))
-            return ["S-1-1-0", "S-1-15-2-1"]; // Everyone + ALL_APPLICATION_PACKAGES
+        // AppContainer SIDs (S-1-15-2-*) and the Low Integrity label SID (S-1-16-4096) are not
+        // user accounts — they have a fixed, well-known group membership and NetUserGetLocalGroups
+        // does not apply to them.
+        if (AclHelper.IsContainerSid(accountSid) || AclHelper.IsLowIntegritySid(accountSid))
+            return ["S-1-1-0", AclHelper.AllApplicationPackagesSid]; // Everyone + ALL_APPLICATION_PACKAGES
 
         var sids = new List<string>
         {

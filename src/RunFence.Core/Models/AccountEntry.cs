@@ -23,11 +23,15 @@ public class AccountEntry
 
     [JsonPropertyName("manageAssociations")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    // ReSharper disable once UnusedMember.Global
     public bool? ManageAssociationsSerialized
     {
         get => ManageAssociations ? null : false;
         set => ManageAssociations = value ?? true;
     }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ReceiveInjectedInput { get; set; }
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -41,6 +45,7 @@ public class AccountEntry
 
     [JsonPropertyName("firewall")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    // ReSharper disable once UnusedMember.Global
     public FirewallAccountSettings? FirewallSerialized
     {
         get => Firewall.IsDefault ? null : Firewall;
@@ -51,7 +56,7 @@ public class AccountEntry
 
     [JsonIgnore]
     public bool IsEmpty => !IsIpcCaller && !TrayFolderBrowser && !TrayDiscovery && !TrayTerminal
-                           && ManageAssociations
+                           && ManageAssociations && !ReceiveInjectedInput
                            && PrivilegeLevel == PrivilegeLevel.Basic && DeleteAfterUtc == null
                            && Firewall.IsDefault && Grants.Count == 0;
 
@@ -63,6 +68,7 @@ public class AccountEntry
         TrayDiscovery = TrayDiscovery,
         TrayTerminal = TrayTerminal,
         ManageAssociations = ManageAssociations,
+        ReceiveInjectedInput = ReceiveInjectedInput,
         PrivilegeLevel = PrivilegeLevel,
         DeleteAfterUtc = DeleteAfterUtc,
         Firewall = Firewall.Clone(),

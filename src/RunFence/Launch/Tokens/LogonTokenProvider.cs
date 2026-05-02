@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Security;
 using RunFence.Core;
 using RunFence.Infrastructure;
 
@@ -10,13 +9,13 @@ namespace RunFence.Launch.Tokens;
 /// Handles ERROR_LOGON_TYPE_NOT_GRANTED by temporarily granting SeInteractiveLogonRight
 /// via <see cref="IInteractiveLogonHelper.RunWithLogonRetry{T}"/>.
 /// </summary>
-public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper logonHelper, IExplorerTokenProvider explorerTokenProvider)
+public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper logonHelper, IExplorerTokenProvider explorerTokenProvider, ISystemTokenProvider systemTokenProvider) : ILogonTokenProvider
 {
     /// <summary>
     /// Acquires a logon token for the given credentials, or opens the current process token
     /// when <paramref name="password"/> is null (current-account launch).
     /// </summary>
-    public IntPtr AcquireLogonToken(SecureString? password, string? domain,
+    public IntPtr AcquireLogonToken(ProtectedString? password, string? domain,
         string? username, LaunchTokenSource tokenSource = LaunchTokenSource.Credentials)
     {
         switch (tokenSource)
@@ -28,6 +27,9 @@ public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper log
                     throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
                 return hProcessToken;
 
+            case LaunchTokenSource.SystemAccount:
+                return systemTokenProvider.AcquireSystemToken();
+
             case LaunchTokenSource.InteractiveUser:
                 try
                 {
@@ -37,7 +39,7 @@ public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper log
                 {
                     // Explorer token failed but stored credentials are available — fall back to LogonUser
                     log.Warn("AcquireLogonToken: Explorer token unavailable, falling back to stored credentials.");
-                    var fallbackPtr = Marshal.SecureStringToGlobalAllocUnicode(password);
+                    var fallbackPtr = password.AllocUnicode();
                     try
                     {
                         return logonHelper.RunWithLogonRetry(domain, username,
@@ -54,7 +56,7 @@ public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper log
                 if (password == null)
                     throw new ArgumentException("Password is required for Credentials token source.", nameof(password));
 
-                var passwordPtr = Marshal.SecureStringToGlobalAllocUnicode(password);
+                var passwordPtr = password.AllocUnicode();
                 try
                 {
                     return logonHelper.RunWithLogonRetry(domain, username,

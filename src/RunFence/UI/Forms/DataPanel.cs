@@ -1,7 +1,6 @@
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Security;
 
 namespace RunFence.UI.Forms;
 
@@ -23,6 +22,8 @@ public class DataPanel : UserControl
     protected DataPanel()
     {
     }
+
+    protected override Size DefaultSize => new Size(900, 600);
 
     protected SessionContext Session { get; private set; } = null!;
 
@@ -59,7 +60,7 @@ public class DataPanel : UserControl
     {
     }
 
-    // --- Grid duplication helpers ---
+    // --- Grid refresh state and selection helpers ---
 
     /// <summary>
     /// Tracks whether the grid is being repopulated. Subclasses set this in
@@ -84,35 +85,6 @@ public class DataPanel : UserControl
         if (IsRefreshing)
             return;
         UpdateButtonState();
-    }
-
-    /// <summary>
-    /// Configures a DataGridView with standard read-only behavioral settings.
-    /// Visual styling is provided by <see cref="UI.Controls.StyledDataGridView"/>.
-    /// </summary>
-    public static void ConfigureReadOnlyGrid(DataGridView grid)
-    {
-        grid.Dock = DockStyle.Fill;
-        grid.ReadOnly = true;
-        grid.AllowUserToAddRows = false;
-        grid.AllowUserToDeleteRows = false;
-        grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        grid.MultiSelect = false;
-        grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-    }
-
-    /// <summary>
-    /// Returns the index of the first non-image column cell suitable for CurrentCell assignment.
-    /// </summary>
-    private static int GetFirstTextCellIndex(DataGridView grid)
-    {
-        for (int i = 0; i < grid.Columns.Count; i++)
-        {
-            if (grid.Columns[i] is not DataGridViewImageColumn && grid.Columns[i].Visible)
-                return i;
-        }
-
-        return 0;
     }
 
     // --- Three-state column sorting ---
@@ -142,40 +114,4 @@ public class DataPanel : UserControl
         IEnumerable<T> items, Func<T, string> keySelector)
         => _sortHelper.SortByActiveColumn(items, keySelector);
 
-    protected static void SelectFirstRow(DataGridView grid)
-    {
-        if (grid.Rows.Count > 0)
-        {
-            grid.Rows[0].Selected = true;
-            grid.CurrentCell = grid.Rows[0].Cells[GetFirstTextCellIndex(grid)];
-        }
-    }
-
-    protected static void SelectRowByIndex(DataGridView grid, int index)
-    {
-        if (grid.Rows.Count == 0)
-            return;
-        var targetIndex = Math.Min(index, grid.Rows.Count - 1);
-        grid.Rows[targetIndex].Selected = true;
-        grid.CurrentCell = grid.Rows[targetIndex].Cells[GetFirstTextCellIndex(grid)];
-    }
-
-    protected static void ShowContextMenuAtRow(DataGridView grid, ContextMenuStrip menu)
-    {
-        if (grid.SelectedRows.Count == 0)
-            return;
-        var row = grid.SelectedRows[0];
-        var cellBounds = grid.GetCellDisplayRectangle(1, row.Index, true);
-        menu.Show(grid, new Point(cellBounds.Left + cellBounds.Width / 2, cellBounds.Top + cellBounds.Height / 2));
-    }
-
-    protected static void HandleRightClickRowSelect(DataGridView grid, DataGridViewCellMouseEventArgs e, ContextMenuStrip contextMenu)
-    {
-        if (e.Button != MouseButtons.Right || e.RowIndex < 0)
-            return;
-        grid.ClearSelection();
-        grid.Rows[e.RowIndex].Selected = true;
-        grid.CurrentCell = grid.Rows[e.RowIndex].Cells[GetFirstTextCellIndex(grid)];
-        contextMenu.Show(grid, grid.PointToClient(Cursor.Position));
-    }
 }

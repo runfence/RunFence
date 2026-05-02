@@ -13,11 +13,11 @@ partial class BlockedConnectionsDialog
     private CheckBox _auditCheckBox;
     private Label _allUsersNoteLabel;
     private StyledDataGridView _grid;
-    private DataGridViewTextBoxColumn _colIp;
-    private DataGridViewTextBoxColumn _colHostname;
-    private DataGridViewTextBoxColumn _colCount;
-    private DataGridViewTextBoxColumn _colLastSeen;
-    private DataGridViewTextBoxColumn _colPorts;
+    private DataGridViewTextBoxColumn colIp;
+    private DataGridViewTextBoxColumn colHostname;
+    private DataGridViewTextBoxColumn colCount;
+    private DataGridViewTextBoxColumn colLastSeen;
+    private DataGridViewTextBoxColumn colPorts;
     private Panel _bottomPanel;
     private FlowLayoutPanel _rightPanel;
     private RadioButton _ipRadio;
@@ -41,11 +41,11 @@ partial class BlockedConnectionsDialog
         _auditCheckBox = new CheckBox();
         _allUsersNoteLabel = new Label();
         _grid = new StyledDataGridView();
-        _colIp = new DataGridViewTextBoxColumn();
-        _colHostname = new DataGridViewTextBoxColumn();
-        _colCount = new DataGridViewTextBoxColumn();
-        _colLastSeen = new DataGridViewTextBoxColumn();
-        _colPorts = new DataGridViewTextBoxColumn();
+        colIp = new DataGridViewTextBoxColumn();
+        colHostname = new DataGridViewTextBoxColumn();
+        colCount = new DataGridViewTextBoxColumn();
+        colLastSeen = new DataGridViewTextBoxColumn();
+        colPorts = new DataGridViewTextBoxColumn();
         _bottomPanel = new Panel();
         _rightPanel = new FlowLayoutPanel();
         _ipRadio = new RadioButton();
@@ -78,41 +78,38 @@ partial class BlockedConnectionsDialog
         _auditPanel.Controls.Add(_allUsersNoteLabel);
 
         // columns
-        _colIp.Name = "colIp";
-        _colIp.HeaderText = "IP Address";
-        _colIp.ReadOnly = true;
-        _colIp.FillWeight = 22;
+        colIp.Name = "colIp";
+        colIp.HeaderText = "IP Address";
+        colIp.ReadOnly = true;
+        colIp.FillWeight = 22;
 
-        _colHostname.Name = "colHostname";
-        _colHostname.HeaderText = "Hostname";
-        _colHostname.ReadOnly = true;
-        _colHostname.FillWeight = 28;
+        colHostname.Name = "colHostname";
+        colHostname.HeaderText = "Hostname";
+        colHostname.ReadOnly = true;
+        colHostname.FillWeight = 28;
 
-        _colCount.Name = "colCount";
-        _colCount.HeaderText = "Hits";
-        _colCount.ReadOnly = true;
-        _colCount.FillWeight = 8;
+        colCount.Name = "colCount";
+        colCount.HeaderText = "Hits";
+        colCount.ReadOnly = true;
+        colCount.FillWeight = 8;
 
-        _colLastSeen.Name = "colLastSeen";
-        _colLastSeen.HeaderText = "Last Seen";
-        _colLastSeen.ReadOnly = true;
-        _colLastSeen.FillWeight = 17;
+        colLastSeen.Name = "colLastSeen";
+        colLastSeen.HeaderText = "Last Seen";
+        colLastSeen.ReadOnly = true;
+        colLastSeen.FillWeight = 17;
 
-        _colPorts.Name = "colPorts";
-        _colPorts.HeaderText = "Ports";
-        _colPorts.ReadOnly = true;
-        _colPorts.FillWeight = 20;
+        colPorts.Name = "colPorts";
+        colPorts.HeaderText = "Ports";
+        colPorts.ReadOnly = true;
+        colPorts.FillWeight = 20;
 
         // _grid
-        _grid.AllowUserToAddRows = false;
-        _grid.AllowUserToDeleteRows = false;
-        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _grid.MultiSelect = true;
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.Dock = DockStyle.Fill;
         _grid.Columns.AddRange(new DataGridViewColumn[]
         {
-            _colIp, _colHostname, _colCount, _colLastSeen, _colPorts
+            colIp, colHostname, colCount, colLastSeen, colPorts
         });
 
         // _ipRadio

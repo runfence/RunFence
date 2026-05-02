@@ -10,7 +10,7 @@ namespace RunFence.Acl;
 /// Handles allow-mode ACL operations: applying, reverting, and cleaning up allow-mode ACEs.
 /// Extracted from AclService to keep it focused on dispatch.
 /// </summary>
-public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUserProvider)
+public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUserProvider, IAclAccessor aclAccessor)
     : IAclAllowModeService
 {
     public bool ApplyAllowAcl(AppEntry app, string targetPath)
@@ -87,7 +87,7 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
 
         var localUserSids = AclHelper.BuildLocalUserSidSet(localUserProvider.GetLocalUserAccounts());
         bool changed = false;
-        AclHelper.ModifyAclIf(targetPath, isDirectory, security =>
+        aclAccessor.ModifyAclWithFallback(targetPath, isDirectory, security =>
         {
             var denyCleaned = AclHelper.RemoveManagedDenyAces(security, localUserSids);
             var inheritanceBroken = security.AreAccessRulesProtected;
@@ -109,10 +109,11 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
         if (!isDirectory && !isFile)
             return;
 
-        AclHelper.ModifyAcl(targetPath, isDirectory, security =>
+        aclAccessor.ModifyAclWithFallback(targetPath, isDirectory, security =>
         {
             RemoveAllowManagedAces(security, app);
             security.SetAccessRuleProtection(false, false);
+            return true;
         });
     }
 
@@ -124,7 +125,7 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
 
         try
         {
-            var changed = AclHelper.ModifyAclIf(targetPath, isFolder, security =>
+            var changed = aclAccessor.ModifyAclWithFallback(targetPath, isFolder, security =>
             {
                 if (!security.AreAccessRulesProtected)
                     return false;

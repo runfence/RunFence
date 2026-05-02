@@ -48,20 +48,24 @@ public class InstallPackageSelector
         if (_installedPackageIndices.Contains(index))
             return CheckState.Checked;
 
-        // Auto-check Winget when Terminal is checked
-        if (newValue == CheckState.Checked && KnownPackages.All[index] == KnownPackages.WindowsTerminal)
+        switch (newValue)
         {
-            int wingetIndex = FindPackageIndex(KnownPackages.Winget);
-            if (wingetIndex >= 0 && !_installedPackageIndices.Contains(wingetIndex))
-                list.BeginInvoke(() => list.SetItemChecked(wingetIndex, true));
-        }
-
-        // Prevent unchecking Winget when Terminal is checked (dependency)
-        if (newValue == CheckState.Unchecked && KnownPackages.All[index] == KnownPackages.Winget)
-        {
-            int terminalIndex = FindPackageIndex(KnownPackages.WindowsTerminal);
-            if (terminalIndex >= 0 && list.GetItemChecked(terminalIndex))
-                return CheckState.Checked;
+            // Auto-check Winget when Terminal is checked
+            case CheckState.Checked when KnownPackages.All[index] == KnownPackages.WindowsTerminal:
+            {
+                int wingetIndex = FindPackageIndex(KnownPackages.Winget);
+                if (wingetIndex >= 0 && !_installedPackageIndices.Contains(wingetIndex))
+                    list.BeginInvoke(() => list.SetItemChecked(wingetIndex, true));
+                break;
+            }
+            // Prevent unchecking Winget when Terminal is checked (dependency)
+            case CheckState.Unchecked when KnownPackages.All[index] == KnownPackages.Winget:
+            {
+                int terminalIndex = FindPackageIndex(KnownPackages.WindowsTerminal);
+                if (terminalIndex >= 0 && list.GetItemChecked(terminalIndex))
+                    return CheckState.Checked;
+                break;
+            }
         }
 
         return null;

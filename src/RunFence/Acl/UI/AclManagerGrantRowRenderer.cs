@@ -14,6 +14,7 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
     private DataGridView _grid = null!;
     private string _sid = null!;
     private bool _isContainer;
+    private bool _blocksOwnerColumn;
     private IReadOnlyList<string> _groupSids = null!;
     private AclManagerPendingChanges _pending = null!;
 
@@ -23,6 +24,7 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
         _grid = grid;
         _sid = sid;
         _isContainer = isContainer;
+        _blocksOwnerColumn = !AclHelper.CanAssignGrantOwner(sid, isContainer);
         _groupSids = groupSids;
         _pending = pending;
     }
@@ -73,19 +75,15 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
 
         if (!_isContainer && _grid.Columns.Contains(AclManagerGrantsHelper.ColOwner))
         {
-            row.Cells[_grid.Columns[AclManagerGrantsHelper.ColOwner]!.Index].Value = effectiveIsDeny
+            var ownerCell = row.Cells[_grid.Columns[AclManagerGrantsHelper.ColOwner]!.Index];
+            ownerCell.Value = effectiveIsDeny
                 ? state.IsAdminOwner ? RightCheckState.Checked : RightCheckState.Unchecked
                 : state.IsAccountOwner;
+            ownerCell.ReadOnly = _blocksOwnerColumn;
         }
 
         ApplyRowStatus(row, status, isPendingChange);
         _grid.Rows.Add(row);
-    }
-
-    public void RefreshRow(DataGridViewRow row, GrantedPathEntry entry)
-    {
-        bool isPending = _pending.IsPendingGrantChange(entry.Path, entry.IsDeny);
-        RefreshRow(row, entry, isPending);
     }
 
     public void RefreshRow(DataGridViewRow row, GrantedPathEntry entry, bool isPendingChange,
@@ -147,9 +145,13 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
             }
 
             if (!_isContainer && _grid.Columns.Contains(AclManagerGrantsHelper.ColOwner))
-                row.Cells[AclManagerGrantsHelper.ColOwner].Value = effectiveIsDeny
+            {
+                var ownerCell = row.Cells[AclManagerGrantsHelper.ColOwner];
+                ownerCell.Value = effectiveIsDeny
                     ? state.IsAdminOwner ? RightCheckState.Checked : RightCheckState.Unchecked
                     : state.IsAccountOwner;
+                ownerCell.ReadOnly = _blocksOwnerColumn;
+            }
 
             ApplyRowStatus(row, status, isPendingChange);
         }

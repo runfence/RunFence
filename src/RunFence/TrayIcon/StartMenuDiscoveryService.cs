@@ -6,7 +6,20 @@ namespace RunFence.TrayIcon;
 
 public record StartMenuEntry(string Name, string ExePath, string AccountSid, string? Subfolder);
 
-public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHelper shortcutHelper)
+/// <summary>
+/// Captures all per-credential context needed to scan a single directory for start menu shortcuts.
+/// </summary>
+internal record ScanContext(
+    CredentialEntry Credential,
+    string CurrentUserProfile,
+    string? ProfilePath,
+    HashSet<string> PublicTargets,
+    HashSet<string> InteractiveTargets,
+    HashSet<(string sid, string exePath)> Seen,
+    IReadOnlySet<(string ExePath, string AccountSid)> ExistingApps,
+    List<StartMenuEntry> Results);
+
+public class StartMenuDiscoveryService(IProfilePathResolver profilePathResolver, IShortcutComHelper shortcutHelper, ILoggingService log)
 {
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
         { ".exe", ".com", ".bat", ".cmd", ".ps1" };
@@ -27,44 +40,33 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHel
         foreach (var credential in credentials)
         {
             if (credential is { IsCurrentAccount: false, IsInteractiveUser: false, EncryptedPassword.Length: 0 })
+            {
+                log.Info($"Skipping tray discovery for account {credential.Sid}: no stored password");
                 continue;
+            }
 
-            var profilePath = credential.IsCurrentAccount ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : sidResolver.TryGetProfilePath(credential.Sid);
+            var profilePath = credential.IsCurrentAccount ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : profilePathResolver.TryGetProfilePath(credential.Sid);
 
-            var programsPath = sidResolver.TryGetStartMenuProgramsPath(credential.Sid, credential.IsCurrentAccount);
-            var desktopPath = sidResolver.TryGetDesktopPath(credential.Sid, credential.IsCurrentAccount);
+            var programsPath = profilePathResolver.TryGetStartMenuProgramsPath(credential.Sid, credential.IsCurrentAccount);
+            var desktopPath = profilePathResolver.TryGetDesktopPath(credential.Sid, credential.IsCurrentAccount);
+
+            var context = new ScanContext(credential, currentUserProfile, profilePath,
+                publicTargets, interactiveTargets, seen, existingApps, results);
 
             // Scan directories: (path, subfolder-root or null-means-desktop)
-            var scanDirs = new List<(string Dir, string? SubfolderRoot)>();
             if (programsPath != null && Directory.Exists(programsPath))
-                scanDirs.Add((programsPath, programsPath));
+                ProcessShortcutsInDirectory(programsPath, programsPath, context);
             if (desktopPath != null && Directory.Exists(desktopPath))
-                scanDirs.Add((desktopPath, null));
-
-            foreach (var (dir, subfolderRoot) in scanDirs)
-            {
-                ProcessShortcutsInDirectory(dir, subfolderRoot, credential, currentUserProfile,
-                    profilePath, publicTargets, interactiveTargets, seen, existingApps, results);
-            }
+                ProcessShortcutsInDirectory(desktopPath, null, context);
         }
 
         return results;
     }
 
-    private void ProcessShortcutsInDirectory(
-        string dir,
-        string? subfolderRoot,
-        CredentialEntry credential,
-        string currentUserProfile,
-        string? profilePath,
-        HashSet<string> publicTargets,
-        HashSet<string> interactiveTargets,
-        HashSet<(string sid, string exePath)> seen,
-        IReadOnlySet<(string ExePath, string AccountSid)> existingApps,
-        List<StartMenuEntry> results)
+    private void ProcessShortcutsInDirectory(string dir, string? subfolderRoot, ScanContext ctx)
     {
-        var profilePrefix = profilePath != null
-            ? profilePath.TrimEnd('\\', '/') + Path.DirectorySeparatorChar
+        var profilePrefix = ctx.ProfilePath != null
+            ? ctx.ProfilePath.TrimEnd('\\', '/') + Path.DirectorySeparatorChar
             : null;
         List<string> lnkFiles;
         try
@@ -81,7 +83,7 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHel
             string? target;
             try
             {
-                (target, _) = shortcutHelper.GetShortcutTargetAndArgs(lnkPath);
+                target = shortcutHelper.GetShortcutTargetAndArgs(lnkPath).Target;
             }
             catch
             {
@@ -94,7 +96,7 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHel
             // WScript.Shell expands env vars (%LOCALAPPDATA%, %APPDATA%, etc.) using the
             // current process environment (admin account). Re-root to the target user's
             // actual profile so paths resolve correctly for icon loading and launching.
-            target = RerootToUserProfile(target, credential.IsCurrentAccount, currentUserProfile, profilePath);
+            target = RerootToUserProfile(target, ctx.Credential.IsCurrentAccount, ctx.CurrentUserProfile, ctx.ProfilePath);
 
             if (!SupportedExtensions.Contains(Path.GetExtension(target)))
                 continue;
@@ -102,7 +104,7 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHel
                 continue;
             if (ShortcutClassificationHelper.IsSystemExecutable(target))
                 continue;
-            if (existingApps.Contains((target, credential.Sid)))
+            if (ctx.ExistingApps.Contains((target, ctx.Credential.Sid)))
                 continue;
             if (!File.Exists(target))
                 continue;
@@ -110,15 +112,15 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHel
             var isInProfileFolder = profilePrefix != null &&
                                     target.StartsWith(profilePrefix, StringComparison.OrdinalIgnoreCase);
 
-            var isCoveredByPublic = publicTargets.Contains(target);
-            var isCoveredByInteractiveUser = !credential.IsInteractiveUser && interactiveTargets.Contains(target);
+            var isCoveredByPublic = ctx.PublicTargets.Contains(target);
+            var isCoveredByInteractiveUser = !ctx.Credential.IsInteractiveUser && ctx.InteractiveTargets.Contains(target);
             var isCovered = isCoveredByPublic || isCoveredByInteractiveUser;
 
             if (!isInProfileFolder && isCovered)
                 continue;
 
-            var key = (credential.Sid, target);
-            if (!seen.Add(key))
+            var key = (ctx.Credential.Sid, target);
+            if (!ctx.Seen.Add(key))
                 continue;
 
             var name = Path.GetFileNameWithoutExtension(lnkPath);
@@ -133,7 +135,7 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHel
                 }
             }
 
-            results.Add(new StartMenuEntry(name, target, credential.Sid, subfolder));
+            ctx.Results.Add(new StartMenuEntry(name, target, ctx.Credential.Sid, subfolder));
         }
     }
 
@@ -164,11 +166,11 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHel
         var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         string? profilePath = credential.IsCurrentAccount
             ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-            : sidResolver.TryGetProfilePath(credential.Sid);
+            : profilePathResolver.TryGetProfilePath(credential.Sid);
 
-        var desktopPath = sidResolver.TryGetDesktopPath(credential.Sid, credential.IsCurrentAccount);
+        var desktopPath = profilePathResolver.TryGetDesktopPath(credential.Sid, credential.IsCurrentAccount);
         CollectTargets(desktopPath, targets, currentUserProfile, profilePath);
-        var programsPath = sidResolver.TryGetStartMenuProgramsPath(credential.Sid, credential.IsCurrentAccount);
+        var programsPath = profilePathResolver.TryGetStartMenuProgramsPath(credential.Sid, credential.IsCurrentAccount);
         if (programsPath != null)
             CollectTargets(Path.GetDirectoryName(programsPath), targets, currentUserProfile, profilePath);
         return targets;
@@ -185,7 +187,7 @@ public class StartMenuDiscoveryService(ISidResolver sidResolver, IShortcutComHel
             {
                 try
                 {
-                    var (target, _) = shortcutHelper.GetShortcutTargetAndArgs(lnkPath);
+                    var target = shortcutHelper.GetShortcutTargetAndArgs(lnkPath).Target;
                     if (string.IsNullOrEmpty(target))
                         continue;
                     if (currentUserProfile != null)

@@ -1,8 +1,8 @@
 namespace RunFence.Acl;
 
 /// <summary>
-/// Read-only operations for inspecting grant state.
-/// Focused interface for consumers that only need to query grants.
+/// Read-only NTFS operations for inspecting grant state.
+/// Focused interface for consumers that only need to query the filesystem ACL state.
 /// </summary>
 public interface IGrantInspectionService
 {
@@ -17,10 +17,4 @@ public interface IGrantInspectionService
     /// combination. Broken = path exists but no direct ACE for this SID in the expected mode.
     /// </summary>
     PathAclStatus CheckGrantStatus(string path, string sid, bool isDeny);
-
-    /// <summary>
-    /// Validates a prospective grant against the DB: throws <see cref="InvalidOperationException"/>
-    /// if a same-mode duplicate or an opposite-mode entry exists. No side effects.
-    /// </summary>
-    void ValidateGrant(string sid, string path, bool isDeny);
 }

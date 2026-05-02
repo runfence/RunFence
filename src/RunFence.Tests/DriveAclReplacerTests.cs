@@ -1,7 +1,8 @@
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Moq;
 using RunFence.Acl;
 using RunFence.Core;
-using RunFence.Core.Models;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -66,5 +67,75 @@ public class DriveAclReplacerTests : IDisposable
         _pathGrantService.Verify(
             p => p.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()),
             Times.Never);
+    }
+
+    // --- F-77: Pre-seeded broad-access ACEs exercising replacement logic ---
+
+    private static void AddBroadAccessAce(string path, WellKnownSidType sidType, FileSystemRights rights)
+    {
+        var broadSid = new SecurityIdentifier(sidType, null);
+        var dirInfo = new DirectoryInfo(path);
+        var security = dirInfo.GetAccessControl();
+        security.AddAccessRule(new FileSystemAccessRule(
+            broadSid, rights,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None,
+            AccessControlType.Allow));
+        dirInfo.SetAccessControl(security);
+    }
+
+    private static bool HasAceForSid(string path, SecurityIdentifier sid)
+    {
+        var security = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access);
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
+        return rules.Cast<FileSystemAccessRule>().Any(r => r.IdentityReference.Equals(sid));
+    }
+
+    [Theory]
+    [InlineData(WellKnownSidType.WorldSid)]      // Everyone
+    [InlineData(WellKnownSidType.BuiltinUsersSid)] // Builtin Users
+    public void ReplaceDriveAcl_WithBroadAccessAce_RemovesBroadAceAndAddsTargetSid(WellKnownSidType sidType)
+    {
+        // Arrange: add an explicit broad-access ACE to the temp directory
+        var broadSid = new SecurityIdentifier(sidType, null);
+        var targetSid = new SecurityIdentifier(TestSid);
+
+        AddBroadAccessAce(_tempDir.Path, sidType, FileSystemRights.ReadAndExecute);
+        Assert.True(HasAceForSid(_tempDir.Path, broadSid), "Broad-access ACE must be present before test");
+
+        // Act
+        var result = _replacer.ReplaceDriveAcl(_tempDir.Path, TestSid);
+
+        // Assert: no error, broad ACE removed, target SID ACE added, UpdateFromPath called
+        Assert.Null(result);
+        Assert.False(HasAceForSid(_tempDir.Path, broadSid), "Broad-access ACE should be removed");
+        Assert.True(HasAceForSid(_tempDir.Path, targetSid), "Target SID ACE should be added");
+        _pathGrantService.Verify(p => p.UpdateFromPath(_tempDir.Path, TestSid), Times.Once);
+    }
+
+    [Fact]
+    public void ReplaceDriveAcl_WhenTargetSidAceAlreadyExists_DoesNotAddDuplicateAce()
+    {
+        // Arrange: pre-seed both Everyone ACE and target-SID ACE with same rights
+        var everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+        var targetSid = new SecurityIdentifier(TestSid);
+
+        AddBroadAccessAce(_tempDir.Path, WellKnownSidType.WorldSid, FileSystemRights.ReadAndExecute);
+        // Also add an existing ACE for the target SID with the same rights
+        var acl = new AclAccessor();
+        acl.ApplyExplicitAce(_tempDir.Path, TestSid, AccessControlType.Allow, FileSystemRights.ReadAndExecute);
+
+        // Act
+        var result = _replacer.ReplaceDriveAcl(_tempDir.Path, TestSid);
+
+        // Assert: success, Everyone removed, target SID has exactly one ACE (no duplicate added)
+        Assert.Null(result);
+        Assert.False(HasAceForSid(_tempDir.Path, everyoneSid));
+        var security = new DirectoryInfo(_tempDir.Path).GetAccessControl(AccessControlSections.Access);
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
+        var targetRuleCount = rules.Cast<FileSystemAccessRule>()
+            .Count(r => r.IdentityReference.Equals(targetSid));
+        // At most 1 ACE for target SID (no duplicate added when existing one matches)
+        Assert.True(targetRuleCount <= 1, $"Expected at most 1 ACE for target SID, got {targetRuleCount}");
     }
 }

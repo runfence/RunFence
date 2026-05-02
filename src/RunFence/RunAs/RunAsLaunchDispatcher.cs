@@ -18,7 +18,7 @@ public class RunAsLaunchDispatcher(
     ISidNameCacheService sidNameCache,
     IAppStateProvider appState,
     IRunAsLaunchErrorHandler launchErrorHandler,
-    RunAsAppShortcutCreator shortcutCreator)
+    RunAsAppShortcutCreator shortcutCreator) : IRunAsLaunchDispatcher
 {
     /// <summary>
     /// Dispatches the container flow result: opens the app edit dialog when

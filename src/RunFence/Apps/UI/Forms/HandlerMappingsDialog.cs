@@ -1,8 +1,8 @@
-using RunFence.Apps;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Persistence;
 using RunFence.UI;
 
 namespace RunFence.Apps.UI.Forms;
@@ -13,36 +13,47 @@ namespace RunFence.Apps.UI.Forms;
 /// </summary>
 public partial class HandlerMappingsDialog : Form
 {
-    private readonly HandlerMappingsController _controller;
+    private readonly HandlerMappingMutationHandler _mutationHandler;
+    private readonly HandlerMappingSyncService _syncService;
+    private readonly IHandlerMappingService _handlerMappingService;
+    private readonly IInteractiveUserAssociationReader _interactiveReader;
     private readonly ILoggingService _log;
-    private readonly ShellHelper _shellHelper;
+    private readonly IShellHelper _shellHelper;
     private readonly Func<HandlerMappingAddDialog> _createAddDialog;
-    private readonly Func<HandlerMappingEditDirectDialog> _createEditDirectDialog;
-    private readonly Func<HandlerMappingEditAppDialog> _createEditAppDialog;
+    private readonly HandlerMappingGridBuilder _gridBuilder;
+    private readonly HandlerMappingDialogHelper _dialogHelper;
     private Func<AppDatabase> _getDatabase = null!;
     private Action _saveDatabase = null!;
+    private HashSet<string> _originalRunFenceKeys = null!;
+    private bool _hasNewKeys;
     private int _ctxRowIndex = -1;
     private readonly GridSortHelper _sortHelper = new();
 
     public HandlerMappingsDialog(
-        HandlerMappingsController controller,
+        HandlerMappingMutationHandler mutationHandler,
+        HandlerMappingSyncService syncService,
+        IHandlerMappingService handlerMappingService,
+        IInteractiveUserAssociationReader interactiveReader,
         ILoggingService log,
-        ShellHelper shellHelper,
+        IShellHelper shellHelper,
         Func<HandlerMappingAddDialog> createAddDialog,
-        Func<HandlerMappingEditDirectDialog> createEditDirectDialog,
-        Func<HandlerMappingEditAppDialog> createEditAppDialog)
+        HandlerMappingGridBuilder gridBuilder,
+        HandlerMappingDialogHelper dialogHelper)
     {
-        _controller = controller;
+        _mutationHandler = mutationHandler;
+        _syncService = syncService;
+        _handlerMappingService = handlerMappingService;
+        _interactiveReader = interactiveReader;
         _log = log;
         _shellHelper = shellHelper;
         _createAddDialog = createAddDialog;
-        _createEditDirectDialog = createEditDirectDialog;
-        _createEditAppDialog = createEditAppDialog;
+        _gridBuilder = gridBuilder;
+        _dialogHelper = dialogHelper;
 
         InitializeComponent();
 
         // Rename Application → Handler without touching Designer.cs
-        _colAppName.HeaderText = "Handler";
+        colAppName.HeaderText = "Handler";
         _editButton.ToolTipText = "Edit selected association";
         _ctxEdit.Text = "Edit...";
 
@@ -79,14 +90,25 @@ public partial class HandlerMappingsDialog : Form
         _getDatabase = getDatabase;
         _saveDatabase = saveDatabase;
         _openDefaultAppsButton.Text = "Open Default Apps for " + interactiveUsername;
-        _controller.Initialize(getDatabase);
+        _originalRunFenceKeys = new HashSet<string>(
+            _handlerMappingService.GetAllHandlerMappings(getDatabase()).Keys,
+            StringComparer.OrdinalIgnoreCase);
+        _mutationHandler.Changed += OnMutationHandlerChanged;
+        _syncService.Initialize(_mutationHandler);
         RefreshGrid();
+    }
+
+    private void OnMutationHandlerChanged()
+    {
+        _saveDatabase();
+        if (_dialogHelper.HasNewCapability(_getDatabase, _originalRunFenceKeys))
+            _hasNewKeys = true;
     }
 
     private void RefreshGrid()
     {
         _grid.Rows.Clear();
-        foreach (var row in _controller.GetGridRows())
+        foreach (var row in _gridBuilder.GetGridRows(_getDatabase()))
         {
             var rowIndex = _grid.Rows.Add(row.Key, row.HandlerDisplay, row.AccountDisplay, row.ArgsTemplate);
             _grid.Rows[rowIndex].Tag = row.Tag;
@@ -132,8 +154,7 @@ public partial class HandlerMappingsDialog : Form
     {
         if (e.RowIndex < 0)
             return;
-        var tag = _grid.Rows[e.RowIndex].Tag;
-        if (tag is DirectHandlerRowTag)
+        if (_grid.Rows[e.RowIndex].Tag is DirectHandlerRowTag)
             OnEditDirectHandlerClick(sender, e);
         else
             OnChangeAppClick(sender, e);
@@ -156,23 +177,30 @@ public partial class HandlerMappingsDialog : Form
 
         if (dlg.IsDirectMode)
         {
-            var validKeys = ValidateKeys(dlg.ResolvedKeys);
+            var (validKeys, invalidKeys) = _dialogHelper.ValidateKeys(dlg.ResolvedKeys);
+            if (invalidKeys.Count > 0)
+                MessageBox.Show($"Invalid keys: {string.Join(", ", invalidKeys)}. Use file extensions (.pdf) or protocols (http).",
+                    "Invalid", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             if (validKeys.Count == 0)
                 return;
-            _controller.AddDirectHandler(validKeys, dlg.DirectHandlerValue ?? string.Empty);
+            var handlerValue = dlg.DirectHandlerValue ?? string.Empty;
+            var resolvedEntries = validKeys
+                .Select(key => _dialogHelper.ResolveDirectHandlerEntry(key, handlerValue))
+                .ToList();
+            _mutationHandler.AddDirectHandler(validKeys, resolvedEntries);
         }
         else
         {
-            if (dlg.SelectedAppId == null)
+            if (dlg.SelectedApp is not {} app)
                 return;
-            var app = db.Apps.FirstOrDefault(a =>
-                string.Equals(a.Id, dlg.SelectedAppId, StringComparison.OrdinalIgnoreCase));
-            if (app == null)
-                return;
-            var validKeys = ValidateKeys(dlg.ResolvedKeys);
+            var (validKeys, invalidKeys) = _dialogHelper.ValidateKeys(dlg.ResolvedKeys);
+            if (invalidKeys.Count > 0)
+                MessageBox.Show($"Invalid keys: {string.Join(", ", invalidKeys)}. Use file extensions (.pdf) or protocols (http).",
+                    "Invalid", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             if (validKeys.Count == 0)
                 return;
-            _controller.AddAppMapping(validKeys, app, dlg.ArgumentsTemplate);
+            _mutationHandler.UpdateAppPrefixes(app.Id, dlg.AppPrefixes);
+            _mutationHandler.AddAppMapping(validKeys, app, dlg.ArgumentsTemplate, dlg.PathPrefixes, dlg.ReplacePrefixes);
         }
 
         RefreshGrid();
@@ -195,14 +223,18 @@ public partial class HandlerMappingsDialog : Form
         var db = _getDatabase();
         var currentApp = db.Apps.FirstOrDefault(a => string.Equals(a.Id, appTag.AppId, StringComparison.OrdinalIgnoreCase));
 
-        using var dlg = _createEditAppDialog();
-        dlg.Initialize(appTag.Key, db.Apps, currentApp, currentTemplateInRow);
+        using var dlg = _createAddDialog();
+        dlg.InitializeForEditApp(appTag.Key, db.Apps, currentApp, currentTemplateInRow,
+            currentApp?.PathPrefixes?.AsReadOnly(), appTag.PathPrefixes, appTag.ReplacePrefixes);
         if (dlg.ShowDialog(this) != DialogResult.OK)
             return;
-        if (dlg.SelectedApp is not AppEntry selected)
+        if (dlg.SelectedApp is not {} selected)
             return;
 
-        if (_controller.ChangeAppMapping(appTag.Key, appTag.AppId, selected, dlg.NewTemplate, currentTemplateInRow))
+        _mutationHandler.UpdateAppPrefixes(selected.Id, dlg.AppPrefixes);
+        if (_mutationHandler.ChangeAppMapping(appTag.Key, appTag.AppId, selected, dlg.ArgumentsTemplate,
+                currentTemplateInRow, appTag.PathPrefixes, dlg.PathPrefixes,
+                appTag.ReplacePrefixes, dlg.ReplacePrefixes))
             RefreshGrid();
     }
 
@@ -214,23 +246,24 @@ public partial class HandlerMappingsDialog : Form
         if (row.Tag is not DirectHandlerRowTag tag)
             return;
 
-        var currentEntryNullable = _controller.GetDirectHandlerEntry(tag.Key);
-        if (currentEntryNullable == null)
+        var currentEntryOrNull = _dialogHelper.GetCurrentDirectHandler(tag.Key, _getDatabase);
+        if (currentEntryOrNull == null)
             return;
 
-        var currentEntry = currentEntryNullable.Value;
+        var currentEntry = currentEntryOrNull.Value;
         var currentValue = currentEntry.ClassName ?? currentEntry.Command ?? string.Empty;
 
-        using var dlg = _createEditDirectDialog();
-        dlg.Initialize(tag.Key, currentValue);
+        using var dlg = _createAddDialog();
+        dlg.InitializeForEditDirect(tag.Key, currentValue);
         if (dlg.ShowDialog(this) != DialogResult.OK)
             return;
 
-        var newValue = dlg.NewValue;
+        var newValue = dlg.DirectHandlerValue;
         if (newValue == null)
             return;
 
-        _controller.EditDirectHandler(tag.Key, currentEntry, newValue);
+        var newEntry = _dialogHelper.ResolveDirectHandlerEntry(tag.Key, newValue);
+        _mutationHandler.EditDirectHandler(tag.Key, currentEntry, newEntry);
         RefreshGrid();
     }
 
@@ -239,21 +272,22 @@ public partial class HandlerMappingsDialog : Form
         if (_grid.SelectedRows.Count == 0)
             return;
         var row = _grid.SelectedRows[0];
-        if (row.Tag is DirectHandlerRowTag directTag)
+        switch (row.Tag)
         {
-            _controller.RemoveDirectHandler(directTag);
-            RefreshGrid();
-        }
-        else if (row.Tag is AppMappingRowTag appTag)
-        {
-            _controller.RemoveMapping(appTag);
-            RefreshGrid();
+            case DirectHandlerRowTag directTag:
+                _mutationHandler.RemoveDirectHandler(directTag);
+                RefreshGrid();
+                break;
+            case AppMappingRowTag appTag:
+                _mutationHandler.RemoveMapping(appTag);
+                RefreshGrid();
+                break;
         }
     }
 
     private void OnImportClick(object? sender, EventArgs e)
     {
-        var entries = _controller.GetInteractiveUserAssociations();
+        var entries = _interactiveReader.GetInteractiveUserAssociations();
         if (entries.Count == 0)
         {
             MessageBox.Show(
@@ -262,7 +296,8 @@ public partial class HandlerMappingsDialog : Form
             return;
         }
 
-        var existingKeys = _controller.GetExistingKeys();
+        var db = _getDatabase();
+        var existingKeys = _gridBuilder.GetExistingKeys(db);
         using var importDlg = new ImportAssociationsDialog();
         importDlg.Initialize(entries, existingKeys);
 
@@ -276,7 +311,7 @@ public partial class HandlerMappingsDialog : Form
         if (selected.Count == 0)
             return;
 
-        _controller.ApplyImportedAssociations(selected);
+        _mutationHandler.ApplyImportedAssociations(selected);
         RefreshGrid();
     }
 
@@ -306,42 +341,23 @@ public partial class HandlerMappingsDialog : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (_controller.HasChanges)
+        _mutationHandler.Changed -= OnMutationHandlerChanged;
+        _syncService.Detach();
+
+        // All mutations are saved immediately via the Changed subscription.
+        // Only prompt for Default Apps when new keys were added during this session.
+        if (_hasNewKeys &&
+            MessageBox.Show(
+                "Handler registrations have changed. Would you like to open Windows Default Apps settings?",
+                "Handler Associations", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
         {
-            // Apply pending AllowPassingArguments changes to live objects before saving
-            _controller.ApplyPendingAllowPassingArgs(_getDatabase());
-            _saveDatabase();
-            if (_controller.HasNewCapability() &&
-                MessageBox.Show(
-                    "Handler registrations have changed. Would you like to open Windows Default Apps settings?",
-                    "Handler Associations", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-            {
-                OnOpenDefaultAppsClick(null, EventArgs.Empty);
-            }
+            OnOpenDefaultAppsClick(null, EventArgs.Empty);
         }
     }
 
     private void OnReapplyClick(object? sender, EventArgs e)
     {
-        _controller.Sync();
+        _syncService.Sync();
         RefreshGrid();
-    }
-
-    /// <summary>
-    /// Validates keys against <see cref="AppHandlerRegistrationService.IsValidKey"/>.
-    /// Shows a warning for each invalid key and returns only the valid subset.
-    /// </summary>
-    private List<string> ValidateKeys(IReadOnlyList<string> keys)
-    {
-        var valid = new List<string>(keys.Count);
-        foreach (var key in keys)
-        {
-            if (AppHandlerRegistrationService.IsValidKey(key))
-                valid.Add(key);
-            else
-                MessageBox.Show($"Invalid key '{key}'. Use a file extension (.pdf) or protocol (http).",
-                    "Invalid", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-        return valid;
     }
 }

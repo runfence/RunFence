@@ -7,9 +7,9 @@ public interface IAppConfigService
     // --- Query ---
     string? GetConfigPath(string appId);
     List<AppEntry> GetAppsForConfig(string path, AppDatabase database);
+    AppConfig GetConfigForExport(string path, AppDatabase database);
     IReadOnlyList<string> GetLoadedConfigPaths();
     bool HasLoadedConfigs { get; }
-    List<string> GetUnavailableConfigPaths();
 
     // --- Load / Unload ---
     List<AppEntry> LoadAdditionalConfig(string path, AppDatabase database, byte[] pinDerivedKey);
@@ -25,5 +25,5 @@ public interface IAppConfigService
     void SaveConfigAtPath(string configPath, AppDatabase database, byte[] pinDerivedKey, byte[] argonSalt);
     void SaveAllConfigs(AppDatabase database, byte[] pinDerivedKey, byte[] argonSalt);
     void ReencryptAndSaveAll(CredentialStore store, AppDatabase database, byte[] newPinDerivedKey);
-    void SaveImportedConfig(string path, List<AppEntry> apps, byte[] pinDerivedKey, byte[] argonSalt);
+    void SaveImportedConfig(string path, AppConfig config, byte[] pinDerivedKey, byte[] argonSalt);
 }

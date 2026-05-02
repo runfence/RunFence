@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Security;
 using RunFence.Account.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -11,12 +10,12 @@ namespace RunFence.Account.UI;
 
 /// <summary>
 /// Handles the distinct phases of the EditAccount flow: password change, desktop settings import,
-/// and firewall rules application. Extracted from <see cref="AccountCredentialOperations.EditAccount"/>.
+/// and firewall rules application. Extracted from <see cref="AccountEditOrchestrator.EditAccount"/>.
 /// </summary>
 public class AccountEditHelper(
     IModalCoordinator modalCoordinator,
     SessionPersistenceHelper persistenceHelper,
-    IAccountCredentialManager credentialManager,
+    ICredentialDecryptionService credentialDecryption,
     IAccountPasswordService accountPassword,
     ISettingsTransferService settingsTransferService,
     ISessionProvider sessionProvider,
@@ -28,9 +27,9 @@ public class AccountEditHelper(
     /// uses it directly; otherwise shows the PasswordChangeMethodDialog on the secure desktop.
     /// Returns true if a password was successfully applied to the OS account.
     /// </summary>
-    public bool ApplyPasswordChange(AccountRow accountRow, EditAccountDialog dlg, bool isCurrentAccount)
+    public bool ApplyPasswordChange(AccountRow accountRow, IAccountEditResult editResult, bool isCurrentAccount)
     {
-        if (dlg.NewPasswordText == null)
+        if (editResult.NewPassword == null)
             return false;
 
         var session = sessionProvider.GetSession();
@@ -38,12 +37,13 @@ public class AccountEditHelper(
         // Try with stored password first
         if (accountRow is { Credential: not null, HasStoredPassword: true })
         {
-            var status = credentialManager.DecryptCredential(accountRow.Sid, session.CredentialStore, session.PinDerivedKey, out var oldPwd);
+            using var scope = session.PinDerivedKey.Unprotect();
+            var status = credentialDecryption.TryDecryptCredential(accountRow.Sid, session.CredentialStore, scope.Data, out _, out var oldPwd);
             if (status == CredentialLookupStatus.Success && oldPwd != null)
             {
                 try
                 {
-                    accountPassword.ChangeAccountPassword(accountRow.Sid, oldPwd, dlg.NewPasswordText);
+                    accountPassword.ChangeAccountPassword(accountRow.Sid, oldPwd, editResult.NewPassword);
                     return true;
                 }
                 catch (Win32Exception)
@@ -59,7 +59,7 @@ public class AccountEditHelper(
 
         // Stored password unavailable or failed — show method dialog
         bool forceResetRequested = false;
-        SecureString? enteredPassword = null;
+        ProtectedString? enteredPassword = null;
         DialogResult methodResult = DialogResult.None;
 
         modalCoordinator.RunOnSecureDesktop(() =>
@@ -77,7 +77,7 @@ public class AccountEditHelper(
         {
             try
             {
-                accountPassword.AdminResetAccountPassword(accountRow.Sid, dlg.NewPasswordText);
+                accountPassword.AdminResetAccountPassword(accountRow.Sid, editResult.NewPassword);
                 return true;
             }
             catch (Exception ex)
@@ -92,7 +92,7 @@ public class AccountEditHelper(
         {
             try
             {
-                accountPassword.ChangeAccountPassword(accountRow.Sid, enteredPassword, dlg.NewPasswordText);
+                accountPassword.ChangeAccountPassword(accountRow.Sid, enteredPassword, editResult.NewPassword);
                 return true;
             }
             catch (Exception ex)
@@ -113,9 +113,9 @@ public class AccountEditHelper(
     /// <summary>
     /// Performs the desktop settings import if requested and records any granted paths.
     /// </summary>
-    public async Task ImportDesktopSettingsAsync(AccountRow accountRow, EditAccountDialog dlg, Control ownerControl)
+    public async Task ImportDesktopSettingsAsync(AccountRow accountRow, IAccountEditResult editResult, Control ownerControl)
     {
-        if (dlg.SettingsImportPath == null)
+        if (editResult.SettingsImportPath == null)
             return;
 
         var session = sessionProvider.GetSession();
@@ -124,16 +124,16 @@ public class AccountEditHelper(
         try
         {
             var (error, hadGrants) = await SettingsImportHelper.ImportAsync(
-                dlg.SettingsImportPath, accountRow.Sid,
+                editResult.SettingsImportPath, accountRow.Sid,
                 settingsTransferService);
             if (hadGrants)
                 persistenceHelper.SaveConfig(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
             if (error != null)
-                dlg.Errors.Add($"Settings import: {error}");
+                editResult.Errors.Add($"Settings import: {error}");
         }
         catch (Exception ex)
         {
-            dlg.Errors.Add($"Settings import: {ex.Message}");
+            editResult.Errors.Add($"Settings import: {ex.Message}");
         }
         finally
         {

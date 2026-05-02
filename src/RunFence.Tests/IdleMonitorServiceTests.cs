@@ -185,10 +185,10 @@ public class IdleMonitorServiceTests
         Assert.False(eventFired);
     }
 
-    // ── BHV-21: Reschedule after IdleTimeoutReached fires ───────────────────
+    // ── BHV-21: Do NOT reschedule after IdleTimeoutReached fires ─────────────
 
     [Fact]
-    public void IdleTimeoutReached_ReschedulesAfterTimeoutFires()
+    public void IdleTimeoutReached_DoesNotRescheduleAfterTimeoutFires()
     {
         // Arrange
         int scheduleCallCount = 0;
@@ -215,10 +215,9 @@ public class IdleMonitorServiceTests
         fakeTick = 120_000;
         capturedCallback?.Invoke();
 
-        // Assert: event fired AND timer was rescheduled
+        // Assert: event fired but timer was NOT rescheduled (fires exactly once)
         Assert.True(eventFired);
-        Assert.True(scheduleCallCount > countAfterStart,
-            "ScheduleNextCheck should be called after IdleTimeoutReached fires");
+        Assert.Equal(countAfterStart, scheduleCallCount);
 
         service.Stop();
     }

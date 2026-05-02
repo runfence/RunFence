@@ -43,6 +43,12 @@ public interface IHandlerMappingService
     Dictionary<string, HandlerMappingEntry>? GetHandlerMappingsForConfig(string configPath);
 
     /// <summary>
+    /// Renames loaded handler mappings for a specific extra config from <paramref name="oldAppId"/>
+    /// to <paramref name="newAppId"/> without changing the mapping keys or other entry data.
+    /// </summary>
+    void RenameAppIdInConfigMappings(string configPath, string oldAppId, string newAppId);
+
+    /// <summary>
     /// Registers handler mappings from a loaded extra config. Called by AppConfigService on load.
     /// </summary>
     void RegisterConfigMappings(string configPath, Dictionary<string, HandlerMappingEntry> mappings);
@@ -69,4 +75,10 @@ public interface IHandlerMappingService
     /// Sets <see cref="AppSettings.DirectHandlerMappings"/> to null when it becomes empty.
     /// </summary>
     void RemoveDirectHandlerMapping(string key, AppDatabase database);
+
+    /// <summary>
+    /// Returns true when <paramref name="appId"/> has all four browser handler keys
+    /// (http, https, .htm, .html) registered across all configs in <paramref name="allMappings"/>.
+    /// </summary>
+    bool IsDefaultBrowser(string appId, IReadOnlyDictionary<string, IReadOnlyList<HandlerMappingEntry>> allMappings);
 }

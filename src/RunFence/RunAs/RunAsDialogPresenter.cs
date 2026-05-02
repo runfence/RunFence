@@ -2,27 +2,25 @@ using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Licensing;
 using RunFence.RunAs.UI;
 using RunFence.RunAs.UI.Forms;
 
 namespace RunFence.RunAs;
 
 /// <summary>
-/// Handles the secure desktop dialog presentation for the RunAs flow,
-/// including lock/unlock and new account/container creation.
+/// Handles the RunAs dialog presentation, including lock/unlock and new account/container creation.
+/// Uses the secure desktop for IPC-originated requests; runs on the normal desktop for UI-originated requests.
+/// Post-dialog routing is delegated to <see cref="RunAsPostDialogRouter"/>.
 /// </summary>
 public class RunAsDialogPresenter(
     IModalCoordinator modalCoordinator,
-    RunAsDosProtection dosProtection,
     RunAsPermissionChecker permissionChecker,
-    RunAsUserAccountCreator userAccountCreator,
-    RunAsContainerCreator containerCreator,
     RunAsCredentialPersister credentialPersister,
     IAppStateProvider appState,
     IAppLockControl appLock,
+    IStartupUnlockGrant startupUnlockGrant,
     SessionContext session,
-    IEvaluationLimitHelper evaluationLimitHelper,
+    RunAsPostDialogRouter postDialogRouter,
     Func<RunAsDialog> dialogFactory)
 {
     /// <summary>
@@ -31,23 +29,22 @@ public class RunAsDialogPresenter(
     /// Calls <paramref name="setUnlockedForRunAs"/> with true if the app was unlocked for this flow.
     /// </summary>
     public async Task<RunAsDialogResult?> ShowRunAsDialogAsync(string filePath, string? arguments,
-        ShortcutContext? shortcutContext, bool isAdmin, Action<bool> setUnlockedForRunAs)
+        ShortcutContext? shortcutContext, string? initialAccountSid, bool isAdmin,
+        Action<bool> setUnlockedForRunAs, bool useSecureDesktop)
     {
         setUnlockedForRunAs(false);
 
         if (appLock.IsLocked)
         {
-            if (!await appLock.TryUnlockAsync(isAdmin))
+            var startupUnlockApprovedByAdmin = startupUnlockGrant.TryConsume();
+            var unlockApprovedByAdmin = isAdmin || startupUnlockApprovedByAdmin;
+            if (!await appLock.TryUnlockForOperationAsync(unlockApprovedByAdmin))
             {
-                MessageBox.Show("Could not unlock the application.", "RunFence",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return null;
             }
 
             setUnlockedForRunAs(true);
         }
-
-        var empty = RunAsDialogResult.Empty();
 
         var credentials = session.CredentialStore.Credentials;
         var existingApps = appState.Database.Apps;
@@ -60,7 +57,11 @@ public class RunAsDialogPresenter(
         bool createNewAccountRequested = false;
         bool createNewContainerRequested = false;
 
-        modalCoordinator.RunOnSecureDesktop(() =>
+        Action<Action> runModal = useSecureDesktop
+            ? modalCoordinator.RunOnSecureDesktop
+            : modalCoordinator.RunModal;
+
+        runModal(() =>
         {
             var dlg = dialogFactory();
             dlg.Initialize(new RunAsDialogOptions(
@@ -68,6 +69,7 @@ public class RunAsDialogPresenter(
                 Arguments: arguments,
                 Credentials: credentials.ToList(),
                 ExistingApps: existingApps.ToList(),
+                InitialAccountSid: initialAccountSid,
                 LastUsedAccountSid: credentialPersister.LastUsedRunAsAccountSid,
                 SidsNeedingPermission: sidsNeedingPermission,
                 SidNames: appState.Database.SidNames,
@@ -78,7 +80,8 @@ public class RunAsDialogPresenter(
                 AccountPrivilegeLevels: appState.Database.Accounts
                     .Where(a => !string.IsNullOrEmpty(a.Sid))
                     .ToDictionary(a => a.Sid, a => a.PrivilegeLevel,
-                        StringComparer.OrdinalIgnoreCase)));
+                        StringComparer.OrdinalIgnoreCase),
+                ShowSystemInRunAs: appState.Database.ShowSystemInRunAs));
             using (dlg)
             {
                 dlgResult = dlg.ShowDialog();
@@ -91,69 +94,12 @@ public class RunAsDialogPresenter(
             }
         });
 
-        if (dlgResult != DialogResult.OK || capturedResult == null)
-        {
-            dosProtection.RecordDecline();
-            return empty;
-        }
-
-        if (capturedResult.RevertShortcutRequested)
-            return capturedResult;
-
-        // Container path: return immediately without credential resolution
-        if (capturedResult.SelectedContainer != null)
-            return capturedResult;
-
-        if (createNewContainerRequested)
-        {
-            capturedResult.AdHocPassword?.Dispose();
-            var newContainer = containerCreator.CreateNewContainer();
-            if (newContainer == null)
-                return empty;
-            return new RunAsDialogResult(
-                Credential: null,
-                SelectedContainer: newContainer,
-                PermissionGrant: capturedResult.PermissionGrant,
-                CreateAppEntryOnly: capturedResult.CreateAppEntryOnly,
-                PrivilegeLevel: PrivilegeLevel.Basic,
-                UpdateOriginalShortcut: capturedResult.UpdateOriginalShortcut,
-                RevertShortcutRequested: false,
-                EditExistingApp: capturedResult.EditExistingApp,
-                ExistingAppForLaunch: capturedResult.ExistingAppForLaunch);
-        }
-
-        if (createNewAccountRequested)
-        {
-            capturedResult.AdHocPassword?.Dispose();
-
-            if (!evaluationLimitHelper.CheckCredentialLimit(session.CredentialStore.Credentials))
-            {
-                dosProtection.RecordDecline();
-                return empty;
-            }
-
-            var newCred = userAccountCreator.CreateNewAccount(filePath, dosProtection, out var newAccountGrant);
-            if (newCred == null)
-                return empty;
-            var grantSelection = newAccountGrant ?? capturedResult.PermissionGrant;
-            return new RunAsDialogResult(
-                Credential: newCred,
-                SelectedContainer: null,
-                PermissionGrant: grantSelection,
-                CreateAppEntryOnly: capturedResult.CreateAppEntryOnly,
-                PrivilegeLevel: capturedResult.PrivilegeLevel,
-                UpdateOriginalShortcut: capturedResult.UpdateOriginalShortcut,
-                RevertShortcutRequested: false,
-                EditExistingApp: capturedResult.EditExistingApp,
-                ExistingAppForLaunch: capturedResult.ExistingAppForLaunch);
-        }
-
-        if (capturedResult.Credential == null)
-        {
-            capturedResult.AdHocPassword?.Dispose();
-            return empty;
-        }
-
-        return capturedResult;
+        return postDialogRouter.Route(
+            dlgResult,
+            capturedResult,
+            createNewAccountRequested,
+            createNewContainerRequested,
+            filePath,
+            credentials);
     }
 }

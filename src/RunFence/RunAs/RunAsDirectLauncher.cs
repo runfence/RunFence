@@ -1,11 +1,9 @@
-using System.Security;
 using RunFence.Account;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
-using RunFence.Launch.Container;
 
 namespace RunFence.RunAs;
 
@@ -26,7 +24,7 @@ public class RunAsDirectLauncher(
     /// </summary>
     public void LaunchWithoutAppEntry(string filePath, string? arguments, CredentialEntry credential,
         bool isFolder = false, PrivilegeLevel privilegeLevel = PrivilegeLevel.Basic,
-        SecureString? adHocPassword = null)
+        ProtectedString? adHocPassword = null)
     {
         LaunchCredentials? launchCreds = null;
         if (adHocPassword != null)

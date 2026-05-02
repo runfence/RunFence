@@ -1,5 +1,7 @@
 using Autofac;
 using Autofac.Extras.Ordering;
+using RunFence.Acl;
+using RunFence.Core;
 using RunFence.DragBridge;
 using RunFence.DragBridge.UI.Forms;
 using RunFence.Infrastructure;
@@ -11,7 +13,12 @@ public class DragBridgeModule : Module
 {
     protected override void Load(ContainerBuilder builder)
     {
-        builder.RegisterType<DragBridgeProcessLauncher>()
+        builder.Register(c => new DragBridgeProcessLauncher(
+                c.Resolve<IDragBridgeLauncher>(),
+                c.Resolve<ILoggingService>(),
+                c.Resolve<IUiThreadInvoker>(),
+                c.Resolve<IKernelObjectMandatoryLabelService>(),
+                dragBridgeExePath: Path.Combine(AppContext.BaseDirectory, PathConstants.DragBridgeExeName)))
             .As<IDragBridgeProcessLauncher>()
             .As<IDragBridgeSessionManager>()
             .As<IDragBridgePipeLauncher>()
@@ -25,8 +32,12 @@ public class DragBridgeModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<DragBridgePasteHandler>()
+        builder.RegisterType<DragBridgeChoiceCache>()
             .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<DragBridgePasteHandler>()
+            .As<IDragBridgePasteHandler>()
             .SingleInstance();
 
         builder.RegisterType<DragBridgeResolveOrchestrator>()
@@ -71,7 +82,13 @@ public class DragBridgeModule : Module
             .As<ITempDirectoryAclHelper>()
             .SingleInstance();
 
-        builder.RegisterType<DragBridgeTempFileManager>()
+        builder.Register(c => new DragBridgeTempFileManager(
+                c.Resolve<ILoggingService>(),
+                c.Resolve<IPathGrantService>(),
+                c.Resolve<ISessionSaver>(),
+                c.Resolve<IUiThreadInvoker>(),
+                c.Resolve<ITempDirectoryAclHelper>(),
+                tempRoot: Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir)))
             .As<IDragBridgeTempFileManager>()
             .SingleInstance();
 

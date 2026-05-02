@@ -339,6 +339,12 @@ RunFence sets up a protection for the apps it launches to prevent other account 
 
 Not if Low Integrity Mode is enabled or an App Container is used.
 
+**Can an isolated app control or send input to another account's apps?**
+
+Any non-elevated app can't use SendInput unless you disable "Block input injection" feature in the tray menu or close RunFence.
+
+Additionally, all non-uwp apps (i.e. not Windows Terminal) that you launch through RunFence with Basic privilege level get restricted from accessing other accounts' window handles, changing system settings, or shutting down Windows. 
+
 **Can isolated apps access my clipboard?**
 
 Not if it's an App Container app and it's not in foreground.

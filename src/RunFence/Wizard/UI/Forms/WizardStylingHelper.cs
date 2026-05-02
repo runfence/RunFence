@@ -11,6 +11,8 @@ public static class WizardStylingHelper
 {
     private static readonly Color AccentColor = Color.FromArgb(0x19, 0x67, 0xD2);
     private static readonly Color DotOutlineColor = Color.FromArgb(0xCC, 0xCC, 0xCC);
+    private static readonly Font TitleFont = new("Segoe UI Semibold", 14f, FontStyle.Regular);
+    private static readonly Font SmallFont = new("Segoe UI", 9f);
 
     /// <summary>
     /// Applies the modern white/flat visual style to all dialog elements.
@@ -32,13 +34,13 @@ public static class WizardStylingHelper
         footerPanel.BackColor = Color.FromArgb(0xF5, 0xF5, 0xF5);
         progressPanel.BackColor = Color.White;
 
-        titleLabel.Font = new Font("Segoe UI Semibold", 14f, FontStyle.Regular);
+        titleLabel.Font = TitleFont;
         titleLabel.ForeColor = Color.FromArgb(0x1A, 0x1A, 0x1A);
 
-        statusLabel.Font = new Font("Segoe UI", 9f);
+        statusLabel.Font = SmallFont;
         statusLabel.ForeColor = Color.FromArgb(0x44, 0x44, 0x44);
 
-        errorLabel.Font = new Font("Segoe UI", 9f);
+        errorLabel.Font = SmallFont;
         errorLabel.ForeColor = Color.FromArgb(0xC0, 0x20, 0x20);
     }
 

@@ -9,7 +9,7 @@ using RunFence.Launch.Tokens;
 
 namespace RunFence.Launch.Container;
 
-public class AppContainerService(ILoggingService log, IPathGrantService pathGrantService, AppContainerProfileSetup appContainerProfileSetup, AppContainerDataFolderService dataFolderService, Func<AppContainerComAccessService> comServiceFactory, IExplorerTokenProvider explorerTokenProvider, IAppContainerSidProvider sidProvider)
+public class AppContainerService(ILoggingService log, IPathGrantService pathGrantService, IAppContainerProfileSetup appContainerProfileSetup, IAppContainerDataFolderService dataFolderService, IAppContainerComAccessService comService, IExplorerTokenProvider explorerTokenProvider, IAppContainerSidProvider sidProvider)
     : IAppContainerService
 {
 
@@ -77,10 +77,10 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
         }
     }
 
-    public void DeleteProfile(string name, bool hadLoopback = false)
+    public async Task DeleteProfile(string name, bool hadLoopback = false)
     {
         if (hadLoopback)
-            SetLoopbackExemption(name, false);
+            await SetLoopbackExemption(name, false);
 
         var hr = AppContainerNative.DeleteAppContainerProfile(name);
         if (hr != 0)
@@ -105,12 +105,7 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
     public string GetContainerDataPath(string name)
         => AppContainerPaths.GetContainerDataPath(name);
 
-    /// <remarks>
-    /// <see cref="Process.WaitForExit(int)"/> with a 5000ms timeout blocks the calling thread for up to 5 seconds.
-    /// Callers that run on the UI thread (<c>AppContainerEditService</c>, <c>AccountContainerOrchestrator</c>)
-    /// will freeze the UI for up to 5 seconds. Callers should ideally dispatch to a background thread.
-    /// </remarks>
-    public bool SetLoopbackExemption(string name, bool enable)
+    public async Task<bool> SetLoopbackExemption(string name, bool enable)
     {
         var arg = enable ? "-a" : "-d";
         try
@@ -125,38 +120,41 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
                 return false;
             }
 
-            using var proc = Process.Start(new ProcessStartInfo
+            return await Task.Run(() =>
             {
-                FileName = checkNetIsolation,
-                Arguments = $"LoopbackExempt {arg} -n={name}",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
+                using var proc = Process.Start(new ProcessStartInfo
+                {
+                    FileName = checkNetIsolation,
+                    Arguments = $"LoopbackExempt {arg} -n={name}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                });
+
+                if (proc != null && !proc.WaitForExit(5000))
+                {
+                    log.Warn($"CheckNetIsolation LoopbackExempt {arg} for '{name}' timed out after 5 seconds");
+                    try
+                    {
+                        proc.Kill();
+                    }
+                    catch
+                    {
+                    }
+
+                    return false;
+                }
+
+                var exitCode = proc?.ExitCode ?? -1;
+                if (exitCode != 0)
+                {
+                    log.Warn($"CheckNetIsolation LoopbackExempt {arg} for '{name}' exited with code {exitCode}");
+                    return false;
+                }
+
+                return true;
             });
-
-            if (proc != null && !proc.WaitForExit(5000))
-            {
-                log.Warn($"CheckNetIsolation LoopbackExempt {arg} for '{name}' timed out after 5 seconds");
-                try
-                {
-                    proc.Kill();
-                }
-                catch
-                {
-                }
-
-                return false;
-            }
-
-            var exitCode = proc?.ExitCode ?? -1;
-            if (exitCode != 0)
-            {
-                log.Warn($"CheckNetIsolation LoopbackExempt {arg} for '{name}' exited with code {exitCode}");
-                return false;
-            }
-
-            return true;
         }
         catch (Exception ex)
         {
@@ -166,10 +164,10 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
     }
 
     public void GrantComAccess(string containerSid, string clsid)
-        => comServiceFactory().GrantComAccess(containerSid, clsid);
+        => comService.GrantComAccess(containerSid, clsid);
 
     public void RevokeComAccess(string containerSid, string clsid)
-        => comServiceFactory().RevokeComAccess(containerSid, clsid);
+        => comService.RevokeComAccess(containerSid, clsid);
 
     public (bool Modified, List<string> AppliedPaths) EnsureTraverseAccess(AppContainerEntry entry, string path)
     {
@@ -181,11 +179,5 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
     {
         var containerSid = GetSid(entry.Name);
         pathGrantService.RemoveAll(containerSid, updateFileSystem: true);
-    }
-
-    public void RevertTraverseAccessForPath(AppContainerEntry entry, GrantedPathEntry grantedEntry, AppDatabase database)
-    {
-        var containerSid = GetSid(entry.Name);
-        pathGrantService.RemoveTraverse(containerSid, grantedEntry.Path, updateFileSystem: true);
     }
 }

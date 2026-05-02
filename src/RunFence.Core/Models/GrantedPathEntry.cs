@@ -69,6 +69,25 @@ public class GrantedPathEntry
     public string? OwnerContainerSid { get; set; }
 
     /// <summary>
+    /// Source account SIDs that triggered this Low IL grant. Auto-populated in PathGrantService
+    /// when a new grant to S-1-16-4096 is created, by scanning existing non-Low-IL account grants
+    /// to the same path. Null = manually added via ACL Manager (no auto-cleanup).
+    /// Only populated on grants to S-1-16-4096.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? SourceSids { get; set; }
+
+    /// <summary>
+    /// The SACL mandatory label SDDL before ApplyLowIntegrityLabel was called.
+    /// Only set on Write grants to S-1-16-4096.
+    /// Null = no explicit label was present (object was inheriting); on restore, the explicit label
+    /// is removed (object reverts to inheriting). A non-null SDDL (e.g. "S:(ML;;NW;;;ME)") is
+    /// re-applied verbatim. Populated at first Write grant; never updated on subsequent grants.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PreviousSaclLabel { get; set; }
+
+    /// <summary>
     /// Returns a deep copy of this entry. <see cref="AllAppliedPaths"/> is list-cloned;
     /// all other fields are value types, immutable strings, or an immutable record (<see cref="SavedRights"/>).
     /// Use this when capturing a snapshot of a live DB entry for background-thread operations.
@@ -80,6 +99,8 @@ public class GrantedPathEntry
         SavedRights = SavedRights,
         IsTraverseOnly = IsTraverseOnly,
         AllAppliedPaths = AllAppliedPaths?.ToList(),
-        OwnerContainerSid = OwnerContainerSid
+        OwnerContainerSid = OwnerContainerSid,
+        SourceSids = SourceSids?.ToList(),
+        PreviousSaclLabel = PreviousSaclLabel
     };
 }

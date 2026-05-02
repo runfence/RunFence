@@ -7,6 +7,7 @@ namespace RunFence.SidMigration;
 
 public class SidMigrationService(
     ISidResolver sidResolver,
+    IProfilePathResolver profilePathResolver,
     ISidCleanupHelper sidCleanup,
     ISidAclScanService aclScan,
     ISidNameCacheService sidNameCache,
@@ -63,16 +64,18 @@ public class SidMigrationService(
     public Task<List<SidMigrationMatch>> ScanAsync(
         IReadOnlyList<string> rootPaths,
         IReadOnlyList<SidMigrationMapping> mappings,
+        IReadOnlyList<string> sidsToDelete,
         IProgress<(long scanned, long found)> onProgress,
         CancellationToken ct)
-        => aclScan.ScanAsync(rootPaths, mappings, onProgress, ct);
+        => aclScan.ScanAsync(rootPaths, mappings, sidsToDelete, onProgress, ct);
 
     public Task<(long applied, long errors)> ApplyAsync(
         IReadOnlyList<SidMigrationMatch> hits,
         IReadOnlyList<SidMigrationMapping> mappings,
+        IReadOnlyList<string> sidsToDelete,
         IProgress<MigrationProgress> onProgress,
         CancellationToken ct)
-        => aclScan.ApplyAsync(hits, mappings, onProgress, ct);
+        => aclScan.ApplyAsync(hits, mappings, sidsToDelete, onProgress, ct);
 
     public MigrationCounts MigrateAppData(
         IReadOnlyList<SidMigrationMapping> mappings,
@@ -130,10 +133,11 @@ public class SidMigrationService(
         foreach (var mapping in mappings)
             RebaseAccountGrants(database, mapping);
 
-        // Copy SidNames entries from old SIDs to new SIDs
+        // Copy SidNames entries from old SIDs to new SIDs (only when new SID has no cached name)
         foreach (var mapping in mappings)
         {
-            if (database.SidNames.TryGetValue(mapping.OldSid, out var name))
+            if (database.SidNames.TryGetValue(mapping.OldSid, out var name)
+                && !database.SidNames.ContainsKey(mapping.NewSid))
                 sidNameCache.UpdateName(mapping.NewSid, name);
         }
 
@@ -295,8 +299,8 @@ public class SidMigrationService(
     /// </summary>
     private void RebaseAccountGrants(AppDatabase database, SidMigrationMapping mapping)
     {
-        var oldProfilePath = sidResolver.TryGetProfilePath(mapping.OldSid);
-        var newProfilePath = sidResolver.TryGetProfilePath(mapping.NewSid);
+        var oldProfilePath = profilePathResolver.TryGetProfilePath(mapping.OldSid);
+        var newProfilePath = profilePathResolver.TryGetProfilePath(mapping.NewSid);
         if (oldProfilePath == null || newProfilePath == null)
             return;
 
@@ -325,9 +329,7 @@ public class SidMigrationService(
     {
         bool isUnder = string.Equals(path, oldBase, StringComparison.OrdinalIgnoreCase)
             || path.StartsWith(oldBase + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-        if (!isUnder)
-            return path;
-        if (Directory.Exists(path) || File.Exists(path))
+        if (!isUnder || Directory.Exists(path) || File.Exists(path))
             return path;
         return newBase + path[oldBase.Length..];
     }

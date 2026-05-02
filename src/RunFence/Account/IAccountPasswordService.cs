@@ -1,9 +1,9 @@
-using System.Security;
+using RunFence.Core;
 
 namespace RunFence.Account;
 
 public interface IAccountPasswordService
 {
-    void ChangeAccountPassword(string sid, SecureString oldPassword, string newPassword);
-    void AdminResetAccountPassword(string sid, string newPassword);
+    void ChangeAccountPassword(string sid, ProtectedString oldPassword, ProtectedString newPassword);
+    void AdminResetAccountPassword(string sid, ProtectedString newPassword);
 }

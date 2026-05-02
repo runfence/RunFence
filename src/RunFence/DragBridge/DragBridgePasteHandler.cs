@@ -31,15 +31,9 @@ public class DragBridgePasteHandler(
     IUiThreadInvoker uiThreadInvoker,
     IAclPermissionService aclPermission,
     IPathGrantService pathGrantService,
-    SidDisplayNameResolver displayNameResolver)
+    SidDisplayNameResolver displayNameResolver,
+    DragBridgeChoiceCache choiceCache) : IDragBridgePasteHandler
 {
-    // Key: targetSid + "|" + sorted inaccessible paths. Only CopyToTemp is remembered (grant choices are permanent
-    // — access exists on next drag so the dialog never reappears).
-    // Capacity-limited to 100 entries with oldest-first eviction to prevent unbounded memory growth.
-    private const int RememberedChoicesMaxCapacity = 100;
-    private readonly Dictionary<string, DragBridgeAccessAction> _rememberedChoices = new();
-    private readonly Queue<string> _rememberedChoicesOrder = new();
-
     public async Task<DragBridgeResolveResult> ResolveFileAccessAsync(
         SecurityIdentifier targetSid,
         List<string> filePaths,
@@ -78,9 +72,8 @@ public class DragBridgePasteHandler(
         bool dbModified = false;
         if (inaccessibleByTarget.Count > 0)
         {
-            var choiceKey = MakeChoiceKey(targetSid.Value, inaccessibleByTarget);
             DragBridgeAccessAction action;
-            if (_rememberedChoices.TryGetValue(choiceKey, out var remembered))
+            if (choiceCache.TryGetChoice(targetSid.Value, inaccessibleByTarget, out var remembered))
             {
                 action = remembered;
             }
@@ -91,16 +84,7 @@ public class DragBridgePasteHandler(
                     return new DragBridgeResolveResult(null, false, []); // cancelled
                 action = chosen.Value;
                 if (action is DragBridgeAccessAction.CopyToTemp)
-                {
-                    if (_rememberedChoices.Count >= RememberedChoicesMaxCapacity)
-                    {
-                        var oldest = _rememberedChoicesOrder.Dequeue();
-                        _rememberedChoices.Remove(oldest);
-                    }
-
-                    _rememberedChoicesOrder.Enqueue(choiceKey);
-                    _rememberedChoices[choiceKey] = action;
-                }
+                    choiceCache.RememberChoice(targetSid.Value, inaccessibleByTarget, action);
             }
 
             switch (action)
@@ -191,9 +175,6 @@ public class DragBridgePasteHandler(
         => filePaths.Any(p =>
             (!File.Exists(p) && !Directory.Exists(p)) ||
             aclPermission.NeedsPermissionGrant(p, targetSid.Value, FileSystemRights.Read));
-
-    private static string MakeChoiceKey(string targetSid, IEnumerable<string> inaccessiblePaths)
-        => targetSid + "|" + string.Join("|", inaccessiblePaths.OrderBy(p => p, StringComparer.OrdinalIgnoreCase));
 
     private async Task<DragBridgeAccessAction?> AskUserAboutAccessAsync(
         SecurityIdentifier targetSid,

@@ -2,6 +2,7 @@ using RunFence.Account.UI;
 using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
+using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -13,10 +14,12 @@ namespace RunFence.Wizard.Templates;
 /// Creates a dedicated account, stores credentials, and creates an app entry with a deny ACL
 /// on the parent folder to protect against accidental launch of a malicious replacement.
 /// </summary>
-public class CryptoWalletTemplate(
+internal class CryptoWalletTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
-    IShortcutDiscoveryService discoveryService)
+    IShortcutDiscoveryService discoveryService,
+    IShortcutIconHelper iconHelper,
+    IExecutablePathResolver executablePathResolver)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -36,7 +39,7 @@ public class CryptoWalletTemplate(
         return
         [
             setupHelperFactory.CreateAccountNameStep(
-                (name, _) => _data.Username = name,
+                (name, password) => { _data.Username = name; password.Dispose(); },
                 showPassword: false,
                 maxNameLength: 20,
                 description: "Choose a name for the new isolated account. " +
@@ -49,39 +52,32 @@ public class CryptoWalletTemplate(
                     _data.AppName = name;
                 },
                 discoveryService,
+                iconHelper,
+                executablePathResolver,
                 description: "Select the wallet or password manager executable. " +
                              "A deny ACL will be placed on its parent folder to prevent accidental launch of a malicious replacement.")
         ];
     }
 
-    public Task ExecuteAsync(IWizardProgressReporter progress)
+    public async Task ExecuteAsync(IWizardProgressReporter progress)
     {
         if (string.IsNullOrEmpty(_data.Username))
         {
             progress.ReportError("No account name was provided.");
-            return Task.CompletedTask;
+            return;
         }
 
         if (string.IsNullOrEmpty(_data.AppPath) || string.IsNullOrEmpty(_data.AppName))
         {
             progress.ReportError("No application path was provided.");
-            return Task.CompletedTask;
+            return;
         }
 
-        var defaults = setupHelperFactory.CreateAccountDefaults();
+        using var defaults = setupHelperFactory.CreateAccountDefaults();
 
         progress.ReportStatus($"Creating account '{_data.Username}'...");
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: _data.Username,
-            PasswordText: defaults.Password,
-            ConfirmPasswordText: defaults.Password,
-            IsEphemeral: false,
-            CheckedGroups: [],
-            UncheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
-            AllowLogon: false,
-            AllowNetworkLogin: false,
-            AllowBgAutorun: false,
-            CurrentHiddenCount: 0);
+        var request = EditAccountDialogCreateHandler.CreateAccountRequest.ForIsolatedAccount(
+            _data.Username, defaults.Password);
 
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
@@ -111,7 +107,15 @@ public class CryptoWalletTemplate(
             ],
             CreateDesktopShortcut: true);
 
-        return executor.ExecuteAsync(flowParams, progress);
+        try
+        {
+            await executor.ExecuteAsync(flowParams, progress);
+        }
+        finally
+        {
+            request.Password.Dispose();
+            request.ConfirmPassword.Dispose();
+        }
     }
 
     private sealed class CommitData

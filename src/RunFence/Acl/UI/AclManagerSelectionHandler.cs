@@ -1,27 +1,19 @@
 using RunFence.Acl.UI.Forms;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 
 namespace RunFence.Acl.UI;
 
 /// <summary>
-/// Handles selection, tab switching, context menus, keyboard/mouse navigation, and path
-/// helpers for <see cref="AclManagerDialog"/>. The form-closing guard checks apply and
-/// pending state; scan cancellation is delegated to the caller.
+/// Handles selection, tab switching, context menus, keyboard navigation, and form-closing
+/// guard for <see cref="AclManagerDialog"/>. Shell path actions and grid mouse routing are
+/// handled by <see cref="AclManagerPathActionHelper"/> and <see cref="AclManagerMouseEventHandler"/>,
+/// injected directly into <see cref="AclManagerDialog"/>.
 /// </summary>
 public class AclManagerSelectionHandler(
     AclManagerGrantsHelper grantsHelper,
     AclManagerTraverseHelper traverseHelper,
-    AclManagerActionOrchestrator actionHandler,
-    AclManagerApplyOrchestrator applyHandler,
-    ShellHelper shellHelper)
+    AclManagerApplyOrchestrator applyHandler)
 {
-    private readonly AclManagerGrantsHelper _grantsHelper = grantsHelper;
-    private readonly AclManagerTraverseHelper _traverseHelper = traverseHelper;
-    private readonly AclManagerActionOrchestrator _actionHandler = actionHandler;
-    private readonly AclManagerApplyOrchestrator _applyHandler = applyHandler;
-    private readonly ShellHelper _shellHelper = shellHelper;
-    private IWin32Window _owner = null!;
     private bool _isContainer;
     private AclManagerPendingChanges _pending = null!;
     private AclManagerDialogControls _controls = null!;
@@ -31,13 +23,11 @@ public class AclManagerSelectionHandler(
     public event EventHandler? RemoveKeyPressed;
 
     public void Initialize(
-        IWin32Window owner,
         bool isContainer,
         AclManagerPendingChanges pending,
         AclManagerDialogControls controls,
         Action refreshTraverseGrid)
     {
-        _owner = owner;
         _isContainer = isContainer;
         _pending = pending;
         _controls = controls;
@@ -65,14 +55,14 @@ public class AclManagerSelectionHandler(
             var expanded = AclManagerSectionHeader.ExpandSectionSelection(_controls.TraverseGrid);
             _controls.RemoveButton.Enabled = expanded.Any(r => r.Tag is GrantedPathEntry);
             _controls.FixAclsButton.Enabled = expanded.Any(r => r.Tag is GrantedPathEntry entry &&
-                                                                _traverseHelper.FixableEntries.Contains(entry));
+                                                                traverseHelper.FixableEntries.Contains(entry));
         }
         else
         {
             var expanded = AclManagerSectionHeader.ExpandSectionSelection(_controls.GrantsGrid);
             _controls.RemoveButton.Enabled = expanded.Count > 0;
             _controls.FixAclsButton.Enabled = expanded.Any(r =>
-                r.Tag is GrantedPathEntry e && _grantsHelper.FixableEntries.Contains(e));
+                r.Tag is GrantedPathEntry e && grantsHelper.FixableEntries.Contains(e));
         }
 
         _controls.ApplyButton.Enabled = _pending.HasPendingChanges;
@@ -82,7 +72,7 @@ public class AclManagerSelectionHandler(
 
     public void HandleGrantsCellValueChanged(DataGridViewCellEventArgs e)
     {
-        if (_grantsHelper.IsSuppressed || e.RowIndex < 0)
+        if (grantsHelper.IsSuppressed || e.RowIndex < 0)
             return;
         var row = _controls.GrantsGrid.Rows[e.RowIndex];
         if (row.Tag is not GrantedPathEntry entry)
@@ -92,11 +82,11 @@ public class AclManagerSelectionHandler(
 
         if (colName == AclManagerGrantsHelper.ColOwner && !_isContainer)
         {
-            _actionHandler.HandleOwnChange(row, entry, UpdateActionButtons);
+            grantsHelper.HandleOwnChange(row, entry, UpdateActionButtons);
             return;
         }
 
-        bool traverseChanged = _grantsHelper.HandleCellValueChanged(row, colName, entry,
+        bool traverseChanged = grantsHelper.HandleCellValueChanged(row, colName, entry,
             msg => MessageBox.Show(msg, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error));
         if (traverseChanged)
             _refreshTraverseGrid();
@@ -105,7 +95,7 @@ public class AclManagerSelectionHandler(
 
     public void HandleGrantsDirtyStateChanged()
     {
-        if (_grantsHelper.IsSuppressed)
+        if (grantsHelper.IsSuppressed)
             return;
         if (!_controls.GrantsGrid.IsCurrentCellDirty)
             return;
@@ -120,7 +110,7 @@ public class AclManagerSelectionHandler(
     /// </summary>
     public bool HandleFormClosing()
     {
-        if (_applyHandler.IsApplyInProgress)
+        if (applyHandler.IsApplyInProgress)
         {
             MessageBox.Show("Apply is in progress, please wait.", "ACL Manager",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -148,7 +138,7 @@ public class AclManagerSelectionHandler(
         bool singleItem = _controls.GrantsGrid.SelectedRows.Cast<DataGridViewRow>()
             .Count(r => r.Tag is GrantedPathEntry) == 1;
         bool hasFixable = selectedEntryRows.Any(r =>
-            r.Tag is GrantedPathEntry ge && _grantsHelper.FixableEntries.Contains(ge));
+            r.Tag is GrantedPathEntry ge && grantsHelper.FixableEntries.Contains(ge));
         bool hasDbItem = _controls.GrantsGrid.SelectedRows.Cast<DataGridViewRow>()
             .Any(r => r.Tag is GrantedPathEntry ge && !_pending.IsPendingAdd(ge.Path, ge.IsDeny));
 
@@ -170,7 +160,7 @@ public class AclManagerSelectionHandler(
         var expanded = AclManagerSectionHeader.ExpandSectionSelection(_controls.TraverseGrid);
         bool hasItem = expanded.Any(r => r.Tag is GrantedPathEntry);
         bool hasFixable = hasItem && expanded.Any(r => r.Tag is GrantedPathEntry te &&
-                                                       _traverseHelper.FixableEntries.Contains(te));
+                                                       traverseHelper.FixableEntries.Contains(te));
         bool singleItem = _controls.TraverseGrid.SelectedRows.Cast<DataGridViewRow>()
             .Count(r => r.Tag is GrantedPathEntry) == 1;
         bool hasDbItem = _controls.TraverseGrid.SelectedRows.Cast<DataGridViewRow>()
@@ -189,7 +179,7 @@ public class AclManagerSelectionHandler(
         _controls.CtxTraverseProperties.Visible = singleItem;
     }
 
-    // --- Grid key / mouse ---
+    // --- Grid key ---
 
     public void HandleGridKeyDown(KeyEventArgs e)
     {
@@ -202,73 +192,4 @@ public class AclManagerSelectionHandler(
         e.SuppressKeyPress = true;
     }
 
-    public void HandleGrantsRightClickDown(MouseEventArgs e)
-        => HandleRightClickDown(e, _controls.GrantsGrid);
-
-    public void HandleTraverseRightClickDown(MouseEventArgs e)
-        => HandleRightClickDown(e, _controls.TraverseGrid);
-
-    private static void HandleRightClickDown(MouseEventArgs e, DataGridView grid)
-    {
-        if (e.Button != MouseButtons.Right) return;
-        var hit = grid.HitTest(e.X, e.Y);
-        if (hit.RowIndex >= 0)
-        {
-            var row = grid.Rows[hit.RowIndex];
-            if (!row.Selected)
-            {
-                grid.ClearSelection();
-                row.Selected = true;
-            }
-        }
-        else
-        {
-            grid.ClearSelection();
-        }
-    }
-
-    public void HandleGrantsMouseClick(MouseEventArgs e)
-        => OnGridMouseClick(e, _controls.GrantsGrid);
-
-    public void HandleTraverseMouseClick(MouseEventArgs e)
-        => OnGridMouseClick(e, _controls.TraverseGrid);
-
-    private static void OnGridMouseClick(MouseEventArgs e, DataGridView grid)
-    {
-        if (e.Button == MouseButtons.Left && grid.HitTest(e.X, e.Y).Type == DataGridViewHitTestType.None)
-            grid.ClearSelection();
-    }
-
-    // --- Path helpers for context menu ---
-
-    private string? GetSelectedGrantPath()
-    {
-        var selected = _controls.GrantsGrid.SelectedRows.Cast<DataGridViewRow>()
-            .Where(r => r.Tag is GrantedPathEntry).ToList();
-        return selected.Count == 1 ? ((GrantedPathEntry)selected[0].Tag!).Path : null;
-    }
-
-    private string? GetSelectedTraversePath()
-    {
-        var selected = _controls.TraverseGrid.SelectedRows.Cast<DataGridViewRow>().ToList();
-        return selected.Count == 1 && selected[0].Tag is GrantedPathEntry e ? e.Path : null;
-    }
-
-    public void OpenFolderGrants()
-        => _actionHandler.OpenInExplorer(GetSelectedGrantPath()!);
-
-    public void CopyPathGrants()
-        => Clipboard.SetText(GetSelectedGrantPath()!);
-
-    public void ShowPropertiesGrants()
-        => _shellHelper.ShowProperties(GetSelectedGrantPath()!, _owner);
-
-    public void OpenFolderTraverse()
-        => _actionHandler.OpenInExplorer(GetSelectedTraversePath()!);
-
-    public void CopyPathTraverse()
-        => Clipboard.SetText(GetSelectedTraversePath()!);
-
-    public void ShowPropertiesTraverse()
-        => _shellHelper.ShowProperties(GetSelectedTraversePath()!, _owner);
 }

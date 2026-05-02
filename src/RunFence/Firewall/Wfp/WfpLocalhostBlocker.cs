@@ -1,5 +1,5 @@
+using System.Runtime.InteropServices;
 using RunFence.Core;
-using RunFence.Firewall;
 
 namespace RunFence.Firewall.Wfp;
 
@@ -11,15 +11,21 @@ namespace RunFence.Firewall.Wfp;
 /// storing IDs in the database.
 ///
 /// Per account, up to 2 + 2*N BLOCK filters are installed when blocking is active:
-///   RunFence-LH-V4/V6       — persistent static complement filters blocking ports 1–65535 minus exemption list
-///   RunFence-LH-EV4-{n}/EV6-{n} — non-persistent ephemeral filters blocking dynamically-discovered cross-user ports
+///   RunFence-LH-V4/V6         — persistent static complement filters blocking ports 1–65535 minus exemption list
+///   RunFence-LH-EV4D-{n}/EV6D-{n} — dynamic-session ephemeral filters blocking dynamically-discovered cross-user ports
 /// Static and ephemeral filters are managed independently: <see cref="Apply"/> writes V4/V6 (persistent),
-/// <see cref="UpdateEphemeralPorts"/> writes EV4/EV6 (non-persistent, session-scoped).
+/// <see cref="UpdateEphemeralPorts"/> writes EV4D/EV6D (non-persistent, dynamic-session-scoped).
 ///
-/// Ephemeral filters use a long-lived WFP engine handle (<see cref="_ephemeralHandle"/>) and are
-/// non-persistent: they are automatically removed when the handle is closed (process exit/dispose).
-/// This avoids BFE persistent store churn from rapid 1-second filter updates, which causes
-/// AccessViolationException in FwpmFilterAdd0.
+/// Ephemeral filters use a long-lived WFP engine handle (<see cref="_ephemeralHandle"/>) opened
+/// as a dynamic session (<c>FWPM_SESSION_FLAG_DYNAMIC</c>). Dynamic sessions automatically remove
+/// all associated filters when the handle is closed (process exit/dispose/crash). This avoids BFE
+/// persistent store churn from rapid 1-second filter updates and prevents stale ephemeral filters
+/// from surviving process exit (which would cause FWP_E_ALREADY_EXISTS on the next startup).
+///
+/// The "D" suffix in EV4D/EV6D distinguishes dynamic-session keys from the legacy non-dynamic keys
+/// (RunFence-LH-EV4-{n}/EV6-{n}) used by older builds. Legacy non-persistent filters from non-dynamic
+/// sessions are session-owned (FWP_E_WRONG_SESSION when deleted by another session) and cannot be
+/// removed until BFE stops; the distinct key prefix prevents any collision with them.
 ///
 /// Ephemeral ranges are chunked across multiple filters when the range count exceeds
 /// <see cref="MaxPortRangesPerFilter"/> to stay within WFP per-filter condition limits.
@@ -105,15 +111,23 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
 
                 // Delete non-persistent ephemeral filters on their own handle. This runs even when
                 // the persistent filter removal transaction above failed (committed == false) — best-effort
-                // cleanup for a rare edge case. Ephemeral filters are non-persistent and automatically
-                // removed on process exit, so any failure here is self-correcting.
+                // cleanup for a rare edge case. Ephemeral filters are automatically removed when the
+                // handle is closed (Dispose/process exit), so any failure here is self-correcting.
                 if (ephemeralFilterCount > 0)
                 {
                     var handle = EnsureEphemeralHandle();
                     if (handle != IntPtr.Zero)
                     {
                         _txHelper.ExecuteOnHandle("WfpLocalhostBlocker", handle, h =>
-                            DeleteEphemeralFilters(h, sid, ephemeralFilterCount));
+                        {
+                            for (var chunk = 0; chunk < ephemeralFilterCount; chunk++)
+                            {
+                                var ev4Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV4D-{chunk}", sid);
+                                var ev6Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV6D-{chunk}", sid);
+                                _filterWriter.DeleteFilter(h, ref ev4Key);
+                                _filterWriter.DeleteFilter(h, ref ev6Key);
+                            }
+                        });
                     }
                 }
             }
@@ -143,7 +157,15 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
             bool committed = _txHelper.ExecuteOnHandle("WfpLocalhostBlocker", handle, h =>
             {
                 var sddl = FirewallSddlHelper.BuildSddl(sid);
-                DeleteEphemeralFilters(h, sid, oldFilterCount);
+
+                // Remove old chunks that won't be replaced by the new set
+                for (var chunk = newFilterCount; chunk < oldFilterCount; chunk++)
+                {
+                    var ev4Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV4D-{chunk}", sid);
+                    var ev6Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV6D-{chunk}", sid);
+                    _filterWriter.DeleteFilter(h, ref ev4Key);
+                    _filterWriter.DeleteFilter(h, ref ev6Key);
+                }
 
                 for (var chunk = 0; chunk < newFilterCount; chunk++)
                 {
@@ -151,8 +173,12 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
                     var count = Math.Min(MaxPortRangesPerFilter, ephemeralBlockedRanges.Count - offset);
                     var chunkRanges = ephemeralBlockedRanges.Skip(offset).Take(count).ToList();
 
-                    var ev4Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV4-{chunk}", sid);
-                    var ev6Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV6-{chunk}", sid);
+                    var ev4Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV4D-{chunk}", sid);
+                    var ev6Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV6D-{chunk}", sid);
+                    // Delete before add: handles stale filters from a previous session that were
+                    // not tracked in _ephemeralState (e.g., after a crash or state reset).
+                    _filterWriter.DeleteFilter(h, ref ev4Key);
+                    _filterWriter.DeleteFilter(h, ref ev6Key);
                     _filterWriter.AddLocalhostFilter(h, ev4Key, sddl, isIPv6: false, chunkRanges, persistent: false);
                     _filterWriter.AddLocalhostFilter(h, ev6Key, sddl, isIPv6: true, chunkRanges, persistent: false);
                 }
@@ -168,25 +194,29 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
         if (_ephemeralHandle != IntPtr.Zero)
             return _ephemeralHandle;
 
-        var rc = WfpNative.FwpmEngineOpen0(null, WfpNative.RPC_C_AUTHN_DEFAULT,
-            IntPtr.Zero, IntPtr.Zero, out _ephemeralHandle);
-        if (rc != WfpNative.ERROR_SUCCESS)
+        // Open a dynamic WFP session so all non-persistent filters are automatically removed
+        // when the handle is closed. Without FWPM_SESSION_FLAG_DYNAMIC, non-persistent filters
+        // survive process exit until BFE restarts, causing FWP_E_ALREADY_EXISTS on the next startup.
+        // FWPM_SESSION0 layout: GUID(16) + LPWSTR name(IntPtr.Size) + LPWSTR desc(IntPtr.Size) + flags(4)
+        const int SessionSize = 128;
+        var sessionPtr = Marshal.AllocHGlobal(SessionSize);
+        try
         {
-            _ephemeralHandle = IntPtr.Zero;
-            log.Warn($"WfpLocalhostBlocker: FwpmEngineOpen0 failed for ephemeral session (0x{rc:X8})");
+            WfpFilterStructHelper.ZeroMemory(sessionPtr, SessionSize);
+            Marshal.WriteInt32(sessionPtr, 16 + IntPtr.Size * 2, (int)WfpNative.FWPM_SESSION_FLAG_DYNAMIC);
+            var rc = WfpNative.FwpmEngineOpen0(null, WfpNative.RPC_C_AUTHN_DEFAULT,
+                IntPtr.Zero, sessionPtr, out _ephemeralHandle);
+            if (rc != WfpNative.ERROR_SUCCESS)
+            {
+                _ephemeralHandle = IntPtr.Zero;
+                log.Warn($"WfpLocalhostBlocker: FwpmEngineOpen0 failed for ephemeral session (0x{rc:X8})");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(sessionPtr);
         }
         return _ephemeralHandle;
-    }
-
-    private void DeleteEphemeralFilters(IntPtr handle, string sid, int filterCount)
-    {
-        for (var chunk = 0; chunk < filterCount; chunk++)
-        {
-            var ev4Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV4-{chunk}", sid);
-            var ev6Key = WfpFilterKeyHelper.DeriveKey($"RunFence-LH-EV6-{chunk}", sid);
-            _filterWriter.DeleteFilter(handle, ref ev4Key);
-            _filterWriter.DeleteFilter(handle, ref ev6Key);
-        }
     }
 
     public void Dispose()

@@ -8,11 +8,12 @@ namespace RunFence.Core.Ipc;
 public static class IpcClient
 {
     private const int MaxResponseSize = 10 * 1024 * 1024;
+    private static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(10);
 
-    public static IpcResponse? SendMessage(IpcMessage message, int connectTimeoutMs = Constants.PipeConnectTimeoutMs)
+    public static IpcResponse? SendMessage(IpcMessage message, int connectTimeoutMs = IpcConstants.PipeConnectTimeoutMs)
     {
         message.CallerName ??= Environment.UserName;
-        var pipeName = Constants.PipeName;
+        var pipeName = IpcConstants.PipeName;
 
         try
         {
@@ -39,8 +40,9 @@ public static class IpcClient
             client.Write(bytes, 0, bytes.Length);
             client.Flush();
 
-            var buffer = new byte[Constants.MaxPipeMessageSize];
-            int bytesRead = client.Read(buffer, 0, buffer.Length);
+            using var cts = new CancellationTokenSource(ReadTimeout);
+            var buffer = new byte[IpcConstants.MaxPipeMessageSize];
+            int bytesRead = client.ReadAsync(buffer, 0, buffer.Length, cts.Token).GetAwaiter().GetResult();
 
             // Assemble multi-chunk responses when the pipe signals incomplete delivery.
             if (!client.IsMessageComplete)
@@ -49,7 +51,7 @@ public static class IpcClient
                 ms.Write(buffer, 0, bytesRead);
                 while (!client.IsMessageComplete)
                 {
-                    int chunk = client.Read(buffer, 0, buffer.Length);
+                    int chunk = client.ReadAsync(buffer, 0, buffer.Length, cts.Token).GetAwaiter().GetResult();
                     if (chunk == 0)
                         break;
                     ms.Write(buffer, 0, chunk);
@@ -84,8 +86,8 @@ public static class IpcClient
     {
         try
         {
-            using var client = new NamedPipeClientStream(".", Constants.PipeName, PipeDirection.InOut);
-            try { client.Connect(Constants.PipeConnectTimeoutMs); }
+            using var client = new NamedPipeClientStream(".", IpcConstants.PipeName, PipeDirection.InOut);
+            try { client.Connect(IpcConstants.PipeConnectTimeoutMs); }
             catch { return false; }
 
             client.ReadMode = PipeTransmissionMode.Message;
@@ -93,8 +95,9 @@ public static class IpcClient
             client.Write(IpcCommands.PingBytes, 0, IpcCommands.PingBytes.Length);
             client.Flush();
 
+            using var cts = new CancellationTokenSource(ReadTimeout);
             var buffer = new byte[16];
-            int bytesRead = client.Read(buffer, 0, buffer.Length);
+            int bytesRead = client.ReadAsync(buffer, 0, buffer.Length, cts.Token).GetAwaiter().GetResult();
             return buffer.AsSpan(0, bytesRead).SequenceEqual(IpcCommands.PongBytes);
         }
         catch

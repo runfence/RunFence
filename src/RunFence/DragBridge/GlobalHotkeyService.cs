@@ -140,6 +140,9 @@ public class GlobalHotkeyService : IGlobalHotkeyService, IRequiresInitialization
 
     private void OnHotkey(int id) => HotkeyPressed?.Invoke(id);
 
+    /// <summary>Resets the tracked modifier key state. For unit testing only.</summary>
+    internal void ResetState() => _currentModifiers = 0;
+
     /// <summary>Triggers <see cref="HotkeyPressed"/> directly — for unit testing only.</summary>
-    public void SimulateHotkey(int id) => OnHotkey(id);
+    internal void SimulateHotkey(int id) => OnHotkey(id);
 }

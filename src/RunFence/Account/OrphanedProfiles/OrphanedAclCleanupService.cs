@@ -127,7 +127,7 @@ public class OrphanedAclCleanupService(ILoggingService log) : IOrphanedAclCleanu
     {
         objectsScanned++;
         if (objectsScanned % 500 == 0)
-            progress?.Report(new AclCleanupProgress(path, objectsFixed, objectsScanned));
+            progress?.Report(new AclCleanupProgress(path, objectsFixed));
 
         try
         {

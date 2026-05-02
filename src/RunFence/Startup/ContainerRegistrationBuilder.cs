@@ -24,9 +24,9 @@ public static class ContainerRegistrationBuilder
     }
 
     public static ILifetimeScope BeginSessionScope(
-        IContainer container,
+        ILifetimeScope container,
         SessionContext session,
-        IStartupOptions options)
+        StartupOptions options)
     {
         // Set session on the SessionProvider before building the scope so that any
         // OnActivated callbacks that read from ISessionProvider find a valid session.
@@ -36,7 +36,7 @@ public static class ContainerRegistrationBuilder
         return container.BeginLifetimeScope(builder =>
         {
             builder.RegisterInstance(session).SingleInstance();
-            builder.RegisterInstance(options).As<IStartupOptions>().SingleInstance();
+            builder.RegisterInstance(options).AsSelf().SingleInstance();
             builder.RegisterModule(new AccountModule());
             builder.RegisterModule(new FirewallModule());
             builder.RegisterModule(new PersistenceModule());

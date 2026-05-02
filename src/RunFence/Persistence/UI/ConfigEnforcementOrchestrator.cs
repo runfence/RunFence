@@ -3,58 +3,46 @@ using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Firewall;
 using RunFence.Infrastructure;
-using RunFence.Launch;
 
 namespace RunFence.Persistence.UI;
 
 /// <summary>
-/// Exposes enforcement revert operations needed by the PIN reset flow in
-/// <see cref="RunFence.Startup.UI.LockManager"/> to clean up disk-side enforcement before
-/// discarding the current database.
+/// Exposes enforcement operations for the loaded-apps lifecycle and the PIN reset flow in
+/// <see cref="RunFence.Startup.UI.LockManager"/>.
 /// </summary>
 public interface ILoadedAppsCleanup
 {
-    /// <summary>Reverts enforcement (ACLs, shortcuts, icons) for all provided apps.</summary>
+    void ApplyLoadedAppsEnforcement(IReadOnlyList<AppEntry> loadedApps);
     void RevertApps(IEnumerable<AppEntry> apps);
-
-    /// <summary>Recomputes all ancestor ACLs given the complete current app list.</summary>
     void RecomputeAllAncestorAcls(IReadOnlyList<AppEntry> allApps);
-}
 
-/// <summary>Result of <see cref="ConfigEnforcementOrchestrator.CleanupAllApps"/>.</summary>
-public enum CleanupAllAppsResult
-{
-    /// <summary>Cleanup completed and the caller should exit the application.</summary>
-    ReadyToExit,
-
-    /// <summary>Cleanup was skipped because an operation was already in progress.</summary>
-    OperationInProgress
+    /// <summary>
+    /// Reverts all apps in the current database for shutdown — passes each app the full
+    /// database.Apps list as context, then recomputes ancestor ACLs with an empty list.
+    /// Per-app errors are logged and silently skipped.
+    /// </summary>
+    void RevertAllAppsForShutdown();
 }
 
 /// <summary>
 /// Handles enforcement operations for loaded/unloaded app configs:
-/// applies ACLs and shortcuts when loading, reverts them when unloading,
-/// and performs full cleanup on shutdown.
+/// applies ACLs and shortcuts when loading, and reverts them when unloading.
+/// Shutdown-specific cleanup (firewall, context menu, associations, handlers) is in
+/// <see cref="ShutdownCleanupService"/>.
 /// </summary>
 public class ConfigEnforcementOrchestrator(
     ISessionProvider sessionProvider,
     IAclService aclService,
     IIconService iconService,
-    IContextMenuService contextMenuService,
     ILoggingService log,
     AppEntryEnforcementHelper enforcementHelper,
-    IShortcutDiscoveryService shortcutDiscovery,
-    IAppHandlerRegistrationService handlerRegistrationService,
-    IAssociationAutoSetService associationAutoSetService,
-    IFolderHandlerService folderHandlerService,
-    IFirewallCleanupService firewallCleanupService) : ILoadedAppsCleanup
+    IShortcutDiscoveryService shortcutDiscovery) : ILoadedAppsCleanup
 {
     public void ApplyLoadedAppsEnforcement(IReadOnlyList<AppEntry> loadedApps)
     {
         var database = sessionProvider.GetSession().Database;
-        var shortcutCache = CreateShortcutCacheIfNeeded(loadedApps);
+        var shortcutCache = shortcutDiscovery.CreateTraversalCacheIfNeeded(loadedApps);
         foreach (var app in loadedApps)
         {
             try
@@ -74,7 +62,7 @@ public class ConfigEnforcementOrchestrator(
     {
         var appList = apps.ToList();
         var remainingApps = sessionProvider.GetSession().Database.Apps;
-        var shortcutCache = CreateShortcutCacheIfNeeded(appList);
+        var shortcutCache = shortcutDiscovery.CreateTraversalCacheIfNeeded(appList);
         foreach (var app in appList)
         {
             try
@@ -92,45 +80,22 @@ public class ConfigEnforcementOrchestrator(
     public void RecomputeAllAncestorAcls(IReadOnlyList<AppEntry> allApps)
         => aclService.RecomputeAllAncestorAcls(allApps);
 
-    public CleanupAllAppsResult CleanupAllApps(bool isEnforcementInProgress, bool isOperationInProgress)
+    public void RevertAllAppsForShutdown()
     {
-        if (isEnforcementInProgress || isOperationInProgress)
-            return CleanupAllAppsResult.OperationInProgress;
-
-        try
+        var database = sessionProvider.GetSession().Database;
+        var shortcutCache = shortcutDiscovery.CreateTraversalCacheIfNeeded(database.Apps);
+        foreach (var app in database.Apps.ToList())
         {
-            var database = sessionProvider.GetSession().Database;
-            var shortcutCache = CreateShortcutCacheIfNeeded(database.Apps);
-            foreach (var app in database.Apps.ToList())
+            try
             {
-                try
-                {
-                    enforcementHelper.RevertChanges(app, database.Apps, shortcutCache);
-                }
-                catch (Exception ex)
-                {
-                    log.Error($"Cleanup failed for {app.Name}", ex);
-                }
+                enforcementHelper.RevertChanges(app, database.Apps, shortcutCache);
             }
-
-            aclService.RecomputeAllAncestorAcls([]);
-            firewallCleanupService.RemoveAll(database);
-            log.Info("Cleanup complete, exiting");
-        }
-        catch (Exception ex)
-        {
-            log.Error("Cleanup failed", ex);
+            catch (Exception ex)
+            {
+                log.Error($"Cleanup failed for {app.Name}", ex);
+            }
         }
 
-        contextMenuService.Unregister();
-        associationAutoSetService.RestoreForAllUsers();
-        handlerRegistrationService.UnregisterAll();
-        folderHandlerService.UnregisterAll();
-        return CleanupAllAppsResult.ReadyToExit;
+        aclService.RecomputeAllAncestorAcls([]);
     }
-
-    private ShortcutTraversalCache CreateShortcutCacheIfNeeded(IEnumerable<AppEntry> apps)
-        => apps.Any(a => a.ManageShortcuts)
-            ? shortcutDiscovery.CreateTraversalCache()
-            : new ShortcutTraversalCache([]);
 }

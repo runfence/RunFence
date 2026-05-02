@@ -114,6 +114,16 @@ partial class AclManagerDialog
         _ctxTraversePropertiesSep = new ToolStripSeparator();
         _ctxTraverseProperties = new ToolStripMenuItem();
 
+        ((ISupportInitialize)_grantsGrid).BeginInit();
+        ((ISupportInitialize)_traverseGrid).BeginInit();
+        _toolStrip.SuspendLayout();
+        _contextMenuGrants.SuspendLayout();
+        _contextMenuTraverse.SuspendLayout();
+        _grantsTab.SuspendLayout();
+        _traverseTab.SuspendLayout();
+        _tabControl.SuspendLayout();
+        SuspendLayout();
+
         // tabControl
         _tabControl.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
         _tabControl.Location = new Point(0, 31);
@@ -135,10 +145,7 @@ partial class AclManagerDialog
 
         // grantsGrid
         _grantsGrid.Dock = DockStyle.Fill;
-        _grantsGrid.AllowUserToAddRows = false;
-        _grantsGrid.AllowUserToDeleteRows = false;
         _grantsGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.None;
-        _grantsGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _grantsGrid.MultiSelect = true;
         _grantsGrid.EditMode = DataGridViewEditMode.EditOnEnter;
         _grantsGrid.CellValueChanged += OnGrantsCellValueChanged;
@@ -152,10 +159,7 @@ partial class AclManagerDialog
 
         // traverseGrid
         _traverseGrid.Dock = DockStyle.Fill;
-        _traverseGrid.AllowUserToAddRows = false;
-        _traverseGrid.AllowUserToDeleteRows = false;
         _traverseGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-        _traverseGrid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
         _traverseGrid.MultiSelect = true;
         _traverseGrid.ReadOnly = true;
         _traverseGrid.SelectionChanged += OnTraverseSelectionChanged;
@@ -292,6 +296,16 @@ partial class AclManagerDialog
         StartPosition = FormStartPosition.CenterParent;
         Controls.AddRange(new Control[] { _toolStrip, _tabControl, _applyButton, _closeButton });
         Name = "AclManagerDialog";
+        ((ISupportInitialize)_grantsGrid).EndInit();
+        ((ISupportInitialize)_traverseGrid).EndInit();
+        _toolStrip.ResumeLayout(false);
+        _toolStrip.PerformLayout();
+        _contextMenuGrants.ResumeLayout(false);
+        _contextMenuTraverse.ResumeLayout(false);
+        _grantsTab.ResumeLayout(false);
+        _traverseTab.ResumeLayout(false);
+        _tabControl.ResumeLayout(false);
+        _tabControl.PerformLayout();
         ResumeLayout(false);
     }
 }

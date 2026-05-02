@@ -19,6 +19,13 @@ public class AppConfig
     public List<AppConfigAccountEntry>? Accounts { get; set; }
 
     /// <summary>
+    /// Shared AppContainer traverse entries for this config file.
+    /// These are owned by ALL APPLICATION PACKAGES instead of a specific container SID.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<GrantedPathEntry>? SharedContainerTraverseGrants { get; set; }
+
+    /// <summary>
     /// Handler associations for this config's apps: extension/protocol → appId.
     /// Keys: file extensions start with '.' (e.g., ".pdf"), URL protocols are bare words (e.g., "http").
     /// Null when empty (omitted from JSON).

@@ -14,33 +14,29 @@ public static class AssociationFallbackHelper
     /// <summary>
     /// Silently falls back to the original handler stored in <c>RunFenceFallback</c>,
     /// or to the HKLM handler when no fallback is stored.
-    /// Used when IPC returns <c>AccessDenied</c> — the override is kept in place.
+    /// Used when the HKCU override should be kept in place (e.g. <c>PathPrefixMismatch</c> —
+    /// the association is still valid for other paths).
     /// </summary>
-    public static int LaunchFallback(string association, string? rawArguments, bool ipcAccessDenied = false)
+    public static int LaunchFallback(string association, string? rawArguments)
     {
         string? fallbackValue;
         using (var assocKey = Registry.ClassesRoot.OpenSubKey(association))
-            fallbackValue = assocKey?.GetValue(Constants.RunFenceFallbackValueName) as string;
+            fallbackValue = assocKey?.GetValue(PathConstants.RunFenceFallbackValueName) as string;
 
         string? command;
-        if (!string.IsNullOrEmpty(fallbackValue))
-            command = ResolveHandler(fallbackValue);
-        else
-            command = LookupHklmHandler(association);
+        command = !string.IsNullOrEmpty(fallbackValue) ? ResolveHandler(fallbackValue) : LookupHklmHandler(association);
 
         if (command != null)
             return LaunchResolvedCommand(command, rawArguments);
 
-        var errorMessage = ipcAccessDenied
-            ? "IPC access denied; no fallback handler found for '" + association + "'."
-            : "No fallback handler found for '" + association + "'.";
-        LauncherIpcHelper.ShowError(errorMessage);
+        LauncherIpcHelper.ShowError("No fallback handler found for '" + association + "'.");
         return 1;
     }
 
     /// <summary>
     /// Restores the original handler in HKCU (removing the RunFence override) and then
-    /// launches the original handler. Used when IPC returns <c>UnknownAssociation</c>.
+    /// launches the original handler. Used when the HKCU override should be removed
+    /// (e.g. <c>AccessDenied</c> — caller is no longer authorized; <c>UnknownAssociation</c> — association no longer registered).
     /// </summary>
     public static int CleanupAndLaunchFallback(string association, string? rawArguments)
     {
@@ -61,10 +57,7 @@ public static class AssociationFallbackHelper
         }
 
         string? command;
-        if (!string.IsNullOrEmpty(fallbackValue))
-            command = ResolveHandler(fallbackValue);
-        else
-            command = LookupHklmHandler(association);
+        command = !string.IsNullOrEmpty(fallbackValue) ? ResolveHandler(fallbackValue) : LookupHklmHandler(association);
 
         if (command != null)
             return LaunchResolvedCommand(command, rawArguments);
@@ -115,11 +108,9 @@ public static class AssociationFallbackHelper
                 return null;
             return ResolveHandlerFromHklm(progId);
         }
-        else
-        {
-            using var commandKey = hklmKey.OpenSubKey(@"shell\open\command");
-            return commandKey?.GetValue(null) as string;
-        }
+
+        using var commandKey = hklmKey.OpenSubKey(@"shell\open\command");
+        return commandKey?.GetValue(null) as string;
     }
 
     private static string? ResolveHandlerFromHklm(string? progId)
@@ -149,36 +140,13 @@ public static class AssociationFallbackHelper
     {
         try
         {
-            var substituted = AssociationCommandHelper.SubstituteArgument(command, rawArguments);
-            string exeToken;
-            string? argsStr;
-            try
+            if (!TryBuildProcessStartInfo(command, rawArguments, out var startInfo, out var errorMessage))
             {
-                argsStr = CommandLineHelper.SkipArgs(substituted, 1);
-                exeToken = (argsStr != null ? substituted[..^argsStr.Length] : substituted).Trim();
-            }
-            catch
-            {
-                LauncherIpcHelper.ShowError("Failed to launch fallback handler: could not parse command.");
+                LauncherIpcHelper.ShowError(errorMessage);
                 return 1;
             }
 
-            if (exeToken.Length == 0)
-            {
-                LauncherIpcHelper.ShowError("Failed to launch fallback handler: empty command.");
-                return 1;
-            }
-
-            var exe = exeToken.Length >= 2 && exeToken[0] == '"' && exeToken[^1] == '"'
-                ? exeToken[1..^1]
-                : exeToken;
-
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = exe,
-                Arguments = argsStr ?? string.Empty,
-                UseShellExecute = true
-            });
+            Process.Start(startInfo);
             return 0;
         }
         catch (Exception ex)
@@ -186,5 +154,33 @@ public static class AssociationFallbackHelper
             LauncherIpcHelper.ShowError("Failed to launch fallback handler: " + ex.Message);
             return 1;
         }
+    }
+
+    public static bool TryBuildProcessStartInfo(
+        string command,
+        string? rawArguments,
+        out ProcessStartInfo processStartInfo,
+        out string errorMessage)
+    {
+        processStartInfo = new ProcessStartInfo();
+
+        if (!AssociationCommandHelper.TryMaterializeCommand(
+                command,
+                rawArguments,
+                out var materialization,
+                out var rejectionReason))
+        {
+            errorMessage = "Failed to launch fallback handler: " + rejectionReason;
+            return false;
+        }
+
+        processStartInfo = new ProcessStartInfo
+        {
+            FileName = materialization.ExePath,
+            Arguments = materialization.Arguments ?? string.Empty,
+            UseShellExecute = true
+        };
+        errorMessage = string.Empty;
+        return true;
     }
 }

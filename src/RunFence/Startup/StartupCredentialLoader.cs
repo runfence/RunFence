@@ -11,21 +11,17 @@ namespace RunFence.Startup;
 public class StartupCredentialLoader(
     IStartupUI ui,
     IDatabaseService databaseService,
-    IConfigPaths configPaths)
+    IConfigPaths configPaths,
+    IRememberPinService rememberPinService,
+    IPinService pinService,
+    ICredentialEncryptionService encryptionService,
+    ILoggingService log) : IStartupCredentialLoader
 {
-    /// <summary>Result of the LoadAndVerifyCredentials step.</summary>
-    public record CredentialLoadResult(
-        CredentialStore Store,
-        byte[] PinDerivedKey,
-        byte[]? MismatchKey);
-
     /// <summary>
     /// Loads the credential store and verifies the PIN. Handles first run, DPAPI loss, and
     /// JSON corruption cases. Returns null if the user cancelled or an unrecoverable error occurred.
     /// </summary>
-    public CredentialLoadResult? LoadAndVerifyCredentials(
-        ICredentialEncryptionService encryptionService,
-        ILoggingService log)
+    public CredentialLoadResult? LoadAndVerifyCredentials()
     {
         log.Info("StartupCredentialLoader: loading credentials.");
         var configSalt = databaseService.TryGetConfigSalt();
@@ -38,6 +34,25 @@ public class StartupCredentialLoader(
                                      !configSalt.SequenceEqual(credentialStore.ArgonSalt)
                 ? configSalt
                 : null;
+
+            if (rememberPinService.IsEnabled)
+            {
+                if (rememberPinService.TryDecrypt(out var rememberedPinKey))
+                {
+                    if (pinService.VerifyDerivedKey(rememberedPinKey, credentialStore))
+                    {
+                        return new CredentialLoadResult(credentialStore, rememberedPinKey, MismatchKey: null,
+                            PinBypassed: true);
+                    }
+
+                    log.Warn("Remember PIN key failed canary verification - falling back to PIN");
+                    CryptographicOperations.ZeroMemory(rememberedPinKey);
+                }
+                else
+                {
+                    log.Info("Remember PIN key unavailable - falling back to PIN");
+                }
+            }
 
             var pinResult = ui.PromptVerifyPin(credentialStore, mismatchConfigSalt);
             if (pinResult.Key.Length == 0)
@@ -55,7 +70,7 @@ public class StartupCredentialLoader(
 
             try
             {
-                if (!VerifyDpapiAccess(credentialStore, pinDerivedKey, encryptionService, log))
+                if (!VerifyDpapiAccess(credentialStore, pinDerivedKey))
                 {
                     CryptographicOperations.ZeroMemory(pinDerivedKey);
                     if (mismatchKey != null)
@@ -116,8 +131,7 @@ public class StartupCredentialLoader(
         }
     }
 
-    private static bool VerifyDpapiAccess(CredentialStore store, byte[] pinDerivedKey,
-        ICredentialEncryptionService encryptionService, ILoggingService log)
+    private bool VerifyDpapiAccess(CredentialStore store, byte[] pinDerivedKey)
     {
         var cred = store.Credentials.FirstOrDefault(c => c is { IsCurrentAccount: false, EncryptedPassword.Length: > 0 });
         if (cred == null)
@@ -130,7 +144,7 @@ public class StartupCredentialLoader(
         }
         catch (CryptographicException ex)
         {
-            log.Error("DPAPI key loss detected — credential decryption failed after successful PIN verification", ex);
+            log.Error("DPAPI key loss detected - credential decryption failed after successful PIN verification", ex);
             return false;
         }
     }

@@ -9,32 +9,33 @@ namespace RunFence.Apps.UI.Forms;
 /// </summary>
 public partial class HandlerAssociationsSection : UserControl
 {
+    private readonly record struct AssociationRowData(List<string>? Prefixes, bool ReplacePrefixes);
+
+    private readonly IExeAssociationRegistryReader? _reader;
     private List<string> _loadedKeys = [];
 
     public event Action? Changed;
 
-    /// <summary>
-    /// When set, invoked to produce registry-suggested keys shown at the top of the Add dialog.
-    /// </summary>
+    /// <summary>The exe path used for registry suggestions. Set by AppEditDialog when the path changes.</summary>
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Func<IEnumerable<string>>? RegistrySuggestionFactory { get; set; }
-
-    /// <summary>
-    /// When set, called with the selected key to look up a registry-suggested arguments template
-    /// for pre-populating the template field in the Add dialog.
-    /// Return null to use <c>"%1"</c> as the default.
-    /// </summary>
-    [Browsable(false)]
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    public Func<string, string?>? RegistryTemplateLoader { get; set; }
+    public string ExePath { get; set; } = "";
 
     public HandlerAssociationsSection()
     {
         InitializeComponent();
         _addButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22));
+        _editButton.Image = UiIconFactory.CreateToolbarIcon("\u270E", Color.FromArgb(0x33, 0x66, 0x99));
         _removeButton.Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33));
+        _ctxAdd.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 16);
+        _ctxEdit.Image = UiIconFactory.CreateToolbarIcon("\u270E", Color.FromArgb(0x33, 0x66, 0x99), 16);
         _ctxRemove.Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33), 16);
+        _dataGrid.CellDoubleClick += OnCellDoubleClick;
+    }
+
+    public HandlerAssociationsSection(IExeAssociationRegistryReader reader) : this()
+    {
+        _reader = reader;
     }
 
     public void SetAssociations(List<HandlerAssociationItem>? items)
@@ -44,7 +45,10 @@ public partial class HandlerAssociationsSection : UserControl
         if (items == null)
             return;
         foreach (var item in items)
-            _dataGrid.Rows.Add(item.Key, item.ArgumentsTemplate ?? "");
+        {
+            var idx = _dataGrid.Rows.Add(item.Key, item.ArgumentsTemplate ?? "");
+            _dataGrid.Rows[idx].Tag = new AssociationRowData(item.PathPrefixes?.ToList(), item.ReplacePrefixes);
+        }
     }
 
     public List<HandlerAssociationItem>? GetAssociations()
@@ -58,7 +62,11 @@ public partial class HandlerAssociationsSection : UserControl
                 var key = row.Cells[0].Value?.ToString() ?? "";
                 var template = row.Cells[1].Value?.ToString();
                 template = string.IsNullOrEmpty(template) ? null : template;
-                return new HandlerAssociationItem(key, template);
+                var data = row.Tag is AssociationRowData d ? d : default;
+                var prefixes = data.Prefixes;
+                var replace = data.ReplacePrefixes;
+                return new HandlerAssociationItem(key, template,
+                    prefixes?.Count > 0 ? (IReadOnlyList<string>)prefixes : null, replace);
             })
             .ToList();
     }
@@ -67,12 +75,13 @@ public partial class HandlerAssociationsSection : UserControl
     {
         _dataGrid.Enabled = enabled;
         _addButton.Enabled = enabled;
+        _editButton.Enabled = enabled && _dataGrid.CurrentRow != null;
         _removeButton.Enabled = enabled && _dataGrid.CurrentRow != null;
     }
 
     private IEnumerable<string> BuildSuggestions()
     {
-        var fromRegistry = RegistrySuggestionFactory?.Invoke()?.ToList() ?? [];
+        var fromRegistry = _reader?.GetHandledAssociations(ExePath).ToList() ?? [];
         var currentKeys = _dataGrid.Rows.Cast<DataGridViewRow>()
             .Select(r => r.Cells[0].Value?.ToString() ?? "")
             .Where(k => k.Length > 0)
@@ -97,8 +106,10 @@ public partial class HandlerAssociationsSection : UserControl
 
     private void OnAddClick(object? sender, EventArgs e)
     {
-        using var dlg = new AssociationKeyInputDialog("Add Association", BuildSuggestions());
-        dlg.TemplateLoader = RegistryTemplateLoader;
+        if (_reader == null)
+            return;
+        using var dlg = new HandlerAssociationEditDialog();
+        dlg.InitializeForAdd(BuildSuggestions(), _reader, ExePath);
 
         if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
             return;
@@ -106,13 +117,6 @@ public partial class HandlerAssociationsSection : UserControl
         var key = dlg.SelectedKey;
         if (string.IsNullOrEmpty(key))
             return;
-
-        if (!AppHandlerRegistrationService.IsValidKey(key))
-        {
-            MessageBox.Show("Invalid association key. Use a file extension (e.g., .pdf) or protocol name (e.g., http).",
-                "Invalid", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
 
         if (_dataGrid.Rows.Cast<DataGridViewRow>().Any(row =>
                 string.Equals(row.Cells[0].Value?.ToString(), key, StringComparison.OrdinalIgnoreCase)))
@@ -122,7 +126,30 @@ public partial class HandlerAssociationsSection : UserControl
             return;
         }
 
-        _dataGrid.Rows.Add(key, dlg.SelectedTemplate ?? "");
+        var idx = _dataGrid.Rows.Add(key, dlg.NewTemplate ?? "");
+        _dataGrid.Rows[idx].Tag = new AssociationRowData(dlg.NewPrefixes?.ToList(), dlg.NewReplacePrefixes);
+        Changed?.Invoke();
+    }
+
+    private void OnEditClick(object? sender, EventArgs e)
+    {
+        var row = _dataGrid.CurrentRow;
+        if (row == null)
+            return;
+
+        var key = row.Cells[0].Value?.ToString() ?? "";
+        var template = row.Cells[1].Value?.ToString();
+        var data = row.Tag is AssociationRowData d ? d : default;
+        var prefixes = data.Prefixes;
+        var replace = data.ReplacePrefixes;
+
+        using var dlg = new HandlerAssociationEditDialog();
+        dlg.Initialize(key, template, prefixes, replace);
+        if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
+            return;
+
+        row.Cells[1].Value = dlg.NewTemplate ?? "";
+        row.Tag = new AssociationRowData(dlg.NewPrefixes?.ToList(), dlg.NewReplacePrefixes);
         Changed?.Invoke();
     }
 
@@ -137,7 +164,14 @@ public partial class HandlerAssociationsSection : UserControl
 
     private void OnSelectionChanged(object? sender, EventArgs e)
     {
+        _editButton.Enabled = _dataGrid.Enabled && _dataGrid.CurrentRow != null;
         _removeButton.Enabled = _dataGrid.Enabled && _dataGrid.CurrentRow != null;
+    }
+
+    private void OnCellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex >= 0)
+            OnEditClick(null, EventArgs.Empty);
     }
 
     private void OnKeyDown(object? sender, KeyEventArgs e)
@@ -165,6 +199,7 @@ public partial class HandlerAssociationsSection : UserControl
         }
 
         _ctxAdd.Visible = _dataGrid.CurrentRow == null;
+        _ctxEdit.Visible = _dataGrid.CurrentRow != null;
         _ctxRemove.Visible = _dataGrid.CurrentRow != null;
     }
 }

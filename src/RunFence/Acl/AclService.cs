@@ -1,8 +1,6 @@
 using System.Security.AccessControl;
-using System.Security.Principal;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Persistence;
 
 namespace RunFence.Acl;
 
@@ -10,7 +8,8 @@ public class AclService(
     ILoggingService log,
     IAclDenyModeService denyService,
     IAclAllowModeService allowService,
-    IDatabaseProvider databaseProvider)
+    ContainerLookupHelper containerLookup,
+    IPathGrantService pathGrantService)
     : IAclService
 {
     public void ApplyAcl(AppEntry app, IReadOnlyList<AppEntry> allApps)
@@ -157,9 +156,9 @@ public class AclService(
 
     public bool IsBlockedPath(string resolvedPath)
     {
-        var normalized = Path.GetFullPath(resolvedPath).TrimEnd(Path.DirectorySeparatorChar);
+        var normalized = AclHelper.NormalizePath(resolvedPath);
 
-        if (Constants.GetBlockedAclPaths().Select(blocked => Path.GetFullPath(blocked).TrimEnd(Path.DirectorySeparatorChar))
+        if (PathConstants.GetBlockedAclPaths().Select(AclHelper.NormalizePath)
             .Any(normalizedBlocked => string.Equals(normalized, normalizedBlocked, StringComparison.OrdinalIgnoreCase)))
         {
             return true;
@@ -180,7 +179,7 @@ public class AclService(
         var folder = app.IsFolder
             ? Path.GetFullPath(app.ExePath)
             : Path.GetDirectoryName(Path.GetFullPath(app.ExePath))!;
-        var cappedDepth = Math.Min(app.FolderAclDepth, Constants.MaxFolderAclDepth);
+        var cappedDepth = Math.Min(app.FolderAclDepth, PathConstants.MaxFolderAclDepth);
         for (int i = 0; i < cappedDepth; i++)
         {
             var parent = Path.GetDirectoryName(folder);
@@ -204,46 +203,29 @@ public class AclService(
     // --- AppContainer SID helpers ---
 
     private void TryGrantContainerSid(string containerName, string targetPath)
-    {
-        TryModifyContainerSid(containerName, targetPath, "grant",
-            (sid, isDirectory) =>
-            {
-                var inhFlags = AclHelper.InheritanceFlagsFor(isDirectory);
-                var rule = new FileSystemAccessRule(
-                    sid,
-                    FileSystemRights.ReadAndExecute,
-                    inhFlags, PropagationFlags.None, AccessControlType.Allow);
-                AclHelper.ModifyAcl(targetPath, isDirectory, security => security.AddAccessRule(rule));
-                log.Info($"Granted AppContainer SID '{sid.Value}' ReadAndExecute on '{targetPath}'");
-            });
-    }
+        =>
+        TryModifyContainerSid(containerName, targetPath, "grant", sid =>
+        {
+            pathGrantService.EnsureAccess(sid, targetPath, FileSystemRights.ReadAndExecute, confirm: null);
+            log.Info($"Granted AppContainer SID '{sid}' ReadAndExecute on '{targetPath}'");
+        });
 
     private void TryRevokeContainerSid(string containerName, string targetPath)
-    {
-        TryModifyContainerSid(containerName, targetPath, "revoke",
-            (sid, isDirectory) =>
-            {
-                AclHelper.ModifyAcl(targetPath, isDirectory, security =>
-                {
-                    var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
-                    foreach (FileSystemAccessRule rule in rules)
-                    {
-                        if (rule.IdentityReference is SecurityIdentifier ruleSid && ruleSid == sid)
-                            security.RemoveAccessRuleSpecific(rule);
-                    }
-                });
-                log.Info($"Revoked AppContainer SID '{sid.Value}' from '{targetPath}'");
-            });
-    }
+        =>
+        TryModifyContainerSid(containerName, targetPath, "revoke", sid =>
+        {
+            pathGrantService.RemoveGrant(sid, targetPath, isDeny: false, updateFileSystem: true);
+            log.Info($"Revoked AppContainer SID '{sid}' from '{targetPath}'");
+        });
 
     /// <summary>
     /// Resolves the AppContainer SID for <paramref name="containerName"/>, verifies the target path
-    /// exists, then invokes <paramref name="operation"/> with the resolved SID and isDirectory flag.
+    /// exists, then invokes <paramref name="operation"/> with the resolved SID.
     /// Logs and swallows exceptions so ACL failures never block launch.
     /// </summary>
     private void TryModifyContainerSid(
         string containerName, string targetPath, string actionName,
-        Action<SecurityIdentifier, bool> operation)
+        Action<string> operation)
     {
         try
         {
@@ -258,8 +240,7 @@ public class AclService(
             if (!isDirectory && !File.Exists(targetPath))
                 return;
 
-            var sid = new SecurityIdentifier(containerSid);
-            operation(sid, isDirectory);
+            operation(containerSid);
         }
         catch (Exception ex)
         {
@@ -268,5 +249,5 @@ public class AclService(
     }
 
     private string? ResolveContainerSid(string containerName)
-        => AclHelper.ResolveContainerSid(databaseProvider.GetDatabase(), containerName);
+        => containerLookup.ResolveContainerSid(containerName);
 }

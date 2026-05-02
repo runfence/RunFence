@@ -1,15 +1,8 @@
 namespace RunFence.Firewall;
 
-public class FirewallApplyException : Exception
+public class FirewallApplyException(FirewallApplyPhase phase, string sid, Exception innerException)
+    : Exception($"Firewall apply failed during {phase} for SID '{sid}'.", innerException)
 {
-    public FirewallApplyException(FirewallApplyPhase phase, string sid, Exception innerException)
-        : base($"Firewall apply failed during {phase} for SID '{sid}'.", innerException)
-    {
-        Phase = phase;
-        Sid = sid;
-    }
-
-    public FirewallApplyPhase Phase { get; }
-    public string Sid { get; }
+    public FirewallApplyPhase Phase { get; } = phase;
     public string CauseMessage => InnerException?.Message ?? Message;
 }

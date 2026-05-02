@@ -16,9 +16,12 @@ namespace RunFence.Tests;
 /// Tests for <see cref="PathGrantService"/> covering grant operations, traverse management,
 /// container interactive-user sync, bulk operations, and utility methods.
 /// NTFS reads/writes are prevented by mocking <see cref="IAclAccessor"/> (wrapped in a real
-/// <see cref="GrantNtfsHelper"/>), <see cref="ITraverseAcl"/>, and <see cref="IAclPermissionService"/>.
+/// <see cref="GrantAceService"/>), <see cref="ITraverseAcl"/>, and <see cref="IAclPermissionService"/>.
 /// <see cref="AncestorTraverseGranter"/> is used directly (not mocked) with a no-op
 /// <see cref="ITraverseAcl"/> mock so no ACEs are written.
+/// No real filesystem access is required — all paths used in tests are synthetic constants that
+/// never exist on disk. For tests against real NTFS ACLs, see
+/// <see cref="PathGrantServiceIntegrationTests"/>.
 /// </summary>
 public class PathGrantServiceTests
 {
@@ -27,23 +30,31 @@ public class PathGrantServiceTests
     private const string OtherContainerSid = "S-1-15-2-99-1-2-3-4-5-7";
     private const string InteractiveSid = "S-1-5-21-1234567890-1234567890-1234567890-1002";
     private const string TestPath = @"C:\TestFolder\SubDir";
+    private const string ExistingDir = @"C:\Existing\TestDir";
 
     private readonly Mock<IAclAccessor> _aclAccessor = new();
     private readonly Mock<ITraverseAcl> _traverseAcl = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
     private readonly Mock<IInteractiveUserResolver> _iuResolver = new();
     private readonly Mock<ILoggingService> _log = new();
+    private readonly TestFileSystemPathInfo _pathInfo = new();
 
     private readonly AppDatabase _database = new();
     private readonly IPathGrantService _service;
     private readonly AncestorTraverseGranter _ancestorGranter;
-    private readonly IGrantNtfsHelper _ntfsHelper;
+    private readonly IGrantAceService _grantAceService;
+    private readonly IFileOwnerService _fileOwnerService;
+    private readonly IPathExistenceService _pathExistenceService;
+    private readonly IMandatoryLabelService _mandatoryLabelService;
 
     private static readonly IUiThreadInvoker SyncInvoker =
-        new LambdaUiThreadInvoker(a => a(), a => a(), a => a());
+        new LambdaUiThreadInvoker(a => a(), a => a());
 
     public PathGrantServiceTests()
     {
+        _pathInfo.AddDirectory(Path.GetPathRoot(TestPath)!);
+        _pathInfo.AddDirectory(ExistingDir);
+
         // HasExplicitTraverseAce=true is used by PromoteNearestAncestor (to detect existing ACEs on
         // ancestor paths) and by the fallback path in AncestorTraverseGranter (when groupSids is null).
         _traverseAcl.Setup(t => t.HasExplicitTraverseAce(It.IsAny<string>(),
@@ -66,9 +77,12 @@ public class PathGrantServiceTests
 
         _iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
 
-        _ntfsHelper = new GrantNtfsHelper(_aclAccessor.Object, _log.Object);
+        _grantAceService = new GrantAceService(_aclAccessor.Object, _pathInfo);
+        _fileOwnerService = new FileOwnerService(_log.Object, _pathInfo);
+        _pathExistenceService = new PathExistenceService(_aclAccessor.Object);
+        _mandatoryLabelService = new MandatoryLabelService(_log.Object, _pathInfo);
         _ancestorGranter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object,
-            _traverseAcl.Object);
+            _traverseAcl.Object, _pathInfo);
 
         _service = BuildService(_database);
     }
@@ -76,14 +90,19 @@ public class PathGrantServiceTests
     private IPathGrantService BuildService(AppDatabase db)
     {
         var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => db), SyncInvoker);
-        var grantCore = new GrantCoreOperations(_ntfsHelper, dbAccessor, _log.Object);
+        var grantCore = new GrantCoreOperations(_grantAceService, _fileOwnerService,
+            dbAccessor, _log.Object, _pathInfo);
         var traverseCore = new TraverseCoreOperations(_traverseAcl.Object,
-            _ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object);
+            _ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
         var containerIuSync = new ContainerInteractiveUserSync(grantCore, traverseCore,
-            _iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object);
-        var syncService = new PathGrantSyncService(dbAccessor, _ntfsHelper, _log.Object);
-        return new PathGrantService(grantCore, traverseCore, _ntfsHelper,
-            _iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, syncService);
+            _iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
+        var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
+            _mandatoryLabelService, dbAccessor);
+        var syncService = new PathGrantSyncService(dbAccessor, _grantAceService, _log.Object, _pathInfo);
+        return new PathGrantService(grantCore, traverseCore, _grantAceService,
+            _fileOwnerService, _pathExistenceService, _mandatoryLabelService,
+            _iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, lowIlSync, syncService,
+            _pathInfo);
     }
 
     private IPathGrantService BuildServiceWithIuResolver(AppDatabase db, string iuSid)
@@ -92,34 +111,77 @@ public class PathGrantServiceTests
         iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns(iuSid);
 
         var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => db), SyncInvoker);
-        var grantCore = new GrantCoreOperations(_ntfsHelper, dbAccessor, _log.Object);
+        var grantCore = new GrantCoreOperations(_grantAceService, _fileOwnerService,
+            dbAccessor, _log.Object, _pathInfo);
         var traverseCore = new TraverseCoreOperations(_traverseAcl.Object,
-            _ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object);
+            _ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
         var containerIuSync = new ContainerInteractiveUserSync(grantCore, traverseCore,
-            iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object);
-        var syncService = new PathGrantSyncService(dbAccessor, _ntfsHelper, _log.Object);
-        return new PathGrantService(grantCore, traverseCore, _ntfsHelper,
-            iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, syncService);
+            iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
+        var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
+            _mandatoryLabelService, dbAccessor);
+        var syncService = new PathGrantSyncService(dbAccessor, _grantAceService, _log.Object, _pathInfo);
+        return new PathGrantService(grantCore, traverseCore, _grantAceService,
+            _fileOwnerService, _pathExistenceService, _mandatoryLabelService,
+            iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, lowIlSync, syncService,
+            _pathInfo);
     }
 
     /// <summary>
-    /// Builds a <see cref="PathGrantService"/> backed by a mocked <see cref="IGrantNtfsHelper"/>
-    /// so that <c>ChangeOwner</c>/<c>ResetOwner</c> calls can be verified without real NTFS I/O.
+    /// Builds a <see cref="PathGrantService"/> backed by mocked NTFS services
+    /// so ACE and owner calls can be verified without real NTFS I/O.
     /// </summary>
-    private PathGrantService BuildServiceWithMockedNtfs(out Mock<IGrantNtfsHelper> ntfsMock, out AppDatabase db)
+    private PathGrantService BuildServiceWithMockedNtfs(
+        out Mock<IGrantAceService> grantAceMock,
+        out Mock<IFileOwnerService> ownerMock,
+        out Mock<IMandatoryLabelService> mandatoryLabelMock,
+        out AppDatabase db)
     {
-        ntfsMock = new Mock<IGrantNtfsHelper>();
+        grantAceMock = new Mock<IGrantAceService>();
+        ownerMock = new Mock<IFileOwnerService>();
+        var pathExistenceMock = new Mock<IPathExistenceService>();
+        mandatoryLabelMock = new Mock<IMandatoryLabelService>();
         var localDb = new AppDatabase();
         db = localDb;
         var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => localDb), SyncInvoker);
-        var grantCore = new GrantCoreOperations(ntfsMock.Object, dbAccessor, _log.Object);
+        var grantCore = new GrantCoreOperations(grantAceMock.Object, ownerMock.Object,
+            dbAccessor, _log.Object, _pathInfo);
         var traverseCore = new TraverseCoreOperations(_traverseAcl.Object,
-            _ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object);
+            _ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
         var containerIuSync = new ContainerInteractiveUserSync(grantCore, traverseCore,
-            _iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object);
-        var syncService = new PathGrantSyncService(dbAccessor, ntfsMock.Object, _log.Object);
-        return new PathGrantService(grantCore, traverseCore, ntfsMock.Object,
-            _iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, syncService);
+            _iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
+        var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
+            mandatoryLabelMock.Object, dbAccessor);
+        var syncService = new PathGrantSyncService(dbAccessor, grantAceMock.Object, _log.Object, _pathInfo);
+        return new PathGrantService(grantCore, traverseCore, grantAceMock.Object,
+            ownerMock.Object, pathExistenceMock.Object, mandatoryLabelMock.Object,
+            _iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, lowIlSync, syncService,
+            _pathInfo);
+    }
+
+    private PathGrantService BuildServiceWithMockedPathExistence(
+        out Mock<IPathExistenceService> pathExistenceMock,
+        out AppDatabase db)
+    {
+        var grantAceMock = new Mock<IGrantAceService>();
+        var ownerMock = new Mock<IFileOwnerService>();
+        var mandatoryLabelMock = new Mock<IMandatoryLabelService>();
+        pathExistenceMock = new Mock<IPathExistenceService>();
+        var localDb = new AppDatabase();
+        db = localDb;
+        var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => localDb), SyncInvoker);
+        var grantCore = new GrantCoreOperations(grantAceMock.Object, ownerMock.Object,
+            dbAccessor, _log.Object, _pathInfo);
+        var traverseCore = new TraverseCoreOperations(_traverseAcl.Object,
+            _ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
+        var containerIuSync = new ContainerInteractiveUserSync(grantCore, traverseCore,
+            _iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
+        var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
+            mandatoryLabelMock.Object, dbAccessor);
+        var syncService = new PathGrantSyncService(dbAccessor, grantAceMock.Object, _log.Object, _pathInfo);
+        return new PathGrantService(grantCore, traverseCore, grantAceMock.Object,
+            ownerMock.Object, pathExistenceMock.Object, mandatoryLabelMock.Object,
+            _iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, lowIlSync, syncService,
+            _pathInfo);
     }
 
     private static SavedRightsState ReadOnly =>
@@ -144,7 +206,7 @@ public class PathGrantServiceTests
         Assert.True(result.DatabaseModified);
         var grants = _database.GetAccount(UserSid)?.Grants;
         Assert.NotNull(grants);
-        Assert.Contains(grants, e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
+        Assert.Contains(grants, e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
     }
 
     [Fact]
@@ -160,7 +222,7 @@ public class PathGrantServiceTests
         Assert.False(result.GrantAdded);
         Assert.True(result.DatabaseModified);
         var grants = _database.GetAccount(UserSid)!.Grants
-            .Where(e => !e.IsTraverseOnly && !e.IsDeny).ToList();
+            .Where(e => e is { IsTraverseOnly: false, IsDeny: false }).ToList();
         Assert.Single(grants);
         Assert.True(grants[0].SavedRights!.Execute);
     }
@@ -184,7 +246,7 @@ public class PathGrantServiceTests
 
         // Assert — entry recorded with DefaultForMode rights
         var entry = _database.GetAccount(UserSid)!.Grants
-            .First(e => !e.IsTraverseOnly && !e.IsDeny);
+            .First(e => e is { IsTraverseOnly: false, IsDeny: false });
         Assert.NotNull(entry.SavedRights);
         Assert.True(entry.SavedRights.Read);
     }
@@ -215,7 +277,20 @@ public class PathGrantServiceTests
         // Assert — IU also has grant
         var iuGrants = db.GetAccount(InteractiveSid)?.Grants;
         Assert.NotNull(iuGrants);
-        Assert.Contains(iuGrants, e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
+        Assert.Contains(iuGrants, e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
+    }
+
+    [Fact]
+    public void AddGrant_AllApplicationPackagesSid_TriggersInteractiveUserSync()
+    {
+        var db = new AppDatabase();
+        var service = BuildServiceWithIuResolver(db, InteractiveSid);
+
+        service.AddGrant(AclHelper.AllApplicationPackagesSid, TestPath, isDeny: false, ReadOnly);
+
+        var iuGrants = db.GetAccount(InteractiveSid)?.Grants;
+        Assert.NotNull(iuGrants);
+        Assert.Contains(iuGrants, e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
     }
 
     [Fact]
@@ -234,33 +309,44 @@ public class PathGrantServiceTests
 
         // Assert — IU has no non-traverse grant for TestPath
         var iuNonTraverse = db.GetAccount(InteractiveSid)?.Grants
-            .Where(e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath).ToList();
+            .Where(e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath }).ToList();
         Assert.Empty(iuNonTraverse ?? []);
     }
 
     [Fact]
     public void AddGrant_WithOwnerSid_RecordsGrantAndAppliesAce()
     {
-        // Arrange: use a real directory (temp) so SetOwnerInternal does not throw.
-        // Set owner to the current process identity — the test user owns the temp dir
-        // and can set owner back to themselves without elevation.
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
-        var currentUserSid = System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value;
-        var db = new AppDatabase();
-        var service = BuildService(db);
+        const string ownerSid = "S-1-5-21-9999-9999-9999-1001";
+        var service = BuildServiceWithMockedNtfs(out var grantAceMock, out var ownerMock,
+            out _, out var db);
 
         // Act
-        var result = service.AddGrant(UserSid, tempDir, isDeny: false, ReadOnly, ownerSid: currentUserSid);
+        var result = service.AddGrant(UserSid, ExistingDir, isDeny: false, ReadOnly, ownerSid: ownerSid);
 
-        // Assert: grant recorded; ACE applied; SetOwner called (no exception = success)
+        // Assert: grant recorded; ACE applied; owner change delegated without real NTFS I/O.
         Assert.True(result.GrantAdded);
         Assert.True(result.DatabaseModified);
         var entry = db.GetAccount(UserSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && !e.IsDeny &&
-                string.Equals(e.Path, tempDir, StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false } &&
+                                 string.Equals(e.Path, ExistingDir, StringComparison.OrdinalIgnoreCase));
         Assert.NotNull(entry);
-        _aclAccessor.Verify(a => a.ApplyExplicitAce(
-            tempDir, UserSid, AccessControlType.Allow, It.IsAny<FileSystemRights>()), Times.Once);
+        grantAceMock.Verify(n => n.ApplyAce(ExistingDir, UserSid, false, ReadOnly, true), Times.Once);
+        ownerMock.Verify(n => n.ChangeOwner(ExistingDir, ownerSid, recursive: false), Times.Once);
+    }
+
+    [Fact]
+    public void AddGrant_LowIntegritySid_IgnoresOwnerAndStoresOwnerOff()
+    {
+        const string ownerSid = "S-1-5-21-9999-9999-9999-1001";
+        var ownerRights = ReadExecute with { Own = true };
+        var service = BuildServiceWithMockedNtfs(out _, out var ownerMock, out _, out var db);
+
+        service.AddGrant(AclHelper.LowIntegritySid, TestPath, isDeny: false, ownerRights, ownerSid: ownerSid);
+
+        var entry = db.GetAccount(AclHelper.LowIntegritySid)!.Grants
+            .First(e => e is { IsTraverseOnly: false, IsDeny: false });
+        Assert.False(entry.SavedRights!.Own);
+        ownerMock.Verify(n => n.ChangeOwner(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
     }
 
     // --- UpdateGrant ---
@@ -276,7 +362,7 @@ public class PathGrantServiceTests
 
         // Assert: DB entry has new SavedRights
         var entry = _database.GetAccount(UserSid)!.Grants
-            .First(e => !e.IsTraverseOnly && !e.IsDeny);
+            .First(e => e is { IsTraverseOnly: false, IsDeny: false });
         Assert.NotNull(entry.SavedRights);
         Assert.True(entry.SavedRights!.Execute);
     }
@@ -302,9 +388,9 @@ public class PathGrantServiceTests
     [Fact]
     public void UpdateGrant_WithOwnerSid_CallsChangeOwnerWithCorrectSid()
     {
-        // Arrange: mock IGrantNtfsHelper directly so ChangeOwner can be verified without real NTFS calls.
+        // Arrange: mock owner service directly so ChangeOwner can be verified without real NTFS calls.
         const string ownerSid = "S-1-5-21-9999-9999-9999-1001";
-        var service = BuildServiceWithMockedNtfs(out var ntfsMock, out var db);
+        var service = BuildServiceWithMockedNtfs(out _, out var ownerMock, out _, out var db);
 
         // Pre-populate DB entry directly so no NTFS calls from AddGrant interfere with verification.
         db.GetOrCreateAccount(UserSid).Grants.Add(
@@ -314,7 +400,24 @@ public class PathGrantServiceTests
         service.UpdateGrant(UserSid, TestPath, isDeny: false, ReadExecute, ownerSid: ownerSid);
 
         // Assert: ChangeOwner called with the correct owner SID (non-recursive for UpdateGrant)
-        ntfsMock.Verify(n => n.ChangeOwner(It.IsAny<string>(), ownerSid, false), Times.Once);
+        ownerMock.Verify(n => n.ChangeOwner(It.IsAny<string>(), ownerSid, false), Times.Once);
+    }
+
+    [Fact]
+    public void UpdateGrant_LowIntegritySid_IgnoresOwnerAndStoresOwnerOff()
+    {
+        const string ownerSid = "S-1-5-21-9999-9999-9999-1001";
+        var ownerRights = ReadExecute with { Own = true };
+        var service = BuildServiceWithMockedNtfs(out _, out var ownerMock, out _, out var db);
+        db.GetOrCreateAccount(AclHelper.LowIntegritySid).Grants.Add(
+            new GrantedPathEntry { Path = TestPath, IsDeny = false, SavedRights = ReadOnly });
+
+        service.UpdateGrant(AclHelper.LowIntegritySid, TestPath, isDeny: false, ownerRights, ownerSid: ownerSid);
+
+        var entry = db.GetAccount(AclHelper.LowIntegritySid)!.Grants
+            .First(e => e is { IsTraverseOnly: false, IsDeny: false });
+        Assert.False(entry.SavedRights!.Own);
+        ownerMock.Verify(n => n.ChangeOwner(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
     }
 
     [Fact]
@@ -328,7 +431,7 @@ public class PathGrantServiceTests
 
         // Assert: still only one non-traverse allow entry
         var grants = _database.GetAccount(UserSid)!.Grants
-            .Where(e => !e.IsTraverseOnly && !e.IsDeny).ToList();
+            .Where(e => e is { IsTraverseOnly: false, IsDeny: false }).ToList();
         Assert.Single(grants);
     }
 
@@ -351,7 +454,7 @@ public class PathGrantServiceTests
 
         // DB entry unchanged (still has SavedRights = ReadOnly; FixGrant does not modify SavedRights)
         var entry = _database.GetAccount(UserSid)!.Grants
-            .First(e => !e.IsTraverseOnly && !e.IsDeny);
+            .First(e => e is { IsTraverseOnly: false, IsDeny: false });
         Assert.NotNull(entry.SavedRights);
         Assert.False(entry.SavedRights!.Execute);
     }
@@ -399,7 +502,7 @@ public class PathGrantServiceTests
         // Assert: no duplicate traverse entry added (FixTraverse updates AllAppliedPaths on the existing
         // entry but does not insert a new one)
         var traverseEntries = _database.GetAccount(UserSid)!.Grants
-            .Where(e => e.IsTraverseOnly && e.Path == TestPath).ToList();
+            .Where(e => e is { IsTraverseOnly: true, Path: TestPath }).ToList();
         Assert.Single(traverseEntries); // still exactly one
     }
 
@@ -407,7 +510,7 @@ public class PathGrantServiceTests
     public void FixTraverse_ReturnsVisitedPaths()
     {
         // Arrange: use a path that exists so AncestorTraverseGranter visits at least one ancestor
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
         _database.GetOrCreateAccount(UserSid).Grants.Add(
             new GrantedPathEntry { Path = tempDir, IsTraverseOnly = true });
 
@@ -427,7 +530,7 @@ public class PathGrantServiceTests
         // A real existing directory is used so pathExists=true and the auto-fix check runs.
         // The security descriptor has an explicit ReadMask ACE matching the DB SavedRights,
         // so needsFix=false. Combined with NeedsPermissionGrant=false, EnsureAccess returns no-op.
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
 
         // Blank security (no inherited ACEs) with exactly one explicit allow ACE matching ReadOnly.
         var security = new DirectorySecurity();
@@ -460,7 +563,7 @@ public class PathGrantServiceTests
     {
         // Arrange: no DB entry, path exists, but account already has sufficient rights.
         // This is the bug scenario: toolbar folder browser on user's own profile folder.
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
         _aclPermission.Setup(p => p.NeedsPermissionGrant(tempDir, UserSid,
                 It.IsAny<FileSystemRights>(), It.IsAny<bool>()))
             .Returns(false);
@@ -478,11 +581,34 @@ public class PathGrantServiceTests
     }
 
     [Fact]
+    public void EnsureAccess_SpecificContainerSid_AllApplicationPackagesAlreadyEffective_DoesNotAddContainerGrant()
+    {
+        _aclPermission.Setup(p => p.NeedsPermissionGrant(
+                ExistingDir,
+                AclHelper.AllApplicationPackagesSid,
+                It.IsAny<FileSystemRights>(),
+                false))
+            .Returns(false);
+
+        var result = _service.EnsureAccess(ContainerSid, ExistingDir, ReadExecute, confirm: null);
+
+        Assert.False(result.GrantAdded);
+        Assert.False(result.TraverseAdded);
+        Assert.False(result.DatabaseModified);
+        Assert.Null(_database.GetAccount(ContainerSid));
+        _aclPermission.Verify(p => p.NeedsPermissionGrant(
+            ExistingDir,
+            ContainerSid,
+            It.IsAny<FileSystemRights>(),
+            false), Times.Never);
+    }
+
+    [Fact]
     public void EnsureAccess_NewGrantNeeded_NullConfirm_ProceedsSilently()
     {
         // Arrange: no existing grant; path exists but account lacks access — grantNeeded=true via NeedsPermissionGrant.
         // Null confirm = silent grant, no prompt. Post-grant verification returns false (access now sufficient).
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
         _aclPermission.SetupSequence(p => p.NeedsPermissionGrant(tempDir, UserSid,
                 It.IsAny<FileSystemRights>(), It.IsAny<bool>()))
             .Returns(true)   // grantNeeded check
@@ -494,7 +620,7 @@ public class PathGrantServiceTests
         // Assert
         Assert.True(result.GrantAdded);
         var grants = _database.GetAccount(UserSid)?.Grants;
-        Assert.Contains(grants!, e => !e.IsTraverseOnly && !e.IsDeny && e.Path == tempDir);
+        Assert.Contains(grants!, e => e is { IsTraverseOnly: false, IsDeny: false } && e.Path == tempDir);
     }
 
     [Fact]
@@ -502,7 +628,7 @@ public class PathGrantServiceTests
     {
         // Arrange: no existing grant; path exists but account lacks access.
         // confirm is called before applying the grant; post-grant verification returns false (access now sufficient).
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
         _aclPermission.SetupSequence(p => p.NeedsPermissionGrant(tempDir, UserSid,
                 It.IsAny<FileSystemRights>(), It.IsAny<bool>()))
             .Returns(true)   // grantNeeded check
@@ -524,7 +650,7 @@ public class PathGrantServiceTests
     {
         // Arrange: no existing grant; path exists but account lacks access.
         // NeedsPermissionGrant=true (default) → grantNeeded=true → confirm called → rejects → OCE.
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
 
         // Act + Assert: confirm rejects the grant → OperationCanceledException
         Assert.Throws<OperationCanceledException>(
@@ -550,11 +676,33 @@ public class PathGrantServiceTests
     }
 
     [Fact]
+    public void EnsureAccess_StandardPathInfoMissing_UsesPathExistenceServiceFallback()
+    {
+        const string fallbackPath = @"C:\DeniedButReachable\Target";
+        var service = BuildServiceWithMockedPathExistence(out var pathExistenceMock, out var db);
+        bool aclIsFolder = true;
+        pathExistenceMock.Setup(p => p.PathExists(fallbackPath, out aclIsFolder))
+            .Returns(true);
+        _aclPermission.SetupSequence(p => p.NeedsPermissionGrant(fallbackPath, UserSid,
+                It.IsAny<FileSystemRights>(), It.IsAny<bool>()))
+            .Returns(true)
+            .Returns(false);
+
+        var result = service.EnsureAccess(UserSid, fallbackPath, ReadOnly, confirm: null);
+
+        Assert.True(result.GrantAdded);
+        pathExistenceMock.Verify(p => p.PathExists(fallbackPath, out aclIsFolder), Times.Once);
+        Assert.Contains(db.GetAccount(UserSid)!.Grants,
+            e => e is { IsTraverseOnly: false, IsDeny: false } &&
+                 string.Equals(e.Path, fallbackPath, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void EnsureAccess_MergesFlags_NeverReducesExistingAccess()
     {
         // Arrange: existing grant has Execute=true; disk ACE is missing (needsFix=true) so EnsureAccess
         // will re-apply the grant using merged rights (ReadOnly requested but Execute must be preserved).
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
 
         // Empty ACL → DirectAllowAceCount=0 → needsFix=true → EnsureAccess applies merged rights
         _aclAccessor.Setup(a => a.GetSecurity(tempDir)).Returns(EmptySecurity());
@@ -570,7 +718,7 @@ public class PathGrantServiceTests
 
         // Assert: grant still has Execute=true (merge preserved it, not reduced)
         var entry = _database.GetAccount(UserSid)!.Grants
-            .First(e => !e.IsTraverseOnly && !e.IsDeny && e.Path == tempDir);
+            .First(e => e is { IsTraverseOnly: false, IsDeny: false } && e.Path == tempDir);
         Assert.True(entry.SavedRights!.Execute);
     }
 
@@ -579,7 +727,7 @@ public class PathGrantServiceTests
     {
         // Arrange: DB entry exists but disk has no explicit allow ACE (DirectAllowAceCount == 0).
         // This simulates a state where the ACE was lost but the DB still records the grant.
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
 
         // Empty security (no explicit ACEs) so DirectAllowAceCount = 0 → needsFix=true
         var emptyAcl = EmptySecurity();
@@ -655,8 +803,33 @@ public class PathGrantServiceTests
         // newDenyExecute = existingDeny.Execute && !requestedAllow.Execute = false && true = false
         // → deny fully removed.
         var denyEntry = _database.GetAccount(UserSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && e.IsDeny && e.Path == TestPath);
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: true, Path: TestPath });
         Assert.Null(denyEntry); // fully removed: no remaining conflicting deny flags
+    }
+
+    [Fact]
+    public void EnsureAccess_DenyConflictPartialWeakening_ReducesDenyEntryToRemainingFlags()
+    {
+        // F-75: partial-weakening — deny has both Execute=true and Read=true, but only
+        // Read is requested by EnsureAccess. After conflict resolution:
+        //   newDenyRead    = denyState.Read    && !requestedAllow.Read    = true  && false = false
+        //   newDenyExecute = denyState.Execute && !requestedAllow.Execute = true  && true  = true
+        // Since newDenyExecute is still true, the deny entry must be UPDATED (not removed)
+        // with Execute=true and Read=false — a partial weakening.
+
+        // Arrange: deny entry with both Read=true and Execute=true
+        var denyRights = new SavedRightsState(Execute: true, Write: true, Read: true, Special: true, Own: false);
+        _service.AddGrant(UserSid, TestPath, isDeny: true, denyRights);
+
+        // Act: request allow with Read-only (Execute=false) — only the Read conflict is resolved
+        _service.EnsureAccess(UserSid, TestPath, ReadOnly, confirm: (_, _) => true);
+
+        // Assert: deny entry still exists (partial weakening, not full removal) with Execute=true, Read=false
+        var denyEntry = _database.GetAccount(UserSid)?.Grants
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: true, Path: TestPath });
+        Assert.NotNull(denyEntry); // entry remains (Execute-only deny still applies)
+        Assert.True(denyEntry!.SavedRights!.Execute, "Execute deny must remain — not requested by EnsureAccess");
+        Assert.False(denyEntry.SavedRights.Read, "Read deny must be cleared — it conflicted with the requested allow");
     }
 
     [Fact]
@@ -678,7 +851,7 @@ public class PathGrantServiceTests
         // Arrange: use a real existing directory so pathExists=true and the post-grant
         // verification runs. NeedsPermissionGrant always returns true (default mock),
         // simulating a parent deny that blocks access even after the grant is applied.
-        var tempDir = Path.GetTempPath();
+        var tempDir = ExistingDir;
 
         // Act + Assert
         Assert.Throws<InvalidOperationException>(
@@ -690,7 +863,7 @@ public class PathGrantServiceTests
     {
         // Arrange: path exists, account lacks access → grant applied. Uses SetupSequence so
         // post-grant verification returns false (access now sufficient after the grant).
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
         _aclPermission.SetupSequence(p => p.NeedsPermissionGrant(tempDir, UserSid,
                 It.IsAny<FileSystemRights>(), It.IsAny<bool>()))
             .Returns(true)   // grantNeeded check
@@ -711,7 +884,7 @@ public class PathGrantServiceTests
         // traverse ACE is missing on disk (HasEffectiveTraverse=false). The grant ACE is correct
         // (DirectAllowAceCount=1, matching diskRights). NeedsPermissionGrant returns false
         // (file rights are fine). Only the traverse needs to be re-applied.
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
 
         // Security with correct allow ACE so needsFix=false (disk ACE matches)
         var security = CreateSecurityWithAllowAce(UserSid, GrantRightsMapper.ReadMask);
@@ -756,10 +929,10 @@ public class PathGrantServiceTests
         // Assert
         Assert.True(removed);
         var grants = _database.GetAccount(UserSid)?.Grants
-            .Where(e => !e.IsTraverseOnly && !e.IsDeny).ToList();
+            .Where(e => e is { IsTraverseOnly: false, IsDeny: false }).ToList();
         Assert.Empty(grants ?? []);
         _aclAccessor.Verify(a => a.RemoveExplicitAces(TestPath, UserSid,
-            AccessControlType.Allow), Times.AtLeastOnce);
+            AccessControlType.Allow, It.IsAny<Func<FileSystemAccessRule, bool>?>()), Times.AtLeastOnce);
     }
 
     [Fact]
@@ -787,9 +960,10 @@ public class PathGrantServiceTests
     [Fact]
     public void RemoveGrant_OrphanedTraverseCleaned_WhenNoOtherGrantsNeedIt()
     {
-        // Arrange: add grant for a real directory so the traverse entry's path actually exists.
+        // Arrange: add grant for a fake existing directory so the traverse entry's path exists
+        // for the service without touching the real filesystem.
         // This ensures pathIsStale=false in RemoveTraverse and PromoteNearestAncestor does not run.
-        var tempDir = Path.GetFullPath(Path.GetTempPath());
+        var tempDir = ExistingDir;
         _service.AddGrant(UserSid, tempDir, isDeny: false, ReadOnly);
 
         // Verify traverse was auto-added
@@ -843,14 +1017,14 @@ public class PathGrantServiceTests
 
         // Verify IU has the grant
         Assert.Contains(db.GetAccount(InteractiveSid)?.Grants ?? [],
-            e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
+            e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
 
         // Act: remove container grant
         service.RemoveGrant(ContainerSid, TestPath, isDeny: false, updateFileSystem: true);
 
         // Assert: IU grant also removed
         var iuEntry = db.GetAccount(InteractiveSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
         Assert.Null(iuEntry);
     }
 
@@ -860,13 +1034,13 @@ public class PathGrantServiceTests
     public void AddTraverse_NewEntry_RecordsDbEntry()
     {
         // Act
-        var (modified, visited) = _service.AddTraverse(UserSid, TestPath);
+        var (_, visited) = _service.AddTraverse(UserSid, TestPath);
 
         // Assert — DB entry recorded. TestPath itself does not exist, so AncestorTraverseGranter
         // skips it and visits the nearest existing ancestor (C:\). anyAceAdded=false because
         // HasEffectiveRights returns true (default mock), but dbEntryIsNew=true so modified=true.
         var traverseEntry = _database.GetAccount(UserSid)?.Grants
-            .FirstOrDefault(e => e.IsTraverseOnly && e.Path == TestPath);
+            .FirstOrDefault(e => e is { IsTraverseOnly: true, Path: TestPath });
         Assert.NotNull(traverseEntry);
         // Visited ancestor paths returned for cleanup tracking
         Assert.NotEmpty(visited);
@@ -884,8 +1058,90 @@ public class PathGrantServiceTests
 
         // Assert: IU also has a traverse entry
         var iuEntry = db.GetAccount(InteractiveSid)?.Grants
-            .FirstOrDefault(e => e.IsTraverseOnly && e.Path == TestPath);
+            .FirstOrDefault(e => e is { IsTraverseOnly: true, Path: TestPath });
         Assert.NotNull(iuEntry);
+    }
+
+    [Fact]
+    public void AddTraverse_SpecificContainerSid_AddsSharedAllApplicationPackagesTraverse()
+    {
+        // Arrange
+        _traverseAcl.Invocations.Clear();
+        _aclPermission.Setup(p => p.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(),
+                TraverseRightsHelper.TraverseRights))
+            .Returns(false);
+
+        // Act
+        _service.AddTraverse(ContainerSid, ExistingDir);
+
+        // Assert
+        _traverseAcl.Verify(t => t.AddAllowAce(
+            It.IsAny<string>(),
+            It.Is<SecurityIdentifier>(s => s.Value == ContainerSid)), Times.Never);
+        _traverseAcl.Verify(t => t.AddAllowAce(
+            It.IsAny<string>(),
+            It.Is<SecurityIdentifier>(s => s.Value == AclHelper.AllApplicationPackagesSid)), Times.AtLeastOnce);
+        Assert.Contains(_database.SharedContainerTraverseGrants,
+            e => e.IsTraverseOnly && string.Equals(e.Path, ExistingDir, StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(_database.GetAccount(ContainerSid)?.Grants ?? [],
+            e => e.IsTraverseOnly && string.Equals(e.Path, ExistingDir, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void AddTraverse_SpecificContainerSid_AllApplicationPackagesAlreadyEffective_DoesNotAddContainerAce()
+    {
+        // Arrange
+        _traverseAcl.Invocations.Clear();
+        _aclPermission.Setup(p => p.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                ContainerSid,
+                It.IsAny<IReadOnlyList<string>>(),
+                TraverseRightsHelper.TraverseRights))
+            .Returns(false);
+        _aclPermission.Setup(p => p.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                AclHelper.AllApplicationPackagesSid,
+                It.IsAny<IReadOnlyList<string>>(),
+                TraverseRightsHelper.TraverseRights))
+            .Returns(true);
+
+        // Act
+        _service.AddTraverse(ContainerSid, ExistingDir);
+
+        // Assert
+        _traverseAcl.Verify(t => t.AddAllowAce(
+            It.IsAny<string>(),
+            It.Is<SecurityIdentifier>(s => s.Value == ContainerSid)), Times.Never);
+    }
+
+    [Fact]
+    public void AddTraverse_SpecificContainerSid_SpecificGrantAlreadyEffective_DoesNotAddSharedAceOnSamePath()
+    {
+        // Arrange
+        _traverseAcl.Invocations.Clear();
+        _aclPermission.Setup(p => p.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                ContainerSid,
+                It.IsAny<IReadOnlyList<string>>(),
+                TraverseRightsHelper.TraverseRights))
+            .Returns(true);
+        _aclPermission.Setup(p => p.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                AclHelper.AllApplicationPackagesSid,
+                It.IsAny<IReadOnlyList<string>>(),
+                TraverseRightsHelper.TraverseRights))
+            .Returns(false);
+
+        // Act
+        _service.AddTraverse(ContainerSid, ExistingDir);
+
+        // Assert
+        _traverseAcl.Verify(t => t.AddAllowAce(
+            ExistingDir,
+            It.Is<SecurityIdentifier>(s => s.Value == AclHelper.AllApplicationPackagesSid)), Times.Never);
     }
 
     [Fact]
@@ -900,7 +1156,7 @@ public class PathGrantServiceTests
         // Assert
         Assert.True(removed);
         var traverseEntries = _database.GetAccount(UserSid)?.Grants
-            .Where(e => e.IsTraverseOnly && e.Path == TestPath).ToList();
+            .Where(e => e is { IsTraverseOnly: true, Path: TestPath }).ToList();
         Assert.Empty(traverseEntries ?? []);
     }
 
@@ -923,14 +1179,14 @@ public class PathGrantServiceTests
 
         // Verify IU has traverse
         Assert.Contains(db.GetAccount(InteractiveSid)?.Grants ?? [],
-            e => e.IsTraverseOnly && e.Path == TestPath);
+            e => e is { IsTraverseOnly: true, Path: TestPath });
 
         // Act
         service.RemoveTraverse(ContainerSid, TestPath, updateFileSystem: true);
 
         // Assert: IU traverse removed
         var iuEntry = db.GetAccount(InteractiveSid)?.Grants
-            .FirstOrDefault(e => e.IsTraverseOnly && e.Path == TestPath);
+            .FirstOrDefault(e => e is { IsTraverseOnly: true, Path: TestPath });
         Assert.Null(iuEntry);
     }
 
@@ -941,7 +1197,7 @@ public class PathGrantServiceTests
         // applied ancestor paths. One of those ancestors exists on disk and has an explicit
         // traverse ACE → it should be promoted to a standalone DB entry.
         const string stalePath = @"C:\DoesNotExistNever\GoneDir";
-        var tempDir = Path.GetFullPath(Path.GetTempPath()); // real path that "exists"
+        var tempDir = ExistingDir;
 
         // The stale entry references tempDir as an applied ancestor
         var staleEntry = new GrantedPathEntry
@@ -963,7 +1219,7 @@ public class PathGrantServiceTests
         // Assert: stale entry removed; tempDir promoted as new standalone traverse entry
         Assert.True(removed);
         var grants = _database.GetAccount(UserSid)?.Grants;
-        Assert.DoesNotContain(grants ?? [], e => e.IsTraverseOnly && e.Path == stalePath);
+        Assert.DoesNotContain(grants ?? [], e => e is { IsTraverseOnly: true, Path: stalePath });
         Assert.Contains(grants ?? [], e => e.IsTraverseOnly &&
             string.Equals(e.Path, tempDir, StringComparison.OrdinalIgnoreCase));
     }
@@ -1008,29 +1264,29 @@ public class PathGrantServiceTests
     // --- ChangeOwner / ResetOwner ---
 
     [Fact]
-    public void ChangeOwner_ForwardsToNtfsHelper()
+    public void ChangeOwner_ForwardsToOwnerService()
     {
-        // Arrange: build service with a mocked IGrantNtfsHelper so the forwarding can be verified
-        var service = BuildServiceWithMockedNtfs(out var ntfsMock, out _);
+        // Arrange: build service with a mocked owner service so the forwarding can be verified.
+        var service = BuildServiceWithMockedNtfs(out _, out var ownerMock, out _, out _);
 
         // Act
         service.ChangeOwner(TestPath, UserSid, recursive: true);
 
-        // Assert: forwarded to ntfsHelper.ChangeOwner with the exact same arguments
-        ntfsMock.Verify(n => n.ChangeOwner(TestPath, UserSid, true), Times.Once);
+        // Assert: forwarded with the exact same arguments.
+        ownerMock.Verify(n => n.ChangeOwner(TestPath, UserSid, true), Times.Once);
     }
 
     [Fact]
-    public void ResetOwner_ForwardsToNtfsHelper()
+    public void ResetOwner_ForwardsToOwnerService()
     {
-        // Arrange: build service with a mocked IGrantNtfsHelper
-        var service = BuildServiceWithMockedNtfs(out var ntfsMock, out _);
+        // Arrange: build service with a mocked owner service.
+        var service = BuildServiceWithMockedNtfs(out _, out var ownerMock, out _, out _);
 
         // Act
         service.ResetOwner(TestPath, recursive: false);
 
-        // Assert: forwarded to ntfsHelper.ResetOwner with the exact same arguments
-        ntfsMock.Verify(n => n.ResetOwner(TestPath, false), Times.Once);
+        // Assert: forwarded with the exact same arguments.
+        ownerMock.Verify(n => n.ResetOwner(TestPath, false), Times.Once);
     }
 
     // --- RemoveAll ---
@@ -1051,13 +1307,13 @@ public class PathGrantServiceTests
 
         // Verify NTFS revert was called for the grant
         _aclAccessor.Verify(a => a.RemoveExplicitAces(TestPath, UserSid,
-            AccessControlType.Allow), Times.AtLeastOnce);
+            AccessControlType.Allow, It.IsAny<Func<FileSystemAccessRule, bool>?>()), Times.AtLeastOnce);
     }
 
     [Fact]
-    public void RemoveAll_ContainerSid_RevertsIuGrantsWithSavedRightsEquality()
+    public void RemoveAll_ContainerSid_RevertsIuGrants()
     {
-        // Arrange: container and IU both have same grant
+        // Arrange: container and IU both have a grant for the same path
         var db = new AppDatabase();
         var service = BuildServiceWithIuResolver(db, InteractiveSid);
 
@@ -1065,15 +1321,15 @@ public class PathGrantServiceTests
 
         // Verify IU has the matching grant
         var iuBefore = db.GetAccount(InteractiveSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
         Assert.NotNull(iuBefore);
 
         // Act
         service.RemoveAll(ContainerSid, updateFileSystem: true);
 
-        // Assert: IU grant removed (SavedRights matched)
+        // Assert: IU grant removed because OwnerContainerSid matches
         var iuEntry = db.GetAccount(InteractiveSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
         Assert.Null(iuEntry);
     }
 
@@ -1092,31 +1348,74 @@ public class PathGrantServiceTests
 
         // Assert: IU grant preserved because OtherContainerSid still needs the path
         var iuEntry = db.GetAccount(InteractiveSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
         Assert.NotNull(iuEntry);
     }
 
     [Fact]
-    public void RemoveAll_ContainerSid_IuGrantPreservedWhenSavedRightsDiffer()
+    public void RemoveAll_SpecificContainerSid_SharedTraversePreservedWhenOtherContainerGrantNeedsPath()
     {
-        // Arrange: container has ReadOnly rights but IU grant has ReadExecute (different source)
+        _aclPermission.Setup(p => p.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(),
+                TraverseRightsHelper.TraverseRights))
+            .Returns(false);
+        var db = new AppDatabase();
+        var service = BuildServiceWithIuResolver(db, InteractiveSid);
+        service.AddGrant(ContainerSid, ExistingDir, isDeny: false, ReadOnly);
+        service.AddGrant(OtherContainerSid, ExistingDir, isDeny: false, ReadOnly);
+
+        _traverseAcl.Invocations.Clear();
+
+        service.RemoveAll(ContainerSid, updateFileSystem: true);
+
+        _traverseAcl.Verify(t => t.RemoveTraverseOnlyAce(
+            It.IsAny<string>(),
+            It.Is<SecurityIdentifier>(s => s.Value == AclHelper.AllApplicationPackagesSid)), Times.Never);
+        Assert.Contains(db.SharedContainerTraverseGrants,
+            e => e.IsTraverseOnly && string.Equals(e.Path, ExistingDir, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void RemoveAll_SpecificContainerSid_SharedTraverseRemovedWhenNoContainerGrantNeedsPath()
+    {
+        _aclPermission.Setup(p => p.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(),
+                TraverseRightsHelper.TraverseRights))
+            .Returns(false);
+
+        _service.AddGrant(ContainerSid, ExistingDir, isDeny: false, ReadOnly);
+
+        _service.RemoveAll(ContainerSid, updateFileSystem: true);
+
+        Assert.DoesNotContain(_database.SharedContainerTraverseGrants,
+            e => e.IsTraverseOnly && string.Equals(e.Path, ExistingDir, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void RemoveAll_ContainerSid_IuGrantRemovedWhenOwnerMatches_EvenIfSavedRightsDiffer()
+    {
+        // Arrange: container has ReadOnly rights but IU grant has ReadExecute (different SavedRights)
         var db = new AppDatabase();
         var service = BuildServiceWithIuResolver(db, InteractiveSid);
 
         service.AddGrant(ContainerSid, TestPath, isDeny: false, ReadOnly);
 
-        // Override the IU's SavedRights to simulate a different origin
+        // Override the IU's SavedRights to simulate rights differing from container's
         var iuEntry = db.GetOrCreateAccount(InteractiveSid).Grants
-            .First(e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
+            .First(e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
         iuEntry.SavedRights = ReadExecute;
 
         // Act
         service.RemoveAll(ContainerSid, updateFileSystem: true);
 
-        // Assert: IU grant preserved because SavedRights differ from container's
-        var preserved = db.GetAccount(InteractiveSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && !e.IsDeny && e.Path == TestPath);
-        Assert.NotNull(preserved);
+        // Assert: IU grant removed because OwnerContainerSid matches — SavedRights difference is irrelevant
+        var removed = db.GetAccount(InteractiveSid)?.Grants
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false, Path: TestPath });
+        Assert.Null(removed);
     }
 
     [Fact]
@@ -1155,7 +1454,7 @@ public class PathGrantServiceTests
     public void UpdateFromPath_DiscoverGrant_CreatesDbEntry()
     {
         // Arrange: path exists; ACL has an allow ACE for UserSid with ReadMask (not traverse-only)
-        var tempDir = Path.GetTempPath();
+        var tempDir = ExistingDir;
         var security = CreateSecurityWithAllowAce(UserSid, GrantRightsMapper.ReadMask);
         _aclAccessor.Setup(a => a.GetSecurity(tempDir)).Returns(security);
 
@@ -1165,8 +1464,8 @@ public class PathGrantServiceTests
         // Assert: grant entry created
         Assert.True(modified);
         var entry = _database.GetAccount(UserSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && !e.IsDeny &&
-                string.Equals(e.Path, tempDir, StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false } &&
+                                 string.Equals(e.Path, tempDir, StringComparison.OrdinalIgnoreCase));
         Assert.NotNull(entry);
     }
 
@@ -1174,7 +1473,7 @@ public class PathGrantServiceTests
     public void UpdateFromPath_DiscoverTraverseAce_CreatesTraverseDbEntry()
     {
         // Arrange: path exists; ACL has traverse-only ACE for UserSid
-        var tempDir = Path.GetTempPath();
+        var tempDir = ExistingDir;
         var security = CreateSecurityWithAllowAce(UserSid, GrantRightsMapper.TraverseOnlyMask);
         _aclAccessor.Setup(a => a.GetSecurity(tempDir)).Returns(security);
 
@@ -1190,10 +1489,27 @@ public class PathGrantServiceTests
     }
 
     [Fact]
+    public void UpdateFromPath_AllApplicationPackagesTraverseAce_CreatesSharedTraverseDbEntry()
+    {
+        var tempDir = ExistingDir;
+        var security = CreateSecurityWithAllowAce(
+            AclHelper.AllApplicationPackagesSid,
+            GrantRightsMapper.TraverseOnlyMask);
+        _aclAccessor.Setup(a => a.GetSecurity(tempDir)).Returns(security);
+
+        var modified = _service.UpdateFromPath(tempDir, AclHelper.AllApplicationPackagesSid);
+
+        Assert.True(modified);
+        Assert.Contains(_database.SharedContainerTraverseGrants,
+            e => e.IsTraverseOnly && string.Equals(e.Path, tempDir, StringComparison.OrdinalIgnoreCase));
+        Assert.Null(_database.GetAccount(AclHelper.AllApplicationPackagesSid));
+    }
+
+    [Fact]
     public void UpdateFromPath_NoNewAces_ReturnsFalse()
     {
         // Arrange: path exists; ACL has an ACE for UserSid that already matches the DB
-        var tempDir = Path.GetTempPath();
+        var tempDir = ExistingDir;
         var rights = ReadOnly;
         // Pre-populate the DB entry to match what ACL would return
         _database.GetOrCreateAccount(UserSid).Grants.Add(
@@ -1213,7 +1529,7 @@ public class PathGrantServiceTests
     public void UpdateFromPath_NullSid_ProcessesAllSidsFoundInAcl()
     {
         // Arrange: path exists; ACL has ACE for UserSid
-        var tempDir = Path.GetTempPath();
+        var tempDir = ExistingDir;
         var security = CreateSecurityWithAllowAce(UserSid, GrantRightsMapper.ReadMask);
         _aclAccessor.Setup(a => a.GetSecurity(tempDir)).Returns(security);
 
@@ -1223,7 +1539,7 @@ public class PathGrantServiceTests
         // Assert: DB updated for UserSid
         Assert.True(modified);
         var entry = _database.GetAccount(UserSid)?.Grants
-            .FirstOrDefault(e => !e.IsTraverseOnly && !e.IsDeny);
+            .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false });
         Assert.NotNull(entry);
     }
 
@@ -1242,7 +1558,7 @@ public class PathGrantServiceTests
     public void CheckGrantStatus_PathExistsNoMatchingAce_ReturnsBroken()
     {
         // Arrange: path exists (temp dir) but its ACL has no ACE for UserSid in allow mode
-        var tempDir = Path.GetTempPath();
+        var tempDir = ExistingDir;
         var security = EmptySecurity();
         _aclAccessor.Setup(a => a.GetSecurity(tempDir)).Returns(security);
 
@@ -1256,7 +1572,7 @@ public class PathGrantServiceTests
     public void CheckGrantStatus_PathExistsWithMatchingAce_ReturnsAvailable()
     {
         // Arrange: path exists and ACL has allow ACE for UserSid
-        var tempDir = Path.GetTempPath();
+        var tempDir = ExistingDir;
         var security = CreateSecurityWithAllowAce(UserSid, GrantRightsMapper.ReadMask);
         _aclAccessor.Setup(a => a.GetSecurity(tempDir)).Returns(security);
 
@@ -1270,7 +1586,7 @@ public class PathGrantServiceTests
     public void ReadGrantState_EmptyAcl_ReturnsAllUncheckedWithZeroAceCounts()
     {
         // Arrange
-        var tempDir = Path.GetTempPath();
+        var tempDir = ExistingDir;
         _aclAccessor.Setup(a => a.GetSecurity(tempDir)).Returns(EmptySecurity());
 
         // Act

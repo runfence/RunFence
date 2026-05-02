@@ -1,6 +1,3 @@
-using System.Runtime.InteropServices;
-using System.Text;
-using Microsoft.Win32.SafeHandles;
 using Moq;
 using RunFence.Account;
 using RunFence.Account.OrphanedProfiles;
@@ -19,7 +16,6 @@ public class OrphanedProfileServiceTests : IDisposable
     private const string DeadSid = "S-1-5-21-9999999999-9999999999-9999999999-1001";
     private const string AliveSid = "S-1-5-21-9999999999-9999999999-9999999999-1002";
 
-    // Creates a service with injectable registry entries and account existence set
     private TestOrphanedProfileService CreateService(
         IEnumerable<(string Sid, string ProfilePath)>? registryEntries = null,
         IEnumerable<string>? aliveAccounts = null) =>
@@ -209,9 +205,9 @@ public class OrphanedProfileServiceTests : IDisposable
         var profileDir = Path.Combine(_usersDir.Path, "UserWithJunction");
         Directory.CreateDirectory(profileDir);
 
-        // Directory junctions do not require elevation — create via P/Invoke directly.
+        // Directory junctions do not require elevation — create via JunctionHelper.
         var junctionPath = Path.Combine(profileDir, "Junction");
-        CreateJunction(junctionPath, externalDir.Path);
+        JunctionHelper.CreateJunction(junctionPath, externalDir.Path);
 
         var profile = new OrphanedProfile(null, profileDir);
         var service = CreateService();
@@ -226,70 +222,6 @@ public class OrphanedProfileServiceTests : IDisposable
         Assert.True(Directory.Exists(externalDir.Path));
         Assert.True(File.Exists(Path.Combine(externalDir.Path, "sentinel.txt")));
     }
-
-    // Creates a directory junction (mount point) using native Win32 APIs.
-    // Directory junctions require no special privileges — only write access to the target directory.
-    private static void CreateJunction(string junctionPath, string targetPath)
-    {
-        // Native path format required for mount-point substitute name
-        var nativeTarget = @"\??\" + Path.GetFullPath(targetPath).TrimEnd(Path.DirectorySeparatorChar);
-        var subNameBytes = Encoding.Unicode.GetBytes(nativeTarget);
-
-        ushort subLen = (ushort)subNameBytes.Length;
-        ushort printOffset = (ushort)(subLen + 2); // substitute name + UTF-16 NUL terminator
-        // PathBuffer: substitute name + NUL + empty print name + NUL (all UTF-16)
-        var pathBuf = new byte[subLen + 2 + 0 + 2];
-        Buffer.BlockCopy(subNameBytes, 0, pathBuf, 0, subLen);
-
-        // ReparseDataLength covers the four ushort header fields plus PathBuffer
-        ushort reparseDataLen = (ushort)(8 + pathBuf.Length);
-
-        // Full REPARSE_DATA_BUFFER: tag(4) + reparseDataLen(2) + reserved(2) + header(8) + pathBuf
-        var buf = new byte[4 + 2 + 2 + reparseDataLen];
-        int i = 0;
-        BitConverter.GetBytes(0xA0000003u).CopyTo(buf, i);
-        i += 4; // IO_REPARSE_TAG_MOUNT_POINT
-        BitConverter.GetBytes(reparseDataLen).CopyTo(buf, i);
-        i += 2;
-        i += 2; // Reserved
-        BitConverter.GetBytes((ushort)0).CopyTo(buf, i);
-        i += 2; // SubstituteNameOffset
-        BitConverter.GetBytes(subLen).CopyTo(buf, i);
-        i += 2; // SubstituteNameLength
-        BitConverter.GetBytes(printOffset).CopyTo(buf, i);
-        i += 2; // PrintNameOffset
-        BitConverter.GetBytes((ushort)0).CopyTo(buf, i);
-        i += 2; // PrintNameLength
-        pathBuf.CopyTo(buf, i);
-
-        Directory.CreateDirectory(junctionPath);
-
-        using var handle = CreateFileW(junctionPath,
-            0x40000000u, // GENERIC_WRITE
-            0x1u | 0x2u | 0x4u, // FILE_SHARE_READ|WRITE|DELETE
-            IntPtr.Zero, 3u, // OPEN_EXISTING
-            0x02000000u, // FILE_FLAG_BACKUP_SEMANTICS
-            IntPtr.Zero);
-
-        if (handle.IsInvalid)
-            throw new IOException($"CreateFile failed: {Marshal.GetLastWin32Error()}");
-
-        if (!DeviceIoControl(handle, 0x000900A4u, buf, buf.Length, IntPtr.Zero, 0, out _, IntPtr.Zero))
-            throw new IOException($"FSCTL_SET_REPARSE_POINT failed: {Marshal.GetLastWin32Error()}");
-    }
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
-    private static extern SafeFileHandle CreateFileW(
-        string lpFileName, uint dwDesiredAccess, uint dwShareMode,
-        IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes,
-        IntPtr hTemplateFile);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool DeviceIoControl(
-        SafeFileHandle hDevice, uint dwIoControlCode,
-        byte[] lpInBuffer, int nInBufferSize,
-        IntPtr lpOutBuffer, int nOutBufferSize,
-        out int lpBytesReturned, IntPtr lpOverlapped);
 
     [Fact]
     public void DeleteProfiles_CaseA_SuccessfulDelete_ReturnsInDeleted()
@@ -393,6 +325,34 @@ public class OrphanedProfileServiceTests : IDisposable
         Assert.Single(deleted);
         Assert.Empty(failed);
         Assert.False(Directory.Exists(dir));
+    }
+
+    [Fact]
+    public void DeleteProfiles_LockedFileInsideProfile_FailsAndRollsBackRename()
+    {
+        // Arrange: profile dir contains a file that is locked (opened with FileShare.None).
+        // The rename to .deleted succeeds, but DeleteSafe fails because a file is locked.
+        // The service must attempt to rename back to the original path and report failure.
+        var dir = Path.Combine(_usersDir.Path, "LockedUser");
+        Directory.CreateDirectory(dir);
+        var lockedFile = Path.Combine(dir, "locked.dat");
+        File.WriteAllText(lockedFile, "locked content");
+
+        var profile = new OrphanedProfile(null, dir);
+        var service = CreateService();
+
+        // Hold the file open exclusively so DeleteSafe cannot delete it
+        using var fileStream = new FileStream(lockedFile, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var (deleted, failed) = service.DeleteProfiles([profile]);
+
+        // Assert: deletion failed, directory rolled back to original path
+        Assert.Empty(deleted);
+        Assert.Single(failed);
+        Assert.Equal(dir, failed[0].Path, StringComparer.OrdinalIgnoreCase);
+        Assert.True(Directory.Exists(dir), "Profile directory must be restored to original path after rollback.");
+        Assert.False(Directory.Exists(dir + ".deleted"), "Renamed .deleted directory must not remain after rollback.");
+        _log.Verify(l => l.Warn(It.IsAny<string>()), Times.AtLeastOnce);
     }
 
     // --- Test subclass ---

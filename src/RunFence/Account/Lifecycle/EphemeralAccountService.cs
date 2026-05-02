@@ -16,7 +16,7 @@ public class EphemeralAccountService(
     IUiThreadInvoker uiThreadInvoker,
     ISidResolver sidResolver,
     IPathGrantService pathGrantService)
-    : IDisposable, IBackgroundService
+    : IDisposable, IBackgroundService, IEphemeralAccountChangeSource
 {
     private EphemeralTimerHelper? _timer;
 
@@ -25,7 +25,7 @@ public class EphemeralAccountService(
     public void Start()
     {
         log.Info("EphemeralAccountService: starting.");
-        _timer = new EphemeralTimerHelper(uiThreadInvoker, ProcessExpiredAccounts);
+        _timer = new EphemeralTimerHelper(uiThreadInvoker, () => { ProcessExpiredAccounts(); return Task.CompletedTask; });
         _timer.Start();
         log.Info("EphemeralAccountService: started.");
     }

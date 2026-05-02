@@ -1,5 +1,4 @@
 using RunFence.Core;
-using RunFence.Firewall;
 
 namespace RunFence.Firewall.Wfp;
 

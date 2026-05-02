@@ -7,47 +7,51 @@ namespace RunFence.Firewall.UI;
 /// populating, adding, removing, editing, exporting, and resolving domain entries in the grid.
 /// Event handlers in the dialog extract parameters from UI state and delegate to these methods.
 /// </summary>
-public class FirewallAllowlistGridHelper
+public class FirewallAllowlistGridHelper(
+    DataGridView grid,
+    Action<bool> setAddVisible,
+    Action<bool> setRemoveVisible,
+    Action<bool> setExportVisible,
+    FirewallAllowlistTabHandler handler,
+    Func<IReadOnlyList<string>, string, bool> tryExportToFile,
+    Action exportCombined,
+    Action updateApplyButton,
+    Action updateToolbar)
+    : FirewallGridHelperBase<FirewallAllowlistEntry>(
+        grid, setAddVisible, setRemoveVisible, setExportVisible,
+        tryExportToFile, exportCombined, updateApplyButton)
 {
-    private readonly DataGridView _grid;
-    private readonly ToolStripMenuItem _ctxAdd;
-    private readonly ToolStripMenuItem _ctxRemoveItem;
-    private readonly ToolStripMenuItem _ctxExportItem;
-    private readonly FirewallAllowlistTabHandler _handler;
-    private readonly Func<IReadOnlyList<string>, string, bool> _tryExportToFile;
-    private readonly Action _exportCombined;
-    private readonly Action _updateApplyButton;
-    private readonly Action _updateToolbar;
-    private int _ctxRowIndex = -1;
+    public bool IsResolvingDomains => handler.IsResolvingDomains;
 
-    public bool IsResolvingDomains => _handler.IsResolvingDomains;
+    protected override string GetExportValue(FirewallAllowlistEntry entry) => entry.Value;
 
-    public FirewallAllowlistGridHelper(
-        DataGridView grid,
-        ToolStripMenuItem ctxAdd,
-        ToolStripMenuItem ctxRemoveItem,
-        ToolStripMenuItem ctxExportItem,
-        FirewallAllowlistTabHandler handler,
-        Func<IReadOnlyList<string>, string, bool> tryExportToFile,
-        Action exportCombined,
-        Action updateApplyButton,
-        Action updateToolbar)
+    protected override string ExportTitle => "Export Firewall Allowlist";
+
+    protected override void RemoveEntries(IEnumerable<FirewallAllowlistEntry> entries) =>
+        handler.RemoveEntries(entries);
+
+    protected override bool HandleExtraKeys(Keys keyCode, bool control)
     {
-        _grid = grid;
-        _ctxAdd = ctxAdd;
-        _ctxRemoveItem = ctxRemoveItem;
-        _ctxExportItem = ctxExportItem;
-        _handler = handler;
-        _tryExportToFile = tryExportToFile;
-        _exportCombined = exportCombined;
-        _updateApplyButton = updateApplyButton;
-        _updateToolbar = updateToolbar;
+        if (keyCode == Keys.C && control && Grid.SelectedRows.Count > 0 && !Grid.IsCurrentCellInEditMode)
+        {
+            var values = Grid.SelectedRows.Cast<DataGridViewRow>()
+                .Where(r => r.Tag is FirewallAllowlistEntry)
+                .Select(r => ((FirewallAllowlistEntry)r.Tag!).Value)
+                .ToList();
+            if (values.Count > 0)
+            {
+                Clipboard.SetText(string.Join(Environment.NewLine, values));
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public void PopulateGrid()
     {
-        _grid.Rows.Clear();
-        foreach (var entry in _handler.GetEntries())
+        Grid.Rows.Clear();
+        foreach (var entry in handler.GetEntries())
             AddRow(entry);
     }
 
@@ -64,7 +68,7 @@ public class FirewallAllowlistGridHelper
                 ResolveEntryAsync(entry, row);
         }
         if (entries.Count > 0)
-            _updateApplyButton();
+            UpdateApplyButton();
     }
 
     /// <summary>
@@ -73,7 +77,7 @@ public class FirewallAllowlistGridHelper
     /// </summary>
     public void AddEntry(string input)
     {
-        var result = _handler.AddEntry(input);
+        var result = handler.AddEntry(input);
         switch (result.Outcome)
         {
             case AddEntryOutcome.LicenseLimitReached:
@@ -94,39 +98,7 @@ public class FirewallAllowlistGridHelper
         var row = AddRow(result.Entry!);
         if (result.Entry!.IsDomain)
             ResolveEntryAsync(result.Entry, row);
-        _updateApplyButton();
-    }
-
-    /// <summary>
-    /// Removes all currently selected rows from the grid and the handler's entry list.
-    /// </summary>
-    public void RemoveSelectedEntries()
-    {
-        if (_grid.SelectedRows.Count == 0)
-            return;
-        var toRemove = _grid.SelectedRows.Cast<DataGridViewRow>().ToList();
-        _handler.RemoveEntries(toRemove
-            .Where(r => r.Tag is FirewallAllowlistEntry)
-            .Select(r => (FirewallAllowlistEntry)r.Tag!));
-        foreach (var row in toRemove)
-            _grid.Rows.Remove(row);
-        _updateApplyButton();
-    }
-
-    /// <summary>
-    /// Exports the currently selected entries, or falls back to the combined export when
-    /// nothing is selected.
-    /// </summary>
-    public void ExportSelected()
-    {
-        var selected = _grid.SelectedRows.Cast<DataGridViewRow>()
-            .Where(r => r.Tag is FirewallAllowlistEntry)
-            .Select(r => ((FirewallAllowlistEntry)r.Tag!).Value)
-            .ToList();
-        if (selected.Count > 0)
-            _tryExportToFile(selected, "Export Firewall Allowlist");
-        else
-            _exportCombined();
+        UpdateApplyButton();
     }
 
     /// <summary>
@@ -135,7 +107,7 @@ public class FirewallAllowlistGridHelper
     /// </summary>
     public BlockedConnectionAddResult AddEntriesFromBlockedConnections(IEnumerable<FirewallAllowlistEntry> selected)
     {
-        var result = _handler.AddEntriesFromBlockedConnections(selected);
+        var result = handler.AddEntriesFromBlockedConnections(selected);
         foreach (var entry in result.Added)
         {
             var row = AddRow(entry);
@@ -143,7 +115,7 @@ public class FirewallAllowlistGridHelper
                 ResolveEntryAsync(entry, row);
         }
         if (result.Added.Count > 0)
-            _updateApplyButton();
+            UpdateApplyButton();
         return result;
     }
 
@@ -151,18 +123,18 @@ public class FirewallAllowlistGridHelper
     {
         var typeText = entry.IsDomain ? "Domain" : "IP/CIDR";
         var resolvedText = entry.IsDomain ? "" : entry.Value;
-        var idx = _grid.Rows.Add(typeText, entry.Value, resolvedText);
-        _grid.Rows[idx].Tag = entry;
-        return _grid.Rows[idx];
+        var idx = Grid.Rows.Add(typeText, entry.Value, resolvedText);
+        Grid.Rows[idx].Tag = entry;
+        return Grid.Rows[idx];
     }
 
     public async Task ResolveDomainEntriesAsync(bool showError)
     {
         SetDomainRowsResolvedText("Resolving...");
-        var resolveTask = _handler.ResolveAllDomainsAsync();
+        var resolveTask = handler.ResolveAllDomainsAsync();
         // ResolveAllDomainsAsync sets IsResolvingDomains = true synchronously before yielding,
         // so UpdateToolbarForCurrentTab correctly disables the add/resolve buttons.
-        _updateToolbar();
+        updateToolbar();
 
         try
         {
@@ -177,7 +149,7 @@ public class FirewallAllowlistGridHelper
         }
         finally
         {
-            _updateToolbar();
+            updateToolbar();
         }
     }
 
@@ -186,7 +158,7 @@ public class FirewallAllowlistGridHelper
         row.Cells["Resolved"].Value = "Resolving...";
         try
         {
-            var ips = await _handler.ResolveEntryAsync(entry);
+            var ips = await handler.ResolveEntryAsync(entry);
             if (row.DataGridView == null)
                 return;
             row.Cells["Resolved"].Value = ips.Count > 0
@@ -202,75 +174,15 @@ public class FirewallAllowlistGridHelper
     }
 
     /// <summary>
-    /// Handles a right-click on the grid: tracks the clicked row for context menu use.
-    /// </summary>
-    public void HandleMouseDown(int x, int y)
-    {
-        var hit = _grid.HitTest(x, y);
-        if (hit.RowIndex >= 0)
-        {
-            _ctxRowIndex = hit.RowIndex;
-            if (!_grid.Rows[hit.RowIndex].Selected)
-            {
-                _grid.ClearSelection();
-                _grid.Rows[hit.RowIndex].Selected = true;
-            }
-        }
-        else
-        {
-            _ctxRowIndex = -1;
-            _grid.ClearSelection();
-        }
-    }
-
-    /// <summary>
-    /// Configures context menu item visibility based on the last right-clicked row.
-    /// </summary>
-    public void ConfigureContextMenu()
-    {
-        _ctxAdd.Visible = _ctxRowIndex < 0;
-        _ctxRemoveItem.Visible = _ctxRowIndex >= 0;
-        _ctxExportItem.Visible = _ctxRowIndex >= 0;
-    }
-
-    /// <summary>
-    /// Handles Delete (remove) and Ctrl+C (copy to clipboard) keyboard shortcuts.
-    /// Returns <c>true</c> when the key was handled and the caller should suppress it.
-    /// </summary>
-    public bool HandleKeyDown(Keys keyCode, bool control)
-    {
-        if (keyCode == Keys.Delete && _grid.SelectedRows.Count > 0 && !_grid.IsCurrentCellInEditMode)
-        {
-            RemoveSelectedEntries();
-            return true;
-        }
-
-        if (keyCode == Keys.C && control && _grid.SelectedRows.Count > 0 && !_grid.IsCurrentCellInEditMode)
-        {
-            var values = _grid.SelectedRows.Cast<DataGridViewRow>()
-                .Where(r => r.Tag is FirewallAllowlistEntry)
-                .Select(r => ((FirewallAllowlistEntry)r.Tag!).Value)
-                .ToList();
-            if (values.Count > 0)
-            {
-                Clipboard.SetText(string.Join(Environment.NewLine, values));
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>
     /// Validates and applies an in-place cell edit for the Value column.
     /// </summary>
-    public void ApplyCellEdit(int rowIndex, int columnIndex)
+    public override void ApplyCellEdit(int rowIndex, int columnIndex)
     {
         if (rowIndex < 0 || columnIndex < 0)
             return;
-        if (_grid.Columns[columnIndex].Name != "Value")
+        if (Grid.Columns[columnIndex].Name != "Value")
             return;
-        var row = _grid.Rows[rowIndex];
+        var row = Grid.Rows[rowIndex];
         if (row.Tag is not FirewallAllowlistEntry entry)
             return;
 
@@ -278,7 +190,7 @@ public class FirewallAllowlistGridHelper
         if (string.Equals(newValue, entry.Value, StringComparison.OrdinalIgnoreCase))
             return;
 
-        var result = _handler.ValidateEdit(entry, newValue);
+        var result = handler.ValidateEdit(entry, newValue);
         switch (result.Outcome)
         {
             case EditEntryOutcome.Invalid:
@@ -300,12 +212,12 @@ public class FirewallAllowlistGridHelper
             ResolveEntryAsync(entry, row);
         else
             row.Cells["Resolved"].Value = newValue;
-        _updateApplyButton();
+        UpdateApplyButton();
     }
 
     private void SetDomainRowsResolvedText(string text)
     {
-        foreach (DataGridViewRow row in _grid.Rows)
+        foreach (DataGridViewRow row in Grid.Rows)
         {
             if (row.Tag is FirewallAllowlistEntry { IsDomain: true })
                 row.Cells["Resolved"].Value = text;
@@ -314,9 +226,9 @@ public class FirewallAllowlistGridHelper
 
     private void UpdateResolvedColumn(Dictionary<string, List<string>> resolved)
     {
-        foreach (DataGridViewRow row in _grid.Rows)
+        foreach (DataGridViewRow row in Grid.Rows)
         {
-            if (row.Tag is not FirewallAllowlistEntry entry || !entry.IsDomain)
+            if (row.Tag is not FirewallAllowlistEntry { IsDomain: true } entry)
                 continue;
             row.Cells["Resolved"].Value = resolved.TryGetValue(entry.Value, out var ips) && ips.Count > 0
                 ? string.Join(", ", ips)

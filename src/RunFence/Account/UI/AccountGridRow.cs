@@ -22,7 +22,11 @@ public class AccountRow(CredentialEntry? credential, string username, string sid
     public bool IsEphemeral { get; } = isEphemeral;
 
     public bool CanImport => !IsUnavailable &&
+                             !SidResolutionHelper.IsSystemSid(Sid) &&
                              (HasStoredPassword || SidResolutionHelper.CanLaunchWithoutPassword(Sid));
+
+    public bool CanLaunch => !IsUnavailable &&
+                             (SidResolutionHelper.CanLaunchWithoutPassword(Sid) || HasStoredPassword);
 }
 
 public class ContainerRow(AppContainerEntry container, string containerSid) : IAccountGridRow

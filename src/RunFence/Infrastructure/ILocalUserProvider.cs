@@ -8,6 +8,6 @@ namespace RunFence.Infrastructure;
 /// </summary>
 public interface ILocalUserProvider
 {
-    List<LocalUserAccount> GetLocalUserAccounts();
+    IReadOnlyList<LocalUserAccount> GetLocalUserAccounts();
     void InvalidateCache();
 }

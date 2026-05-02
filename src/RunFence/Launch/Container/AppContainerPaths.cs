@@ -9,7 +9,7 @@ namespace RunFence.Launch.Container;
 public static class AppContainerPaths
 {
     public static string GetContainersRootPath()
-        => Path.Combine(Constants.ProgramDataDir, "AC");
+        => Path.Combine(PathConstants.ProgramDataDir, "AC");
 
     public static string GetContainerDataPath(string profileName)
         => Path.Combine(GetContainersRootPath(), profileName);

@@ -11,7 +11,11 @@ namespace RunFence.Acl.Traverse;
 /// Uses SetFileSecurity (via ITraverseAcl) to avoid recursive NTFS auto-inheritance propagation
 /// that SetNamedSecurityInfo triggers on large directory trees.
 /// </summary>
-public class AncestorTraverseGranter(ILoggingService log, IAclPermissionService aclPermission, ITraverseAcl traverseAcl)
+public class AncestorTraverseGranter(
+    ILoggingService log,
+    IAclPermissionService aclPermission,
+    ITraverseAcl traverseAcl,
+    IFileSystemPathInfo pathInfo)
 {
     /// <summary>
     /// Grants Traverse + ReadAttributes + Synchronize (no inheritance) on <paramref name="path"/> and each
@@ -26,18 +30,22 @@ public class AncestorTraverseGranter(ILoggingService log, IAclPermissionService 
     /// </summary>
     public (List<string> AppliedPaths, bool AnyAceAdded) GrantOnPathAndAncestors(
         string path, SecurityIdentifier identity,
-        IReadOnlyList<string>? groupSids = null)
+        IReadOnlyList<string>? groupSids = null,
+        string? effectiveSid = null,
+        IReadOnlyList<string>? effectiveGroupSids = null)
     {
         var current = new DirectoryInfo(path);
         var visitedPaths = new List<string>();
         bool anyAceAdded = false;
+        effectiveSid ??= identity.Value;
+        effectiveGroupSids ??= groupSids;
 
         while (current != null)
         {
             var next = current.Parent;
             try
             {
-                if (!current.Exists)
+                if (!pathInfo.DirectoryExists(current.FullName))
                 {
                     current = next;
                     continue;
@@ -48,12 +56,16 @@ public class AncestorTraverseGranter(ILoggingService log, IAclPermissionService 
                 // different rights (e.g. ReadData instead of Traverse) and must not be treated as covered.
                 // When no permission service is available, fall back to the explicit-ACE check.
                 bool effectivelyCovered;
-                if (groupSids != null)
+                if (effectiveGroupSids != null)
                 {
                     try
                     {
-                        var dirSecurity = new DirectoryInfo(current.FullName).GetAccessControl();
-                        effectivelyCovered = aclPermission.HasEffectiveRights(dirSecurity, identity.Value, groupSids, TraverseRightsHelper.TraverseRights);
+                        effectivelyCovered = TraverseRightsHelper.HasEffectiveTraverseForGrantSid(
+                            current.FullName,
+                            effectiveSid,
+                            effectiveGroupSids,
+                            aclPermission,
+                            pathInfo);
                     }
                     catch (Exception ex)
                     {

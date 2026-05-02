@@ -54,9 +54,6 @@ public class AccountGridRefreshHandler(
             var db = session.Database;
             persistenceHelper.ApplyStaleNameUpdates(resolutions, db, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
 
-            foreach (var kvp in resolutions)
-                session.SidNameCache[kvp.Key] = kvp.Value;
-
             var displayNameCache = BuildDisplayNameCache(resolutions);
             PopulateGrid(displayNameCache, resolutions);
             log.Info($"AccountGridRefreshHandler: initial SID resolution complete ({resolutions.Count} SID(s)).");

@@ -8,6 +8,12 @@ public interface IAssociationAutoSetService
     /// <summary>Auto-sets HKCU association overrides for a single user by SID.</summary>
     void AutoSetForUser(string sid);
 
+    /// <summary>
+    /// Clears the SID from the completed cache and re-runs auto-set for that user.
+    /// Use when a SID is newly added as a global IPC caller mid-session (after startup's AutoSetForAllUsers already ran).
+    /// </summary>
+    void ForceAutoSetForUser(string sid);
+
     /// <summary>Restores original handlers for all users (for Cleanup).</summary>
     void RestoreForAllUsers();
 

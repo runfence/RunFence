@@ -16,6 +16,8 @@ public class HandlerMappingEntryConverter : JsonConverter<HandlerMappingEntry>
 
         string? appId = null;
         string? argsTemplate = null;
+        List<string>? pathPrefixes = null;
+        bool replacePrefixes = false;
 
         while (reader.Read())
         {
@@ -32,6 +34,18 @@ public class HandlerMappingEntryConverter : JsonConverter<HandlerMappingEntry>
                 appId = reader.GetString();
             else if (string.Equals(propertyName, "ArgumentsTemplate", StringComparison.OrdinalIgnoreCase))
                 argsTemplate = reader.TokenType == JsonTokenType.Null ? null : reader.GetString();
+            else if (string.Equals(propertyName, "PathPrefixes", StringComparison.OrdinalIgnoreCase))
+            {
+                pathPrefixes = [];
+                while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+                {
+                    if (reader.TokenType == JsonTokenType.Null)
+                        throw new JsonException("PathPrefixes elements must not be null");
+                    pathPrefixes.Add(reader.GetString()!);
+                }
+            }
+            else if (string.Equals(propertyName, "ReplacePrefixes", StringComparison.OrdinalIgnoreCase))
+                replacePrefixes = reader.GetBoolean();
             else
                 reader.Skip();
         }
@@ -39,7 +53,7 @@ public class HandlerMappingEntryConverter : JsonConverter<HandlerMappingEntry>
         if (appId == null)
             throw new JsonException("HandlerMappingEntry requires AppId");
 
-        return new HandlerMappingEntry(appId, argsTemplate);
+        return new HandlerMappingEntry(appId, argsTemplate, pathPrefixes, replacePrefixes);
     }
 
     public override void Write(Utf8JsonWriter writer, HandlerMappingEntry value, JsonSerializerOptions options)
@@ -48,6 +62,15 @@ public class HandlerMappingEntryConverter : JsonConverter<HandlerMappingEntry>
         writer.WriteString("AppId", value.AppId);
         if (value.ArgumentsTemplate != null)
             writer.WriteString("ArgumentsTemplate", value.ArgumentsTemplate);
+        if (value.PathPrefixes is { Count: > 0 })
+        {
+            writer.WritePropertyName("PathPrefixes");
+            writer.WriteStartArray();
+            foreach (var p in value.PathPrefixes) writer.WriteStringValue(p);
+            writer.WriteEndArray();
+        }
+        if (value.ReplacePrefixes)
+            writer.WriteBoolean("ReplacePrefixes", true);
         writer.WriteEndObject();
     }
 }

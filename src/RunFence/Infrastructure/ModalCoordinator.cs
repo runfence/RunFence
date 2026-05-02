@@ -14,10 +14,17 @@ public class ModalCoordinator(IModalTracker modalTracker, ISecureDesktopRunner s
 
     public DialogResult ShowModal(Form dialog, IWin32Window? owner)
     {
+        DialogResult result = DialogResult.None;
+        RunModal(() => result = dialog.ShowDialog(owner));
+        return result;
+    }
+
+    public void RunModal(Action action)
+    {
         BeginModal();
         try
         {
-            return dialog.ShowDialog(owner);
+            action();
         }
         finally
         {
@@ -25,16 +32,5 @@ public class ModalCoordinator(IModalTracker modalTracker, ISecureDesktopRunner s
         }
     }
 
-    public void RunOnSecureDesktop(Action action)
-    {
-        BeginModal();
-        try
-        {
-            secureDesktopRunner.Run(action);
-        }
-        finally
-        {
-            EndModal();
-        }
-    }
+    public void RunOnSecureDesktop(Action action) => RunModal(() => secureDesktopRunner.Run(action));
 }

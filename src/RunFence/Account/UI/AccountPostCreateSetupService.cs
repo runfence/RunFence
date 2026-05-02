@@ -24,7 +24,7 @@ public class AccountPostCreateSetupService(
     /// package installs are required, shows an <see cref="Forms.AccountCreationProgressForm"/>.
     /// The <paramref name="saveAndRefresh"/> callback must trigger a save and grid refresh.
     /// </summary>
-    public async Task RunPostCreateSetupAsync(PostCreateSetupRequest request, Action saveAndRefresh)
+    public async Task RunPostCreateSetupAsync(PostCreateSetupContext request, Action saveAndRefresh)
     {
         bool hasPackages = request.SelectedInstallPackages.Count > 0;
         bool internetBlocked = request is { FirewallSettingsChanged: true, AllowInternet: false };
@@ -59,7 +59,7 @@ public class AccountPostCreateSetupService(
 
                     saveAndRefresh();
 
-                    if (hasPackages && internetBlocked)
+                    if (hasPackages && internetBlocked && !progressForm.CancellationToken.IsCancellationRequested)
                     {
                         var refreshedSession = sessionProvider.GetSession();
                         var credEntry = refreshedSession.CredentialStore.Credentials.FirstOrDefault(c =>
@@ -71,7 +71,12 @@ public class AccountPostCreateSetupService(
                             {
                                 packageInstallService.InstallPackages(request.SelectedInstallPackages, new AccountLaunchIdentity(request.CreatedSid));
                                 progressForm.SetStatus($"Waiting for install scripts to complete for {request.NewUsername}...");
-                                await packageInstallService.WaitForInstallCompletionAsync(request.CreatedSid, TimeSpan.FromMinutes(10));
+                                await packageInstallService.WaitForInstallCompletionAsync(
+                                    request.CreatedSid, TimeSpan.FromMinutes(10), progressForm.CancellationToken);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                log.Info($"Package install wait cancelled by user for {request.NewUsername}.");
                             }
                             catch (Exception ex)
                             {
@@ -107,29 +112,11 @@ public class AccountPostCreateSetupService(
                     progressForm.DialogResult = DialogResult.OK;
                 }
             };
-            progressForm.ShowDialog();
+            await progressForm.ShowDialogAsync();
         }
         else
         {
             saveAndRefresh();
         }
     }
-}
-
-public class PostCreateSetupRequest(
-    string? SettingsImportPath,
-    string CreatedSid,
-    string NewUsername,
-    bool FirewallSettingsChanged,
-    List<InstallablePackage> SelectedInstallPackages,
-    bool AllowInternet,
-    List<string> Errors)
-{
-    public string? SettingsImportPath { get; } = SettingsImportPath;
-    public string CreatedSid { get; } = CreatedSid;
-    public string NewUsername { get; } = NewUsername;
-    public bool FirewallSettingsChanged { get; } = FirewallSettingsChanged;
-    public List<InstallablePackage> SelectedInstallPackages { get; } = SelectedInstallPackages;
-    public bool AllowInternet { get; } = AllowInternet;
-    public List<string> Errors { get; } = Errors;
 }

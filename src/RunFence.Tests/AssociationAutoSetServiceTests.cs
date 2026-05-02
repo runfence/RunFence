@@ -2,7 +2,6 @@ using Microsoft.Win32;
 using Moq;
 using RunFence.Apps;
 using RunFence.Core;
-using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Ipc;
@@ -39,7 +38,7 @@ public class AssociationAutoSetServiceTests : IDisposable
     public AssociationAutoSetServiceTests()
     {
         _testSubKey = $@"Software\RunFenceTests\AutoSet_{Guid.NewGuid():N}";
-        _hkuRoot = Registry.CurrentUser.CreateSubKey(_testSubKey)!;
+        _hkuRoot = Registry.CurrentUser.CreateSubKey(_testSubKey);
 
         _tempDir = new TempDirectory("RunFenceAutoSetTests");
         _launcherPath = Path.Combine(_tempDir.Path, "RunFence.Launcher.exe");
@@ -78,7 +77,8 @@ public class AssociationAutoSetServiceTests : IDisposable
 
     private AssociationAutoSetService CreateService()
         => new(_hiveManager.Object, _sessionProvider.Object, _handlerMappingService.Object,
-            _callerAuthorizer.Object, _log.Object, _hkuRoot, _launcherPath);
+            _callerAuthorizer.Object, _log.Object, new AssociationRegistryWriter(_log.Object),
+            _hkuRoot, _launcherPath);
 
     private void SetMappings(Dictionary<string, HandlerMappingEntry> mappings)
         => _handlerMappingService
@@ -117,10 +117,10 @@ public class AssociationAutoSetServiceTests : IDisposable
 
         // Assert: default value set to RunFence ProgId
         var defaultVal = ReadDefaultValue($@"{TestSid}\Software\Classes\.test");
-        Assert.Equal(Constants.HandlerProgIdPrefix + ".test", defaultVal);
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".test", defaultVal);
 
         // Assert: RunFenceFallback contains original ProgId
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.test", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\.test", PathConstants.RunFenceFallbackValueName);
         Assert.Equal(existingProgId, fallback);
     }
 
@@ -151,7 +151,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         Assert.Equal(string.Empty, urlProtocol);
 
         // Assert: RunFenceFallback contains original command
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\mailto", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\mailto", PathConstants.RunFenceFallbackValueName);
         Assert.Equal(existingCommand, fallback);
     }
 
@@ -173,7 +173,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         CreateService().AutoSetForUser(TestSid);
 
         // DefaultAppsOnly keys must NOT be written
-        foreach (var key in Constants.DefaultAppsOnlyAssociations)
+        foreach (var key in PathConstants.DefaultAppsOnlyAssociations)
         {
             var path = key.StartsWith('.')
                 ? $@"{TestSid}\Software\Classes\{key}"
@@ -211,7 +211,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         svc2.AutoSetForUser(TestSid);
 
         // RunFenceFallback must still be the original value — not overwritten by second call
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.test", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\.test", PathConstants.RunFenceFallbackValueName);
         Assert.Equal(originalProgId, fallback);
     }
 
@@ -224,11 +224,11 @@ public class AssociationAutoSetServiceTests : IDisposable
         const string originalProgId = "OldApp.Document";
         using (var extKey = _hkuRoot.CreateSubKey($@"{TestSid}\Software\Classes\.doc"))
         {
-            extKey.SetValue(null, Constants.HandlerProgIdPrefix + ".doc");
-            extKey.SetValue(Constants.RunFenceFallbackValueName, originalProgId);
+            extKey.SetValue(null, PathConstants.HandlerProgIdPrefix + ".doc");
+            extKey.SetValue(PathConstants.RunFenceFallbackValueName, originalProgId);
         }
         // Need TestSid subkey to exist at the top level of _hkuRoot for enumeration
-        _hkuRoot.CreateSubKey(TestSid)!.Dispose();
+        _hkuRoot.CreateSubKey(TestSid).Dispose();
 
         AddCredential(TestSid);
 
@@ -240,7 +240,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         Assert.Equal(originalProgId, defaultVal);
 
         // Assert: RunFenceFallback removed
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.doc", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\.doc", PathConstants.RunFenceFallbackValueName);
         Assert.Null(fallback);
     }
 
@@ -249,8 +249,9 @@ public class AssociationAutoSetServiceTests : IDisposable
     [Fact]
     public void AutoSet_CleansStaleUserProgIds()
     {
-        // Arrange: old per-user ProgId from before HKLM migration
-        using (_hkuRoot.CreateSubKey($@"{TestSid}\Software\Classes\RunFence_http\shell\open\command")) { }
+        // Arrange: old per-user ProgId from before HKLM migration (uses current prefix so cleanup is exercised)
+        var staleProgId = PathConstants.HandlerProgIdPrefix + "http";
+        using (_hkuRoot.CreateSubKey($@"{TestSid}\Software\Classes\{staleProgId}\shell\open\command")) { }
 
         SetMappings(new Dictionary<string, HandlerMappingEntry> { [".test"] = new HandlerMappingEntry("app1") });
 
@@ -258,7 +259,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         CreateService().AutoSetForUser(TestSid);
 
         // Assert: stale per-user RunFence ProgId deleted
-        Assert.Null(_hkuRoot.OpenSubKey($@"{TestSid}\Software\Classes\RunFence_http"));
+        Assert.Null(_hkuRoot.OpenSubKey($@"{TestSid}\Software\Classes\{staleProgId}"));
     }
 
     // --- Target user SIDs ---
@@ -278,9 +279,9 @@ public class AssociationAutoSetServiceTests : IDisposable
         CreateService().AutoSetForAllUsers();
 
         // Both fake credential SIDs processed
-        Assert.Equal(Constants.HandlerProgIdPrefix + ".test",
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".test",
             ReadDefaultValue($@"{TestSid}\Software\Classes\.test"));
-        Assert.Equal(Constants.HandlerProgIdPrefix + ".test",
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".test",
             ReadDefaultValue($@"{OtherSid}\Software\Classes\.test"));
 
         // Current admin SID excluded — nothing written for it
@@ -302,7 +303,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         CreateService().AutoSetForAllUsers();
 
         // Verify it works (only one set written, no errors)
-        Assert.Equal(Constants.HandlerProgIdPrefix + ".test",
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".test",
             ReadDefaultValue($@"{TestSid}\Software\Classes\.test"));
 
         // EnsureHiveLoaded called once — GetTargetUserSids deduplicates via HashSet
@@ -320,7 +321,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         CreateService().AutoSetForAllUsers();
 
         // Credential SID still processed despite null interactive SID
-        Assert.Equal(Constants.HandlerProgIdPrefix + ".test",
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".test",
             ReadDefaultValue($@"{TestSid}\Software\Classes\.test"));
     }
 
@@ -388,7 +389,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         CreateService().AutoSetForAllUsers();
 
         Assert.Null(_hkuRoot.OpenSubKey($@"{TestSid}\Software\Classes\.test"));
-        Assert.Equal(Constants.HandlerProgIdPrefix + ".test",
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".test",
             ReadDefaultValue($@"{OtherSid}\Software\Classes\.test"));
         _hiveManager.Verify(h => h.EnsureHiveLoaded(TestSid), Times.Never);
     }
@@ -403,8 +404,8 @@ public class AssociationAutoSetServiceTests : IDisposable
         foreach (var sid in new[] { TestSid, OtherSid })
         {
             using var extKey = _hkuRoot.CreateSubKey($@"{sid}\Software\Classes\.doc");
-            extKey.SetValue(null, Constants.HandlerProgIdPrefix + ".doc");
-            extKey.SetValue(Constants.RunFenceFallbackValueName, originalProgId);
+            extKey.SetValue(null, PathConstants.HandlerProgIdPrefix + ".doc");
+            extKey.SetValue(PathConstants.RunFenceFallbackValueName, originalProgId);
         }
 
         // Act: restore only TestSid
@@ -413,12 +414,12 @@ public class AssociationAutoSetServiceTests : IDisposable
         // Assert: TestSid restored
         var testDefault = ReadDefaultValue($@"{TestSid}\Software\Classes\.doc");
         Assert.Equal(originalProgId, testDefault);
-        var testFallback = ReadValue($@"{TestSid}\Software\Classes\.doc", Constants.RunFenceFallbackValueName);
+        var testFallback = ReadValue($@"{TestSid}\Software\Classes\.doc", PathConstants.RunFenceFallbackValueName);
         Assert.Null(testFallback);
 
         // Assert: OtherSid untouched
         var otherDefault = ReadDefaultValue($@"{OtherSid}\Software\Classes\.doc");
-        Assert.Equal(Constants.HandlerProgIdPrefix + ".doc", otherDefault);
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".doc", otherDefault);
     }
 
     [Fact]
@@ -438,8 +439,6 @@ public class AssociationAutoSetServiceTests : IDisposable
         // 1 (initial) + 1 (RestoreForUser) + 1 (re-auto-set) = 3
         _hiveManager.Verify(h => h.EnsureHiveLoaded(TestSid), Times.Exactly(3));
     }
-
-    // --- RestoreForAllUsers clears caches ---
 
     // --- Direct handler: class-based extension ---
 
@@ -464,7 +463,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         Assert.Equal("txtfile", defaultVal);
 
         // Assert: RunFenceFallback stores original
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.txt", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\.txt", PathConstants.RunFenceFallbackValueName);
         Assert.Equal("SomeOldProgId", fallback);
     }
 
@@ -485,7 +484,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         CreateService().AutoSetForUser(TestSid);
 
         // Assert: no fallback created because value was already correct
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.txt", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\.txt", PathConstants.RunFenceFallbackValueName);
         Assert.Null(fallback);
     }
 
@@ -514,7 +513,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         Assert.Equal(newCommand, command);
 
         // Assert: RunFenceFallback on extension key stores original default value (not RunFenceDirectFallback)
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.py", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\.py", PathConstants.RunFenceFallbackValueName);
         Assert.Equal(existingProgId, fallback);
     }
 
@@ -537,7 +536,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         Assert.Equal(newCommand, command);
 
         // Assert: RunFenceFallback is empty string (no previous default)
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.py", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\.py", PathConstants.RunFenceFallbackValueName);
         Assert.Equal(string.Empty, fallback);
     }
 
@@ -559,7 +558,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         CreateService().AutoSetForUser(TestSid);
 
         // Assert: no fallback created (command already matched)
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.py", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\.py", PathConstants.RunFenceFallbackValueName);
         Assert.Null(fallback);
     }
 
@@ -592,7 +591,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         Assert.Equal(string.Empty, urlProtocol);
 
         // Assert: RunFenceFallback stores original command
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\myproto", Constants.RunFenceFallbackValueName);
+        var fallback = ReadValue($@"{TestSid}\Software\Classes\myproto", PathConstants.RunFenceFallbackValueName);
         Assert.Equal(existingCommand, fallback);
     }
 
@@ -605,11 +604,11 @@ public class AssociationAutoSetServiceTests : IDisposable
         // The fallback stores the original default value (empty = no previous default)
         using (var extKey = _hkuRoot.CreateSubKey($@"{TestSid}\Software\Classes\.txt"))
         {
-            extKey.SetValue(Constants.RunFenceFallbackValueName, string.Empty);
+            extKey.SetValue(PathConstants.RunFenceFallbackValueName, string.Empty);
             using (var cmdKey = extKey.CreateSubKey(@"shell\open\command"))
                 cmdKey.SetValue(null, @"""C:\new-editor.exe"" ""%1""");
         }
-        _hkuRoot.CreateSubKey(TestSid)!.Dispose();
+        _hkuRoot.CreateSubKey(TestSid).Dispose();
         AddCredential(TestSid);
 
         // Act
@@ -617,7 +616,7 @@ public class AssociationAutoSetServiceTests : IDisposable
 
         // Assert: shell\open\command cleaned up (RestoreFromFallback deletes it for extensions)
         Assert.Null(_hkuRoot.OpenSubKey($@"{TestSid}\Software\Classes\.txt\shell\open\command"));
-        Assert.Null(ReadValue($@"{TestSid}\Software\Classes\.txt", Constants.RunFenceFallbackValueName));
+        Assert.Null(ReadValue($@"{TestSid}\Software\Classes\.txt", PathConstants.RunFenceFallbackValueName));
     }
 
     [Fact]
@@ -627,7 +626,7 @@ public class AssociationAutoSetServiceTests : IDisposable
         const string originalProgId = "SomeApp.Document";
         using (var extKey = _hkuRoot.CreateSubKey($@"{TestSid}\Software\Classes\.log"))
         {
-            extKey.SetValue(Constants.RunFenceFallbackValueName, originalProgId);
+            extKey.SetValue(PathConstants.RunFenceFallbackValueName, originalProgId);
             using (var cmdKey = extKey.CreateSubKey(@"shell\open\command"))
                 cmdKey.SetValue(null, @"""C:\new.exe"" ""%1""");
         }
@@ -689,7 +688,7 @@ public class AssociationAutoSetServiceTests : IDisposable
 
         // Assert: app-based handler applied — default set to RunFence ProgId
         var defaultVal = ReadDefaultValue($@"{TestSid}\Software\Classes\.txt");
-        Assert.Equal(Constants.HandlerProgIdPrefix + ".txt", defaultVal);
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".txt", defaultVal);
     }
 
     // --- ManageAssociations=false skips direct handlers ---
@@ -734,12 +733,38 @@ public class AssociationAutoSetServiceTests : IDisposable
             Times.Once);
     }
 
+    // --- ForceAutoSetForUser bypasses cache ---
+
+    [Fact]
+    public void ForceAutoSetForUser_BypassesCache_ReRunsAfterAutoSetForUserCached()
+    {
+        // Arrange: AutoSetForUser caches the SID so a subsequent call is a no-op.
+        // ForceAutoSetForUser removes the SID from the cache and re-runs.
+        SetMappings(new Dictionary<string, HandlerMappingEntry> { [".test"] = new HandlerMappingEntry("app1") });
+
+        var svc = CreateService();
+
+        // First call — caches TestSid (1 EnsureHiveLoaded call)
+        svc.AutoSetForUser(TestSid);
+
+        // Second call — skipped by cache (still 1 total)
+        svc.AutoSetForUser(TestSid);
+
+        // ForceAutoSetForUser removes TestSid from cache and re-runs (2 total)
+        svc.ForceAutoSetForUser(TestSid);
+
+        // Total: 1 (first AutoSetForUser) + 0 (cached) + 1 (ForceAutoSetForUser) = 2
+        _hiveManager.Verify(h => h.EnsureHiveLoaded(TestSid), Times.Exactly(2));
+    }
+
+    // --- RestoreForAllUsers clears caches ---
+
     [Fact]
     public void RestoreForAllUsers_ClearsCompletedAndCleanedSids()
     {
         AddCredential(TestSid);
         SetMappings(new Dictionary<string, HandlerMappingEntry> { [".test"] = new HandlerMappingEntry("app1") });
-        _hkuRoot.CreateSubKey(TestSid)!.Dispose();
+        _hkuRoot.CreateSubKey(TestSid).Dispose();
 
         var svc = CreateService();
 

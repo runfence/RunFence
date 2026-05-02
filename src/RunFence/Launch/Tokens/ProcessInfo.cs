@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using RunFence.Infrastructure;
 
@@ -6,6 +7,25 @@ namespace RunFence.Launch.Tokens;
 
 public sealed class ProcessInfo(ProcessLaunchNative.PROCESS_INFORMATION NativeInfo) : IDisposable
 {
+    /// <summary>
+    /// Creates a <see cref="ProcessInfo"/> by opening a handle to a managed <see cref="Process"/>.
+    /// The managed process is disposed; <see cref="ProcessInfo"/> owns the opened native handle.
+    /// Returns an empty <see cref="ProcessInfo"/> when <paramref name="process"/> is null.
+    /// </summary>
+    public static ProcessInfo FromManagedProcess(Process? process)
+    {
+        if (process == null)
+            return new(default);
+        var pid = (uint)process.Id;
+        var hProcess = ProcessNative.OpenProcess(
+            ProcessLaunchNative.SYNCHRONIZE | ProcessNative.ProcessQueryLimitedInformation, false, (int)pid);
+        process.Dispose();
+        if (hProcess == IntPtr.Zero)
+            return new(default);
+        return new(new ProcessLaunchNative.PROCESS_INFORMATION { hProcess = hProcess, dwProcessId = pid });
+    }
+
+
     public int Id => (int)NativeInfo.dwProcessId;
 
     public int ExitCode

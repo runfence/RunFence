@@ -1,5 +1,4 @@
 using System.Security.AccessControl;
-using System.Security.Principal;
 using Moq;
 using RunFence.Acl;
 using RunFence.Acl.Permissions;
@@ -23,6 +22,7 @@ public class GrantReconciliationServiceTests
     private readonly Mock<IAclPermissionService> _aclPermission = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<ISessionSaver> _sessionSaver = new();
+    private readonly TestFileSystemPathInfo _pathInfo = new();
 
     public GrantReconciliationServiceTests()
     {
@@ -38,11 +38,20 @@ public class GrantReconciliationServiceTests
         _service = BuildService(new AppDatabase());
     }
 
-    private GrantReconciliationService BuildService(AppDatabase db) =>
-        new(_aclPermission.Object, new Mock<ILocalGroupMembershipService>().Object, _log.Object, _sessionSaver.Object,
+    private GrantReconciliationService BuildService(AppDatabase db, IInteractiveUserResolver? iuResolver = null)
+    {
+        var sidReconciler = new SidReconciler(
+            _aclPermission.Object,
+            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object,
+                _pathInfo),
+            _log.Object,
+            iuResolver ?? new Mock<IInteractiveUserResolver>().Object,
+            _pathInfo);
+        return new GrantReconciliationService(
+            _aclPermission.Object, new Mock<ILocalGroupMembershipService>().Object, _log.Object, _sessionSaver.Object,
             new LambdaDatabaseProvider(() => db),
-            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object),
-            new Mock<IInteractiveUserResolver>().Object);
+            sidReconciler);
+    }
 
     // _service uses an empty database; suitable for tests that don't depend on database state.
     // Stored as a readonly field so the same instance is reused throughout a single test.
@@ -57,8 +66,13 @@ public class GrantReconciliationServiceTests
         string displayName,
         List<string>? snapshotGroups = null)
     {
-        var db = new AppDatabase();
-        db.SidNames[sid] = displayName;
+        var db = new AppDatabase
+        {
+            SidNames =
+            {
+                [sid] = displayName
+            }
+        };
         db.GetOrCreateAccount(sid);
         if (snapshotGroups != null)
         {
@@ -403,12 +417,10 @@ public class GrantReconciliationServiceTests
     [Fact]
     public void ReconcileChangedSids_ScriptFileMissing_EarlyReturn_NoEntries()
     {
-        // ReconcileChangedSids → ReconcileTraverseForSid → ReconcileLogonScript checks both
-        // File.Exists(scriptFile) and Directory.Exists(scriptsDir). Using a fake SID guarantees
-        // the per-SID script file ("{sid}_block_login.cmd") does not exist in the scripts
-        // directory, so ReconcileLogonScript returns immediately without any side effects.
-        // HasEffectiveRights is set to true so that traversal of any real directories reports
-        // traverse already covered — preventing ACE writes.
+        // ReconcileChangedSids -> ReconcileTraverseForSid -> ReconcileLogonScript checks both
+        // script file and scripts directory existence through TestFileSystemPathInfo. No fake
+        // script file is registered, so ReconcileLogonScript returns without side effects.
+        // HasEffectiveRights is true so any fake traverse location is treated as covered.
         _aclPermission.Setup(a => a.HasEffectiveRights(
                 It.IsAny<FileSystemSecurity>(),
                 It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
@@ -436,8 +448,7 @@ public class GrantReconciliationServiceTests
         // continue for remaining SIDs. Both SIDs must appear in UpdatedSnapshots (snapshot
         // update happens before the traversal attempt).
         //
-        // HasEffectiveRights is set to true so that if the second SID's traversal reaches any
-        // real directory (e.g. DragBridge), ACEs are not written (traverse already covered).
+        // HasEffectiveRights is set to true so any fake traverse location is treated as covered.
         const string userSid2 = "S-1-5-21-9999999999-9999999999-9999999999-1002";
         _aclPermission.Setup(a => a.HasEffectiveRights(
                 It.IsAny<FileSystemSecurity>(),
@@ -466,10 +477,8 @@ public class GrantReconciliationServiceTests
     [Fact]
     public void ReconcileChangedSids_ValidSidNoTraversePaths_OnlySnapshotUpdated()
     {
-        // A valid SID with no logon script file (fake SID guarantees this) and empty AccountGrants
-        // has nothing to remove. HasEffectiveRights is set to true so that traversal of any
-        // real directories (e.g. DragBridge if RunFence is installed) reports traverse already
-        // covered — preventing ACE writes and keeping NewTraverseEntries empty.
+        // A valid SID with no fake existing reconcile locations and empty AccountGrants has
+        // nothing to remove.
         _aclPermission.Setup(a => a.HasEffectiveRights(
                 It.IsAny<FileSystemSecurity>(),
                 It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
@@ -495,17 +504,12 @@ public class GrantReconciliationServiceTests
     [Fact]
     public void ReconcileChangedSids_TraverseNowCoveredByGroup_MarkedForRemoval()
     {
-        // Arrange: Use the actual DragBridge temp root — the only reconcile location that requires
-        // no prerequisite file. The entry path must match the reconcile location exactly so that
-        // CheckRedundantTraverse finds and flags the entry.
+        // Arrange: Use a fake DragBridge temp root. The entry path must match the reconcile
+        // location exactly so CheckRedundantTraverse finds and flags the entry without reading
+        // the real ProgramData tree.
         // HasEffectiveRights returns true → groups alone cover the path → marked for removal.
-        var dragBridgeTempRoot = Path.Combine(Constants.ProgramDataDir, Constants.DragBridgeTempDir);
-
-        if (!Directory.Exists(dragBridgeTempRoot))
-            throw Xunit.Sdk.SkipException.ForSkip($"DragBridge temp root '{dragBridgeTempRoot}' does not exist — RunFence not installed.");
-
-        try { new DirectoryInfo(dragBridgeTempRoot).GetAccessControl(); }
-        catch { throw Xunit.Sdk.SkipException.ForSkip($"Cannot read ACL of '{dragBridgeTempRoot}' — insufficient permissions in test environment."); }
+        var dragBridgeTempRoot = Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir);
+        _pathInfo.AddDirectory(dragBridgeTempRoot);
 
         var accountGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase)
         {
@@ -544,10 +548,10 @@ public class GrantReconciliationServiceTests
     public void ReconcileChangedSids_TraverseNowNeededAfterGroupRemoval_PopulatesNewTraverseEntries()
     {
         // Arrange: HasEffectiveRights returns false — groups no longer cover traverse, so a new
-        // direct ACE must be written. Setting the interactive user to UserSid causes
-        // ReconcileAppDirectory to run against AppContext.BaseDirectory, which is guaranteed to
-        // exist in any test run. ITraverseAcl is mocked (AddAllowAce is a no-op), so no real
-        // NTFS writes occur.
+        // direct ACE must be requested against a fake app directory. ITraverseAcl is mocked
+        // (AddAllowAce is a no-op), so no real NTFS writes occur.
+        var appDir = Path.GetDirectoryName(PathConstants.UnlockCmdPath)!;
+        _pathInfo.AddDirectory(appDir);
         _aclPermission.Setup(a => a.HasEffectiveRights(
                 It.IsAny<FileSystemSecurity>(),
                 It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
@@ -563,20 +567,13 @@ public class GrantReconciliationServiceTests
         var iuResolver = new Mock<IInteractiveUserResolver>();
         iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns(UserSid);
         var db = new AppDatabase();
-        var service = new GrantReconciliationService(
-            _aclPermission.Object,
-            new Mock<ILocalGroupMembershipService>().Object,
-            _log.Object,
-            _sessionSaver.Object,
-            new LambdaDatabaseProvider(() => db),
-            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object),
-            iuResolver.Object);
+        var service = BuildService(db, iuResolver.Object);
 
         // Act
         var result = service.ReconcileChangedSids(changedSids, emptyGrants);
 
-        // Assert: NewTraverseEntries is populated because HasEffectiveRights=false and the app
-        // directory (AppContext.BaseDirectory) exists, causing AncestorTraverseGranter to add ACEs.
+        // Assert: NewTraverseEntries is populated because HasEffectiveRights=false and the fake
+        // app directory exists, causing AncestorTraverseGranter to request ACEs.
         Assert.True(result.UpdatedSnapshots.ContainsKey(UserSid));
         Assert.True(result.NewTraverseEntries.ContainsKey(UserSid),
             "NewTraverseEntries should be populated when HasEffectiveRights=false and app directory exists");

@@ -1,8 +1,6 @@
 using Moq;
 using RunFence.Account;
-using RunFence.Apps;
 using RunFence.Apps.UI;
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
@@ -24,7 +22,7 @@ public class ApplicationsGridPopulatorTests
 
         using var grid = new DataGridView();
         grid.Columns.Add(new DataGridViewImageColumn { Name = "Icon" });
-        grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name" });
+        grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "AppName" });
         grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ExePath" });
         grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Account" });
         grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ACL" });
@@ -42,7 +40,7 @@ public class ApplicationsGridPopulatorTests
         appConfigService.Setup(s => s.HasLoadedConfigs).Returns(false);
         appConfigService.Setup(s => s.GetConfigPath(It.IsAny<string>())).Returns((string?)null);
         appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(Array.Empty<string>());
-        sidNameCache.Setup(s => s.GetDisplayName(It.IsAny<string>())).Returns((string sid) => "TestUser");
+        sidNameCache.Setup(s => s.GetDisplayName(It.IsAny<string>())).Returns("TestUser");
 
         var testIcon = new Bitmap(16, 16);
 
@@ -55,14 +53,14 @@ public class ApplicationsGridPopulatorTests
         };
         db.Apps.Add(app1);
 
-        iconService.Setup(i => i.GetOriginalAppIcon(It.IsAny<AppEntry>(), It.IsAny<int>())).Returns((Image)testIcon);
+        iconService.Setup(i => i.GetOriginalAppIcon(It.IsAny<AppEntry>(), It.IsAny<int>())).Returns(testIcon);
 
         var dragDrop = new AppGridDragDropHandler(appConfigService.Object);
         populator.PopulateGrid(dragDrop, _ => { }, () => { });
 
         app1.ExePath = @"C:\app1_v2.exe";
         var newIcon = new Bitmap(16, 16);
-        iconService.Setup(i => i.GetOriginalAppIcon(It.IsAny<AppEntry>(), It.IsAny<int>())).Returns((Image)newIcon);
+        iconService.Setup(i => i.GetOriginalAppIcon(It.IsAny<AppEntry>(), It.IsAny<int>())).Returns(newIcon);
 
         // Act
         populator.PopulateGrid(dragDrop, _ => { }, () => { });

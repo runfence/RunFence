@@ -16,10 +16,11 @@ public class AclAllowListGridHandler
     public void ApplyCellValueToEntry(DataGridViewRow row)
     {
         if (row.Tag is AllowAclEntry entry)
-        {
-            entry.AllowExecute = row.Cells["Execute"].Value is true;
-            entry.AllowWrite = row.Cells["Write"].Value is true;
-        }
+            row.Tag = entry with
+            {
+                AllowExecute = row.Cells["Execute"].Value is true,
+                AllowWrite = row.Cells["Write"].Value is true
+            };
     }
 
     /// <summary>

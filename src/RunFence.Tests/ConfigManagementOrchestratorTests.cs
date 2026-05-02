@@ -48,6 +48,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
     {
         _pinKey = new ProtectedBuffer(new byte[32], protect: false);
         _shortcutDiscovery.Setup(d => d.CreateTraversalCache()).Returns(() => new ShortcutTraversalCache([]));
+        _shortcutDiscovery.Setup(d => d.CreateTraversalCacheIfNeeded(It.IsAny<IEnumerable<AppEntry>>())).Returns(() => new ShortcutTraversalCache([]));
         var session = new SessionContext
         {
             Database = _database,
@@ -59,8 +60,8 @@ public class ConfigManagementOrchestratorTests : IDisposable
             .Setup(s => s.GetEffectiveHandlerMappings(It.IsAny<AppDatabase>()))
             .Returns(new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase));
 
-        _handler = BuildHandler(session,
-            onShortcutConflicts: names => _shortcutConflicts.Add(names));
+        _handler = BuildHandler(session);
+        _handler.ShortcutConflictsDetected += names => _shortcutConflicts.Add(names);
     }
 
     public void Dispose() => _pinKey.Dispose();
@@ -320,11 +321,11 @@ public class ConfigManagementOrchestratorTests : IDisposable
         var (success, _) = _handler.LoadApps(ConfigPath);
 
         Assert.True(success);
-        _shortcutDiscovery.Verify(d => d.CreateTraversalCache(), Times.Once);
+        _shortcutDiscovery.Verify(d => d.CreateTraversalCacheIfNeeded(It.IsAny<IEnumerable<AppEntry>>()), Times.Once);
     }
 
     [Fact]
-    public void LoadApps_NoManageShortcuts_DoesNotCreateTraversalCache()
+    public void LoadApps_NoManageShortcuts_DoesNotScanShortcuts()
     {
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App", ExePath = @"C:\App\app.exe", ManageShortcuts = false };
         SetupLoad([app]);
@@ -332,6 +333,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
         var (success, _) = _handler.LoadApps(ConfigPath);
 
         Assert.True(success);
+        _shortcutDiscovery.Verify(d => d.CreateTraversalCacheIfNeeded(It.IsAny<IEnumerable<AppEntry>>()), Times.Once);
         _shortcutDiscovery.Verify(d => d.CreateTraversalCache(), Times.Never);
     }
 
@@ -403,7 +405,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
     public void LoadApps_ExceedsEvaluationLimit_RollsBackAndReturnsError()
     {
         // Arrange: fill database to evaluation limit, then attempt to load one more
-        for (int i = 0; i < Constants.EvaluationMaxApps; i++)
+        for (int i = 0; i < EvaluationConstants.EvaluationMaxApps; i++)
             _database.Apps.Add(new AppEntry { Id = AppEntry.GenerateId(), Name = $"App{i}", ExePath = $@"C:\App\app{i}.exe" });
 
         var newApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "Extra", ExePath = @"C:\App\extra.exe" };
@@ -417,8 +419,8 @@ public class ConfigManagementOrchestratorTests : IDisposable
         licenseService
             .Setup(l => l.GetRestrictionMessage(EvaluationFeature.Apps, It.IsAny<int>()))
             .Returns((EvaluationFeature _, int count) =>
-                count >= Constants.EvaluationMaxApps
-                    ? $"Evaluation mode allows up to {Constants.EvaluationMaxApps} app entries. Activate a license to remove this limit."
+                count >= EvaluationConstants.EvaluationMaxApps
+                    ? $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxApps} app entries. Activate a license to remove this limit."
                     : null);
 
         using var handler = BuildHandlerWithLicense(licenseService.Object);
@@ -437,7 +439,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
     public void LoadApps_WithinEvaluationLimit_Succeeds()
     {
         // Arrange: one slot below the limit
-        for (int i = 0; i < Constants.EvaluationMaxApps - 1; i++)
+        for (int i = 0; i < EvaluationConstants.EvaluationMaxApps - 1; i++)
             _database.Apps.Add(new AppEntry { Id = AppEntry.GenerateId(), Name = $"App{i}", ExePath = $@"C:\App\app{i}.exe" });
 
         var newApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "Extra", ExePath = @"C:\App\extra.exe" };
@@ -452,8 +454,8 @@ public class ConfigManagementOrchestratorTests : IDisposable
         licenseService
             .Setup(l => l.GetRestrictionMessage(EvaluationFeature.Apps, It.IsAny<int>()))
             .Returns((EvaluationFeature _, int count) =>
-                count >= Constants.EvaluationMaxApps
-                    ? $"Evaluation mode allows up to {Constants.EvaluationMaxApps} app entries. Activate a license to remove this limit."
+                count >= EvaluationConstants.EvaluationMaxApps
+                    ? $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxApps} app entries. Activate a license to remove this limit."
                     : null);
 
         using var handler = BuildHandlerWithLicense(licenseService.Object);
@@ -472,7 +474,6 @@ public class ConfigManagementOrchestratorTests : IDisposable
     public void LoadApps_CryptographicExceptionDuringLoad_RollsBackAndReturnsError()
     {
         // Arrange: LoadAdditionalConfig throws CryptographicException (wrong PIN for config file)
-        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App", ExePath = @"C:\App\app.exe" };
         _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
         _appConfigService
             .Setup(s => s.LoadAdditionalConfig(ConfigPath, _database, It.IsAny<byte[]>()))
@@ -549,9 +550,9 @@ public class ConfigManagementOrchestratorTests : IDisposable
     [Fact]
     public void CleanupAllApps_RemovesFirewallArtifactsThroughCleanupService()
     {
-        // Real AppEntryEnforcementHelper + ConfigEnforcementOrchestrator are used here to verify
-        // the full delegation chain: CleanupAllApps must reach IFirewallCleanupService.RemoveAll
-        // without calling ACL or shortcut services (cleanup is firewall-specific, not enforcement).
+        // Real AppEntryEnforcementHelper + ConfigEnforcementOrchestrator + ShutdownCleanupService
+        // are used here to verify the full delegation chain: CleanupAllApps must reach
+        // IFirewallCleanupService.RemoveAll without calling ACL or shortcut enforce services.
         var session = new SessionContext
         {
             Database = _database,
@@ -567,21 +568,28 @@ public class ConfigManagementOrchestratorTests : IDisposable
             _iconService.Object,
             new Mock<ISidNameCacheService>().Object,
             new Mock<IInteractiveUserDesktopProvider>().Object,
+            new Mock<IInteractiveUserSidResolver>().Object,
             new Mock<ILoggingService>().Object);
         var enforcementHandler = new ConfigEnforcementOrchestrator(
             sessionProvider,
             _aclService.Object,
             _iconService.Object,
-            _contextMenuService.Object,
             _log.Object,
             enforcementHelper,
-            _shortcutDiscovery.Object,
+            _shortcutDiscovery.Object);
+        var shutdownCleanupService = new ShutdownCleanupService(
+            enforcementHandler,
+            sessionProvider,
+            _log.Object,
+            _contextMenuService.Object,
             _handlerRegistrationService.Object,
             _associationAutoSetService.Object,
             _folderHandlerService.Object,
-            _firewallCleanupService.Object);
+            _firewallCleanupService.Object,
+            new Mock<IJobKeeperService>().Object,
+            new Mock<IProcessJobManager>().Object);
 
-        var result = enforcementHandler.CleanupAllApps(isEnforcementInProgress: false, isOperationInProgress: false);
+        var result = shutdownCleanupService.CleanupAllApps(isEnforcementInProgress: false, isOperationInProgress: false);
 
         Assert.Equal(CleanupAllAppsResult.ReadyToExit, result);
         _firewallCleanupService.Verify(f => f.RemoveAll(_database), Times.Once);
@@ -626,7 +634,6 @@ public class ConfigManagementOrchestratorTests : IDisposable
 
     private ConfigManagementOrchestrator BuildHandler(
         SessionContext session,
-        Action<IReadOnlyList<string>>? onShortcutConflicts = null,
         ISecureDesktopRunner? secureDesktop = null,
         ILicenseService? licenseService = null)
     {
@@ -635,26 +642,32 @@ public class ConfigManagementOrchestratorTests : IDisposable
         var enforcementHelper = new AppEntryEnforcementHelper(
             _aclService.Object, _shortcutService.Object, _besideTargetShortcutService.Object,
             _iconService.Object, new Mock<ISidNameCacheService>().Object,
-            new Mock<IInteractiveUserDesktopProvider>().Object, new Mock<ILoggingService>().Object);
+            new Mock<IInteractiveUserDesktopProvider>().Object, new Mock<IInteractiveUserSidResolver>().Object,
+            new Mock<ILoggingService>().Object);
         var enforcementHandler = new ConfigEnforcementOrchestrator(
             sessionProvider, _aclService.Object, _iconService.Object,
-            _contextMenuService.Object, _log.Object, enforcementHelper,
-            _shortcutDiscovery.Object,
-            _handlerRegistrationService.Object, _associationAutoSetService.Object,
-            _folderHandlerService.Object, _firewallCleanupService.Object);
+            _log.Object, enforcementHelper, _shortcutDiscovery.Object);
         var mismatchKeyResolver = new ConfigMismatchKeyResolver(
             sessionProvider, _pinService.Object, _databaseService.Object,
-            secureDesktop ?? new SecureDesktopHelper(), new OperationGuard());
+            secureDesktop ?? new SecureDesktopHelper(_log.Object), new OperationGuard());
         var handlerSyncHelper = new HandlerSyncHelper(sessionProvider,
             _handlerRegistrationService.Object, _handlerMappingService.Object,
             _associationAutoSetService.Object);
-        return new ConfigManagementOrchestrator(
+        var configGrantPinHelper = new ConfigGrantPinHelper(new Mock<IQuickAccessPinService>().Object);
+        var configLoadUnloadService = new ConfigLoadUnloadService(
             sessionProvider, _appConfigService.Object,
-            _log.Object, enforcementHandler,
-            mismatchKeyResolver, handlerSyncHelper, _handlerMappingService.Object,
-            licenseService ?? _licenseService.Object,
-            new Mock<IQuickAccessPinService>().Object,
-            onShortcutConflicts: onShortcutConflicts);
+            _log.Object, licenseService ?? _licenseService.Object, enforcementHandler,
+            mismatchKeyResolver, handlerSyncHelper, _handlerMappingService.Object);
+        var shutdownCleanupService = new ShutdownCleanupService(
+            enforcementHandler, sessionProvider, _log.Object,
+            _contextMenuService.Object, _handlerRegistrationService.Object,
+            _associationAutoSetService.Object, _folderHandlerService.Object,
+            _firewallCleanupService.Object,
+            new Mock<IJobKeeperService>().Object,
+            new Mock<IProcessJobManager>().Object);
+        return new ConfigManagementOrchestrator(
+            sessionProvider, _log.Object,
+            configLoadUnloadService, configGrantPinHelper, shutdownCleanupService);
     }
 
     private ConfigManagementOrchestrator BuildHandlerWithLicense(ILicenseService licenseService)

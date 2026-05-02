@@ -1,12 +1,13 @@
 using System.IO.Pipes;
-using System.Security.AccessControl;
-using System.Security.Principal;
 using RunFence.Core;
 using RunFence.Core.Ipc;
 
 namespace RunFence.Ipc;
 
-public class IpcServerService(ILoggingService log, IpcConnectionProcessor processor) : IIpcServerService
+public class IpcServerService(
+    ILoggingService log,
+    IpcConnectionProcessor processor,
+    IpcPipeSecurityFactory pipeSecurityFactory) : IIpcServerService
 {
     private CancellationTokenSource? _cts;
     private Task? _listenTask;
@@ -14,9 +15,37 @@ public class IpcServerService(ILoggingService log, IpcConnectionProcessor proces
     public void Start(Func<IpcMessage, IpcCallerContext, IpcResponse> handler)
     {
         _cts = new CancellationTokenSource();
-        const string pipeName = Constants.PipeName;
+        string pipeName = IpcConstants.PipeName;
 
-        _listenTask = Task.Run(() => ListenLoop(pipeName, handler, _cts.Token));
+        NamedPipeServerStream? initialPipe = null;
+        try
+        {
+            initialPipe = CreatePipe(pipeName, firstInstance: true);
+        }
+#if DEBUG
+        catch (UnauthorizedAccessException)
+        {
+            log.Info("IPC server not started — another Debug instance owns the pipe.");
+            _cts.Dispose();
+            _cts = null;
+            return;
+        }
+#else
+        catch (UnauthorizedAccessException ex)
+        {
+            _cts.Dispose();
+            _cts = null;
+            throw new InvalidOperationException("Failed to create initial IPC pipe instance.", ex);
+        }
+#endif
+        catch (Exception ex)
+        {
+            _cts.Dispose();
+            _cts = null;
+            throw new InvalidOperationException("Failed to create initial IPC pipe instance.", ex);
+        }
+
+        _listenTask = Task.Run(() => ListenLoop(pipeName, handler, _cts.Token, initialPipe));
         log.Info($"IPC server started on pipe: {pipeName}");
     }
 
@@ -48,7 +77,7 @@ public class IpcServerService(ILoggingService log, IpcConnectionProcessor proces
         if (firstInstance)
             options |= PipeOptions.FirstPipeInstance;
 
-        var pipeSecurity = BuildPipeSecurity();
+        var pipeSecurity = pipeSecurityFactory.Create();
 
         try
         {
@@ -58,23 +87,23 @@ public class IpcServerService(ILoggingService log, IpcConnectionProcessor proces
                 8,
                 PipeTransmissionMode.Message,
                 options,
-                Constants.MaxPipeMessageSize,
-                Constants.MaxPipeMessageSize,
+                IpcConstants.MaxPipeMessageSize,
+                IpcConstants.MaxPipeMessageSize,
                 pipeSecurity);
         }
         catch (UnauthorizedAccessException)
         {
-            // Passing lpSecurityAttributes to CreateNamedPipe fails for non-first pipe instances.
-            // Retry with pipeSecurity: null (no lpSecurityAttributes) and request WRITE_DAC
-            // explicitly via additionalAccessRights so SetAccessControl can apply the ACL.
+            // Passing lpSecurityAttributes to CreateNamedPipe fails for non-first pipe instances
+            // under some existing-pipe timing/security conditions. Create the instance first,
+            // then immediately apply the intended DACL.
             var pipe = NamedPipeServerStreamAcl.Create(
                 pipeName,
                 PipeDirection.InOut,
                 8,
                 PipeTransmissionMode.Message,
                 options,
-                Constants.MaxPipeMessageSize,
-                Constants.MaxPipeMessageSize,
+                IpcConstants.MaxPipeMessageSize,
+                IpcConstants.MaxPipeMessageSize,
                 pipeSecurity: null,
                 additionalAccessRights: PipeAccessRights.ChangePermissions);
             try
@@ -90,41 +119,22 @@ public class IpcServerService(ILoggingService log, IpcConnectionProcessor proces
         }
     }
 
-    private static PipeSecurity BuildPipeSecurity()
-    {
-        var pipeSecurity = new PipeSecurity();
-
-        var adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        pipeSecurity.AddAccessRule(new PipeAccessRule(
-            adminSid,
-            PipeAccessRights.FullControl,
-            AccessControlType.Allow));
-
-        // Deny remote (SMB) pipe access — all authorization is application-level via AllowedIpcCallers
-        var networkSid = new SecurityIdentifier(WellKnownSidType.NetworkSid, null);
-        pipeSecurity.AddAccessRule(new PipeAccessRule(
-            networkSid, PipeAccessRights.FullControl, AccessControlType.Deny));
-
-        // Grant all local users read/write — RunAs-launched processes may lack InteractiveSid.
-        // Launch is intentionally allowed for any local user when AllowedIpcCallers is empty
-        // (the list is populated with known SIDs on first start). Authorization is application-level.
-        var worldSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
-        pipeSecurity.AddAccessRule(new PipeAccessRule(
-            worldSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
-
-        return pipeSecurity;
-    }
-
     /// <remarks>
-    /// The server accepts up to 8 concurrent named pipe connections. The pipe DACL denies network
-    /// (SMB) access and grants read/write to all local users; authorization is application-level
-    /// via <see cref="IIpcCallerAuthorizer"/>. Each connection is rate-limited per caller identity
-    /// to one request per 100ms to prevent local flooding.
+    /// The server accepts up to 8 concurrent named pipe connections. Each accepted connection is
+    /// dispatched to a background task immediately so the accept loop never blocks on I/O from a
+    /// single caller. A 10-second per-connection read deadline prevents slow-loris wedging.
+    /// The pipe DACL denies network (SMB) access and grants read/write to all local users;
+    /// authorization is application-level via <see cref="IIpcCallerAuthorizer"/>. Each connection
+    /// is rate-limited per caller identity to one request per 100ms to prevent local flooding.
     /// </remarks>
-    private async Task ListenLoop(string pipeName, Func<IpcMessage, IpcCallerContext, IpcResponse> handler, CancellationToken ct)
+    private async Task ListenLoop(
+        string pipeName,
+        Func<IpcMessage, IpcCallerContext, IpcResponse> handler,
+        CancellationToken ct,
+        NamedPipeServerStream? initialPipe)
     {
-        bool firstInstance = true;
-        NamedPipeServerStream? nextPipe = null;
+        bool firstInstance = initialPipe == null;
+        NamedPipeServerStream? nextPipe = initialPipe;
 
         while (!ct.IsCancellationRequested)
         {
@@ -148,12 +158,19 @@ public class IpcServerService(ILoggingService log, IpcConnectionProcessor proces
                     log.Error("Failed to pre-create next pipe instance", ex);
                 }
 
-                await processor.ProcessConnectionAsync(pipeServer, handler, ct);
-
-                pipeServer.Disconnect();
+                // Transfer ownership to background task — do NOT await; loop returns to WaitForConnectionAsync immediately.
+                // A hung caller can no longer wedge the accept loop.
+                var connectionPipe = pipeServer;
+                pipeServer = null;
+                _ = Task.Run(() => ProcessConnectionWithTimeoutAsync(connectionPipe, handler, ct));
             }
             catch (OperationCanceledException)
             {
+                break;
+            }
+            catch (UnauthorizedAccessException) when (firstInstance && DebugHelper.IsDebugBuild)
+            {
+                log.Info("IPC server not started — another Debug instance owns the pipe.");
                 break;
             }
             catch (Exception ex)
@@ -170,10 +187,39 @@ public class IpcServerService(ILoggingService log, IpcConnectionProcessor proces
             }
             finally
             {
-                pipeServer?.Dispose();
+                pipeServer?.Dispose(); // null when ownership was transferred to background task
             }
         }
 
         nextPipe?.Dispose();
+    }
+
+    private async Task ProcessConnectionWithTimeoutAsync(
+        NamedPipeServerStream pipe,
+        Func<IpcMessage, IpcCallerContext, IpcResponse> handler,
+        CancellationToken serverCt)
+    {
+        await using (pipe)
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(serverCt);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+            try
+            {
+                await processor.ProcessConnectionAsync(pipe, handler, timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!serverCt.IsCancellationRequested)
+            {
+                log.Warn("IPC connection read timed out; closing connection.");
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                log.Error("IPC connection processing error", ex);
+            }
+            finally
+            {
+                try { pipe.Disconnect(); } catch { }
+            }
+        }
     }
 }

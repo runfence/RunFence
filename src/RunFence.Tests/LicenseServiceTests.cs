@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using Microsoft.Win32;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -115,10 +114,10 @@ public class LicenseServiceTests : IDisposable
 
     public static IEnumerable<object[]> EvaluationLimitData =>
     [
-        ["App", Constants.EvaluationMaxApps],
-        ["Container", Constants.EvaluationMaxContainers],
-        ["HiddenAccount", Constants.EvaluationMaxHiddenAccounts],
-        ["Credential", Constants.EvaluationMaxCredentials],
+        ["App", EvaluationConstants.EvaluationMaxApps],
+        ["Container", EvaluationConstants.EvaluationMaxContainers],
+        ["HiddenAccount", EvaluationConstants.EvaluationMaxHiddenAccounts],
+        ["Credential", EvaluationConstants.EvaluationMaxCredentials],
     ];
 
     private static bool CanAdd(ILicenseService svc, string feature, int count) => feature switch

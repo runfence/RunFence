@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Moq;
 using RunFence.Acl;
 using RunFence.Acl.Permissions;
+using RunFence.Acl.Traverse;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -21,17 +22,24 @@ public class AclManagerExportImportTests
     private const string TestSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
 
     private readonly Mock<ILoggingService> _log = new();
-    private readonly Mock<IAppConfigService> _appConfig = new();
     private readonly Mock<IPathGrantService> _pathGrantService = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
 
-    private AclManagerExportImport CreateImport(AppDatabase? db = null, AclManagerPendingChanges? pending = null)
+    private AclManagerExportImport CreateImport(
+        AppDatabase? db = null,
+        AclManagerPendingChanges? pending = null,
+        string sid = TestSid,
+        bool isContainer = false)
     {
         db ??= new AppDatabase();
         pending ??= new AclManagerPendingChanges();
         var dbProvider = new LambdaDatabaseProvider(() => db);
-        var exportImport = new AclManagerExportImport(_pathGrantService.Object, _aclPermission.Object, _log.Object, dbProvider);
-        exportImport.Initialize(pending, TestSid, isContainer: false, owner: new NullWin32Window());
+        var importProcessor = new AclImportProcessor(
+            _log.Object,
+            dbProvider,
+            new GrantTraversePathResolver(new TestFileSystemPathInfo()));
+        var exportImport = new AclManagerExportImport(_pathGrantService.Object, _aclPermission.Object, _log.Object, dbProvider, importProcessor);
+        exportImport.Initialize(pending, sid, isContainer, owner: new NullWin32Window());
         return exportImport;
     }
 
@@ -129,6 +137,44 @@ public class AclManagerExportImportTests
         Assert.True(entry.SavedRights!.Execute);
         Assert.True(entry.SavedRights.Read);
         Assert.True(refreshCalled);
+    }
+
+    [Fact]
+    public void ProcessImport_LowIntegrityGrant_IgnoresImportedOwner()
+    {
+        var pending = new AclManagerPendingChanges();
+        var importer = CreateImport(pending: pending, sid: AclHelper.LowIntegritySid);
+        var data = new ExportData(Version: 1,
+            Grants: [new ExportGrantEntry(@"C:\Foo\App.exe", false, Execute: true, Write: true, Read: true, Special: true, Owner: true)],
+            Traverse: null);
+
+        importer.ProcessImport(data, () => { });
+
+        var normalizedPath = Path.GetFullPath(@"C:\Foo\App.exe");
+        var entry = pending.FindPendingAdd(normalizedPath, isDeny: false);
+        Assert.NotNull(entry);
+        Assert.False(entry.SavedRights!.Own);
+        Assert.True(entry.SavedRights.Execute);
+        Assert.True(entry.SavedRights.Write);
+        Assert.True(entry.SavedRights.Read);
+        Assert.True(entry.SavedRights.Special);
+    }
+
+    [Fact]
+    public void ProcessImport_ContainerGrant_IgnoresImportedOwner()
+    {
+        var pending = new AclManagerPendingChanges();
+        var importer = CreateImport(pending: pending, sid: "S-1-15-2-1", isContainer: true);
+        var data = new ExportData(Version: 1,
+            Grants: [new ExportGrantEntry(@"C:\Foo\App.exe", false, Execute: true, Write: true, Read: true, Special: true, Owner: true)],
+            Traverse: null);
+
+        importer.ProcessImport(data, () => { });
+
+        var normalizedPath = Path.GetFullPath(@"C:\Foo\App.exe");
+        var entry = pending.FindPendingAdd(normalizedPath, isDeny: false);
+        Assert.NotNull(entry);
+        Assert.False(entry.SavedRights!.Own);
     }
 
     [Fact]
@@ -329,6 +375,40 @@ public class AclManagerExportImportTests
         Assert.False(pending.IsPendingAdd(normalizedValid, isDeny: false));
         Assert.Empty(pending.PendingAdds);
         Assert.Empty(pending.PendingTraverseAdds);
+    }
+
+    [Fact]
+    public void ProcessImport_ExceptionDuringProcessing_RestoresCancelledPendingRemoval()
+    {
+        // Scenario: a DB entry is in PendingRemoves (user queued removal).
+        // The import first encounters this entry (cancels its pending removal), then
+        // encounters an invalid second entry that causes an exception.
+        // After rollback the cancelled pending removal must be restored.
+        var normalizedGood = Path.GetFullPath(@"C:\Foo\App.exe");
+        var existingEntry = new GrantedPathEntry { Path = normalizedGood, IsDeny = false };
+        var db = new AppDatabase();
+        db.GetOrCreateAccount(TestSid).Grants.Add(existingEntry);
+        var pending = new AclManagerPendingChanges
+        {
+            PendingRemoves = { [(normalizedGood, false)] = existingEntry }
+        };
+
+        var importer = CreateImport(db, pending);
+
+        var data = new ExportData(Version: 1,
+            Grants:
+            [
+                // This entry is in DB + PendingRemoves: import will cancel the pending removal.
+                new ExportGrantEntry(@"C:\Foo\App.exe", false, Execute: true, Write: false, Read: true, Special: false, Owner: false),
+                // Invalid path causes Path.GetFullPath to throw, triggering rollback.
+                new ExportGrantEntry("C:\\Bad\0Path\\App.exe", false, Execute: false, Write: false, Read: true, Special: false, Owner: false)
+            ],
+            Traverse: null);
+
+        Assert.Throws<ArgumentException>(() => importer.ProcessImport(data, () => { }));
+
+        // Rollback must restore the cancelled pending removal.
+        Assert.True(pending.IsPendingRemove(normalizedGood, isDeny: false));
     }
 
     [Fact]

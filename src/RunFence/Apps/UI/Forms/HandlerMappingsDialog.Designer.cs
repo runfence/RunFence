@@ -16,10 +16,10 @@ partial class HandlerMappingsDialog
     private ToolStripButton _reapplyButton;
     private ToolStripButton _openDefaultAppsButton;
     private StyledDataGridView _grid;
-    private DataGridViewTextBoxColumn _colKey;
-    private DataGridViewTextBoxColumn _colAppName;
-    private DataGridViewTextBoxColumn _colAccount;
-    private DataGridViewTextBoxColumn _colArgsTemplate;
+    private DataGridViewTextBoxColumn colKey;
+    private DataGridViewTextBoxColumn colAppName;
+    private DataGridViewTextBoxColumn colAccount;
+    private DataGridViewTextBoxColumn colArgsTemplate;
     private ContextMenuStrip _contextMenu;
     private ToolStripMenuItem _ctxAdd;
     private ToolStripMenuItem _ctxEdit;
@@ -44,10 +44,10 @@ partial class HandlerMappingsDialog
         _reapplyButton = new ToolStripButton();
         _openDefaultAppsButton = new ToolStripButton();
         _grid = new StyledDataGridView();
-        _colKey = new DataGridViewTextBoxColumn();
-        _colAppName = new DataGridViewTextBoxColumn();
-        _colAccount = new DataGridViewTextBoxColumn();
-        _colArgsTemplate = new DataGridViewTextBoxColumn();
+        colKey = new DataGridViewTextBoxColumn();
+        colAppName = new DataGridViewTextBoxColumn();
+        colAccount = new DataGridViewTextBoxColumn();
+        colArgsTemplate = new DataGridViewTextBoxColumn();
         _contextMenu = new ContextMenuStrip();
         _ctxAdd = new ToolStripMenuItem();
         _ctxEdit = new ToolStripMenuItem();
@@ -108,41 +108,37 @@ partial class HandlerMappingsDialog
 
         // _grid
         _grid.Dock = DockStyle.Fill;
-        _grid.AllowUserToAddRows = false;
-        _grid.AllowUserToDeleteRows = false;
         _grid.ReadOnly = true;
-        _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-        _grid.MultiSelect = false;
         _grid.ContextMenuStrip = _contextMenu;
-        _grid.Columns.AddRange(new DataGridViewColumn[] { _colKey, _colAppName, _colAccount, _colArgsTemplate });
+        _grid.Columns.AddRange(new DataGridViewColumn[] { colKey, colAppName, colAccount, colArgsTemplate });
         _grid.SelectionChanged += OnGridSelectionChanged;
         _grid.MouseDown += OnGridMouseDown;
         _grid.KeyDown += OnGridKeyDown;
         _grid.CellDoubleClick += OnGridCellDoubleClick;
 
-        // _colKey
-        _colKey.HeaderText = "Extension / Protocol";
-        _colKey.Name = "colKey";
-        _colKey.Width = 160;
-        _colKey.ReadOnly = true;
+        // colKey
+        colKey.HeaderText = "Extension / Protocol";
+        colKey.Name = "colKey";
+        colKey.Width = 160;
+        colKey.ReadOnly = true;
 
-        // _colAppName
-        _colAppName.HeaderText = "Application";
-        _colAppName.Name = "colAppName";
-        _colAppName.Width = 200;
-        _colAppName.ReadOnly = true;
+        // colAppName
+        colAppName.HeaderText = "Application";
+        colAppName.Name = "colAppName";
+        colAppName.Width = 200;
+        colAppName.ReadOnly = true;
 
-        // _colAccount
-        _colAccount.HeaderText = "Account";
-        _colAccount.Name = "colAccount";
-        _colAccount.Width = 130;
-        _colAccount.ReadOnly = true;
+        // colAccount
+        colAccount.HeaderText = "Account";
+        colAccount.Name = "colAccount";
+        colAccount.Width = 130;
+        colAccount.ReadOnly = true;
 
-        // _colArgsTemplate
-        _colArgsTemplate.HeaderText = "Args Template";
-        _colArgsTemplate.Name = "colArgsTemplate";
-        _colArgsTemplate.ReadOnly = true;
-        _colArgsTemplate.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+        // colArgsTemplate
+        colArgsTemplate.HeaderText = "Args Template";
+        colArgsTemplate.Name = "colArgsTemplate";
+        colArgsTemplate.ReadOnly = true;
+        colArgsTemplate.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
 
         // _contextMenu
         _contextMenu.Items.AddRange(new ToolStripItem[] { _ctxAdd, _ctxEdit, _ctxRemove });

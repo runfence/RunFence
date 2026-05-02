@@ -1,4 +1,3 @@
-using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 
@@ -63,15 +62,10 @@ public class TaskSchedulerDataAccess
     {
         try
         {
-            string folderPath = folder.Path;
-
             foreach (dynamic task in folder.GetTasks(1))
             {
                 try
                 {
-                    string taskPath = task.Path;
-                    string taskName = task.Name;
-
                     var exePaths = new List<string>();
                     bool isPerUser = false;
                     string? userSid = null;
@@ -132,7 +126,7 @@ public class TaskSchedulerDataAccess
                         /* definition not accessible */
                     }
 
-                    tasks.Add(new ScheduledTaskInfo(taskPath, folderPath, taskName, exePaths, isPerUser, userSid));
+                    tasks.Add(new ScheduledTaskInfo(exePaths, isPerUser, userSid));
                 }
                 catch
                 {
@@ -166,50 +160,4 @@ public class TaskSchedulerDataAccess
         }
     }
 
-    public string? ResolveShortcutTarget(string lnkPath)
-    {
-        string? result = null;
-        Exception? error = null;
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                var shellType = Type.GetTypeFromProgID("WScript.Shell");
-                if (shellType == null)
-                    return;
-                dynamic shell = Activator.CreateInstance(shellType)!;
-                try
-                {
-                    dynamic shortcut = shell.CreateShortcut(lnkPath);
-                    try
-                    {
-                        result = shortcut.TargetPath as string;
-                    }
-                    finally
-                    {
-                        Marshal.ReleaseComObject(shortcut);
-                    }
-                }
-                finally
-                {
-                    Marshal.ReleaseComObject(shell);
-                }
-            }
-            catch (Exception ex)
-            {
-                error = ex;
-            }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.IsBackground = true;
-        thread.Start();
-        if (!thread.Join(10_000))
-        {
-            thread.Interrupt();
-            return null;
-        }
-        if (error != null)
-            ExceptionDispatchInfo.Capture(error).Throw();
-        return result;
-    }
 }

@@ -9,6 +9,7 @@ public class AppDatabase
     public List<AppEntry> Apps { get; set; } = new();
     public List<AccountEntry> Accounts { get; set; } = new();
     public List<AppContainerEntry> AppContainers { get; set; } = new();
+    public List<GrantedPathEntry> SharedContainerTraverseGrants { get; set; } = new();
     public AppSettings Settings { get; set; } = new();
     public string? LastPrefsFilePath { get; set; }
 
@@ -20,12 +21,26 @@ public class AppDatabase
     public Dictionary<string, string> SidNames { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Durable JobKeeper routing identities. Keys are target SID plus restricted integrity mode.
+    /// Reconnect is valid only after the named job is reopened and verified.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, JobKeeperInstanceIdentity>? JobKeeperInstances { get; set; }
+
+    /// <summary>
     /// Snapshot of each known SID's local group memberships at the last reconciliation check.
     /// Used to detect group membership changes between sessions and re-apply traverse ACEs
     /// when a user is added to or removed from a group. Keys are SIDs (case-insensitive).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, List<string>>? AccountGroupSnapshots { get; set; }
+
+    /// <summary>
+    /// When true, the built-in SYSTEM account (S-1-5-18) appears as the first item
+    /// in the RunAs credential dropdown.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ShowSystemInRunAs { get; set; }
 
     public AccountEntry? GetAccount(string sid)
         => Accounts.FirstOrDefault(a => string.Equals(a.Sid, sid, OrdinalIgnoreCase));
@@ -72,11 +87,15 @@ public class AppDatabase
         Version = Version,
         Apps = Apps.ToList(),
         AppContainers = AppContainers.ToList(),
+        SharedContainerTraverseGrants = SharedContainerTraverseGrants.Select(g => g.Clone()).ToList(),
         Settings = Settings.Clone(),
         LastPrefsFilePath = LastPrefsFilePath,
         SidNames = new Dictionary<string, string>(SidNames, StringComparer.OrdinalIgnoreCase),
+        JobKeeperInstances = JobKeeperInstances?.ToDictionary(
+            kvp => kvp.Key, kvp => kvp.Value with { }, StringComparer.OrdinalIgnoreCase),
         Accounts = Accounts.Select(a => a.Clone()).ToList(),
         AccountGroupSnapshots = AccountGroupSnapshots?.ToDictionary(
             kvp => kvp.Key, kvp => kvp.Value.ToList(), StringComparer.OrdinalIgnoreCase),
+        ShowSystemInRunAs = ShowSystemInRunAs,
     };
 }

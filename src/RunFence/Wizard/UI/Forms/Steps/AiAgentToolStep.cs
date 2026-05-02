@@ -1,7 +1,5 @@
 using RunFence.Account;
 using RunFence.Apps.Shortcuts;
-using RunFence.Apps.UI.Forms;
-using RunFence.Infrastructure;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
 
@@ -15,14 +13,11 @@ public class AiAgentToolStep : WizardStepPage
 {
     private readonly Action<bool, string?> _setOptions;
     private readonly Func<IWizardProgressReporter, Task>? _commitAction;
-    private readonly IShortcutDiscoveryService _discoveryService;
 
     private RadioButton _aiPackageRadio = null!;
     private RadioButton _otherToolRadio = null!;
     private Label _appPathLabel = null!;
-    private TextBox _appPathTextBox = null!;
-    private Button _browseAppButton = null!;
-    private Button _discoverAppButton = null!;
+    private AppPathBrowseControl _appPathBrowseControl = null!;
     private Panel _appPathPanel = null!;
 
     /// <param name="setOptions">Receives (useAiPackage, appPath) on <see cref="Collect"/>.</param>
@@ -34,12 +29,12 @@ public class AiAgentToolStep : WizardStepPage
     public AiAgentToolStep(
         Action<bool, string?> setOptions,
         IShortcutDiscoveryService discoveryService,
+        IShortcutIconHelper iconHelper,
         Func<IWizardProgressReporter, Task>? commitAction = null)
     {
         _setOptions = setOptions;
-        _discoveryService = discoveryService;
         _commitAction = commitAction;
-        BuildContent();
+        BuildContent(discoveryService, iconHelper);
     }
 
     public override Task OnCommitBeforeNextAsync(IWizardProgressReporter progress) =>
@@ -51,13 +46,13 @@ public class AiAgentToolStep : WizardStepPage
     public override void Collect()
     {
         var useAiPackage = _aiPackageRadio.Checked;
-        var appPath = !useAiPackage && !string.IsNullOrWhiteSpace(_appPathTextBox.Text)
-            ? _appPathTextBox.Text.Trim()
+        var appPath = !useAiPackage && !string.IsNullOrWhiteSpace(_appPathBrowseControl.PathText)
+            ? _appPathBrowseControl.PathText.Trim()
             : null;
         _setOptions(useAiPackage, appPath);
     }
 
-    private void BuildContent()
+    private void BuildContent(IShortcutDiscoveryService discoveryService, IShortcutIconHelper iconHelper)
     {
         SuspendLayout();
         Padding = new Padding(8);
@@ -90,51 +85,16 @@ public class AiAgentToolStep : WizardStepPage
             Padding = new Padding(0, 8, 0, 4)
         };
 
-        _appPathTextBox = new TextBox
-        {
-            Font = new Font("Segoe UI", 9.5f),
-            Dock = DockStyle.Fill
-        };
+        _appPathBrowseControl = new AppPathBrowseControl(
+            discoveryService,
+            iconHelper,
+            dialogTitle: "Select Tool Executable");
+        _appPathBrowseControl.Font = new Font("Segoe UI", 9);
 
-        int inputHeight = _appPathTextBox.PreferredHeight;
-
-        _browseAppButton = new Button
-        {
-            Text = "Browse…",
-            Font = new Font("Segoe UI", 9),
-            Width = 72,
-            Height = inputHeight,
-            Dock = DockStyle.Right,
-            FlatStyle = FlatStyle.System
-        };
-        _browseAppButton.Click += OnBrowseApp;
-
-        _discoverAppButton = new Button
-        {
-            Text = "Discover…",
-            Font = new Font("Segoe UI", 9),
-            Width = 88,
-            Height = inputHeight,
-            Dock = DockStyle.Right,
-            FlatStyle = FlatStyle.System
-        };
-        _discoverAppButton.Click += OnDiscoverApp;
-
-        var appPathRow = new Panel
-        {
-            Dock = DockStyle.Top,
-            Height = inputHeight
-        };
-        // Dock=Right: last added = highest Z-order = rightmost position.
-        // Add Browse first (will be to the left), Discover last (rightmost), then Fill textbox.
-        appPathRow.Controls.Add(_browseAppButton);
-        appPathRow.Controls.Add(_discoverAppButton);
-        appPathRow.Controls.Add(_appPathTextBox);
-
-        int appPathPanelHeight = _appPathLabel.PreferredHeight + _appPathLabel.Padding.Vertical + inputHeight;
+        int appPathPanelHeight = _appPathLabel.PreferredHeight + _appPathLabel.Padding.Vertical + _appPathBrowseControl.Height;
         _appPathPanel = new Panel { Dock = DockStyle.Top, Height = appPathPanelHeight, Visible = false };
         // Add in reverse order so Dock=Top stacks top-to-bottom inside _appPathPanel
-        _appPathPanel.Controls.Add(appPathRow);
+        _appPathPanel.Controls.Add(_appPathBrowseControl);
         _appPathPanel.Controls.Add(_appPathLabel);
 
         // Add in reverse order so Dock=Top stacks top-to-bottom
@@ -147,39 +107,5 @@ public class AiAgentToolStep : WizardStepPage
     private void UpdateOtherToolVisibility()
     {
         _appPathPanel.Visible = !_aiPackageRadio.Checked;
-    }
-
-    private async void OnDiscoverApp(object? sender, EventArgs e)
-    {
-        _discoverAppButton.Enabled = false;
-        Cursor = Cursors.WaitCursor;
-        try
-        {
-            var apps = await Task.Run(() => _discoveryService.DiscoverApps());
-            if (IsDisposed) return;
-
-            using var dlg = new AppDiscoveryDialog(apps);
-            if (dlg.ShowDialog(this) == DialogResult.OK)
-                _appPathTextBox.Text = dlg.SelectedPath;
-        }
-        finally
-        {
-            if (!IsDisposed)
-            {
-                Cursor = Cursors.Default;
-                _discoverAppButton.Enabled = true;
-            }
-        }
-    }
-
-    private void OnBrowseApp(object? sender, EventArgs e)
-    {
-        using var dlg = new OpenFileDialog();
-        dlg.Title = "Select Tool Executable";
-        dlg.Filter = "Executable files (*.exe)|*.exe|All files (*.*)|*.*";
-        dlg.CheckFileExists = true;
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-        if (dlg.ShowDialog(this) == DialogResult.OK)
-            _appPathTextBox.Text = dlg.FileName;
     }
 }

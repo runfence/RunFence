@@ -11,6 +11,9 @@ partial class StartupSecurityDialog
     private Label _warningLabel;
     private Label _descLabel;
     private ListView _listView;
+    private ColumnHeader _locationHeader;
+    private ColumnHeader _principalHeader;
+    private ColumnHeader _accessHeader;
     private Label _remediationLabel;
     private Button _openLocationButton;
     private Button _copyButton;
@@ -32,6 +35,9 @@ partial class StartupSecurityDialog
         _warningLabel = new Label();
         _descLabel = new Label();
         _listView = new ListView();
+        _locationHeader = new ColumnHeader();
+        _principalHeader = new ColumnHeader();
+        _accessHeader = new ColumnHeader();
         _remediationLabel = new Label();
         _openLocationButton = new Button();
         _copyButton = new Button();
@@ -113,19 +119,20 @@ partial class StartupSecurityDialog
         _listView.GridLines = true;
         _listView.HeaderStyle = ColumnHeaderStyle.Nonclickable;
         _listView.ShowGroups = true;
-        _listView.Columns.Add("Location", 500);
-        _listView.Columns.Add("Principal", 240);
-        _listView.Columns.Add("Access", 200);
-        _listView.Groups.Add(new ListViewGroup("Startup Folders", HorizontalAlignment.Left) { Name = "StartupFolder" });
-        _listView.Groups.Add(new ListViewGroup("Registry Autorun Keys", HorizontalAlignment.Left) { Name = "RegistryRunKey" });
-        _listView.Groups.Add(new ListViewGroup("Autorun Executables", HorizontalAlignment.Left) { Name = "AutorunExecutable" });
-        _listView.Groups.Add(new ListViewGroup("Task Scheduler", HorizontalAlignment.Left) { Name = "TaskScheduler" });
-        _listView.Groups.Add(new ListViewGroup("Logon Scripts", HorizontalAlignment.Left) { Name = "LogonScript" });
-        _listView.Groups.Add(new ListViewGroup("Auto-Start Services", HorizontalAlignment.Left) { Name = "AutoStartService" });
-        _listView.Groups.Add(new ListViewGroup("Disk Root ACLs", HorizontalAlignment.Left) { Name = "DiskRootAcl" });
-        _listView.Groups.Add(new ListViewGroup("Account Policy", HorizontalAlignment.Left) { Name = "AccountPolicy" });
-        _listView.Groups.Add(new ListViewGroup("Windows Firewall", HorizontalAlignment.Left) { Name = "FirewallPolicy" });
-        _listView.Groups.Add(new ListViewGroup("Other", HorizontalAlignment.Left) { Name = "Other" });
+
+        // _locationHeader
+        _locationHeader.Text = "Location";
+        _locationHeader.Width = 500;
+
+        // _principalHeader
+        _principalHeader.Text = "Principal";
+        _principalHeader.Width = 240;
+
+        // _accessHeader
+        _accessHeader.Text = "Access";
+        _accessHeader.Width = 200;
+
+        _listView.Columns.AddRange(new ColumnHeader[] { _locationHeader, _principalHeader, _accessHeader });
 
         // StartupSecurityDialog
         AutoScaleDimensions = new SizeF(7F, 15F);

@@ -24,7 +24,7 @@ public class RunAsAccountCreationUI(
     /// On cancel, EndModal is called here and the result has <see cref="ShowCreateAccountResult.WasCancelled"/> set.
     /// Caller must dispose the returned dialog.
     /// </summary>
-    public ShowCreateAccountResult ShowCreateAccountDialog(string filePath, RunAsDosProtection dosProtection)
+    public ShowCreateAccountResult ShowCreateAccountDialog(string filePath)
     {
         var prefillUsername = UsernameHelper.GenerateFromPath(filePath);
         EditAccountDialog? dlg = null;
@@ -39,7 +39,6 @@ public class RunAsAccountCreationUI(
 
             if (result != DialogResult.OK || dlg.CreatedSid == null)
             {
-                dosProtection.RecordDecline();
                 dlg.Dispose();
                 modalCoordinator.EndModal();
                 return new ShowCreateAccountResult(null, WasCancelled: true);

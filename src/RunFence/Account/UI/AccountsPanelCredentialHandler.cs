@@ -6,22 +6,23 @@ namespace RunFence.Account.UI;
 
 /// <summary>
 /// Aggregates credential-related operations for AccountsPanel: password copy/type/rotate/set-empty
-/// (via <see cref="AccountPasswordHandler"/>) and credential CRUD / account-edit flow
-/// (via <see cref="AccountCredentialOperations"/>).
+/// (via <see cref="AccountPasswordAccessHandler"/> and <see cref="AccountPasswordMutationHandler"/>),
+/// credential CRUD (via <see cref="AccountCredentialCrudHandler"/>),
+/// and the full edit-account flow (via <see cref="AccountEditOrchestrator"/>).
 /// </summary>
 public class AccountsPanelCredentialHandler : IDisposable
 {
     private IAccountGridCallbacks _callbacks = null!;
     private Control _ownerControl = null!;
-    private readonly ISessionProvider _sessionProvider;
     private readonly OperationGuard _operationGuard;
     private readonly IPreviousWindowTracker _windowTracker;
-    private readonly AccountPasswordHandler _passwordHandler;
-    private readonly AccountCredentialOperations _credentialOperations;
-    private readonly ToolLauncher _launchService;
+    private readonly AccountPasswordAccessHandler _passwordAccessHandler;
+    private readonly AccountPasswordMutationHandler _passwordMutationHandler;
+    private readonly AccountCredentialCrudHandler _credentialCrudHandler;
+    private readonly AccountEditOrchestrator _editOrchestrator;
 
     /// <summary>Raised when the credential operations need to open the create user dialog.</summary>
-    public event Action<string?, string?>? CreateUserDialogRequested;
+    public event Action<string?, ProtectedString?>? CreateUserDialogRequested;
 
     /// <summary>Raised when a delete user action is triggered from the credential edit dialog.</summary>
     public event Action<AccountRow, int>? DeleteUserRequested;
@@ -30,27 +31,29 @@ public class AccountsPanelCredentialHandler : IDisposable
     public event Action<Guid?, int>? SaveAndRefreshRequested;
 
     public AccountsPanelCredentialHandler(
-        AccountCredentialOperations credentialOperations,
-        AccountPasswordHandler passwordHandler,
-        ISessionProvider sessionProvider,
+        AccountCredentialCrudHandler credentialCrudHandler,
+        AccountEditOrchestrator editOrchestrator,
+        AccountPasswordAccessHandler passwordAccessHandler,
+        AccountPasswordMutationHandler passwordMutationHandler,
         OperationGuard operationGuard,
         IPreviousWindowTracker windowTracker,
         ToolLauncher launchService)
     {
-        _credentialOperations = credentialOperations;
-        _passwordHandler = passwordHandler;
-        _sessionProvider = sessionProvider;
+        _credentialCrudHandler = credentialCrudHandler;
+        _editOrchestrator = editOrchestrator;
+        _passwordAccessHandler = passwordAccessHandler;
+        _passwordMutationHandler = passwordMutationHandler;
         _operationGuard = operationGuard;
         _windowTracker = windowTracker;
-        _launchService = launchService;
-
-        _credentialOperations.InstallPackagesRequested += (packages, ar) =>
-            _launchService.InstallPackages(packages, new AccountLaunchIdentity(ar.Sid));
-        _credentialOperations.CreateUserDialogRequested += (username, password) =>
+        _editOrchestrator.InstallPackagesRequested += (packages, ar) =>
+            launchService.InstallPackages(packages, new AccountLaunchIdentity(ar.Sid));
+        _credentialCrudHandler.CreateUserDialogRequested += (username, password) =>
             CreateUserDialogRequested?.Invoke(username, password);
-        _credentialOperations.DeleteUserRequested += (accountRow, selectedIndex) =>
+        _editOrchestrator.DeleteUserRequested += (accountRow, selectedIndex) =>
             DeleteUserRequested?.Invoke(accountRow, selectedIndex);
-        _credentialOperations.SaveAndRefreshRequested += (credId, fallbackIndex) =>
+        _credentialCrudHandler.SaveAndRefreshRequested += (credId, fallbackIndex) =>
+            SaveAndRefreshRequested?.Invoke(credId, fallbackIndex);
+        _editOrchestrator.SaveAndRefreshRequested += (credId, fallbackIndex) =>
             SaveAndRefreshRequested?.Invoke(credId, fallbackIndex);
     }
 
@@ -62,22 +65,24 @@ public class AccountsPanelCredentialHandler : IDisposable
     {
         _ownerControl = ownerControl;
         _callbacks = callbacks;
-        _credentialOperations.Initialize(ownerControl);
+        _editOrchestrator.Initialize(ownerControl);
+        _passwordAccessHandler.Initialize(_operationGuard, ownerControl, text => _callbacks.UpdateStatus(text));
+        _passwordMutationHandler.Initialize(_operationGuard, ownerControl, text => _callbacks.UpdateStatus(text));
     }
 
     // --- Credential CRUD ---
 
     public void AddCredential(AccountRow? selectedRow)
-        => _credentialOperations.AddCredential(selectedRow);
+        => _credentialCrudHandler.AddCredential(selectedRow);
 
     public void EditCredential(AccountRow accountRow)
-        => _credentialOperations.EditCredential(accountRow);
+        => _credentialCrudHandler.EditCredential(accountRow);
 
     public void EditAccount(AccountRow accountRow, int selectedIndex)
-        => _credentialOperations.EditAccount(accountRow, selectedIndex);
+        => _ = _editOrchestrator.EditAccount(accountRow, selectedIndex);
 
     public void RemoveCredential(AccountRow accountRow, int selectedIndex)
-        => _credentialOperations.RemoveCredential(accountRow, selectedIndex);
+        => _credentialCrudHandler.RemoveCredential(accountRow, selectedIndex);
 
     // --- Password operations ---
 
@@ -86,9 +91,7 @@ public class AccountsPanelCredentialHandler : IDisposable
         if (accountRow.Credential == null || accountRow.Credential.IsCurrentAccount || !accountRow.HasStoredPassword)
             return;
 
-        var session = _sessionProvider.GetSession();
-        await _passwordHandler.CopyPasswordAsync(accountRow, session, session.CredentialStore, _operationGuard,
-            _ownerControl.FindForm() ?? _ownerControl, text => _callbacks.UpdateStatus(text));
+        await _passwordAccessHandler.CopyPasswordAsync(accountRow);
     }
 
     public async Task TypePasswordAsync(AccountRow accountRow)
@@ -96,31 +99,18 @@ public class AccountsPanelCredentialHandler : IDisposable
         if (accountRow.Credential == null || accountRow.Credential.IsCurrentAccount || !accountRow.HasStoredPassword)
             return;
 
-        var session = _sessionProvider.GetSession();
-        var previousHwnd = _windowTracker.PreviousWindow;
-        await _passwordHandler.TypePasswordAsync(accountRow, session, session.CredentialStore, _operationGuard,
-            _ownerControl.FindForm() ?? _ownerControl, previousHwnd, text => _callbacks.UpdateStatus(text));
+        await _passwordAccessHandler.TypePasswordAsync(accountRow, _windowTracker.PreviousWindow);
     }
 
     public void RotatePassword(AccountRow accountRow)
-    {
-        var session = _sessionProvider.GetSession();
-        _passwordHandler.RotatePassword(accountRow, session, session.CredentialStore, _operationGuard,
-            _ownerControl.FindForm() ?? _ownerControl, text => _callbacks.UpdateStatus(text),
-            id => SaveAndRefreshRequested?.Invoke(id, -1));
-    }
+        => _passwordMutationHandler.RotatePassword(accountRow, id => SaveAndRefreshRequested?.Invoke(id, -1));
 
     public void SetEmptyPassword(AccountRow accountRow)
-    {
-        var session = _sessionProvider.GetSession();
-        _passwordHandler.SetEmptyPassword(accountRow, session, session.CredentialStore,
-            _operationGuard, _ownerControl.FindForm() ?? _ownerControl, text => _callbacks.UpdateStatus(text),
-            id => SaveAndRefreshRequested?.Invoke(id, -1));
-    }
+        => _passwordMutationHandler.SetEmptyPassword(accountRow, id => SaveAndRefreshRequested?.Invoke(id, -1));
 
     public void Dispose()
     {
-        _passwordHandler.Dispose();
+        _passwordAccessHandler.Dispose();
         if (_windowTracker is IDisposable d)
             d.Dispose();
     }

@@ -1,4 +1,3 @@
-using System.Security;
 using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Account.UI.AppContainer;
@@ -8,12 +7,12 @@ using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
-using RunFence.Launch;
+using RunFence.Launching.Resolution;
 using RunFence.UI;
 
 namespace RunFence.RunAs.UI.Forms;
 
+/// <remarks>Methods above threshold: 22 methods, 435 lines: already has Populator and Renderer extracted. Remaining methods are event handlers + <c>CaptureResult</c>. Extracting layout helpers creates 1:1 coupling with the dialog's controls. Extracting state management duplicates control references. Reviewed 2026-04-09.</remarks>
 public partial class RunAsDialog : Form
 {
     private string _filePath = null!;
@@ -37,9 +36,10 @@ public partial class RunAsDialog : Form
     private bool RevertShortcutRequested { get; set; }
     private AppEntry? EditExistingApp { get; set; }
     private AppEntry? ExistingAppForLaunch { get; set; }
-    private SecureString? AdHocPassword { get; set; }
+    private ProtectedString? AdHocPassword { get; set; }
     private bool RememberPassword { get; set; }
 
+    private string? _initialAccountSid;
     private string? _lastUsedAccountSid;
     private string? _lastUsedContainerName;
     private string? _currentUserSid;
@@ -50,26 +50,29 @@ public partial class RunAsDialog : Form
     private readonly RunAsCredentialListPopulator _populator;
     private readonly RunAsCredentialListRenderer _renderer;
     private readonly IAclPermissionService _aclPermission;
+    private readonly IExecutableKindService _executableKindService;
     private readonly ToolTip _toolTip = new();
 
-    public RunAsDialog(
+    internal RunAsDialog(
         ISidResolver sidResolver,
         IAclPermissionService aclPermission,
         RunAsCredentialListPopulator populator,
         RunAsCredentialListRenderer renderer,
-        IWindowsAccountService windowsAccountService)
+        IWindowsAccountService windowsAccountService,
+        IExecutableKindService executableKindService)
     {
         _sidResolver = sidResolver;
         _aclPermission = aclPermission;
         _populator = populator;
         _renderer = renderer;
         _windowsAccountService = windowsAccountService;
+        _executableKindService = executableKindService;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         _toolTip.SetToolTip(_privilegeLevelComboBox, LaunchUiConstants.PrivilegeLevelTooltip);
     }
 
-    private static readonly PrivilegeLevel[] PrivilegeLevelMapping = [PrivilegeLevel.HighestAllowed, PrivilegeLevel.Basic, PrivilegeLevel.LowIntegrity];
+    private static readonly PrivilegeLevel[] PrivilegeLevelMapping = [PrivilegeLevel.HighestAllowed, PrivilegeLevel.AboveBasic, PrivilegeLevel.Basic, PrivilegeLevel.LowIntegrity];
 
     /// <summary>
     /// Initializes per-use dialog data. Must be called before <see cref="Form.ShowDialog()"/>.
@@ -80,6 +83,7 @@ public partial class RunAsDialog : Form
         _arguments = options.Arguments;
         _credentials = options.Credentials;
         _existingApps = options.ExistingApps;
+        _initialAccountSid = options.InitialAccountSid;
         _lastUsedAccountSid = options.LastUsedAccountSid;
         _lastUsedContainerName = options.LastUsedContainerName;
         _currentUserSid = options.CurrentUserSid;
@@ -91,7 +95,7 @@ public partial class RunAsDialog : Form
 
         _populator.Initialize(
             _credentialListBox, _credentials, _sidNames, _showAllAccountsCheckBox,
-            _currentUserSid, _appContainers);
+            _currentUserSid, _initialAccountSid, _appContainers, showSystemAccount: options.ShowSystemInRunAs);
         _renderer.Attach(_credentialListBox);
 
         ConfigureLayout();
@@ -191,6 +195,13 @@ public partial class RunAsDialog : Form
 
         ClientSize = ClientSize with { Height = y + _launchButton.Height + 17 };
 
+        // Set anchors after ClientSize is finalized so anchor distances are computed correctly.
+        _credentialListBox.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        _revertButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+        _launchButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+        _addAppButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+        _cancelButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+
         // Pre-select: managed app's account/container takes priority; otherwise last used or first non-current
         int initialSelection = _shortcutContext?.IsAlreadyManaged == true
             ? FindManagedAppSelection()
@@ -225,6 +236,14 @@ public partial class RunAsDialog : Form
 
     private int FindPreferredSelectionForNewApp()
     {
+        if (_initialAccountSid != null)
+        {
+            var idx = _populator.FindItemIndex(item => item is CredentialDisplayItem di &&
+                                            string.Equals(di.Credential.Sid, _initialAccountSid, StringComparison.OrdinalIgnoreCase));
+            if (idx >= 0)
+                return idx;
+        }
+
         // Try last used account (skip if it's the current elevated user)
         if (_lastUsedAccountSid != null &&
             !string.Equals(_lastUsedAccountSid, _currentUserSid, StringComparison.OrdinalIgnoreCase))
@@ -300,7 +319,7 @@ public partial class RunAsDialog : Form
         {
             case CreateAccountItem:
                 _currentExistingApp = null;
-                SetPrivilegeLevel(PrivilegeLevel.Basic, enabled: true);
+                SetPrivilegeLevel(SuggestPrivilegeLevel(PrivilegeLevel.Basic), enabled: true);
                 UpdateLaunchButtonState();
                 _addAppButton.Text = "Add app entry\u2026";
                 return;
@@ -329,20 +348,19 @@ public partial class RunAsDialog : Form
                     string.Equals(a.AccountSid, item.Credential.Sid, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(a.ExePath, _filePath, StringComparison.OrdinalIgnoreCase));
 
-                if (existingApp != null)
+                _currentExistingApp = existingApp;
+                var accountMode = _accountPrivilegeLevels?.GetValueOrDefault(item.Credential.Sid, PrivilegeLevel.Basic)
+                    ?? PrivilegeLevel.Basic;
+                bool isSystem = SidResolutionHelper.IsSystemSid(item.Credential.Sid);
+
+                if (existingApp != null && !isSystem)
                 {
-                    _currentExistingApp = existingApp;
-                    var resolvedMode = existingApp.PrivilegeLevel
-                        ?? _accountPrivilegeLevels?.GetValueOrDefault(item.Credential.Sid, PrivilegeLevel.Basic)
-                        ?? PrivilegeLevel.Basic;
+                    var resolvedMode = existingApp.PrivilegeLevel ?? accountMode;
                     SetPrivilegeLevel(resolvedMode, enabled: false);
                 }
                 else
                 {
-                    _currentExistingApp = null;
-                    var accountMode = _accountPrivilegeLevels?.GetValueOrDefault(item.Credential.Sid, PrivilegeLevel.Basic)
-                        ?? PrivilegeLevel.Basic;
-                    SetPrivilegeLevel(accountMode, enabled: true);
+                    SetPrivilegeLevel(SuggestPrivilegeLevel(accountMode), enabled: !isSystem);
                 }
 
                 break;
@@ -393,6 +411,11 @@ public partial class RunAsDialog : Form
         _privilegeLevelComboBox.Enabled = enabled;
     }
 
+    private PrivilegeLevel SuggestPrivilegeLevel(PrivilegeLevel accountMode)
+        => accountMode == PrivilegeLevel.Basic && _executableKindService.SuggestsAboveBasicPrivilegeLevel(_filePath)
+            ? PrivilegeLevel.AboveBasic
+            : accountMode;
+
     private void OnLaunchClick(object? sender, EventArgs e)
     {
         if (!CaptureSelectionState())
@@ -414,6 +437,8 @@ public partial class RunAsDialog : Form
         if (_credentialListBox.SelectedItem is not CredentialDisplayItem item)
             return true;
         if (item.HasStoredCredential)
+            return true;
+        if (SidResolutionHelper.CanLaunchWithoutPassword(item.Credential.Sid))
             return true;
 
         var displayName = item.ToString();

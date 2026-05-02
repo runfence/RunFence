@@ -9,6 +9,5 @@ public class SessionContext
     public AppDatabase Database { get; set; } = new();
     public CredentialStore CredentialStore { get; set; } = new();
     public ProtectedBuffer PinDerivedKey { get; set; } = null!;
-    public Dictionary<string, string?> SidNameCache { get; } = new(StringComparer.OrdinalIgnoreCase);
     public DateTime? LastPinVerifiedAt { get; set; }
 }

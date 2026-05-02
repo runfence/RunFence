@@ -6,6 +6,8 @@ namespace RunFence.SidMigration.UI.Forms;
 /// </summary>
 public partial class MigrationProgressStep : UserControl
 {
+    protected override Size DefaultSize => new Size(595, 140);
+
     public ProgressBar ProgressBar { get; private set; }
 
     public Label StatusLabel { get; private set; }
@@ -33,10 +35,4 @@ public partial class MigrationProgressStep : UserControl
         CancelButton.Visible = showCancelButton;
     }
 
-    /// <summary>Resets the progress bar to the empty state.</summary>
-    public void ResetProgress()
-    {
-        ProgressBar.Style = ProgressBarStyle.Continuous;
-        ProgressBar.Value = 0;
-    }
 }

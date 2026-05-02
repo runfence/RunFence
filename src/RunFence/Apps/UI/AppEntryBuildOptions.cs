@@ -29,6 +29,7 @@ public record AppEntryBuildOptions(
     string? AppContainerName = null,
     Dictionary<string, string>? EnvironmentVariables = null,
     string? ArgumentsTemplate = null,
+    List<string>? PathPrefixes = null,
     List<AppEntry>? ExistingApps = null)
 {
     /// <summary>

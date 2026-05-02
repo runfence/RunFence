@@ -36,9 +36,9 @@ public class ShortcutComHelper : IShortcutComHelper
         });
     }
 
-    public (string? target, string? args) GetShortcutTargetAndArgs(string shortcutPath)
+    public ShortcutInfo GetShortcutTargetAndArgs(string shortcutPath)
     {
-        return WithShortcut(shortcutPath, sc => ((string?)sc.TargetPath, (string?)sc.Arguments));
+        return WithShortcut(shortcutPath, sc => new ShortcutInfo((string?)sc.TargetPath, (string?)sc.Arguments, (string?)sc.WorkingDirectory));
     }
 
 }

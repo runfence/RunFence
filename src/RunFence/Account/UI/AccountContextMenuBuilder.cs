@@ -7,6 +7,7 @@ namespace RunFence.Account.UI;
 /// All items are created internally; no service dependencies.
 /// Called from <see cref="AccountContextMenuOrchestrator.Initialize"/> during panel setup.
 /// </summary>
+/// <remarks>Lines above threshold: 317 lines, static <c>Build</c> method: making non-static requires DI registration for a class with zero constructor deps, adding wiring overhead. The method is pure UI construction (deterministic menu items from data) — no I/O, no hidden state, no need for mocking. Reviewed 2026-04-09.</remarks>
 public static class AccountContextMenuBuilder
 {
     /// <summary>
@@ -37,7 +38,9 @@ public static class AccountContextMenuBuilder
             PinFolderBrowserToTray = accountItems.PinFolderBrowserToTray,
             PinDiscoveryToTray = accountItems.PinDiscoveryToTray,
             PinTerminalToTray = accountItems.PinTerminalToTray,
+            ShowInRunAs = accountItems.ShowInRunAs,
             ManageAssociations = accountItems.ManageAssociations,
+            ReceiveInjectedInput = accountItems.ReceiveInjectedInput,
             FirewallAllowlist = ctxFirewallAllowlist,
             CopySid = accountItems.CopySid,
             CopyProfilePath = accountItems.CopyProfilePath,
@@ -63,7 +66,6 @@ public static class AccountContextMenuBuilder
             DeleteContainer = container.DeleteContainer,
             CopyContainerProfilePath = container.CopyContainerProfilePath,
             OpenContainerProfileFolder = container.OpenContainerProfileFolder,
-            ContainerFolderBrowser = container.ContainerFolderBrowser,
             ProcessSeparator = process.Separator,
             CopyProcessPath = process.CopyProcessPath,
             CopyProcessPid = process.CopyProcessPid,
@@ -99,7 +101,9 @@ public static class AccountContextMenuBuilder
         var ctxPinFolderBrowserToTray = new ToolStripMenuItem("Pin Folder Browser to Tray");
         var ctxPinDiscoveryToTray = new ToolStripMenuItem("Pin App Discovery to Tray");
         var ctxPinTerminalToTray = new ToolStripMenuItem("Pin Terminal to Tray");
+        var ctxShowInRunAs = new ToolStripMenuItem("Show in RunAs");
         var ctxManageAssociations = new ToolStripMenuItem("Manage Associations");
+        var ctxReceiveInjectedInput = new ToolStripMenuItem("Receive Injected Input");
 
         var ctxCopySid = new ToolStripMenuItem("Copy SID");
         var ctxCopyProfilePath = new ToolStripMenuItem("Copy Profile Path");
@@ -115,12 +119,14 @@ public static class AccountContextMenuBuilder
         var ctxNewApp = new ToolStripMenuItem("New App...");
 
         // Add account items to context menu (Edit submenu and Manage submenu are inserted separately)
-        contextMenu.Items.AddRange(ctxCopyPassword, ctxTypePassword, ctxSep4, ctxPinFolderBrowserToTray, ctxPinDiscoveryToTray, ctxPinTerminalToTray, ctxManageAssociations, ctxSep5, ctxCopySid, ctxCopyProfilePath, ctxOpenProfileFolder, ctxAppsSeparator, ctxNewApp);
+        contextMenu.Items.AddRange(ctxCopyPassword, ctxTypePassword, ctxSep4, ctxPinFolderBrowserToTray, ctxPinDiscoveryToTray, ctxPinTerminalToTray, ctxShowInRunAs, ctxManageAssociations, ctxReceiveInjectedInput, ctxSep5, ctxCopySid, ctxCopyProfilePath, ctxOpenProfileFolder, ctxAppsSeparator, ctxNewApp);
 
         return new AccountItemsResult(
             ctxEditAccount, ctxEditCredential, ctxRemoveCredential, ctxDeleteUser,
             ctxPinFolderBrowserToTray, ctxPinDiscoveryToTray, ctxPinTerminalToTray,
+            ctxShowInRunAs,
             ctxManageAssociations,
+            ctxReceiveInjectedInput,
             ctxCopySid, ctxCopyProfilePath, ctxOpenProfileFolder,
             ctxCopyPassword, ctxTypePassword, ctxRotatePassword, ctxSetEmptyPassword,
             new ToolStripSeparator(), new ToolStripSeparator(), new ToolStripSeparator(),
@@ -206,12 +212,11 @@ public static class AccountContextMenuBuilder
     private static ContainerItemsResult BuildContainerItems(ContextMenuStrip contextMenu)
     {
         var ctxContainerSeparator = new ToolStripSeparator();
-        var ctxCreateContainer = new ToolStripMenuItem("Create Container...");
-        var ctxEditContainer = new ToolStripMenuItem("Edit Container...");
-        var ctxDeleteContainer = new ToolStripMenuItem("Delete Container...");
-        var ctxCopyContainerProfilePath = new ToolStripMenuItem("Copy Container Profile Path");
-        var ctxOpenContainerProfileFolder = new ToolStripMenuItem("Open Container Profile Folder");
-        var ctxContainerFolderBrowser = new ToolStripMenuItem("Launch Folder Browser");
+        var ctxCreateContainer = new ToolStripMenuItem("Create...");
+        var ctxEditContainer = new ToolStripMenuItem("Edit...");
+        var ctxDeleteContainer = new ToolStripMenuItem("Delete...");
+        var ctxCopyContainerProfilePath = new ToolStripMenuItem("Copy Profile Path");
+        var ctxOpenContainerProfileFolder = new ToolStripMenuItem("Open Profile Folder");
 
         contextMenu.Items.Add(ctxContainerSeparator);
         contextMenu.Items.Add(ctxCreateContainer);
@@ -219,11 +224,9 @@ public static class AccountContextMenuBuilder
         contextMenu.Items.Add(ctxDeleteContainer);
         contextMenu.Items.Add(ctxCopyContainerProfilePath);
         contextMenu.Items.Add(ctxOpenContainerProfileFolder);
-        contextMenu.Items.Add(ctxContainerFolderBrowser);
 
         return new ContainerItemsResult(ctxContainerSeparator, ctxCreateContainer, ctxEditContainer,
-            ctxDeleteContainer, ctxCopyContainerProfilePath, ctxOpenContainerProfileFolder,
-            ctxContainerFolderBrowser);
+            ctxDeleteContainer, ctxCopyContainerProfilePath, ctxOpenContainerProfileFolder);
     }
 
     private static ProcessItemsResult BuildProcessItems(ContextMenuStrip contextMenu)
@@ -261,7 +264,9 @@ public static class AccountContextMenuBuilder
         ToolStripMenuItem PinFolderBrowserToTray,
         ToolStripMenuItem PinDiscoveryToTray,
         ToolStripMenuItem PinTerminalToTray,
+        ToolStripMenuItem ShowInRunAs,
         ToolStripMenuItem ManageAssociations,
+        ToolStripMenuItem ReceiveInjectedInput,
         ToolStripMenuItem CopySid,
         ToolStripMenuItem CopyProfilePath,
         ToolStripMenuItem OpenProfileFolder,
@@ -300,8 +305,7 @@ public static class AccountContextMenuBuilder
         ToolStripMenuItem EditContainer,
         ToolStripMenuItem DeleteContainer,
         ToolStripMenuItem CopyContainerProfilePath,
-        ToolStripMenuItem OpenContainerProfileFolder,
-        ToolStripMenuItem ContainerFolderBrowser);
+        ToolStripMenuItem OpenContainerProfileFolder);
 
     private record ProcessItemsResult(
         ToolStripSeparator Separator,

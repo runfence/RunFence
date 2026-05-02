@@ -1,6 +1,5 @@
 using System.Security.Principal;
 using RunFence.Acl.QuickAccess;
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
@@ -12,7 +11,7 @@ namespace RunFence.DragBridge;
 /// that grants ACLs, saves the config, and pins newly accessible folders.
 /// </summary>
 public class DragBridgeResolveOrchestrator(
-    DragBridgePasteHandler pasteHandler,
+    IDragBridgePasteHandler pasteHandler,
     ISessionSaver sessionSaver,
     IQuickAccessPinService quickAccessPinService,
     IUiThreadInvoker uiThreadInvoker)

@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Security;
 using System.Security.Cryptography;
 using RunFence.Core;
 
@@ -7,7 +6,7 @@ namespace RunFence.Security;
 
 public class CredentialEncryptionService : ICredentialEncryptionService
 {
-    public byte[] Encrypt(SecureString password, byte[] pinDerivedKey)
+    public byte[] Encrypt(ProtectedString password, byte[] pinDerivedKey)
     {
         var entropy = HkdfKeyDerivation.DeriveDpapiEntropy(pinDerivedKey);
         byte[]? passwordBytes = null;
@@ -16,7 +15,7 @@ public class CredentialEncryptionService : ICredentialEncryptionService
 
         try
         {
-            bstr = Marshal.SecureStringToBSTR(password);
+            bstr = password.ToBSTR();
             int len = Marshal.ReadInt32(bstr, -4);
             passwordBytes = new byte[len];
             bytesHandle = GCHandle.Alloc(passwordBytes, GCHandleType.Pinned);
@@ -39,7 +38,7 @@ public class CredentialEncryptionService : ICredentialEncryptionService
         }
     }
 
-    public SecureString Decrypt(byte[] encryptedPassword, byte[] pinDerivedKey)
+    public ProtectedString Decrypt(byte[] encryptedPassword, byte[] pinDerivedKey)
     {
         var entropy = HkdfKeyDerivation.DeriveDpapiEntropy(pinDerivedKey);
         byte[]? decryptedBytes = null;
@@ -61,12 +60,7 @@ public class CredentialEncryptionService : ICredentialEncryptionService
                 chars[i] = (char)(decryptedBytes[i * 2] | (decryptedBytes[i * 2 + 1] << 8));
             }
 
-            var secureString = new SecureString();
-            foreach (var c in chars)
-                secureString.AppendChar(c);
-            secureString.MakeReadOnly();
-
-            return secureString;
+            return ProtectedString.FromChars(chars);
         }
         finally
         {

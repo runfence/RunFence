@@ -42,8 +42,8 @@ public class AclManagerScanServiceTests
         using var tempDir = new TempDirectory("rftest_scan");
         var fileA = Path.Combine(tempDir.Path, "a.txt");
         var fileB = Path.Combine(tempDir.Path, "b.txt");
-        File.WriteAllText(fileA, "");
-        File.WriteAllText(fileB, "");
+        await File.WriteAllTextAsync(fileA, "");
+        await File.WriteAllTextAsync(fileB, "");
 
         var service = CreateService();
         var progress = new Progress<long>();
@@ -95,10 +95,10 @@ public class AclManagerScanServiceTests
         using var tempDir = new TempDirectory("rftest_scan");
         // Create many files so cancellation has a chance to trigger mid-scan.
         for (int i = 0; i < 20; i++)
-            File.WriteAllText(Path.Combine(tempDir.Path, $"file{i}.txt"), "");
+            await File.WriteAllTextAsync(Path.Combine(tempDir.Path, $"file{i}.txt"), "");
 
         var cts = new CancellationTokenSource();
-        cts.Cancel(); // cancel immediately
+        await cts.CancelAsync(); // cancel immediately
 
         var service = CreateService();
         var progress = new Progress<long>();
@@ -128,7 +128,7 @@ public class AclManagerScanServiceTests
     public async Task ScanAsync_ProgressReported_AtLeastOnce()
     {
         using var tempDir = new TempDirectory("rftest_scan");
-        File.WriteAllText(Path.Combine(tempDir.Path, "file.txt"), "");
+        await File.WriteAllTextAsync(Path.Combine(tempDir.Path, "file.txt"), "");
 
         var reported = new List<long>();
         var progress = new SynchronousProgress<long>(n => reported.Add(n));

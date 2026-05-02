@@ -6,6 +6,7 @@ using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Launching.Resolution;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -148,11 +149,66 @@ public class ShortcutServiceTests
     }
 
     [Fact]
+    public void CreateBesideTargetShortcut_WindowsAppsApp_DoesNotCreateShortcut()
+    {
+        var app = new AppEntry
+        {
+            Id = AppEntry.GenerateId(),
+            ExePath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "WindowsApps",
+                "Contoso.App_1.0.0.0_x64__8wekyb3d8bbwe",
+                "App.exe")
+        };
+        var log = new Mock<ILoggingService>();
+        var protection = new Mock<IShortcutProtectionService>();
+        var shortcutHelper = new FakeShortcutComHelper(new FakeShortcut());
+        var service = new BesideTargetShortcutService(log.Object, protection.Object, shortcutHelper, UwpKindService());
+
+        service.CreateBesideTargetShortcut(app, @"C:\RunFence\RunFence.Launcher.exe", "", "User");
+
+        Assert.Equal(0, shortcutHelper.WithShortcutCount);
+        protection.VerifyNoOtherCalls();
+        log.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public void EnforceBesideTargetShortcuts_WindowsAppsApp_DoesNotCreateShortcut()
+    {
+        var app = new AppEntry
+        {
+            Id = AppEntry.GenerateId(),
+            Name = "Store App",
+            ExePath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "WindowsApps",
+                "Contoso.App_1.0.0.0_x64__8wekyb3d8bbwe",
+                "App.exe")
+        };
+        var log = new Mock<ILoggingService>();
+        var protection = new Mock<IShortcutProtectionService>();
+        var shortcutHelper = new FakeShortcutComHelper(new FakeShortcut());
+        var service = new BesideTargetShortcutService(log.Object, protection.Object, shortcutHelper, UwpKindService());
+
+        service.EnforceBesideTargetShortcuts(
+            [app],
+            @"C:\RunFence\RunFence.Launcher.exe",
+            _ => ("User", ""));
+
+        Assert.Equal(0, shortcutHelper.WithShortcutCount);
+        protection.VerifyNoOtherCalls();
+        log.VerifyNoOtherCalls();
+    }
+
+    [Fact]
     public void EnforceBesideTargetShortcuts_ManagedShortcutWithOldWorkingDirectory_RecreatesShortcut()
     {
         using var tempDir = new TempDirectory("BesideTargetShortcutService_Enforce");
         var appDir = Path.Combine(tempDir.Path, "App");
         Directory.CreateDirectory(appDir);
+        var iconPath = Path.Combine(tempDir.Path, "app.ico");
+        File.WriteAllBytes(iconPath, []);
+
         var app = new AppEntry
         {
             Id = AppEntry.GenerateId(),
@@ -168,21 +224,70 @@ public class ShortcutServiceTests
         {
             TargetPath = launcherPath,
             Arguments = app.Id,
-            WorkingDirectory = @"D:\OldRunFence"
+            WorkingDirectory = @"D:\OldRunFence",
+            IconLocation = @"D:\OldIcons\old.ico,0"
         };
         var log = new Mock<ILoggingService>();
         var protection = new Mock<IShortcutProtectionService>();
         var shortcutHelper = new FakeShortcutComHelper(shortcut);
-        var service = new BesideTargetShortcutService(log.Object, protection.Object, shortcutHelper);
+        var service = new BesideTargetShortcutService(log.Object, protection.Object, shortcutHelper, NonUwpKindService());
 
         service.EnforceBesideTargetShortcuts(
             [app],
             launcherPath,
-            _ => ("User", iconPath: ""));
+            _ => ("User", iconPath));
 
         Assert.Equal(launcherPath, shortcut.TargetPath);
         Assert.Equal(Path.GetDirectoryName(launcherPath), shortcut.WorkingDirectory);
         Assert.Equal(app.Id, shortcut.Arguments);
+        Assert.Equal($"{iconPath},0", shortcut.IconLocation);
+        Assert.Equal(1, shortcut.SaveCount);
+        Assert.Equal(2, shortcutHelper.WithShortcutCount);
+        Assert.All(shortcutHelper.InvokedPaths, p => Assert.Equal(shortcutPath, p));
+        protection.Verify(p => p.UnprotectShortcut(shortcutPath), Times.Once);
+        protection.Verify(p => p.ProtectShortcut(shortcutPath), Times.Once);
+    }
+
+    [Fact]
+    public void EnforceBesideTargetShortcuts_ManagedShortcutWithStaleIcon_RecreatesShortcut()
+    {
+        using var tempDir = new TempDirectory("BesideTargetShortcutService_Enforce_Icon");
+        var appDir = Path.Combine(tempDir.Path, "App");
+        Directory.CreateDirectory(appDir);
+        var iconPath = Path.Combine(tempDir.Path, "app.ico");
+        File.WriteAllBytes(iconPath, []);
+
+        var app = new AppEntry
+        {
+            Id = AppEntry.GenerateId(),
+            Name = "Managed App",
+            ExePath = Path.Combine(appDir, "app.exe"),
+        };
+        var shortcutPath = Path.Combine(appDir, "app-as-User.lnk");
+        File.WriteAllBytes(shortcutPath, [0x4C, 0x00, 0x00, 0x00]);
+
+        var launcherPath = Path.Combine(tempDir.Path, "Current", "RunFence.Launcher.exe");
+        var shortcut = new FakeShortcut
+        {
+            TargetPath = launcherPath,
+            Arguments = app.Id,
+            WorkingDirectory = Path.GetDirectoryName(launcherPath)!,
+            IconLocation = @"D:\OldIcons\old.ico,0"
+        };
+        var log = new Mock<ILoggingService>();
+        var protection = new Mock<IShortcutProtectionService>();
+        var shortcutHelper = new FakeShortcutComHelper(shortcut);
+        var service = new BesideTargetShortcutService(log.Object, protection.Object, shortcutHelper, NonUwpKindService());
+
+        service.EnforceBesideTargetShortcuts(
+            [app],
+            launcherPath,
+            _ => ("User", iconPath));
+
+        Assert.Equal(launcherPath, shortcut.TargetPath);
+        Assert.Equal(Path.GetDirectoryName(launcherPath), shortcut.WorkingDirectory);
+        Assert.Equal(app.Id, shortcut.Arguments);
+        Assert.Equal($"{iconPath},0", shortcut.IconLocation);
         Assert.Equal(1, shortcut.SaveCount);
         Assert.Equal(2, shortcutHelper.WithShortcutCount);
         Assert.All(shortcutHelper.InvokedPaths, p => Assert.Equal(shortcutPath, p));
@@ -348,7 +453,8 @@ public class ShortcutServiceTests
             log.Object,
             protection.Object,
             shortcutHelper,
-            new Mock<IInteractiveUserDesktopProvider>().Object);
+            new Mock<IInteractiveUserDesktopProvider>().Object,
+            new ShortcutFinder());
 
         service.ReplaceShortcuts(app, launcherPath, iconPath: "", cache);
 
@@ -367,7 +473,7 @@ public class ShortcutServiceTests
         public string TargetPath { get; set; } = "";
         public string Arguments { get; set; } = "";
         public string WorkingDirectory { get; set; } = "";
-        public string IconLocation { get; set; } = "";
+        public string? IconLocation { get; set; }
         public int SaveCount { get; private set; }
 
         public void Save() => SaveCount++;
@@ -392,7 +498,7 @@ public class ShortcutServiceTests
             action(shortcut);
         }
 
-        public (string? target, string? args) GetShortcutTargetAndArgs(string path)
+        public ShortcutInfo GetShortcutTargetAndArgs(string path)
             => throw new NotSupportedException();
 
     }
@@ -403,7 +509,6 @@ public class ShortcutServiceTests
         AppEntry App,
         FakeShortcut Shortcut,
         FakeShortcutComHelper ShortcutHelper,
-        Mock<ILoggingService> Log,
         Mock<IShortcutProtectionService> Protection,
         ShortcutService Service) : IDisposable
     {
@@ -442,10 +547,11 @@ public class ShortcutServiceTests
             log.Object,
             protection.Object,
             shortcutHelper,
-            new Mock<IInteractiveUserDesktopProvider>().Object);
+            new Mock<IInteractiveUserDesktopProvider>().Object,
+            new ShortcutFinder());
 
         return new ShortcutTestFixture(tempDir, shortcutPath, app, shortcut, shortcutHelper,
-            log, protection, service);
+            protection, service);
     }
 
     // --- ProtectInternalShortcut tests ---
@@ -539,8 +645,8 @@ public class ShortcutServiceTests
         // exactly one error is logged (no crash, no swallowed failure).
         // Skip when running as admin: admins retain write access after ACL change, so SetAttributes
         // succeeds (ReadOnly IS set) and no error is logged — the admin behavior is by design.
-        if (new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent())
-                .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator))
+        if (new WindowsPrincipal(WindowsIdentity.GetCurrent())
+                .IsInRole(WindowsBuiltInRole.Administrator))
             throw Xunit.Sdk.SkipException.ForSkip("Test requires non-admin runner — admin retains write access after strict ACL change, so ReadOnly IS set and no error logged.");
         var (path, tempDir) = CreateTempShortcut();
         try
@@ -638,5 +744,23 @@ public class ShortcutServiceTests
         service.ProtectInternalShortcut(@"C:\DoesNotExist_RunFence_Test_" + Guid.NewGuid() + ".lnk", accountSid);
 
         log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Never);
+    }
+
+    private static IExecutableKindService NonUwpKindService()
+    {
+        var service = new Mock<IExecutableKindService>();
+        service.Setup(s => s.IsUwpExeFile(It.IsAny<string>())).Returns(false);
+        service.Setup(s => s.IsKnownBrowserExe(It.IsAny<string>())).Returns(false);
+        service.Setup(s => s.SuggestsAboveBasicPrivilegeLevel(It.IsAny<string>())).Returns(false);
+        return service.Object;
+    }
+
+    private static IExecutableKindService UwpKindService()
+    {
+        var service = new Mock<IExecutableKindService>();
+        service.Setup(s => s.IsUwpExeFile(It.IsAny<string>())).Returns(true);
+        service.Setup(s => s.IsKnownBrowserExe(It.IsAny<string>())).Returns(false);
+        service.Setup(s => s.SuggestsAboveBasicPrivilegeLevel(It.IsAny<string>())).Returns(true);
+        return service.Object;
     }
 }

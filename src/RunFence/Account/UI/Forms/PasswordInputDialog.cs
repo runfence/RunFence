@@ -1,26 +1,27 @@
-using System.Security;
+using RunFence.Account.UI;
 using RunFence.Apps.UI;
+using RunFence.Core;
 
 namespace RunFence.Account.UI.Forms;
 
 public partial class PasswordInputDialog : Form
 {
-    public SecureString? Password { get; private set; }
+    private readonly SecurePasswordBox _passwordSecure;
 
-    public PasswordInputDialog(string username)
+    public ProtectedString? Password { get; private set; }
+
+    public PasswordInputDialog(string username, string? prompt = null)
     {
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
-        _promptLabel.Text = $"Enter current Windows password for \u201C{username}\u201D:";
-        PasswordEyeToggle.AddTo(_passwordTextBox);
+        _promptLabel.Text = prompt ?? $"Enter current Windows password for \u201C{username}\u201D:";
+        _passwordSecure = new SecurePasswordBox(_passwordTextBox);
+        _passwordSecure.AddEyeToggle();
     }
 
     private void OnOkClick(object? sender, EventArgs e)
     {
-        Password = new SecureString();
-        foreach (char c in _passwordTextBox.Text)
-            Password.AppendChar(c);
-        Password.MakeReadOnly();
+        Password = _passwordSecure.GetPassword();
         DialogResult = DialogResult.OK;
     }
 

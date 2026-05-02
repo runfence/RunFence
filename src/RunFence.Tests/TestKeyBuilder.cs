@@ -16,7 +16,7 @@ internal static class TestKeyBuilder
         LicenseTier tier = LicenseTier.Annual,
         string licenseeName = "Test User")
     {
-        var actualVersion = version ?? Constants.MajorVersion;
+        var actualVersion = version ?? EvaluationConstants.MajorVersion;
         var nameBytes = Encoding.UTF8.GetBytes(licenseeName);
 
         var payload = new List<byte> { actualVersion };

@@ -190,25 +190,27 @@ public static class CommandLineHelper
         var backslashes = 0;
         foreach (var c in arg)
         {
-            if (c == '\\')
+            switch (c)
             {
-                backslashes++;
-            }
-            else if (c == '"')
-            {
-                sb.Append('\\', backslashes * 2 + 1);
-                sb.Append('"');
-                backslashes = 0;
-            }
-            else
-            {
-                if (backslashes > 0)
-                {
-                    sb.Append('\\', backslashes);
+                case '\\':
+                    backslashes++;
+                    break;
+                case '"':
+                    sb.Append('\\', backslashes * 2 + 1);
+                    sb.Append('"');
                     backslashes = 0;
-                }
+                    break;
+                default:
+                {
+                    if (backslashes > 0)
+                    {
+                        sb.Append('\\', backslashes);
+                        backslashes = 0;
+                    }
 
-                sb.Append(c);
+                    sb.Append(c);
+                    break;
+                }
             }
         }
 

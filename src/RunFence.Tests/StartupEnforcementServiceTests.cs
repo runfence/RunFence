@@ -13,7 +13,7 @@ namespace RunFence.Tests;
 public class StartupEnforcementServiceTests : IDisposable
 {
     private static readonly SidDisplayNameResolver DefaultDisplayNameResolver =
-        new(new Mock<ISidResolver>().Object);
+        new(new Mock<ISidResolver>().Object, new Mock<IProfilePathResolver>().Object);
 
     private readonly Mock<IAclService> _aclService;
     private readonly Mock<IShortcutService> _shortcutService;
@@ -21,9 +21,14 @@ public class StartupEnforcementServiceTests : IDisposable
     private readonly Mock<IShortcutDiscoveryService> _shortcutDiscovery;
     private readonly Mock<IIconService> _iconService;
     private readonly Mock<ILoggingService> _log;
+    private readonly Mock<IInteractiveUserSidResolver> _interactiveUserSidResolver;
     private readonly StartupEnforcementService _service;
     private readonly string _fakeExePath;
     private readonly TempDirectory _tempDir;
+
+    private ShortcutEnforcementHelper CreateShortcutHelper() =>
+        new(_shortcutService.Object, _besideTargetShortcutService.Object, DefaultDisplayNameResolver,
+            _interactiveUserSidResolver.Object, _log.Object);
 
     public StartupEnforcementServiceTests()
     {
@@ -34,13 +39,13 @@ public class StartupEnforcementServiceTests : IDisposable
         _shortcutDiscovery.Setup(d => d.CreateTraversalCache()).Returns(() => new ShortcutTraversalCache([]));
         _iconService = new Mock<IIconService>();
         _log = new Mock<ILoggingService>();
+        _interactiveUserSidResolver = new Mock<IInteractiveUserSidResolver>();
         var appContainerService = new Mock<IAppContainerService>();
         _service = new StartupEnforcementService(
-            _aclService.Object, _shortcutService.Object,
-            _besideTargetShortcutService.Object,
+            _aclService.Object,
             _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
-            DefaultDisplayNameResolver,
+            CreateShortcutHelper(),
             appContainerService.Object);
 
         _tempDir = new TempDirectory("RunFence_EnforcementTest");
@@ -54,6 +59,21 @@ public class StartupEnforcementServiceTests : IDisposable
     {
         _tempDir.Dispose();
     }
+
+    private AppEntry CreateTestAppEntry(
+        string name,
+        bool restrictAcl = false,
+        bool manageShortcuts = false,
+        bool isUrlScheme = false,
+        string? exePath = null) =>
+        new()
+        {
+            Name = name,
+            IsUrlScheme = isUrlScheme,
+            ExePath = exePath ?? (isUrlScheme ? "steam://run/123" : _fakeExePath),
+            RestrictAcl = restrictAcl,
+            ManageShortcuts = manageShortcuts
+        };
 
     /// <summary>
     /// Sets up the shortcut service mock to capture the resolver callback, calls Enforce,
@@ -107,14 +127,7 @@ public class StartupEnforcementServiceTests : IDisposable
     public void Enforce_NoIconRegeneration_ReturnsEmptyTimestamps()
     {
         // URL scheme apps skip icon checks entirely
-        var app = new AppEntry
-        {
-            Name = "UrlApp",
-            IsUrlScheme = true,
-            ExePath = "steam://run/123",
-            ManageShortcuts = false,
-            RestrictAcl = false
-        };
+        var app = CreateTestAppEntry("UrlApp", isUrlScheme: true);
         var db = new AppDatabase { Apps = [app] };
 
         var result = _service.Enforce(db);
@@ -177,14 +190,7 @@ public class StartupEnforcementServiceTests : IDisposable
     [Fact]
     public void Enforce_ManageShortcutsTrue_LauncherExists_CallsEnforceShortcuts()
     {
-        var app = new AppEntry
-        {
-            Name = "ShortcutApp",
-            IsUrlScheme = false,
-            ExePath = _fakeExePath,
-            RestrictAcl = false,
-            ManageShortcuts = true
-        };
+        var app = CreateTestAppEntry("ShortcutApp", manageShortcuts: true);
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
         var db = new AppDatabase { Apps = [app] };
         var cache = new ShortcutTraversalCache([]);
@@ -202,14 +208,7 @@ public class StartupEnforcementServiceTests : IDisposable
     [Fact]
     public void Enforce_ManageShortcutsFalse_DoesNotCallEnforceShortcuts()
     {
-        var app = new AppEntry
-        {
-            Name = "NoShortcutApp",
-            IsUrlScheme = false,
-            ExePath = _fakeExePath,
-            RestrictAcl = false,
-            ManageShortcuts = false
-        };
+        var app = CreateTestAppEntry("NoShortcutApp");
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
         var db = new AppDatabase { Apps = [app] };
 
@@ -226,14 +225,7 @@ public class StartupEnforcementServiceTests : IDisposable
     public void Enforce_UrlSchemeApp_ManageShortcutsTrue_LauncherExists_CallsEnforceShortcuts()
     {
         // URL scheme apps can have ManageShortcuts = true and should still get shortcuts managed
-        var app = new AppEntry
-        {
-            Name = "UrlShortcutApp",
-            IsUrlScheme = true,
-            ExePath = "steam://run/123",
-            RestrictAcl = false,
-            ManageShortcuts = true
-        };
+        var app = CreateTestAppEntry("UrlShortcutApp", isUrlScheme: true, manageShortcuts: true);
         var db = new AppDatabase { Apps = [app] };
 
         _service.Enforce(db);
@@ -388,14 +380,7 @@ public class StartupEnforcementServiceTests : IDisposable
     [Fact]
     public void Enforce_ShortcutExceptionCaught_ContinuesProcessing()
     {
-        var app = new AppEntry
-        {
-            Name = "ShortcutFailApp",
-            IsUrlScheme = false,
-            ExePath = _fakeExePath,
-            RestrictAcl = false,
-            ManageShortcuts = true
-        };
+        var app = CreateTestAppEntry("ShortcutFailApp", manageShortcuts: true);
 
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
         _shortcutService.Setup(s => s.EnforceShortcuts(
@@ -444,14 +429,7 @@ public class StartupEnforcementServiceTests : IDisposable
     [Fact]
     public void Enforce_RestrictAclFalse_ExeExists_SkipsAclButChecksIcons()
     {
-        var app = new AppEntry
-        {
-            Name = "NoAclApp",
-            IsUrlScheme = false,
-            ExePath = _fakeExePath,
-            RestrictAcl = false,
-            ManageShortcuts = false
-        };
+        var app = CreateTestAppEntry("NoAclApp");
 
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
         var db = new AppDatabase { Apps = [app] };
@@ -587,11 +565,11 @@ public class StartupEnforcementServiceTests : IDisposable
     {
         var containerService = new Mock<IAppContainerService>();
         var service = new StartupEnforcementService(
-            _aclService.Object, _shortcutService.Object,
-            new Mock<IBesideTargetShortcutService>().Object,
+            _aclService.Object,
             _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
-            DefaultDisplayNameResolver, containerService.Object);
+            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
+            containerService.Object);
 
         var entry = new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser" };
         var app = new AppEntry
@@ -617,11 +595,11 @@ public class StartupEnforcementServiceTests : IDisposable
     {
         var containerService = new Mock<IAppContainerService>();
         var service = new StartupEnforcementService(
-            _aclService.Object, _shortcutService.Object,
-            new Mock<IBesideTargetShortcutService>().Object,
+            _aclService.Object,
             _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
-            DefaultDisplayNameResolver, containerService.Object);
+            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
+            containerService.Object);
 
         var fakeExe2 = Path.Combine(_tempDir.Path, "app2.exe");
         File.WriteAllBytes(fakeExe2, []);
@@ -669,11 +647,11 @@ public class StartupEnforcementServiceTests : IDisposable
     {
         var containerService = new Mock<IAppContainerService>();
         var service = new StartupEnforcementService(
-            _aclService.Object, _shortcutService.Object,
-            new Mock<IBesideTargetShortcutService>().Object,
+            _aclService.Object,
             _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
-            DefaultDisplayNameResolver, containerService.Object);
+            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
+            containerService.Object);
 
         var containerEntry = new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = "S-1-15-2-1" };
         var app = new AppEntry
@@ -706,14 +684,8 @@ public class StartupEnforcementServiceTests : IDisposable
     }
 
     [Fact]
-    public void Enforce_AppContainerApp_ShortcutResolver_ReturnsNullForEmptyAccountSid_WhenNoInteractiveSession()
+    public void Enforce_AppContainerApp_ShortcutResolver_ReturnsNullAndWarnsWhenInteractiveSidUnavailable()
     {
-        // Container apps have empty AccountSid. In CI environments with no interactive user
-        // session the resolver must return null rather than producing a path with an empty SID.
-        // xunit v2 dynamic skip shows as Fail in CLI; use early return for environment mismatch.
-        if (SidResolutionHelper.GetInteractiveUserSid() != null)
-            return; // Interactive session present — the resolver may resolve a username, not null.
-
         var app = new AppEntry
         {
             Name = "ContainerApp",
@@ -724,24 +696,21 @@ public class StartupEnforcementServiceTests : IDisposable
             RestrictAcl = false
         };
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
+        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
 
         var db = new AppDatabase { Apps = [app] };
         var resolver = CaptureShortcutResolver(db);
 
-        var result = resolver(new AppEntry { AccountSid = "", AppContainerName = "ram_browser", ExePath = _fakeExePath });
+        var result = resolver(new AppEntry { Name = "ContainerApp", AccountSid = "", AppContainerName = "ram_browser", ExePath = _fakeExePath });
         Assert.Null(result);
+        _log.Verify(
+            l => l.Warn("ShortcutEnforcementHelper: interactive user SID unavailable; skipping AppContainer beside-target shortcut for 'ContainerApp'."),
+            Times.Once);
     }
 
     [Fact]
-    public void Enforce_AppContainerApp_ShortcutResolver_ResolvesInteractiveUser_WhenSessionAvailable()
+    public void Enforce_AppContainerApp_ShortcutResolver_ReturnsNullAndWarnsWhenInteractiveSidEmpty()
     {
-        // When an interactive desktop session exists, the resolver for a container app with
-        // empty AccountSid should resolve the interactive user's username and return non-empty.
-        // xunit v2 dynamic skip shows as Fail in CLI; use early return for environment mismatch.
-        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-        if (interactiveSid == null)
-            return; // No explorer.exe session — resolver returns null, covered by the other test.
-
         var app = new AppEntry
         {
             Name = "ContainerApp",
@@ -752,13 +721,44 @@ public class StartupEnforcementServiceTests : IDisposable
             RestrictAcl = false
         };
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
+        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(string.Empty);
 
         var db = new AppDatabase { Apps = [app] };
+        var resolver = CaptureShortcutResolver(db);
+
+        var result = resolver(new AppEntry { Name = "ContainerApp", AccountSid = "", AppContainerName = "ram_browser", ExePath = _fakeExePath });
+        Assert.Null(result);
+        _log.Verify(
+            l => l.Warn("ShortcutEnforcementHelper: interactive user SID unavailable; skipping AppContainer beside-target shortcut for 'ContainerApp'."),
+            Times.Once);
+    }
+
+    [Fact]
+    public void Enforce_AppContainerApp_ShortcutResolver_UsesResolvedInteractiveSid()
+    {
+        const string interactiveSid = "S-1-5-21-100-200-300-1000";
+        var app = new AppEntry
+        {
+            Name = "ContainerApp",
+            ExePath = _fakeExePath,
+            AccountSid = "",
+            AppContainerName = "ram_browser",
+            ManageShortcuts = false,
+            RestrictAcl = false
+        };
+        _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
+        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
+
+        var db = new AppDatabase
+        {
+            Apps = [app],
+            SidNames = { [interactiveSid] = "InteractiveUser" }
+        };
         var resolver = CaptureShortcutResolver(db);
 
         var result = resolver(new AppEntry { AccountSid = "", AppContainerName = "ram_browser", ExePath = _fakeExePath });
         Assert.NotNull(result);
-        Assert.NotEmpty(result!.Value.Item1);
+        Assert.Equal("InteractiveUser", result.Value.Item1);
     }
 
     [Fact]

@@ -5,6 +5,7 @@ namespace RunFence.Launch;
 
 public class AppEntryLauncher(
     ILaunchFacade launchFacade,
+    IAppEntryLaunchPlanBuilder planBuilder,
     ISessionProvider sessionProvider)
     : IAppEntryLauncher
 {
@@ -12,45 +13,21 @@ public class AppEntryLauncher(
         Func<string, string, bool>? permissionPrompt = null, string? associationArgsTemplate = null)
     {
         var session = sessionProvider.GetSession();
+        var plan = planBuilder.Build(app, session, launcherArguments, launcherWorkingDirectory, associationArgsTemplate);
 
-        LaunchIdentity identity;
-        if (app.AppContainerName != null)
+        switch (plan.Kind)
         {
-            var entry = session.Database.AppContainers
-                            .FirstOrDefault(c => string.Equals(c.Name, app.AppContainerName, StringComparison.OrdinalIgnoreCase))
-                        ?? throw new InvalidOperationException(
-                            $"AppContainer '{app.AppContainerName}' not found in database.");
-
-            identity = new AppContainerLaunchIdentity(entry);
+            case AppEntryLaunchKind.Url:
+                launchFacade.LaunchUrl(plan.Url!, plan.Identity);
+                return;
+            case AppEntryLaunchKind.Folder:
+                launchFacade.LaunchFolderBrowser(plan.Identity, plan.FolderPath, folderPermissionPrompt: permissionPrompt);
+                return;
+            case AppEntryLaunchKind.File:
+                launchFacade.LaunchFile(plan.FileTarget!, plan.Identity, permissionPrompt: permissionPrompt);
+                return;
+            default:
+                throw new InvalidOperationException($"Unsupported launch plan kind '{plan.Kind}'.");
         }
-        else
-        {
-            identity = new AccountLaunchIdentity(app.AccountSid)
-            {
-                PrivilegeLevel = app.PrivilegeLevel,
-            };
-        }
-
-        if (app.IsUrlScheme)
-        {
-            launchFacade.LaunchUrl(app.ExePath, identity);
-            return;
-        }
-
-        if (app.IsFolder)
-        {
-            launchFacade.LaunchFolderBrowser(identity, app.ExePath, folderPermissionPrompt: permissionPrompt);
-            return;
-        }
-
-        var workingDirectory = ProcessLaunchHelper.DetermineWorkingDirectory(app, launcherWorkingDirectory)
-                               ?? (app.AppContainerName != null
-                                   ? Path.GetDirectoryName(Path.GetFullPath(app.ExePath)) ?? ""
-                                   : null);
-        launchFacade.LaunchFile(new ProcessLaunchTarget(
-            ExePath: app.ExePath,
-            WorkingDirectory: workingDirectory,
-            Arguments: ProcessLaunchHelper.DetermineArguments(app, launcherArguments, associationArgsTemplate),
-            EnvironmentVariables: app.EnvironmentVariables), identity, permissionPrompt: permissionPrompt);
     }
 }

@@ -62,7 +62,8 @@ public static class Program
             WorkingDirectory = string.Equals(cwd, launcherDir, StringComparison.OrdinalIgnoreCase) ? null : Environment.CurrentDirectory
         };
 
-        var response = LauncherIpcHelper.SendWithAutoStart(message);
+        var helper = new LauncherIpcHelper(new LauncherIpcClient(), new LauncherGuiController(), new LauncherWaitDelay());
+        var response = helper.SendWithAutoStart(message);
         if (response == null)
             return 1;
 

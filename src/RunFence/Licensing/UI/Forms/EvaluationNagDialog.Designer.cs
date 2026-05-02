@@ -20,6 +20,7 @@ partial class EvaluationNagDialog
     private LinkLabel _paymentLink;
     private LinkLabel _emailLink;
     private Label _orgLabel;
+    private Panel _buttonPanel;
     private Panel _separatorPanel2;
     private Button _enterKeyButton;
     private Button _continueButton;
@@ -46,17 +47,19 @@ partial class EvaluationNagDialog
         _paymentLink = new LinkLabel();
         _emailLink = new LinkLabel();
         _orgLabel = new Label();
+        _buttonPanel = new Panel();
         _separatorPanel2 = new Panel();
         _enterKeyButton = new Button();
         _continueButton = new Button();
 
         SuspendLayout();
         _headerPanel.SuspendLayout();
+        _buttonPanel.SuspendLayout();
 
         // _headerPanel
         _headerPanel.BackColor = Color.FromArgb(0, 99, 177);
-        _headerPanel.Location = new Point(0, 0);
-        _headerPanel.Size = new Size(900, 100);
+        _headerPanel.Dock = DockStyle.Top;
+        _headerPanel.Height = 100;
         _headerPanel.Controls.Add(_headingLabel);
         _headerPanel.Controls.Add(_bodyLabel);
 
@@ -94,26 +97,27 @@ partial class EvaluationNagDialog
 
         // _separatorPanel1
         _separatorPanel1.BackColor = Color.FromArgb(210, 210, 210);
-        _separatorPanel1.Location = new Point(24, 342);
+        _separatorPanel1.Location = new Point(24, 318);
         _separatorPanel1.Size = new Size(852, 1);
 
         // _machineCodeLabel
         _machineCodeLabel.Text = "Machine Code — include in your purchase email to receive a license key:";
         _machineCodeLabel.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
         _machineCodeLabel.AutoSize = true;
-        _machineCodeLabel.Location = new Point(24, 358);
+        _machineCodeLabel.Location = new Point(24, 334);
 
         // _machineCodeTextBox
         _machineCodeTextBox.ReadOnly = true;
         _machineCodeTextBox.Font = new Font("Consolas", 10f);
-        _machineCodeTextBox.Location = new Point(24, 382);
+        _machineCodeTextBox.Location = new Point(24, 358);
         _machineCodeTextBox.Size = new Size(766, 24);
         _machineCodeTextBox.BackColor = SystemColors.Window;
         _machineCodeTextBox.TabStop = false;
 
         // _copyMachineCodeButton
         _copyMachineCodeButton.Text = "Copy";
-        _copyMachineCodeButton.Location = new Point(798, 380);
+        _copyMachineCodeButton.FlatStyle = FlatStyle.System;
+        _copyMachineCodeButton.Location = new Point(798, 356);
         _copyMachineCodeButton.Size = new Size(78, 28);
         _copyMachineCodeButton.Click += OnCopyMachineCodeClick;
 
@@ -121,37 +125,46 @@ partial class EvaluationNagDialog
         _paymentLink.Text = "Purchase";
         _paymentLink.Font = new Font("Segoe UI", 10f);
         _paymentLink.AutoSize = true;
-        _paymentLink.Location = new Point(24, 426);
+        _paymentLink.Location = new Point(24, 402);
         _paymentLink.LinkClicked += OnPaymentLinkClicked;
 
         // _orgLabel
         _orgLabel.Text = "  ·  ";
         _orgLabel.Font = new Font("Segoe UI", 10f);
         _orgLabel.AutoSize = true;
-        _orgLabel.Location = new Point(104, 426);
+        _orgLabel.Location = new Point(104, 402);
 
         // _emailLink
         _emailLink.Text = "runfencedev@gmail.com";
         _emailLink.Font = new Font("Segoe UI", 10f);
         _emailLink.AutoSize = true;
         _emailLink.MinimumSize = new Size(170, 0);
-        _emailLink.Location = new Point(140, 426);
+        _emailLink.Location = new Point(140, 402);
         _emailLink.LinkClicked += OnEmailLinkClicked;
 
-        // _separatorPanel2
+        // _buttonPanel
+        _buttonPanel.Dock = DockStyle.Bottom;
+        _buttonPanel.Height = 61;
+        _buttonPanel.Controls.Add(_separatorPanel2);
+        _buttonPanel.Controls.Add(_enterKeyButton);
+        _buttonPanel.Controls.Add(_continueButton);
+
+        // _separatorPanel2 (inside _buttonPanel)
         _separatorPanel2.BackColor = Color.FromArgb(210, 210, 210);
-        _separatorPanel2.Location = new Point(24, 460);
+        _separatorPanel2.Location = new Point(24, 0);
         _separatorPanel2.Size = new Size(852, 1);
 
-        // _enterKeyButton
+        // _enterKeyButton (inside _buttonPanel)
         _enterKeyButton.Text = "Enter License Key…";
-        _enterKeyButton.Location = new Point(24, 480);
+        _enterKeyButton.FlatStyle = FlatStyle.System;
+        _enterKeyButton.Location = new Point(24, 11);
         _enterKeyButton.Size = new Size(240, 38);
         _enterKeyButton.Click += OnEnterKeyClick;
 
-        // _continueButton
+        // _continueButton (inside _buttonPanel)
         _continueButton.Text = "Continue Evaluation (5s)";
-        _continueButton.Location = new Point(280, 480);
+        _continueButton.FlatStyle = FlatStyle.System;
+        _continueButton.Location = new Point(280, 11);
         _continueButton.Size = new Size(596, 38);
         _continueButton.Click += OnContinueClick;
 
@@ -159,7 +172,7 @@ partial class EvaluationNagDialog
         AutoScaleDimensions = new SizeF(7F, 15F);
         AutoScaleMode = AutoScaleMode.Font;
         Text = "RunFence — Evaluation";
-        ClientSize = new Size(900, 542);
+        ClientSize = new Size(900, 500);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -175,12 +188,12 @@ partial class EvaluationNagDialog
         Controls.Add(_paymentLink);
         Controls.Add(_orgLabel);
         Controls.Add(_emailLink);
-        Controls.Add(_separatorPanel2);
-        Controls.Add(_enterKeyButton);
-        Controls.Add(_continueButton);
+        Controls.Add(_buttonPanel);
 
         _headerPanel.ResumeLayout(false);
         _headerPanel.PerformLayout();
+        _buttonPanel.ResumeLayout(false);
+        _buttonPanel.PerformLayout();
         ResumeLayout(false);
         PerformLayout();
     }

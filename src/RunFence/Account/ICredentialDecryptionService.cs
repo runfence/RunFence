@@ -1,4 +1,4 @@
-using System.Security;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Launch;
 
@@ -18,7 +18,7 @@ public interface ICredentialDecryptionService
         CredentialStore credentialStore,
         byte[] pinDerivedKey,
         out CredentialEntry? credEntry,
-        out SecureString? password);
+        out ProtectedString? password);
 
     /// <summary>
     /// Returns the lookup status for the account without decrypting the password.

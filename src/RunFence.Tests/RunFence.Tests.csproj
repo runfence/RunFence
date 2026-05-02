@@ -23,7 +23,9 @@
 
     <ItemGroup>
         <ProjectReference Include="..\RunFence.Core\RunFence.Core.csproj"/>
+        <ProjectReference Include="..\RunFence.Launching\RunFence.Launching.csproj"/>
         <ProjectReference Include="..\RunFence\RunFence.csproj"/>
+        <ProjectReference Include="..\RunFence.Launcher\RunFence.Launcher.csproj"/>
         <ProjectReference Include="..\RunFence.DragBridge\RunFence.DragBridge.csproj"/>
         <ProjectReference Include="..\RunFence.SecurityScanner\RunFence.SecurityScanner.csproj"/>
     </ItemGroup>

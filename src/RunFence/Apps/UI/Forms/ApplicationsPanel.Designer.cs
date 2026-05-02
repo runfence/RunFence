@@ -38,7 +38,12 @@ partial class ApplicationsPanel
     private ToolStripButton _associationsButton;
     private ToolStripButton _wizardButton;
     private ToolStripButton _runAsButton;
-    private DataGridViewImageColumn _iconCol;
+    private DataGridViewImageColumn Icon;
+    private DataGridViewTextBoxColumn AppName;
+    private DataGridViewTextBoxColumn ExePath;
+    private DataGridViewTextBoxColumn Account;
+    private DataGridViewTextBoxColumn ACL;
+    private DataGridViewTextBoxColumn Shortcuts;
 
     private ApplicationsPanel() { InitializeComponent(); }
 
@@ -55,6 +60,12 @@ partial class ApplicationsPanel
     private void InitializeComponent()
     {
         _grid = new StyledDataGridView();
+        Icon = new DataGridViewImageColumn();
+        AppName = new DataGridViewTextBoxColumn();
+        ExePath = new DataGridViewTextBoxColumn();
+        Account = new DataGridViewTextBoxColumn();
+        ACL = new DataGridViewTextBoxColumn();
+        Shortcuts = new DataGridViewTextBoxColumn();
         _toolStrip = new ToolStrip();
         _addButton = new ToolStripButton();
         _editButton = new ToolStripButton();
@@ -91,22 +102,35 @@ partial class ApplicationsPanel
         SuspendLayout();
 
         // _grid columns
-        _iconCol = new DataGridViewImageColumn();
-        _iconCol.Name = "Icon";
-        _iconCol.HeaderText = "";
-        _iconCol.Width = 28;
-        _iconCol.Resizable = DataGridViewTriState.False;
-        _iconCol.SortMode = DataGridViewColumnSortMode.NotSortable;
-        _iconCol.ImageLayout = DataGridViewImageCellLayout.Zoom;
-        _iconCol.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
-        _grid.Columns.Add(_iconCol);
-        _grid.Columns.Add("Name", "Name");
-        _grid.Columns.Add("ExePath", "Path / URL");
-        _grid.Columns.Add("Account", "Account");
-        _grid.Columns.Add("ACL", "ACL");
-        _grid.Columns.Add("Shortcuts", "Shortcuts");
+        Icon.Name = "Icon";
+        Icon.HeaderText = "";
+        Icon.Width = 28;
+        Icon.Resizable = DataGridViewTriState.False;
+        Icon.SortMode = DataGridViewColumnSortMode.NotSortable;
+        Icon.ImageLayout = DataGridViewImageCellLayout.Zoom;
+        Icon.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+
+        AppName.Name = "AppName";
+        AppName.HeaderText = "Name";
+
+        ExePath.Name = "ExePath";
+        ExePath.HeaderText = "Path / URL";
+
+        Account.Name = "Account";
+        Account.HeaderText = "Account";
+
+        ACL.Name = "ACL";
+        ACL.HeaderText = "ACL";
+
+        Shortcuts.Name = "Shortcuts";
+        Shortcuts.HeaderText = "Shortcuts";
+
+        _grid.Columns.AddRange(new DataGridViewColumn[] { Icon, AppName, ExePath, Account, ACL, Shortcuts });
 
         // _grid
+        _grid.Dock = DockStyle.Fill;
+        _grid.ReadOnly = true;
+        _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
         _grid.SelectionChanged += OnGridSelectionChanged;
         _grid.CellDoubleClick += OnGridCellDoubleClick;
         _grid.CellMouseClick += OnGridCellMouseClick;
@@ -224,7 +248,6 @@ partial class ApplicationsPanel
         _headerContextMenu.Items.Add(_hdrAdd);
 
         // ApplicationsPanel
-        Dock = DockStyle.Fill;
         Controls.Add(_grid);
         Controls.Add(_toolStrip);
 

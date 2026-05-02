@@ -5,7 +5,7 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Launch.Tokens;
 
-public class SaferDeElevationHelper(ILoggingService log)
+public class SaferDeElevationHelper(ILoggingService log) : ISaferDeElevationHelper
 {
     /// <summary>
     /// Creates a de-elevated token from <paramref name="hSourceToken"/> using
@@ -19,21 +19,18 @@ public class SaferDeElevationHelper(ILoggingService log)
     /// </summary>
     public IntPtr CreateDeElevatedToken(IntPtr hSourceToken)
     {
-        IntPtr hLevel = IntPtr.Zero;
-        IntPtr hSaferToken = IntPtr.Zero;
-        IntPtr pSid114 = IntPtr.Zero;
-
         log.Debug("SaferDeElevationHelper: SaferCreateLevel");
         if (!SaferNative.SaferCreateLevel(SaferNative.SAFER_SCOPEID_MACHINE, SaferNative.SAFER_LEVELID_NORMALUSER,
-                SaferNative.SAFER_LEVEL_OPEN, out hLevel, IntPtr.Zero))
+                SaferNative.SAFER_LEVEL_OPEN, out IntPtr hLevel, IntPtr.Zero))
             throw new Win32Exception(Marshal.GetLastWin32Error());
 
         try
         {
             log.Debug("SaferDeElevationHelper: SaferComputeTokenFromLevel");
-            if (!SaferNative.SaferComputeTokenFromLevel(hLevel, hSourceToken, out hSaferToken, 0, IntPtr.Zero))
+            if (!SaferNative.SaferComputeTokenFromLevel(hLevel, hSourceToken, out IntPtr hSaferToken, 0, IntPtr.Zero))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
 
+            IntPtr pSid114 = IntPtr.Zero;
             try
             {
                 log.Debug("SaferDeElevationHelper: CreateRestrictedToken(S-1-5-114 → deny-only)");

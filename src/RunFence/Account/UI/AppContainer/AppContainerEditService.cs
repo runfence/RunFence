@@ -15,6 +15,18 @@ public record AppContainerEditResult(
     IReadOnlyList<string> ComErrors);
 
 /// <summary>
+/// Result of <see cref="AppContainerEditService.CreateNewContainer"/>.
+/// <see cref="Entry"/> is non-null on success; null on failure.
+/// <see cref="ValidationError"/> is set for validation failures; <see cref="CreationError"/> for OS-level failures.
+/// <see cref="ComErrors"/> holds partial COM access failures when creation succeeded.
+/// </summary>
+public record AppContainerCreateResult(
+    AppContainerEntry? Entry,
+    string? ValidationError,
+    string? CreationError,
+    IReadOnlyList<string> ComErrors);
+
+/// <summary>
 /// Handles the business logic for creating and editing AppContainer entries:
 /// applying edits to an existing entry or creating a new one, including
 /// capability changes, loopback exemption, and COM access updates.
@@ -28,7 +40,7 @@ public class AppContainerEditService(
     /// Applies edit changes to an existing AppContainer entry (mutates it in place).
     /// Returns a result describing what happened; the caller is responsible for showing messages.
     /// </summary>
-    public AppContainerEditResult ApplyEditChanges(
+    public async Task<AppContainerEditResult> ApplyEditChanges(
         AppContainerEntry existing,
         string displayName,
         List<string> capabilities,
@@ -55,7 +67,7 @@ public class AppContainerEditService(
         string? loopbackFailAction = null;
         if (loopbackChanged)
         {
-            var succeeded = appContainerService.SetLoopbackExemption(existing.Name, loopback);
+            var succeeded = await appContainerService.SetLoopbackExemption(existing.Name, loopback);
             if (succeeded)
                 existing.EnableLoopback = loopback;
             else
@@ -114,33 +126,24 @@ public class AppContainerEditService(
     /// <summary>
     /// Creates a new AppContainer entry, registers it in the database, and sets
     /// <see cref="AppContainerEntry.ComAccessClsids"/> to the successfully granted CLSIDs.
-    /// Returns the created entry on success, or null if creation failed (caller should not close dialog).
-    /// <paramref name="validationError"/> is set for validation failures (show as warning);
-    /// <paramref name="creationError"/> is set for OS-level creation failures (show as error).
-    /// <paramref name="comErrors"/> holds partial COM access failures on success.
+    /// Returns an <see cref="AppContainerCreateResult"/> where <see cref="AppContainerCreateResult.Entry"/>
+    /// is non-null on success. On failure, <see cref="AppContainerCreateResult.ValidationError"/> is set for
+    /// validation failures and <see cref="AppContainerCreateResult.CreationError"/> for OS-level failures.
     /// </summary>
-    public AppContainerEntry? CreateNewContainer(
+    public async Task<AppContainerCreateResult> CreateNewContainer(
         string profileName,
         string displayName,
         bool isEphemeral,
         List<string> capabilities,
         bool loopback,
-        List<string> comClsids,
-        out string? validationError,
-        out string? creationError,
-        out IReadOnlyList<string> comErrors)
+        List<string> comClsids)
     {
-        validationError = null;
-        creationError = null;
-        comErrors = [];
-
         var database = databaseProvider.GetDatabase();
         if (database.AppContainers.Any(c =>
                 string.Equals(c.Name, profileName, StringComparison.OrdinalIgnoreCase)))
-        {
-            validationError = $"A container with profile name '{profileName}' already exists.";
-            return null;
-        }
+            return new AppContainerCreateResult(null,
+                $"A container with profile name '{profileName}' already exists.",
+                null, []);
 
         var entry = new AppContainerEntry
         {
@@ -158,7 +161,7 @@ public class AppContainerEditService(
 
             if (entry.EnableLoopback)
             {
-                var loopbackOk = appContainerService.SetLoopbackExemption(entry.Name, true);
+                var loopbackOk = await appContainerService.SetLoopbackExemption(entry.Name, true);
                 if (!loopbackOk)
                     entry.EnableLoopback = false;
             }
@@ -192,15 +195,13 @@ public class AppContainerEditService(
                 entry.ComAccessClsids = null;
             }
 
-            comErrors = comGrantErrors;
             database.AppContainers.Add(entry);
-            return entry;
+            return new AppContainerCreateResult(entry, null, null, comGrantErrors);
         }
         catch (Exception ex)
         {
             log.Error($"Failed to create AppContainer '{profileName}'", ex);
-            creationError = ex.Message;
-            return null;
+            return new AppContainerCreateResult(null, null, ex.Message, []);
         }
     }
 }

@@ -77,7 +77,7 @@ public class RunAsAppEditDialogHandler(
                 dlg.ApplyRequested += () =>
                 {
                     if (!commitService.Commit(dlg.Result, existing, dlg.SelectedConfigPath))
-                        return;
+                        return Task.CompletedTask;
 
                     if (updateOriginalShortcut && originalLnkPath != null)
                         shortcutCreator.TryUpdateOriginalShortcut(originalLnkPath, dlg.Result.Id);
@@ -90,6 +90,7 @@ public class RunAsAppEditDialogHandler(
 
                     dlg.DialogResult = DialogResult.OK;
                     dlg.Close();
+                    return Task.CompletedTask;
                 };
 
                 dlg.ShowDialog();

@@ -75,7 +75,8 @@ public static class SidNameResolver
     }
 
     public static string GetDisplayName(
-        CredentialEntry cred, ISidResolver sidResolver, IReadOnlyDictionary<string, string>? sidNames)
+        CredentialEntry cred, ISidResolver sidResolver, IReadOnlyDictionary<string, string>? sidNames,
+        IProfilePathResolver? profilePathResolver = null)
     {
         var preResolvedName = sidResolver.TryResolveName(cred.Sid);
         if (cred.IsCurrentAccount)
@@ -94,7 +95,7 @@ public static class SidNameResolver
             return $"{name} (interactive)";
         }
 
-        return GetDisplayName(cred.Sid, preResolvedName, sidResolver, sidNames);
+        return GetDisplayName(cred.Sid, preResolvedName, sidResolver, sidNames, profilePathResolver);
     }
 
     /// <summary>
@@ -102,13 +103,14 @@ public static class SidNameResolver
     /// 1. Pre-resolved live name  2. Registry profile path  3. Central SidNames map  4. Raw SID
     /// </summary>
     public static string GetDisplayName(
-        string sid, string? preResolvedName, ISidResolver sidResolver, IReadOnlyDictionary<string, string>? sidNames)
+        string sid, string? preResolvedName, ISidResolver sidResolver, IReadOnlyDictionary<string, string>? sidNames,
+        IProfilePathResolver? profilePathResolver)
     {
         if (preResolvedName != null)
             return ExtractUsername(preResolvedName);
 
         // Fall back to registry profile path leaf
-        var registryName = sidResolver.TryResolveNameFromRegistry(sid);
+        var registryName = profilePathResolver?.TryResolveNameFromRegistry(sid);
         if (registryName != null)
             return registryName;
 

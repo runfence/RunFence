@@ -76,7 +76,11 @@ public class AiAgentFirewallOrchestrator(
                 {
                     var terminalExe = accountToolResolver.ResolveTerminalExe(sid);
                     var profilePath = accountToolResolver.GetProfileRoot(sid);
-                    launchFacade.LaunchFile(new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath), new AccountLaunchIdentity(sid), permissionPrompt: (_, _) => true);
+                    var isWt = !terminalExe.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
+                    launchFacade.LaunchFile(
+                        new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath),
+                        new AccountLaunchIdentity(sid) { PrivilegeLevel = isWt ? PrivilegeLevel.AboveBasic : null },
+                        permissionPrompt: (_, _) => true);
                 }
             }
             catch (OperationCanceledException) { }

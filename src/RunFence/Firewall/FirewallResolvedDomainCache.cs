@@ -2,17 +2,16 @@ using RunFence.Core.Models;
 
 namespace RunFence.Firewall;
 
-public class FirewallResolvedDomainCache
+public class FirewallResolvedDomainCache(FirewallDomainDirtyTracker dirtyTracker)
 {
     private readonly Lock _lock = new();
     private readonly Dictionary<string, List<string>> _resolvedDomains = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, HashSet<string>> _dirtyDomainsBySid = new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyDictionary<string, IReadOnlyList<string>> GetAccountSnapshot(FirewallAccountSettings settings)
     {
         lock (_lock)
         {
-            return SnapshotRequestedDomains(GetAllowlistDomains(settings));
+            return SnapshotRequestedDomains(FirewallDomainDirtyTracker.GetAllowlistDomains(settings));
         }
     }
 
@@ -24,16 +23,8 @@ public class FirewallResolvedDomainCache
         }
     }
 
-    public void MarkDirty(string sid, IEnumerable<string> domains)
-    {
-        lock (_lock)
-        {
-            var dirtyDomains = GetOrCreateDirtyDomains(sid);
-            foreach (var domain in domains.DistinctCaseInsensitive())
-                dirtyDomains.Add(domain);
-            RemoveEmptyDirtySet(sid);
-        }
-    }
+    public void MarkDirty(string sid, IEnumerable<string> domains) =>
+        dirtyTracker.MarkDirty(sid, domains);
 
     public IReadOnlyCollection<string> UpdateResolvedDomainsAndGetChangedDomains(
         IReadOnlyCollection<string> requestedDomains,
@@ -63,87 +54,55 @@ public class FirewallResolvedDomainCache
         }
     }
 
-    public void MarkDirtyForChangedDomains(AppDatabase database, IReadOnlyCollection<string> changedDomains)
-    {
-        lock (_lock)
-        {
-            var changedDomainSet = changedDomains.DistinctCaseInsensitive().ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (changedDomainSet.Count == 0)
-                return;
-
-            foreach (var account in database.Accounts)
-            {
-                var settings = account.Firewall;
-                if (!IsEligibleForDomainAllowlistRefresh(settings))
-                    continue;
-
-                var dirtyDomains = GetOrCreateDirtyDomains(account.Sid);
-                foreach (var domain in GetAllowlistDomains(settings))
-                {
-                    if (changedDomainSet.Contains(domain))
-                        dirtyDomains.Add(domain);
-                }
-
-                RemoveEmptyDirtySet(account.Sid);
-            }
-        }
-    }
+    public void MarkDirtyForChangedDomains(AppDatabase database, IReadOnlyCollection<string> changedDomains) =>
+        dirtyTracker.MarkDirtyForChangedDomains(database, changedDomains);
 
     public DomainRefreshDecision GetRefreshDecision(
         string sid,
         FirewallAccountSettings settings,
         IReadOnlySet<string> changedDomains)
     {
+        var requestedDomains = FirewallDomainDirtyTracker.GetAllowlistDomains(settings).ToList();
+        bool dnsChanged = requestedDomains.Any(changedDomains.Contains);
+        bool wasDirty = dirtyTracker.IsAnyDirty(sid, requestedDomains);
+
+        IReadOnlyDictionary<string, IReadOnlyList<string>> resolvedDomains;
         lock (_lock)
         {
-            var requestedDomains = GetAllowlistDomains(settings).ToList();
-            bool dnsChanged = requestedDomains.Any(changedDomains.Contains);
-            bool wasDirty = IsAnyDirty(sid, requestedDomains);
-            var resolvedDomains = SnapshotRequestedDomains(requestedDomains);
-            var domainsToClearOnSuccess = requestedDomains
-                .Where(domain => resolvedDomains.TryGetValue(domain, out var v) && v.Count > 0)
-                .ToList();
-
-            return new DomainRefreshDecision(
-                ShouldRefreshRules: dnsChanged || wasDirty,
-                DnsChanged: dnsChanged,
-                WasDirty: wasDirty,
-                ResolvedDomains: resolvedDomains,
-                DomainsToClearOnSuccess: domainsToClearOnSuccess);
+            resolvedDomains = SnapshotRequestedDomains(requestedDomains);
         }
+
+        var domainsToClearOnSuccess = requestedDomains
+            .Where(domain => resolvedDomains.TryGetValue(domain, out var v) && v.Count > 0)
+            .ToList();
+
+        return new DomainRefreshDecision(
+            ShouldRefreshRules: dnsChanged || wasDirty,
+            WasDirty: wasDirty,
+            ResolvedDomains: resolvedDomains,
+            DomainsToClearOnSuccess: domainsToClearOnSuccess);
     }
 
-    public void MarkRefreshSucceeded(string sid, IReadOnlyCollection<string> domains)
-    {
-        lock (_lock)
-        {
-            if (!_dirtyDomainsBySid.TryGetValue(sid, out var dirtyDomains))
-                return;
-
-            foreach (var domain in domains.DistinctCaseInsensitive())
-                dirtyDomains.Remove(domain);
-
-            RemoveEmptyDirtySet(sid);
-        }
-    }
+    public void MarkRefreshSucceeded(string sid, IReadOnlyCollection<string> domains) =>
+        dirtyTracker.MarkRefreshSucceeded(sid, domains);
 
     public void Prune(AppDatabase database)
     {
+        var activeDomainsBySid = BuildActiveDomainMap(database);
+        var activeGlobalDomains = activeDomainsBySid.Values
+            .SelectMany(domains => domains)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         lock (_lock)
         {
-            var activeDomainsBySid = BuildActiveDomainMap(database);
-            var activeGlobalDomains = activeDomainsBySid.Values
-                .SelectMany(domains => domains)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
             foreach (var domain in _resolvedDomains.Keys.ToList())
             {
                 if (!activeGlobalDomains.Contains(domain))
                     _resolvedDomains.Remove(domain);
             }
-
-            PruneDirtyDomains(activeDomainsBySid);
         }
+
+        dirtyTracker.PruneDirtyDomains(activeDomainsBySid);
     }
 
     public void Clear()
@@ -151,8 +110,9 @@ public class FirewallResolvedDomainCache
         lock (_lock)
         {
             _resolvedDomains.Clear();
-            _dirtyDomainsBySid.Clear();
         }
+
+        dirtyTracker.Clear();
     }
 
     private IReadOnlyDictionary<string, IReadOnlyList<string>> SnapshotRequestedDomains(IEnumerable<string> requestedDomains)
@@ -165,23 +125,6 @@ public class FirewallResolvedDomainCache
         }
 
         return snapshot;
-    }
-
-    private HashSet<string> GetOrCreateDirtyDomains(string sid)
-    {
-        if (!_dirtyDomainsBySid.TryGetValue(sid, out var dirtyDomains))
-        {
-            dirtyDomains = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            _dirtyDomainsBySid[sid] = dirtyDomains;
-        }
-
-        return dirtyDomains;
-    }
-
-    private bool IsAnyDirty(string sid, IEnumerable<string> domains)
-    {
-        return _dirtyDomainsBySid.TryGetValue(sid, out var dirtyDomains)
-            && domains.Any(dirtyDomains.Contains);
     }
 
     private static IReadOnlyDictionary<string, IReadOnlyList<string>> SnapshotDomainMap(
@@ -201,41 +144,8 @@ public class FirewallResolvedDomainCache
     {
         var activeDomainsBySid = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var account in database.Accounts)
-            activeDomainsBySid[account.Sid] = GetAllowlistDomains(account.Firewall).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            activeDomainsBySid[account.Sid] = FirewallDomainDirtyTracker.GetAllowlistDomains(account.Firewall).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         return activeDomainsBySid;
     }
-
-    private void PruneDirtyDomains(IReadOnlyDictionary<string, HashSet<string>> activeDomainsBySid)
-    {
-        foreach (var sid in _dirtyDomainsBySid.Keys.ToList())
-        {
-            if (!activeDomainsBySid.TryGetValue(sid, out var activeDomains))
-            {
-                _dirtyDomainsBySid.Remove(sid);
-                continue;
-            }
-
-            var dirtyDomains = _dirtyDomainsBySid[sid];
-            dirtyDomains.RemoveWhere(domain => !activeDomains.Contains(domain));
-            RemoveEmptyDirtySet(sid);
-        }
-    }
-
-    private void RemoveEmptyDirtySet(string sid)
-    {
-        if (_dirtyDomainsBySid.TryGetValue(sid, out var dirtyDomains) && dirtyDomains.Count == 0)
-            _dirtyDomainsBySid.Remove(sid);
-    }
-
-    private static bool IsEligibleForDomainAllowlistRefresh(FirewallAccountSettings settings)
-        => !settings.IsDefault
-            && settings is not { AllowInternet: true, AllowLan: true }
-            && GetAllowlistDomains(settings).Any();
-
-    private static IEnumerable<string> GetAllowlistDomains(FirewallAccountSettings settings)
-        => settings.Allowlist
-            .Where(entry => entry.IsDomain)
-            .Select(entry => entry.Value)
-            .DistinctCaseInsensitive();
 }

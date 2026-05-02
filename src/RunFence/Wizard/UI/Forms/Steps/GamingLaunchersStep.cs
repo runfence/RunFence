@@ -14,6 +14,7 @@ public class GamingLaunchersStep : WizardStepPage
 {
     private readonly Action<List<string>> _setLauncherPaths;
     private readonly IShortcutDiscoveryService _discoveryService;
+    private readonly IShortcutIconHelper _iconHelper;
     private readonly Func<string?>? _getAccountSid;
 
     private FolderListEditor _editor = null!;
@@ -122,10 +123,12 @@ public class GamingLaunchersStep : WizardStepPage
     public GamingLaunchersStep(
         Action<List<string>> setLauncherPaths,
         IShortcutDiscoveryService discoveryService,
+        IShortcutIconHelper iconHelper,
         Func<string?>? getSid = null)
     {
         _setLauncherPaths = setLauncherPaths;
         _discoveryService = discoveryService;
+        _iconHelper = iconHelper;
         _getAccountSid = getSid;
         BuildContent();
     }
@@ -213,8 +216,8 @@ public class GamingLaunchersStep : WizardStepPage
             var apps = await Task.Run(() => _discoveryService.DiscoverApps());
             if (IsDisposed) return;
 
-            using var dlg = new AppDiscoveryDialog(apps);
-            if (dlg.ShowDialog(this) == DialogResult.OK && dlg.SelectedPath != null)
+            using var dlg = new AppDiscoveryDialog(apps, _iconHelper);
+            if (await dlg.ShowDialogAsync(this) == DialogResult.OK && dlg.SelectedPath != null)
                 _editor.AddItem(dlg.SelectedPath);
         }
         finally

@@ -1,24 +1,24 @@
+using RunFence.Core;
 using System.Runtime.InteropServices;
-using System.Security;
 using System.Security.Cryptography;
-using System.Text;
+using System.Text;  
 using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Account.UI;
 
 /// <summary>
-/// Manages secure clipboard operations: copies a <see cref="SecureString"/> to the clipboard
+/// Manages secure clipboard operations: copies a <see cref="ProtectedString"/> to the clipboard
 /// while excluding it from clipboard monitoring tools, and automatically clears it after 60 seconds
 /// if the clipboard contents have not changed.
 /// </summary>
-public class SecureClipboardService : IDisposable
+public class SecureClipboardService : ISecureClipboardService
 {
     private Timer? _clipboardClearTimer;
     private byte[]? _clipboardExpectedHash;
 
-    public void CopySecureStringToClipboard(SecureString password)
+    public void CopyProtectedStringToClipboard(ProtectedString password)
     {
-        var ptr = Marshal.SecureStringToGlobalAllocUnicode(password);
+        var ptr = password.AllocUnicode();
         try
         {
             // PtrToStringUni creates a managed string that cannot be zeroed after use — known
@@ -39,7 +39,14 @@ public class SecureClipboardService : IDisposable
         _clipboardClearTimer?.Dispose();
         _clipboardClearTimer = null;
 
-        _clipboardExpectedHash = SHA256.HashData(Encoding.Unicode.GetBytes(Clipboard.GetText()));
+        try
+        {
+            _clipboardExpectedHash = SHA256.HashData(Encoding.Unicode.GetBytes(Clipboard.GetText()));
+        }
+        catch (ExternalException)
+        {
+            return;
+        }
 
         _clipboardClearTimer = new Timer { Interval = 60_000 };
         _clipboardClearTimer.Tick += OnClipboardClearTimerTick;
@@ -48,10 +55,14 @@ public class SecureClipboardService : IDisposable
 
     private void OnClipboardClearTimerTick(object? sender, EventArgs e)
     {
-        if (Clipboard.ContainsText() && _clipboardExpectedHash != null &&
-            SHA256.HashData(Encoding.Unicode.GetBytes(Clipboard.GetText()))
-                .AsSpan().SequenceEqual(_clipboardExpectedHash))
-            Clipboard.Clear();
+        try
+        {
+            if (Clipboard.ContainsText() && _clipboardExpectedHash != null &&
+                SHA256.HashData(Encoding.Unicode.GetBytes(Clipboard.GetText()))
+                    .AsSpan().SequenceEqual(_clipboardExpectedHash))
+                Clipboard.Clear();
+        }
+        catch (ExternalException) { }
 
         _clipboardExpectedHash = null;
         _clipboardClearTimer?.Dispose();

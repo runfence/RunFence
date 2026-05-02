@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Launch;
 
 namespace RunFence.Account.UI;
@@ -25,8 +26,22 @@ public class ToolLauncher(
         {
             var terminalExe = toolResolver.ResolveTerminalExe(identity.Sid);
             var profilePath = toolResolver.GetProfileRoot(identity.Sid);
-            RunWithErrorHandling("Launch CMD",
-                () => launchFacade.LaunchFile(new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath), identity, permissionPrompt: (_, _) => true));
+            var isWt = !terminalExe.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
+            var launchIdentity = isWt && identity is AccountLaunchIdentity { PrivilegeLevel: null } acctIdentity
+                ? acctIdentity with { PrivilegeLevel = PrivilegeLevel.AboveBasic }
+                : identity;
+            RunWithErrorHandling("Launch CMD", () =>
+            {
+                try
+                {
+                    launchFacade.LaunchFile(new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath), launchIdentity, permissionPrompt: (_, _) => true);
+                }
+                catch (Exception ex) when (isWt && ex is not OperationCanceledException)
+                {
+                    log.Error($"Launch {terminalExe} failed, falling back to cmd.exe", ex);
+                    launchFacade.LaunchFile(new ProcessLaunchTarget("cmd.exe", WorkingDirectory: profilePath), identity, permissionPrompt: (_, _) => true);
+                }
+            });
         }
     }
 
@@ -53,7 +68,7 @@ public class ToolLauncher(
         RunWithErrorHandling("Install packages", () => packageInstallService.InstallPackages(packages, identity));
     }
 
-    public bool IsWindowsTerminal(string sid) => toolResolver.ResolveTerminalExe(sid) != "cmd.exe";
+    public bool IsWindowsTerminal(string sid) => !toolResolver.ResolveTerminalExe(sid).Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
 
     public bool IsPackageInstalled(InstallablePackage package, string sid) => packageInstallService.IsPackageInstalled(package, sid);
 

@@ -27,4 +27,21 @@ public interface IWfpFilterHelper
         uint filterFlags,
         string logPrefix,
         Action<IntPtr, IntPtr, List<IntPtr>> writeConditions);
+
+    /// <summary>
+    /// Allocates a condition array of <paramref name="maxConditionCount"/> slots, invokes
+    /// <paramref name="writeConditions"/> to populate it (returning the actual count written),
+    /// builds the FWPM_FILTER0 struct using <paramref name="isIPv6"/> to select the layer key,
+    /// calls <c>FwpmFilterAdd0</c>, and frees all unmanaged memory.
+    /// No per-SID SDDL security descriptor is applied — the filter matches globally.
+    /// When <paramref name="writeConditions"/> returns zero, the filter is skipped.
+    /// </summary>
+    void AddFilterGlobal(
+        IntPtr engineHandle,
+        int maxConditionCount,
+        Guid filterKey,
+        bool isIPv6,
+        string filterName,
+        string logPrefix,
+        Func<IntPtr, List<IntPtr>, int> writeConditions);
 }

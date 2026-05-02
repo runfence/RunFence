@@ -12,5 +12,8 @@ public enum LaunchTokenSource
     CurrentProcess,
 
     /// <summary>Interactive desktop user — acquire token from explorer.exe.</summary>
-    InteractiveUser
+    InteractiveUser,
+
+    /// <summary>SYSTEM account — acquire primary token from winlogon.exe in the current session.</summary>
+    SystemAccount
 }

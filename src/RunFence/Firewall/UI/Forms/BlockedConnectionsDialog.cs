@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
+using RunFence.Firewall;
 using RunFence.UI;
 
 namespace RunFence.Firewall.UI.Forms;
@@ -146,8 +147,23 @@ public partial class BlockedConnectionsDialog : Form
         }
     }
 
-    private bool IsInAllowlist(string ip) =>
-        _existingAllowlist.Any(e => string.Equals(e.Value, ip, StringComparison.OrdinalIgnoreCase));
+    private bool IsInAllowlist(string ip)
+    {
+        if (_existingAllowlist.Any(e => !e.IsDomain && CidrRangeHelper.IsInCidrRange(ip, e.Value)))
+            return true;
+
+        if (_reverseDnsMap.TryGetValue(ip, out var hostnames))
+        {
+            foreach (var hostname in hostnames)
+            {
+                if (_existingAllowlist.Any(e => e.IsDomain &&
+                    string.Equals(e.Value, hostname, StringComparison.OrdinalIgnoreCase)))
+                    return true;
+            }
+        }
+
+        return false;
+    }
 
     private void SetLoadingState(bool loading)
     {

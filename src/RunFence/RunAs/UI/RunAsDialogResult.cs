@@ -1,4 +1,4 @@
-using System.Security;
+using RunFence.Core;
 using RunFence.Acl.UI;
 using RunFence.Core.Models;
 using RunFence.RunAs.UI.Forms;
@@ -18,7 +18,7 @@ public record RunAsDialogResult(
     bool RevertShortcutRequested,
     AppEntry? EditExistingApp,
     AppEntry? ExistingAppForLaunch,
-    SecureString? AdHocPassword = null,
+    ProtectedString? AdHocPassword = null,
     bool RememberPassword = false) : IDisposable
 {
     public void Dispose() => AdHocPassword?.Dispose();

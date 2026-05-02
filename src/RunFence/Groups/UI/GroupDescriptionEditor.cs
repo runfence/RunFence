@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Infrastructure;
 
 namespace RunFence.Groups.UI;
@@ -38,7 +39,7 @@ public class GroupDescriptionEditor(ILocalGroupMembershipService groupMembership
     /// Used to skip overwriting in-progress edits during a background refresh.
     /// </summary>
     public bool IsEditingGroup(string? groupSid)
-        => string.Equals(groupSid, _groupSid, StringComparison.OrdinalIgnoreCase)
+        => SidComparer.SidEquals(groupSid, _groupSid)
            && _descriptionTextBox.Focused;
 
     /// <summary>
@@ -48,7 +49,7 @@ public class GroupDescriptionEditor(ILocalGroupMembershipService groupMembership
     /// </summary>
     public void CompleteLoad(string? groupSid, string? desc, bool failed)
     {
-        if (!string.Equals(groupSid, _groupSid, StringComparison.OrdinalIgnoreCase))
+        if (!SidComparer.SidEquals(groupSid, _groupSid))
             return;
 
         if (failed)

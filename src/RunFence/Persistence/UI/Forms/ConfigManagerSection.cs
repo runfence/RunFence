@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json;
+using RunFence.Account;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -18,9 +19,10 @@ public partial class ConfigManagerSection : UserControl
     private readonly IAppFilter _appFilter;
     private readonly ILoggingService _log;
     private readonly IAclPermissionService _aclPermission;
-    private readonly HandlerSyncHelper? _handlerSyncHelper;
     private readonly ConfigImportHandler _importHandler;
     private readonly ISessionProvider _sessionProvider;
+    private readonly IAccountSidResolutionService _sidResolutionService;
+    private readonly HandlerSyncHelper _handlerSyncHelper;
 
     /// <summary>Fired when a config file should be loaded by the parent.</summary>
     public event Action<string>? ConfigLoadRequested;
@@ -34,7 +36,8 @@ public partial class ConfigManagerSection : UserControl
     public ConfigManagerSection(IAppConfigService appConfigService,
         IAppFilter appFilter, ILoggingService log, IAclPermissionService aclPermission,
         ConfigImportHandler importHandler, ISessionProvider sessionProvider,
-        HandlerSyncHelper? handlerSyncHelper = null)
+        IAccountSidResolutionService sidResolutionService,
+        HandlerSyncHelper handlerSyncHelper)
     {
         _appConfigService = appConfigService;
         _appFilter = appFilter;
@@ -42,13 +45,14 @@ public partial class ConfigManagerSection : UserControl
         _aclPermission = aclPermission;
         _importHandler = importHandler;
         _sessionProvider = sessionProvider;
+        _sidResolutionService = sidResolutionService;
         _handlerSyncHelper = handlerSyncHelper;
         InitializeComponent();
         _configNewButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4C4", Color.FromArgb(0x22, 0x8B, 0x22));
         _configLoadButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4C2", Color.FromArgb(0xCC, 0x99, 0x00));
         _configUnloadButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4E4", Color.FromArgb(0xCC, 0x66, 0x00));
         _configExportButton.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x33, 0x66, 0x99));
-        _configImportButton.Image = UiIconFactory.CreateToolbarIcon("\u21A9", Color.FromArgb(0x66, 0x66, 0x99));
+        _configImportButton.Image = UiIconFactory.CreateToolbarIcon("\u2193", Color.FromArgb(0x33, 0x66, 0xCC));
     }
 
     private AppDatabase GetDatabase() => _sessionProvider.GetSession().Database;
@@ -126,8 +130,8 @@ public partial class ConfigManagerSection : UserControl
 
         try
         {
-            using (var scope = GetPinDerivedKey().Unprotect())
-                _appConfigService.CreateEmptyConfig(dlg.FileName, scope.Data, GetCredentialStore().ArgonSalt);
+            using var scope = GetPinDerivedKey().Unprotect();
+            _appConfigService.CreateEmptyConfig(dlg.FileName, scope.Data, GetCredentialStore().ArgonSalt);
         }
         catch (Exception ex)
         {
@@ -206,13 +210,14 @@ public partial class ConfigManagerSection : UserControl
                     // needed to resolve SIDs on a different machine after import (e.g., when migrating
                     // config to a new system where the original accounts do not exist).
                     SidNames = database.SidNames,
+                    AppContainers = mainDb.AppContainers,
+                    ShowSystemInRunAs = database.ShowSystemInRunAs,
                 };
                 json = JsonSerializer.Serialize(exportDb, JsonDefaults.Options);
             }
             else
             {
-                var apps = _appConfigService.GetAppsForConfig(item.Path, database);
-                var exportConfig = new AppConfig { Apps = apps };
+                var exportConfig = _appConfigService.GetConfigForExport(item.Path, database);
                 json = JsonSerializer.Serialize(exportConfig, JsonDefaults.Options);
             }
 
@@ -227,7 +232,7 @@ public partial class ConfigManagerSection : UserControl
         }
     }
 
-    private void OnImportConfigClick(object? sender, EventArgs e)
+    private async void OnImportConfigClick(object? sender, EventArgs e)
     {
         if (_configListBox.SelectedItem is not ConfigComboItem item)
             return;
@@ -249,12 +254,25 @@ public partial class ConfigManagerSection : UserControl
         {
             if (item.Path == null)
             {
-                _importHandler.ImportMainConfig(openDlg.FileName);
+                var session = _sessionProvider.GetSession();
+                var sidResolutions = await _sidResolutionService.ResolveSidsAsync(
+                    session.CredentialStore, session.Database.SidNames);
+                var warnings = _importHandler.ImportMainConfig(openDlg.FileName, sidResolutions);
                 DataChanged?.Invoke();
-                _handlerSyncHelper?.Sync();
+                _handlerSyncHelper.Sync();
                 RefreshConfigList();
-                MessageBox.Show("Main config imported successfully.", "Import Complete",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (warnings.Count > 0)
+                {
+                    var warningText = string.Join("\n", warnings);
+                    MessageBox.Show(
+                        $"Main config imported with warnings:\n\n{warningText}",
+                        "Import Complete", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+                else
+                {
+                    MessageBox.Show("Main config imported successfully.", "Import Complete",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
             }
             else
             {

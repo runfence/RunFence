@@ -9,7 +9,9 @@ partial class OptionsPanel
     private IContainer components = null;
 
     private CheckBox _autoStartCheckBox;
-    private CheckBox _enableLoggingCheckBox;
+    private CheckBox _startWithoutPinCheckBox;
+    private Label _logVerbosityLabel;
+    private ComboBox _logVerbosityComboBox;
     private Button _openLogButton;
     private CheckBox _idleTimeoutCheckBox;
     private NumericUpDown _idleTimeoutUpDown;
@@ -24,6 +26,8 @@ partial class OptionsPanel
     private Button _changePinBtn;
     private Button _cleanupBtn;
     private Button _securityCheckBtn;
+    private Button _migrateAccountBtn;
+    private TableLayoutPanel _controlsButtonPanel;
     private Button _folderBrowseButton;
     private Button _settingsBrowseButton;
     private Button _exportSettingsButton;
@@ -54,6 +58,9 @@ partial class OptionsPanel
     private Panel _spacer1;
     private Panel _spacer2;
     private Panel _spacer3;
+    private TableLayoutPanel _folderBrowserExePanel;
+    private TableLayoutPanel _folderBrowserArgsPanel;
+    private TableLayoutPanel _desktopSettingsPathPanel;
 
     private OptionsPanel() { InitializeComponent(); }
 
@@ -72,7 +79,9 @@ partial class OptionsPanel
     private void InitializeComponent()
     {
         _autoStartCheckBox = new CheckBox();
-        _enableLoggingCheckBox = new CheckBox();
+        _startWithoutPinCheckBox = new CheckBox();
+        _logVerbosityLabel = new Label();
+        _logVerbosityComboBox = new ComboBox();
         _openLogButton = new Button();
         _idleTimeoutCheckBox = new CheckBox();
         _idleTimeoutUpDown = new NumericUpDown();
@@ -87,6 +96,8 @@ partial class OptionsPanel
         _changePinBtn = new Button();
         _cleanupBtn = new Button();
         _securityCheckBtn = new Button();
+        _migrateAccountBtn = new Button();
+        _controlsButtonPanel = new TableLayoutPanel();
         _folderBrowseButton = new Button();
         _settingsBrowseButton = new Button();
         _exportSettingsButton = new Button();
@@ -116,9 +127,31 @@ partial class OptionsPanel
         _spacer1 = new Panel();
         _spacer2 = new Panel();
         _spacer3 = new Panel();
+        _blockIcmpCheckBoxTooltip = new ToolTip();
+        _folderBrowserExePanel = new TableLayoutPanel();
+        _folderBrowserArgsPanel = new TableLayoutPanel();
+        _desktopSettingsPathPanel = new TableLayoutPanel();
 
         ((ISupportInitialize)_idleTimeoutUpDown).BeginInit();
         ((ISupportInitialize)_autoLockTimeoutUpDown).BeginInit();
+        _startupGroup.SuspendLayout();
+        _controlsButtonPanel.SuspendLayout();
+        _pinGroup.SuspendLayout();
+        _startupPinContainer.SuspendLayout();
+        _autoLockGroup.SuspendLayout();
+        _firewallGroup.SuspendLayout();
+        _dragBridgeFirewallContainer.SuspendLayout();
+        _autoLockDragBridgeContainer.SuspendLayout();
+        _idleTimeoutGroup.SuspendLayout();
+        _contextMenuGroup.SuspendLayout();
+        _idleCtxContainer.SuspendLayout();
+        _folderBrowserExePanel.SuspendLayout();
+        _folderBrowserArgsPanel.SuspendLayout();
+        _desktopSettingsPathPanel.SuspendLayout();
+        _folderBrowserGroup.SuspendLayout();
+        _desktopSettingsGroup.SuspendLayout();
+        _folderSettingsContainer.SuspendLayout();
+        _mainFillPanel.SuspendLayout();
         SuspendLayout();
 
         // --- Startup group ---
@@ -130,13 +163,23 @@ partial class OptionsPanel
         _autoStartCheckBox.AutoSize = true;
         _startupGroup.Controls.Add(_autoStartCheckBox);
 
-        _enableLoggingCheckBox.Text = "Enable logging";
-        _enableLoggingCheckBox.Location = new Point(200, 25);
-        _enableLoggingCheckBox.AutoSize = true;
-        _startupGroup.Controls.Add(_enableLoggingCheckBox);
+        _startWithoutPinCheckBox.Text = "Remember PIN";
+        _startWithoutPinCheckBox.Location = new Point(15, 48);
+        _startWithoutPinCheckBox.AutoSize = true;
+        _startupGroup.Controls.Add(_startWithoutPinCheckBox);
+
+        _logVerbosityLabel.Text = "Log verbosity:";
+        _logVerbosityLabel.Location = new Point(200, 27);
+        _logVerbosityLabel.AutoSize = true;
+        _startupGroup.Controls.Add(_logVerbosityLabel);
+
+        _logVerbosityComboBox.Location = new Point(292, 23);
+        _logVerbosityComboBox.Width = 88;
+        _logVerbosityComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        _startupGroup.Controls.Add(_logVerbosityComboBox);
 
         _openLogButton.Text = "Open Log";
-        _openLogButton.Location = new Point(0, 22);
+        _openLogButton.Location = new Point(390, 22);
         _openLogButton.Size = new Size(80, 27);
         _openLogButton.FlatStyle = FlatStyle.System;
         _openLogButton.Click += OnOpenLogClick;
@@ -146,41 +189,66 @@ partial class OptionsPanel
         _pinGroup.Text = "Controls";
         _pinGroup.Dock = DockStyle.Fill;
 
-        _changePinBtn.Text = "  Change PIN";
-        _changePinBtn.Location = new Point(10, 22);
-        _changePinBtn.Size = new Size(120, 34);
+        _changePinBtn.Text = "Change PIN";
+        _changePinBtn.Dock = DockStyle.Fill;
+        _changePinBtn.Margin = new Padding(3, 0, 3, 0);
         _changePinBtn.FlatStyle = FlatStyle.Standard;
         _changePinBtn.TextImageRelation = TextImageRelation.ImageBeforeText;
         _changePinBtn.TextAlign = ContentAlignment.MiddleLeft;
         _changePinBtn.ImageAlign = ContentAlignment.MiddleLeft;
-        _changePinBtn.Padding = new Padding(6, 0, 0, 0);
+        _changePinBtn.Padding = new Padding(4, 0, 0, 0);
         _changePinBtn.Click += OnChangePinClick;
-        _pinGroup.Controls.Add(_changePinBtn);
 
-        _securityCheckBtn.Text = "  Security Check";
-        _securityCheckBtn.Location = new Point(140, 22);
-        _securityCheckBtn.Size = new Size(145, 34);
+        _securityCheckBtn.Text = "Security Check";
+        _securityCheckBtn.Dock = DockStyle.Fill;
+        _securityCheckBtn.Margin = new Padding(3, 0, 3, 0);
         _securityCheckBtn.FlatStyle = FlatStyle.Standard;
         _securityCheckBtn.TextImageRelation = TextImageRelation.ImageBeforeText;
         _securityCheckBtn.TextAlign = ContentAlignment.MiddleLeft;
         _securityCheckBtn.ImageAlign = ContentAlignment.MiddleLeft;
-        _securityCheckBtn.Padding = new Padding(6, 0, 0, 0);
+        _securityCheckBtn.Padding = new Padding(4, 0, 0, 0);
         _securityCheckBtn.Click += OnSecurityCheckClick;
-        _pinGroup.Controls.Add(_securityCheckBtn);
 
-        _cleanupBtn.Text = "  Cleanup && Exit";
-        _cleanupBtn.Location = new Point(295, 22);
-        _cleanupBtn.Size = new Size(140, 34);
+        _cleanupBtn.Text = "Cleanup && Exit";
+        _cleanupBtn.Dock = DockStyle.Fill;
+        _cleanupBtn.Margin = new Padding(3, 0, 3, 0);
         _cleanupBtn.FlatStyle = FlatStyle.Standard;
         _cleanupBtn.TextImageRelation = TextImageRelation.ImageBeforeText;
         _cleanupBtn.TextAlign = ContentAlignment.MiddleLeft;
         _cleanupBtn.ImageAlign = ContentAlignment.MiddleLeft;
-        _cleanupBtn.Padding = new Padding(6, 0, 0, 0);
+        _cleanupBtn.Padding = new Padding(4, 0, 0, 0);
         _cleanupBtn.Click += OnCleanupClick;
-        _pinGroup.Controls.Add(_cleanupBtn);
+
+        _migrateAccountBtn.Text = "Migrate To";
+        _migrateAccountBtn.Dock = DockStyle.Fill;
+        _migrateAccountBtn.Margin = new Padding(3, 0, 3, 0);
+        _migrateAccountBtn.FlatStyle = FlatStyle.Standard;
+        _migrateAccountBtn.TextImageRelation = TextImageRelation.ImageBeforeText;
+        _migrateAccountBtn.TextAlign = ContentAlignment.MiddleLeft;
+        _migrateAccountBtn.ImageAlign = ContentAlignment.MiddleLeft;
+        _migrateAccountBtn.Padding = new Padding(4, 0, 0, 0);
+        _migrateAccountBtn.Click += OnMigrateAccountClick;
+
+        _controlsButtonPanel.Dock = DockStyle.Top;
+        _controlsButtonPanel.Height = 38;
+        _controlsButtonPanel.Font = new Font(Control.DefaultFont.FontFamily, 8f);
+        _controlsButtonPanel.ColumnCount = 4;
+        _controlsButtonPanel.RowCount = 1;
+        _controlsButtonPanel.Margin = Padding.Empty;
+        _controlsButtonPanel.Padding = new Padding(4, 2, 4, 4);
+        _controlsButtonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        _controlsButtonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        _controlsButtonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        _controlsButtonPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        _controlsButtonPanel.Controls.Add(_changePinBtn, 0, 0);
+        _controlsButtonPanel.Controls.Add(_securityCheckBtn, 1, 0);
+        _controlsButtonPanel.Controls.Add(_cleanupBtn, 2, 0);
+        _controlsButtonPanel.Controls.Add(_migrateAccountBtn, 3, 0);
+
+        _pinGroup.Controls.Add(_controlsButtonPanel);
 
         _startupPinContainer.Dock = DockStyle.Top;
-        _startupPinContainer.Height = 65;
+        _startupPinContainer.Height = 72;
         _startupPinContainer.ColumnCount = 2;
         _startupPinContainer.RowCount = 1;
         _startupPinContainer.Margin = Padding.Empty;
@@ -194,7 +262,7 @@ partial class OptionsPanel
         _autoLockGroup.Text = "Auto-Lock";
         _autoLockGroup.Dock = DockStyle.Fill;
 
-        _autoLockCheckBox.Text = "Lock when minimized";
+        _autoLockCheckBox.Text = "Lock in background";
         _autoLockCheckBox.Location = new Point(15, 25);
         _autoLockCheckBox.AutoSize = true;
         _autoLockGroup.Controls.Add(_autoLockCheckBox);
@@ -210,6 +278,7 @@ partial class OptionsPanel
         _autoLockTimeoutUpDown.Maximum = 999;
         _autoLockTimeoutUpDown.Value = 0;
         _autoLockTimeoutUpDown.Enabled = false;
+        _autoLockTimeoutUpDown.Anchor = AnchorStyles.Top | AnchorStyles.Left;
         _autoLockGroup.Controls.Add(_autoLockTimeoutUpDown);
 
         _unlockModeComboBox.Location = new Point(348, 22);
@@ -217,6 +286,7 @@ partial class OptionsPanel
         _unlockModeComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _unlockModeComboBox.Items.AddRange(new object[] { "UAC (Admin)", "PIN", "UAC + PIN", "Windows Hello" });
         _unlockModeComboBox.SelectedIndex = 0;
+        _unlockModeComboBox.Anchor = AnchorStyles.Top | AnchorStyles.Left;
         _autoLockGroup.Controls.Add(_unlockModeComboBox);
 
         // --- Firewall group ---
@@ -227,9 +297,6 @@ partial class OptionsPanel
         _blockIcmpCheckBox.Location = new Point(15, 24);
         _blockIcmpCheckBox.AutoSize = true;
         _firewallGroup.Controls.Add(_blockIcmpCheckBox);
-        
-        _blockIcmpCheckBoxTooltip = new  ToolTip();
-        _blockIcmpCheckBoxTooltip.SetToolTip(_blockIcmpCheckBox, "ICMP tunneling can be potentially used to escape Internet restrictions");
 
         // --- Drag Bridge placeholder (section added in code) + Firewall split ---
         _dragBridgePlaceholder.Dock = DockStyle.Fill;
@@ -300,58 +367,93 @@ partial class OptionsPanel
         // --- Folder Browser group ---
         _folderBrowserGroup.Text = "Folder Browser";
         _folderBrowserGroup.Dock = DockStyle.Fill;
+        _folderBrowserGroup.Padding = new Padding(15, 0, 10, 5);
 
         _folderBrowserExeLabel.Text = "Application used to open folder entries:";
-        _folderBrowserExeLabel.Location = new Point(15, 22);
+        _folderBrowserExeLabel.Dock = DockStyle.Top;
         _folderBrowserExeLabel.AutoSize = true;
-        _folderBrowserGroup.Controls.Add(_folderBrowserExeLabel);
+        _folderBrowserExeLabel.Padding = new Padding(0, 4, 0, 2);
 
-        _folderBrowserExeTextBox.Location = new Point(15, 42);
-        _folderBrowserExeTextBox.Size = new Size(350, 23);
-        _folderBrowserGroup.Controls.Add(_folderBrowserExeTextBox);
+        _folderBrowserExeTextBox.Dock = DockStyle.Fill;
 
         _folderBrowseButton.Text = "Browse...";
-        _folderBrowseButton.Location = new Point(375, 40);
-        _folderBrowseButton.Size = new Size(80, 27);
+        _folderBrowseButton.Dock = DockStyle.Fill;
+        _folderBrowseButton.Height = _folderBrowserExeTextBox.PreferredHeight;
         _folderBrowseButton.FlatStyle = FlatStyle.System;
         _folderBrowseButton.Click += OnFolderBrowserBrowseClick;
-        _folderBrowserGroup.Controls.Add(_folderBrowseButton);
+
+        _folderBrowserExePanel.Dock = DockStyle.Top;
+        _folderBrowserExePanel.Height = _folderBrowserExeTextBox.PreferredHeight;
+        _folderBrowserExePanel.Margin = Padding.Empty;
+        _folderBrowserExePanel.Padding = Padding.Empty;
+        _folderBrowserExePanel.ColumnCount = 2;
+        _folderBrowserExePanel.RowCount = 1;
+        _folderBrowserExePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _folderBrowserExePanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
+        _folderBrowserExePanel.Controls.Add(_folderBrowserExeTextBox, 0, 0);
+        _folderBrowserExePanel.Controls.Add(_folderBrowseButton, 1, 0);
 
         _folderBrowserArgsLabel.Text = "Arguments (%1 = folder path):";
-        _folderBrowserArgsLabel.Location = new Point(15, 72);
         _folderBrowserArgsLabel.AutoSize = true;
-        _folderBrowserGroup.Controls.Add(_folderBrowserArgsLabel);
+        _folderBrowserArgsLabel.TextAlign = ContentAlignment.MiddleLeft;
 
-        _folderBrowserArgsTextBox.Location = new Point(235, 69);
-        _folderBrowserArgsTextBox.Size = new Size(220, 23);
-        _folderBrowserGroup.Controls.Add(_folderBrowserArgsTextBox);
+        _folderBrowserArgsTextBox.Dock = DockStyle.Fill;
+
+        _folderBrowserArgsPanel.Dock = DockStyle.Top;
+        _folderBrowserArgsPanel.Height = _folderBrowserArgsTextBox.PreferredHeight + 5;
+        _folderBrowserArgsPanel.Margin = Padding.Empty;
+        _folderBrowserArgsPanel.Padding = new Padding(0, 5, 0, 0);
+        _folderBrowserArgsPanel.ColumnCount = 2;
+        _folderBrowserArgsPanel.RowCount = 1;
+        _folderBrowserArgsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _folderBrowserArgsPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _folderBrowserArgsPanel.Controls.Add(_folderBrowserArgsLabel, 0, 0);
+        _folderBrowserArgsPanel.Controls.Add(_folderBrowserArgsTextBox, 1, 0);
+
+        // Add in reverse order (last added = topmost for DockStyle.Top):
+        _folderBrowserGroup.Controls.Add(_folderBrowserArgsPanel);
+        _folderBrowserGroup.Controls.Add(_folderBrowserExePanel);
+        _folderBrowserGroup.Controls.Add(_folderBrowserExeLabel);
 
         // --- Desktop Settings group ---
         _desktopSettingsGroup.Text = "Desktop Settings";
         _desktopSettingsGroup.Dock = DockStyle.Fill;
+        _desktopSettingsGroup.Padding = new Padding(15, 0, 10, 5);
 
         _settingsPathLabel.Text = "Default file for new account settings import:";
-        _settingsPathLabel.Location = new Point(15, 22);
+        _settingsPathLabel.Dock = DockStyle.Top;
         _settingsPathLabel.AutoSize = true;
-        _desktopSettingsGroup.Controls.Add(_settingsPathLabel);
+        _settingsPathLabel.Padding = new Padding(0, 4, 0, 2);
 
-        _defaultSettingsPathTextBox.Location = new Point(15, 42);
-        _defaultSettingsPathTextBox.Size = new Size(350, 23);
-        _desktopSettingsGroup.Controls.Add(_defaultSettingsPathTextBox);
+        _defaultSettingsPathTextBox.Dock = DockStyle.Fill;
 
         _settingsBrowseButton.Text = "Browse...";
-        _settingsBrowseButton.Location = new Point(375, 40);
-        _settingsBrowseButton.Size = new Size(80, 27);
+        _settingsBrowseButton.Dock = DockStyle.Fill;
+        _settingsBrowseButton.Height = _defaultSettingsPathTextBox.PreferredHeight;
         _settingsBrowseButton.FlatStyle = FlatStyle.System;
         _settingsBrowseButton.Click += OnDefaultSettingsPathBrowseClick;
-        _desktopSettingsGroup.Controls.Add(_settingsBrowseButton);
+
+        _desktopSettingsPathPanel.Dock = DockStyle.Top;
+        _desktopSettingsPathPanel.Height = _defaultSettingsPathTextBox.PreferredHeight + 5;
+        _desktopSettingsPathPanel.Margin = Padding.Empty;
+        _desktopSettingsPathPanel.Padding = new Padding(0, 0, 0, 5);
+        _desktopSettingsPathPanel.ColumnCount = 2;
+        _desktopSettingsPathPanel.RowCount = 1;
+        _desktopSettingsPathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _desktopSettingsPathPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
+        _desktopSettingsPathPanel.Controls.Add(_defaultSettingsPathTextBox, 0, 0);
+        _desktopSettingsPathPanel.Controls.Add(_settingsBrowseButton, 1, 0);
 
         _exportSettingsButton.Text = "Export Current Desktop Settings As...";
-        _exportSettingsButton.Location = new Point(15, 72);
-        _exportSettingsButton.Size = new Size(300, 27);
+        _exportSettingsButton.Dock = DockStyle.Top;
+        _exportSettingsButton.Height = 28;
         _exportSettingsButton.FlatStyle = FlatStyle.System;
         _exportSettingsButton.Click += OnExportDesktopSettingsClick;
+
+        // Add in reverse order (last added = topmost for DockStyle.Top):
         _desktopSettingsGroup.Controls.Add(_exportSettingsButton);
+        _desktopSettingsGroup.Controls.Add(_desktopSettingsPathPanel);
+        _desktopSettingsGroup.Controls.Add(_settingsPathLabel);
 
         _folderSettingsContainer.Dock = DockStyle.Top;
         _folderSettingsContainer.Height = 105;
@@ -404,10 +506,39 @@ partial class OptionsPanel
         AutoScaleDimensions = new SizeF(7F, 15F);
         AutoScaleMode = AutoScaleMode.Font;
         AutoScroll = true;
-        Dock = DockStyle.Fill;
 
         ((ISupportInitialize)_idleTimeoutUpDown).EndInit();
         ((ISupportInitialize)_autoLockTimeoutUpDown).EndInit();
+        _startupGroup.ResumeLayout(false);
+        _controlsButtonPanel.ResumeLayout(false);
+        _controlsButtonPanel.PerformLayout();
+        _pinGroup.ResumeLayout(false);
+        _startupPinContainer.ResumeLayout(false);
+        _startupPinContainer.PerformLayout();
+        _autoLockGroup.ResumeLayout(false);
+        _firewallGroup.ResumeLayout(false);
+        _dragBridgeFirewallContainer.ResumeLayout(false);
+        _dragBridgeFirewallContainer.PerformLayout();
+        _autoLockDragBridgeContainer.ResumeLayout(false);
+        _autoLockDragBridgeContainer.PerformLayout();
+        _idleTimeoutGroup.ResumeLayout(false);
+        _contextMenuGroup.ResumeLayout(false);
+        _idleCtxContainer.ResumeLayout(false);
+        _idleCtxContainer.PerformLayout();
+        _folderBrowserExePanel.ResumeLayout(false);
+        _folderBrowserExePanel.PerformLayout();
+        _folderBrowserArgsPanel.ResumeLayout(false);
+        _folderBrowserArgsPanel.PerformLayout();
+        _desktopSettingsPathPanel.ResumeLayout(false);
+        _desktopSettingsPathPanel.PerformLayout();
+        _folderBrowserGroup.ResumeLayout(false);
+        _folderBrowserGroup.PerformLayout();
+        _desktopSettingsGroup.ResumeLayout(false);
+        _desktopSettingsGroup.PerformLayout();
+        _folderSettingsContainer.ResumeLayout(false);
+        _folderSettingsContainer.PerformLayout();
+        _mainFillPanel.ResumeLayout(false);
+        _mainFillPanel.PerformLayout();
         ResumeLayout(false);
         PerformLayout();
     }

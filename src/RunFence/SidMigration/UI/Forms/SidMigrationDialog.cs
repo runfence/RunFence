@@ -14,7 +14,7 @@ public partial class SidMigrationDialog : Form
     private readonly InAppMigrationHandler _inAppMigrationHandler;
     private readonly ILocalUserProvider _localUserProvider;
     private readonly ILoggingService _log;
-    private readonly ISidResolver _sidResolver;
+    private readonly IProfilePathResolver _profilePathResolver;
     private readonly ISidNameCacheService _sidNameCache;
 
     private int _currentStep;
@@ -23,13 +23,14 @@ public partial class SidMigrationDialog : Form
     private List<(string path, bool isChecked)>? _savedPathState;
     private CancellationTokenSource? _cts;
     private readonly OperationGuard _operationGuard = new();
+    private bool _goBackAfterOperationCancel;
 
     // Data shared between steps
-    private List<string> _rootPaths = new();
-    private List<SidMigrationMapping> _mappings = new();
-    private List<string> _sidsToDelete = new();
-    private List<OrphanedSid> _orphanedSids = new();
-    private List<SidMigrationMatch> _scanResults = new();
+    private List<string> _rootPaths = [];
+    private List<SidMigrationMapping> _mappings = [];
+    private List<string> _sidsToDelete = [];
+    private List<OrphanedSid> _orphanedSids = [];
+    private List<SidMigrationMatch> _scanResults = [];
     private (long applied, long errors) _applyResult;
 
     public bool InAppMigrationApplied { get; private set; }
@@ -40,7 +41,7 @@ public partial class SidMigrationDialog : Form
         InAppMigrationHandler inAppMigrationHandler,
         ILocalUserProvider localUserProvider,
         ILoggingService log,
-        ISidResolver sidResolver,
+        IProfilePathResolver profilePathResolver,
         ISidNameCacheService sidNameCache)
     {
         _session = session;
@@ -48,19 +49,22 @@ public partial class SidMigrationDialog : Form
         _inAppMigrationHandler = inAppMigrationHandler;
         _localUserProvider = localUserProvider;
         _log = log;
-        _sidResolver = sidResolver;
+        _profilePathResolver = profilePathResolver;
         _sidNameCache = sidNameCache;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         ShowStep(1);
     }
 
+    private bool CanShowBack() => _currentStep > 1 && _currentStep != 6 && _currentStep != 7;
+
     private void ShowStep(int step)
     {
         _currentStep = step;
         _stepPanel.Controls.Clear();
-        _backButton.Enabled = step > 1 && step != 2 && step != 4 && step != 6;
         _nextButton.Enabled = true;
+        _nextButton.Visible = true;
+        UpdateSecondaryButton();
 
         switch (step)
         {
@@ -94,7 +98,6 @@ public partial class SidMigrationDialog : Form
         string statusText = "Scanning...", int? maxValue = null, bool showCancelButton = true)
     {
         _nextButton.Enabled = false;
-        _backButton.Enabled = false;
         _nextButton.Text = "Next";
 
         var step = new MigrationProgressStep();
@@ -108,44 +111,71 @@ public partial class SidMigrationDialog : Form
         step.CancelButton.Click += (_, _) => _cts?.Cancel();
 
         _operationGuard.Begin();
+        UpdateSecondaryButton();
         return (step.ProgressBar, step.StatusLabel, _cts.Token);
     }
 
     private async Task RunGuardedAsync(Func<Task> operation, string errorLogPrefix, ProgressBar progressBar, Label statusLabel,
-        Action? onCancel = null, bool resetProgressOnCancel = true)
+        Action? onCompleted = null, Action? onCancel = null, bool resetProgressOnCancel = true)
     {
+        var completed = false;
+        var canceled = false;
+        Exception? error = null;
+
         try
         {
             await operation();
+            completed = true;
         }
         catch (OperationCanceledException)
         {
-            if (!IsDisposed)
-            {
-                if (resetProgressOnCancel)
-                {
-                    progressBar.Style = ProgressBarStyle.Continuous;
-                    progressBar.Value = 0;
-                }
-
-                _backButton.Enabled = _currentStep > 1 && _currentStep != 2 && _currentStep != 4 && _currentStep != 6;
-                onCancel?.Invoke();
-            }
+            canceled = true;
         }
         catch (Exception ex)
         {
             _log.Error($"{errorLogPrefix} failed", ex);
-            if (!IsDisposed)
-            {
-                progressBar.Style = ProgressBarStyle.Continuous;
-                progressBar.Value = 0;
-                statusLabel.Text = $"Error: {ex.Message}";
-                _backButton.Enabled = _currentStep > 1 && _currentStep != 2 && _currentStep != 4 && _currentStep != 6;
-            }
+            error = ex;
         }
         finally
         {
             _operationGuard.End();
+        }
+
+        if (IsDisposed)
+            return;
+
+        if (completed)
+        {
+            onCompleted?.Invoke();
+            return;
+        }
+
+        if (canceled)
+        {
+            if (_goBackAfterOperationCancel)
+            {
+                _goBackAfterOperationCancel = false;
+                OnBackClick(this, EventArgs.Empty);
+                return;
+            }
+
+            if (resetProgressOnCancel)
+            {
+                progressBar.Style = ProgressBarStyle.Continuous;
+                progressBar.Value = 0;
+            }
+
+            UpdateSecondaryButton();
+            onCancel?.Invoke();
+            return;
+        }
+
+        if (error != null)
+        {
+            progressBar.Style = ProgressBarStyle.Continuous;
+            progressBar.Value = 0;
+            statusLabel.Text = $"Error: {error.Message}";
+            UpdateSecondaryButton();
         }
     }
 
@@ -202,15 +232,7 @@ public partial class SidMigrationDialog : Form
         {
             _orphanedSids = await _sidMigrationService.DiscoverOrphanedSidsAsync(
                 _rootPaths, progress, ct);
-
-            if (!IsDisposed)
-            {
-                progressBar.Style = ProgressBarStyle.Continuous;
-                progressBar.Value = 100;
-                statusLabel.Text = $"Done. Found {_orphanedSids.Count} orphaned SIDs.";
-                _nextButton.Enabled = true;
-            }
-        }, "Discovery scan", progressBar, statusLabel, onCancel: () =>
+        }, "Discovery scan", progressBar, statusLabel, onCompleted: () => ShowStep(3), onCancel: () =>
         {
             statusLabel.Text = _orphanedSids.Count > 0
                 ? $"Scan cancelled. Found {_orphanedSids.Count} orphaned SIDs so far."
@@ -226,10 +248,10 @@ public partial class SidMigrationDialog : Form
         _stepTitleLabel.Text = "Step 3: Review SID Mappings";
         _nextButton.Text = "Start Scan";
         _nextButton.Enabled = false;
-        _backButton.Enabled = false;
+        _secondaryButton.Enabled = false;
 
         _mappingStep = new MigrationMappingStep(
-            _session, _sidMigrationService, _localUserProvider, _log, _orphanedSids, _sidResolver, _sidNameCache)
+            _session, _sidMigrationService, _localUserProvider, _log, _orphanedSids, _profilePathResolver, _sidNameCache)
         {
             Dock = DockStyle.Fill
         };
@@ -239,9 +261,9 @@ public partial class SidMigrationDialog : Form
             onReady: () =>
             {
                 _nextButton.Enabled = true;
-                _backButton.Enabled = true;
+                UpdateSecondaryButton();
             },
-            onFailed: () => { _backButton.Enabled = true; });
+            onFailed: () => UpdateSecondaryButton());
     }
 
     // --- Step 4: Disk Scan ---
@@ -259,16 +281,8 @@ public partial class SidMigrationDialog : Form
 
         _ = RunGuardedAsync(async () =>
         {
-            _scanResults = await _sidMigrationService.ScanAsync(_rootPaths, _mappings, progress, ct);
-
-            if (!IsDisposed)
-            {
-                progressBar.Style = ProgressBarStyle.Continuous;
-                progressBar.Value = 100;
-                statusLabel.Text = $"Done. Found {_scanResults.Count:N0} items to update.";
-                _nextButton.Enabled = true;
-            }
-        }, "Disk scan", progressBar, statusLabel, onCancel: () =>
+            _scanResults = await _sidMigrationService.ScanAsync(_rootPaths, _mappings, _sidsToDelete, progress, ct);
+        }, "Disk scan", progressBar, statusLabel, onCompleted: () => ShowStep(5), onCancel: () =>
         {
             statusLabel.Text = _scanResults.Count > 0
                 ? $"Scan cancelled. Found {_scanResults.Count:N0} items so far."
@@ -283,7 +297,7 @@ public partial class SidMigrationDialog : Form
     {
         _stepTitleLabel.Text = "Step 5: Preview Changes";
         _nextButton.Text = "Apply";
-        _backButton.Enabled = true;
+        UpdateSecondaryButton();
 
         var step = new SidMigrationPreviewStep(_scanResults) { Dock = DockStyle.Fill };
         _stepPanel.Controls.Add(step);
@@ -321,15 +335,14 @@ public partial class SidMigrationDialog : Form
 
         _ = RunGuardedAsync(async () =>
         {
-            _applyResult = await _sidMigrationService.ApplyAsync(_scanResults, _mappings, progress, ct);
-
-            if (!IsDisposed)
-            {
-                progressBar.Value = progressBar.Maximum;
-                statusLabel.Text = $"Done. Applied: {_applyResult.applied:N0}, Errors: {_applyResult.errors:N0}";
-                _nextButton.Enabled = true;
-            }
-        }, "Disk apply", progressBar, statusLabel, onCancel: () => { statusLabel.Text = "Apply cancelled."; }, resetProgressOnCancel: false);
+            _applyResult = await _sidMigrationService.ApplyAsync(_scanResults, _mappings, _sidsToDelete, progress, ct);
+        }, "Disk apply", progressBar, statusLabel, onCompleted: () =>
+        {
+            progressBar.Value = progressBar.Maximum;
+            statusLabel.Text = $"Done. Applied: {_applyResult.applied:N0}, Errors: {_applyResult.errors:N0}";
+            _nextButton.Enabled = true;
+            UpdateSecondaryButton();
+        }, onCancel: () => { statusLabel.Text = "Apply cancelled."; }, resetProgressOnCancel: false);
     }
 
     // --- Step 7: In-App Migration ---
@@ -337,15 +350,14 @@ public partial class SidMigrationDialog : Form
     private void ShowStep7_InAppMigration()
     {
         _stepTitleLabel.Text = "Step 7: In-App Data Migration";
-        _nextButton.Visible = false;
-        _backButton.Enabled = false;
-        _cancelCloseButton.Text = "Close";
+        _nextButton.Text = "Close";
+        UpdateSecondaryButton();
 
         var referencedSids = CollectReferencedSids();
         var filteredMappings = _mappings.Where(m => referencedSids.Contains(m.OldSid)).ToList();
         var filteredDeletes = _sidsToDelete.Where(s => referencedSids.Contains(s)).ToList();
 
-        var step = new SidMigrationInAppStep(_inAppMigrationHandler, _session, filteredMappings, filteredDeletes, _sidResolver)
+        var step = new SidMigrationInAppStep(_inAppMigrationHandler, _session, filteredMappings, filteredDeletes, _profilePathResolver)
         {
             Dock = DockStyle.Fill
         };
@@ -393,6 +405,13 @@ public partial class SidMigrationDialog : Form
         }
     }
 
+    private void UpdateSecondaryButton(string? text = null)
+    {
+        _secondaryButton.Text = text ?? (CanShowBack() ? "Back" : "Cancel");
+        _secondaryButton.Enabled = true;
+        CancelButton = CanShowBack() ? null : _secondaryButton;
+    }
+
     private void OnNextClick(object? sender, EventArgs e)
     {
         switch (_currentStep)
@@ -414,20 +433,19 @@ public partial class SidMigrationDialog : Form
                 break;
 
             case 3:
-                _mappings = _mappingStep?.CollectMappings() ?? new List<SidMigrationMapping>();
-                _sidsToDelete = _mappingStep?.CollectDeleteSids() ?? new List<string>();
-                if (_mappings.Count == 0 && _sidsToDelete.Count == 0)
-                {
-                    MessageBox.Show("Please configure at least one action (Migrate or Delete).",
-                        "No Actions", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (_mappingStep == null || !_mappingStep.TryCollectMappings(out _mappings))
                     return;
-                }
-
-                if (_mappings.Count > 0 && _rootPaths.Count == 0)
+                _sidsToDelete = _mappingStep?.CollectDeleteSids() ?? [];
+                switch (_mappings.Count)
                 {
-                    // No paths selected yet — redirect to path selection first
-                    ShowStep(1);
-                    return;
+                    case 0 when _sidsToDelete.Count == 0:
+                        MessageBox.Show("Please configure at least one action (Migrate or Delete).",
+                            "No Actions", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    case > 0 when _rootPaths.Count == 0:
+                        // No paths selected yet — redirect to path selection first
+                        ShowStep(1);
+                        return;
                 }
 
                 ShowStep(_mappings.Count > 0 ? 4 : 7);
@@ -442,18 +460,54 @@ public partial class SidMigrationDialog : Form
             case 6:
                 ShowStep(7);
                 break;
+            case 7:
+                CloseWithMigrationResult();
+                break;
         }
     }
 
-    private void OnCancelCloseClick(object? sender, EventArgs e)
+    private void OnSecondaryButtonClick(object? sender, EventArgs e)
     {
+        if (CanShowBack())
+        {
+            if (_operationGuard.IsInProgress)
+            {
+                _goBackAfterOperationCancel = true;
+                _cts?.Cancel();
+            }
+            else
+            {
+                OnBackClick(sender, e);
+            }
+
+            return;
+        }
+
         if (_operationGuard.IsInProgress)
         {
+            _goBackAfterOperationCancel = false;
             _cts?.Cancel();
             return;
         }
 
-        DialogResult = InAppMigrationApplied ? DialogResult.OK : DialogResult.Cancel;
+        CloseWithMigrationResult();
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData != Keys.Escape)
+            return base.ProcessCmdKey(ref msg, keyData);
+
+        if (_operationGuard.IsInProgress)
+            _cts?.Cancel();
+        else
+            CloseWithMigrationResult();
+
+        return true;
+    }
+
+    private void CloseWithMigrationResult()
+    {
         Close();
     }
 
@@ -483,6 +537,9 @@ public partial class SidMigrationDialog : Form
             _cts?.Cancel();
             return;
         }
+
+        if (e.CloseReason == CloseReason.UserClosing)
+            DialogResult = InAppMigrationApplied ? DialogResult.OK : DialogResult.Cancel;
 
         _cts?.Dispose();
         base.OnFormClosing(e);

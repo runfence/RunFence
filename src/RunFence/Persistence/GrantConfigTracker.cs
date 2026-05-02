@@ -39,17 +39,18 @@ public class GrantConfigTracker : IGrantConfigTracker
         var result = new List<AppConfigAccountEntry>();
         foreach (var account in accounts)
         {
-            var filtered = account.Grants.Where(e =>
-            {
-                _grantConfigMap.TryGetValue(new GrantKey(account.Sid, e), out var trackedPath);
-                return trackedPath != null &&
-                       string.Equals(trackedPath, configPath, StringComparison.OrdinalIgnoreCase);
-            }).ToList();
+            var filtered = FilterGrantEntriesForConfig(account.Sid, account.Grants, configPath);
             if (filtered.Count > 0)
                 result.Add(new AppConfigAccountEntry { Sid = account.Sid, Grants = filtered });
         }
 
         return result.Count > 0 ? result : null;
+    }
+
+    public List<GrantedPathEntry>? FilterGrantsForConfig(string sid, List<GrantedPathEntry> grants, string configPath)
+    {
+        var filtered = FilterGrantEntriesForConfig(sid, grants, configPath);
+        return filtered.Count > 0 ? filtered : null;
     }
 
     /// <summary>
@@ -90,5 +91,15 @@ public class GrantConfigTracker : IGrantConfigTracker
                 StringComparer.OrdinalIgnoreCase.GetHashCode(Path),
                 IsDeny,
                 IsTraverseOnly);
+    }
+
+    private List<GrantedPathEntry> FilterGrantEntriesForConfig(string sid, List<GrantedPathEntry> grants, string configPath)
+    {
+        return grants.Where(e =>
+        {
+            _grantConfigMap.TryGetValue(new GrantKey(sid, e), out var trackedPath);
+            return trackedPath != null &&
+                   string.Equals(trackedPath, configPath, StringComparison.OrdinalIgnoreCase);
+        }).ToList();
     }
 }

@@ -1,9 +1,9 @@
 using RunFence.Account;
 using RunFence.Account.UI;
-using RunFence.Infrastructure;
+using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Firewall.UI;
-using RunFence.Launch;
 using RunFence.Persistence;
 using RunFence.PrefTrans;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -18,7 +18,6 @@ namespace RunFence.Wizard;
 public class WizardAccountSetupHelperFactory(
     IAccountCredentialManager credentialManager,
     ILocalUserProvider localUserProvider,
-    ILocalGroupMembershipService groupMembership,
     ISidNameCacheService sidNameCache,
     ISettingsTransferService settingsTransferService,
     FirewallApplyHelper firewallApplyHelper,
@@ -30,7 +29,7 @@ public class WizardAccountSetupHelperFactory(
     /// shared <see cref="IWindowsAccountService"/> without exposing it as a public property.
     /// </summary>
     public AccountNameStep CreateAccountNameStep(
-        Action<string, string> onCommit,
+        Action<string, ProtectedString> onCommit,
         bool showPassword = false,
         int maxNameLength = 20,
         string? description = null,
@@ -44,7 +43,7 @@ public class WizardAccountSetupHelperFactory(
                 .Any(u => string.Equals(u.Username, name, StringComparison.OrdinalIgnoreCase)));
 
     public AccountCreationDefaults CreateAccountDefaults() =>
-        AccountCreationDefaults.Create(databaseProvider.GetDatabase(), groupMembership);
+        AccountCreationDefaults.Create(databaseProvider.GetDatabase());
 
     public WizardAccountSetupHelper Create(SessionContext session) =>
         new(credentialManager, localUserProvider, sidNameCache,

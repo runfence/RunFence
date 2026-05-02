@@ -11,7 +11,8 @@ namespace RunFence.UI;
 
 /// <summary>
 /// Runs startup security checks and shows the nag dialog after they complete.
-/// Also handles manual enforcement runs triggered from the applications panel.
+/// Also handles the one-time first-run export prompt and manual enforcement runs
+/// triggered from the applications panel.
 /// Extracted from <see cref="MainForm"/> so the form class is not responsible for these concerns.
 /// </summary>
 public class MainFormStartupOrchestrator(
@@ -22,13 +23,20 @@ public class MainFormStartupOrchestrator(
     ApplicationState applicationState,
     SessionContext session,
     EnforcementResultApplier enforcementResultApplier,
-    FindingLocationHelper findingLocationHelper)
+    FindingLocationHelper findingLocationHelper,
+    MainFormFirstRunExporter firstRunExporter)
 {
     public async Task RunStartupChecksAsync(
         MainForm owner,
         bool suppressVisibility,
         Action showNagIfNeeded)
     {
+        if (!suppressVisibility)
+            await firstRunExporter.PromptExportSettingsIfNeededAsync(owner);
+
+        if (owner.IsDisposed)
+            return;
+
         log.Info("MainFormStartupOrchestrator: running startup security checks.");
         applicationState.EnforcementGuard.Begin();
         try
@@ -61,11 +69,11 @@ public class MainFormStartupOrchestrator(
                     log.Warn($"Startup security: [{f.Category}] {f.TargetDescription} — {f.VulnerablePrincipal}: {f.AccessDescription}");
 
                 using var dlg = new StartupSecurityDialog(findings, findingLocationHelper);
-                dlg.ShowDialog(owner);
+                await dlg.ShowDialogAsync(owner);
             }
 
             var isUacUnsafe = SidResolutionHelper.IsCurrentUserInteractive();
-            var shouldShowUacWarning = isUacUnsafe && !settings.UacSameAccountWarningSuppressed;
+            var shouldShowUacWarning = isUacUnsafe && !settings.UacSameAccountWarningSuppressed && !DebugHelper.IsDebugBuild;
             if (shouldShowUacWarning)
                 SecurityCheckRunner.ShowUacWarning(owner);
 

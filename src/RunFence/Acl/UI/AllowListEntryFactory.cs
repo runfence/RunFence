@@ -31,10 +31,10 @@ public class AllowListEntryFactory(
     public async Task<PromptNewEntryResult?> PromptNewEntryAsync(
         string? selectedAccountSid,
         IReadOnlyDictionary<string, string>? sidNames,
-        IWin32Window? owner,
+        IWin32Window owner,
         IReadOnlyList<AllowAclEntry> existingEntries)
     {
-        var localUsers = localUserProvider.GetLocalUserAccounts();
+        IReadOnlyList<LocalUserAccount> localUsers = localUserProvider.GetLocalUserAccounts();
 
         if (!string.IsNullOrEmpty(selectedAccountSid))
         {
@@ -44,7 +44,7 @@ public class AllowListEntryFactory(
         }
 
         using var dlg = new CallerIdentityDialog(localUsers, sidEntryHelper);
-        if (dlg.ShowDialog(owner) != DialogResult.OK || dlg.Result == null)
+        if (await dlg.ShowDialogAsync(owner) != DialogResult.OK || dlg.Result == null)
             return null;
 
         foreach (var existing in existingEntries)

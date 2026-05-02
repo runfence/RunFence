@@ -16,12 +16,12 @@ public class OptionsPanelDataLoader(IAutoStartService autoStartService, ILicense
     /// May mutate <paramref name="settings"/> to enforce license restrictions (idle timeout, auto-lock).
     /// Returns whether settings were changed by license enforcement (caller should save).
     /// </summary>
-    public (OptionsPanelState State, bool SettingsChangedByLicense) LoadSettings(AppSettings settings)
+    public async Task<(OptionsPanelState State, bool SettingsChangedByLicense)> LoadSettingsAsync(AppSettings settings)
     {
         bool autoStartEnabled;
         try
         {
-            autoStartEnabled = autoStartService.IsAutoStartEnabled();
+            autoStartEnabled = await autoStartService.IsAutoStartEnabled();
         }
         catch
         {
@@ -39,9 +39,9 @@ public class OptionsPanelDataLoader(IAutoStartService autoStartService, ILicense
                 settingsChangedByLicense = true;
             }
 
-            if (settings.AutoLockOnMinimize)
+            if (settings.AutoLockInBackground)
             {
-                settings.AutoLockOnMinimize = false;
+                settings.AutoLockInBackground = false;
                 settingsChangedByLicense = true;
             }
         }
@@ -51,15 +51,15 @@ public class OptionsPanelDataLoader(IAutoStartService autoStartService, ILicense
         return (new OptionsPanelState(
             AutoStartEnabled: autoStartEnabled,
             IdleTimeoutEnabled: idleEnabled,
-            IdleTimeoutMinutes: idleEnabled ? settings.IdleTimeoutMinutes : 30,
-            AutoLockEnabled: settings.AutoLockOnMinimize,
+            IdleTimeoutMinutes: idleEnabled ? Math.Clamp(settings.IdleTimeoutMinutes, 0, 999) : 30,
+            AutoLockEnabled: settings.AutoLockInBackground,
             AutoLockTimeoutMinutes: Math.Clamp(settings.AutoLockTimeoutMinutes, 0, 999),
             FolderBrowserExePath: settings.FolderBrowserExePath,
             FolderBrowserArguments: settings.FolderBrowserArguments,
             DefaultDesktopSettingsPath: settings.DefaultDesktopSettingsPath,
             UnlockModeIndex: (int)settings.UnlockMode,
             EnableContextMenu: settings.EnableRunAsContextMenu,
-            EnableLogging: settings.EnableLogging), settingsChangedByLicense);
+            LogVerbosity: settings.LogVerbosity), settingsChangedByLicense);
     }
 }
 
@@ -77,4 +77,4 @@ public record OptionsPanelState(
     string DefaultDesktopSettingsPath,
     int UnlockModeIndex,
     bool EnableContextMenu,
-    bool EnableLogging);
+    LogVerbosity LogVerbosity);

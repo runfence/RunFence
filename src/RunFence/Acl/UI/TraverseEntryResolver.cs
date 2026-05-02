@@ -9,7 +9,10 @@ namespace RunFence.Acl.UI;
 /// Resolves nearest-ancestor traverse entries for display in the ACL Manager traverse grid.
 /// Provides display-only logic: no DB writes, no NTFS ACE modifications.
 /// </summary>
-public class TraverseEntryResolver(IAclPermissionService aclPermission, ITraverseAcl traverseAcl)
+public class TraverseEntryResolver(
+    IAclPermissionService aclPermission,
+    ITraverseAcl traverseAcl,
+    IFileSystemPathInfo pathInfo)
 {
     /// <summary>
     /// Finds the nearest valid ancestor for a stale entry (target path missing), creates a
@@ -36,7 +39,7 @@ public class TraverseEntryResolver(IAclPermissionService aclPermission, ITravers
     {
         for (int i = 0; i < appliedPaths.Count; i++)
         {
-            if (!AclHelper.PathExists(appliedPaths[i]))
+            if (!pathInfo.DirectoryExists(appliedPaths[i]) && !pathInfo.FileExists(appliedPaths[i]))
                 continue;
             if (!traverseAcl.HasExplicitTraverseAce(appliedPaths[i], sidIdentity))
                 continue;
@@ -47,5 +50,5 @@ public class TraverseEntryResolver(IAclPermissionService aclPermission, ITravers
     }
 
     public bool HasEffectiveTraverse(string dirPath, SecurityIdentifier sid, IReadOnlyList<string> groupSids)
-        => TraverseRightsHelper.HasEffectiveTraverse(dirPath, sid.Value, groupSids, aclPermission);
+        => TraverseRightsHelper.HasEffectiveTraverseForGrantSid(dirPath, sid.Value, groupSids, aclPermission, pathInfo);
 }

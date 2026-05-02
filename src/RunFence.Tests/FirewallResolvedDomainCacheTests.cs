@@ -12,7 +12,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void ResolvedDomain_IsSharedAcrossAccountsWithSameAllowlistDomain()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         var firstSettings = SettingsWithDomains("example.com");
         var secondSettings = SettingsWithDomains("example.com");
 
@@ -25,7 +25,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void ResolvedDomain_UsesCaseInsensitiveGlobalCacheEntry()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
 
         cache.UpdateResolvedDomainsAndGetChangedDomains(["Example.COM"], Resolved("Example.COM", "203.0.113.10"));
         var snapshot = cache.GetAccountSnapshot(SettingsWithDomains("example.com"));
@@ -37,7 +37,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void GetAccountSnapshot_FiltersGlobalCacheToSettingsAllowlist()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         cache.UpdateResolvedDomainsAndGetChangedDomains(
             ["first.example", "second.example"],
             new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
@@ -55,7 +55,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void MarkRefreshSucceeded_ClearsDirtyStateOnlyForSpecifiedSid()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         var settings = SettingsWithDomains("example.com");
         cache.UpdateResolvedDomainsAndGetChangedDomains(["example.com"], Resolved("example.com", "203.0.113.10"));
         cache.MarkDirty(Sid, ["example.com"]);
@@ -70,7 +70,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void UpdateResolvedDomainsAndGetChangedDomains_ComparesAddressSetsIgnoringDuplicates()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         cache.UpdateResolvedDomainsAndGetChangedDomains(
             ["example.com"],
             new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
@@ -91,7 +91,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void MarkDirtyForChangedDomains_MarksEveryEligibleAccountThatAllowlistsChangedDomain()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         var changedDomains = cache.UpdateResolvedDomainsAndGetChangedDomains(
             ["example.com"],
             Resolved("example.com", "203.0.113.10"));
@@ -113,7 +113,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void EmptyDnsResult_PreservesPreviousCacheAndDirtyCanClearAfterSuccessfulRefresh()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         var settings = SettingsWithDomains("example.com");
         cache.UpdateResolvedDomainsAndGetChangedDomains(["example.com"], Resolved("example.com", "203.0.113.10"));
         cache.MarkDirty(Sid, ["example.com"]);
@@ -138,7 +138,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void FirstTimeEmptyDnsResult_DoesNotMarkDirtyOrRefreshRules()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         var settings = SettingsWithDomains("example.com");
 
         var changed = cache.UpdateResolvedDomainsAndGetChangedDomains(
@@ -158,7 +158,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void FirstTimeBlankDnsResult_DoesNotMarkDirtyOrStoreInvalidAddress()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         var settings = SettingsWithDomains("example.com");
 
         var changed = cache.UpdateResolvedDomainsAndGetChangedDomains(
@@ -178,7 +178,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void ResolvedAddresses_AreStoredWithoutBlankOrDuplicateValues()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
 
         cache.UpdateResolvedDomainsAndGetChangedDomains(
             ["example.com"],
@@ -193,7 +193,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void Prune_RemovesGlobalCachedDomainsOnlyWhenNoActiveAllowlistReferencesThem()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         cache.UpdateResolvedDomainsAndGetChangedDomains(
             ["shared.example", "remove.example"],
             new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
@@ -211,7 +211,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void Prune_RemovesDirtyDomainsIndependentlyPerSid()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         cache.MarkDirty(Sid, ["keep.example", "remove.example"]);
         cache.MarkDirty(OtherSid, ["remove.example"]);
 
@@ -227,7 +227,7 @@ public class FirewallResolvedDomainCacheTests
     [Fact]
     public void Clear_ClearsGlobalCacheAndPerSidDirtyState()
     {
-        var cache = new FirewallResolvedDomainCache();
+        var cache = new FirewallResolvedDomainCache(new FirewallDomainDirtyTracker());
         var settings = SettingsWithDomains("example.com");
         cache.UpdateResolvedDomainsAndGetChangedDomains(["example.com"], Resolved("example.com", "203.0.113.10"));
         cache.MarkDirty(Sid, ["example.com"]);

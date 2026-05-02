@@ -20,7 +20,7 @@ partial class RunAsPasswordDialog
     {
         if (disposing)
         {
-            _passwordTextBox?.Clear();
+            _passwordSecure?.Dispose();
             components?.Dispose();
         }
         base.Dispose(disposing);

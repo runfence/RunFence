@@ -19,7 +19,7 @@ namespace RunFence.Apps;
 /// cannot be injected here. License enforcement is applied upstream: <see cref="AppHandlerRegistrationService"/>
 /// filters HKLM ProgIds by license, so unlicensed non-browser extensions fail at the ProgId level (safe).
 /// Protocol associations could theoretically bypass evaluation restrictions, but this is acceptable
-/// in eval mode. <see cref="Constants.DefaultAppsOnlyAssociations"/> are always skipped regardless of license.
+/// in eval mode. <see cref="PathConstants.DefaultAppsOnlyAssociations"/> are always skipped regardless of license.
 /// </remarks>
 public class AssociationAutoSetService(
     IUserHiveManager hiveManager,
@@ -27,6 +27,7 @@ public class AssociationAutoSetService(
     IHandlerMappingService handlerMappingService,
     IIpcCallerAuthorizer callerAuthorizer,
     ILoggingService log,
+    AssociationRegistryWriter registryWriter,
     RegistryKey? hkuOverride = null,
     string? launcherPathOverride = null)
     : IAssociationAutoSetService
@@ -60,6 +61,8 @@ public class AssociationAutoSetService(
 
     public void AutoSetForUser(string sid)
     {
+        if (SidResolutionHelper.IsSystemSid(sid)) return;
+
         var session = sessionProvider.GetSession();
         var filteredMappings = GetEffectiveAutoSetMappings(session);
         var filteredDirectMappings = GetEffectiveAutoSetDirectMappings(session);
@@ -71,6 +74,12 @@ public class AssociationAutoSetService(
 
         ResolveConflictsForSid(sid, filteredMappings, filteredDirectMappings, database);
         AutoSetForUserInternal(sid, filteredMappings, filteredDirectMappings, launcherPath, session);
+    }
+
+    public void ForceAutoSetForUser(string sid)
+    {
+        _completedSids.Remove(sid);
+        AutoSetForUser(sid);
     }
 
     /// <remarks>
@@ -92,12 +101,12 @@ public class AssociationAutoSetService(
             foreach (var subKeyName in classesKey.GetSubKeyNames().ToList())
             {
                 using var subKey = classesKey.OpenSubKey(subKeyName, writable: false);
-                if (subKey?.GetValue(Constants.RunFenceFallbackValueName) != null)
-                    RestoreKey(sidSubKey, subKeyName);
+                if (subKey?.GetValue(PathConstants.RunFenceFallbackValueName) != null)
+                    registryWriter.RestoreKey(_hku, sidSubKey, subKeyName);
             }
 
             // Clean up stale per-user RunFence ProgIds (backward compat migration from per-user ProgIds to HKLM)
-            CleanStalePerUserProgIds(classesKey, sidSubKey);
+            registryWriter.CleanStalePerUserProgIds(classesKey, sidSubKey);
         });
 
         _cleanedSids.Clear();
@@ -112,7 +121,7 @@ public class AssociationAutoSetService(
 
         ForEachLoadedUserHive(credentialSids, sidSubKey =>
         {
-            RestoreKey(sidSubKey, key);
+            registryWriter.RestoreKey(_hku, sidSubKey, key);
         });
 
         ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
@@ -137,8 +146,8 @@ public class AssociationAutoSetService(
         foreach (var subKeyName in classesKey.GetSubKeyNames().ToList())
         {
             using var subKey = classesKey.OpenSubKey(subKeyName, writable: false);
-            if (subKey?.GetValue(Constants.RunFenceFallbackValueName) != null)
-                RestoreKey(sid, subKeyName);
+            if (subKey?.GetValue(PathConstants.RunFenceFallbackValueName) != null)
+                registryWriter.RestoreKey(_hku, sid, subKeyName);
         }
 
         ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
@@ -154,7 +163,7 @@ public class AssociationAutoSetService(
         // RunFence appear in Default Apps. Note: license enforcement is not applied here —
         // see class remarks for the rationale.
         return effectiveMappings
-            .Where(kvp => !Constants.DefaultAppsOnlyAssociations.Contains(kvp.Key))
+            .Where(kvp => !PathConstants.DefaultAppsOnlyAssociations.Contains(kvp.Key))
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -166,7 +175,7 @@ public class AssociationAutoSetService(
             return new Dictionary<string, DirectHandlerEntry>(StringComparer.OrdinalIgnoreCase);
 
         return directMappings
-            .Where(kvp => !Constants.DefaultAppsOnlyAssociations.Contains(kvp.Key))
+            .Where(kvp => !PathConstants.DefaultAppsOnlyAssociations.Contains(kvp.Key))
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -193,7 +202,7 @@ public class AssociationAutoSetService(
 
     private string? GetLauncherPath()
     {
-        var launcherPath = launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, Constants.LauncherExeName);
+        var launcherPath = launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
             log.Warn($"AssociationAutoSetService: launcher not found at {launcherPath}");
@@ -246,7 +255,7 @@ public class AssociationAutoSetService(
             var classesPath = $@"{sid}\Software\Classes";
             using var classesKey = _hku.OpenSubKey(classesPath, writable: true);
             if (classesKey != null)
-                CleanStalePerUserProgIds(classesKey, sid);
+                registryWriter.CleanStalePerUserProgIds(classesKey, sid);
             _cleanedSids.Add(sid);
         }
 
@@ -260,9 +269,9 @@ public class AssociationAutoSetService(
                 try
                 {
                     if (key.StartsWith('.'))
-                        AutoSetExtension(sid, key);
+                        registryWriter.AutoSetExtension(_hku, sid, key);
                     else
-                        AutoSetProtocol(sid, key, launcherPath);
+                        registryWriter.AutoSetProtocol(_hku, sid, key, launcherPath);
                 }
                 catch (Exception ex)
                 {
@@ -281,14 +290,14 @@ public class AssociationAutoSetService(
                 if (key.StartsWith('.'))
                 {
                     if (entry.ClassName != null)
-                        AutoSetDirectClassExtension(sid, key, entry.ClassName);
+                        registryWriter.AutoSetDirectClassExtension(_hku, sid, key, entry.ClassName);
                     else if (entry.Command != null)
-                        AutoSetDirectCommandExtension(sid, key, entry.Command);
+                        registryWriter.AutoSetDirectCommandExtension(_hku, sid, key, entry.Command);
                 }
                 else
                 {
                     if (entry.Command != null)
-                        AutoSetDirectCommandProtocol(sid, key, entry.Command);
+                        registryWriter.AutoSetDirectCommandProtocol(_hku, sid, key, entry.Command);
                     else
                         log.Warn($"AssociationAutoSetService: class-based protocol '{key}' is invalid, skipping");
                 }
@@ -301,95 +310,6 @@ public class AssociationAutoSetService(
 
         _completedSids.Add(sid);
         ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
-    }
-
-    private void AutoSetExtension(string sid, string key)
-    {
-        using var extKey = _hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
-
-        var currentDefault = extKey.GetValue(null) as string;
-        var expectedProgId = Constants.HandlerProgIdPrefix + key;
-
-        if (string.Equals(currentDefault, expectedProgId, StringComparison.OrdinalIgnoreCase))
-            return;
-
-        // Store fallback only if not already stored
-        if (extKey.GetValue(Constants.RunFenceFallbackValueName) == null)
-            extKey.SetValue(Constants.RunFenceFallbackValueName, currentDefault ?? string.Empty);
-
-        extKey.SetValue(null, expectedProgId);
-    }
-
-    private void AutoSetProtocol(string sid, string key, string launcherPath)
-    {
-        using var protocolKey = _hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
-        using var commandKey = _hku.CreateSubKey($@"{sid}\Software\Classes\{key}\shell\open\command");
-
-        var currentCommand = commandKey.GetValue(null) as string;
-        var expectedCommand = $"\"{launcherPath}\" --resolve \"{key}\" %1";
-
-        if (string.Equals(currentCommand, expectedCommand, StringComparison.OrdinalIgnoreCase))
-            return;
-
-        // Store fallback only if not already stored
-        if (protocolKey.GetValue(Constants.RunFenceFallbackValueName) == null)
-            protocolKey.SetValue(Constants.RunFenceFallbackValueName, currentCommand ?? string.Empty);
-
-        // Required for Windows protocol recognition
-        protocolKey.SetValue("URL Protocol", string.Empty);
-
-        commandKey.SetValue(null, expectedCommand);
-    }
-
-    private void AutoSetDirectClassExtension(string sid, string key, string className)
-    {
-        using var extKey = _hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
-        var currentDefault = extKey.GetValue(null) as string;
-
-        if (string.Equals(currentDefault, className, StringComparison.OrdinalIgnoreCase))
-            return;
-
-        if (extKey.GetValue(Constants.RunFenceFallbackValueName) == null)
-            extKey.SetValue(Constants.RunFenceFallbackValueName, currentDefault ?? string.Empty);
-
-        extKey.SetValue(null, className);
-    }
-
-    private void AutoSetDirectCommandExtension(string sid, string key, string command)
-    {
-        using var extKey = _hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
-        using var commandKey = _hku.CreateSubKey($@"{sid}\Software\Classes\{key}\shell\open\command");
-
-        var currentCommand = commandKey.GetValue(null) as string;
-
-        if (string.Equals(currentCommand, command, StringComparison.OrdinalIgnoreCase))
-            return;
-
-        // Store the default value (ProgId) in RunFenceFallback — same as class-based and protocol handlers
-        if (extKey.GetValue(Constants.RunFenceFallbackValueName) == null)
-        {
-            var currentDefault = extKey.GetValue(null) as string;
-            extKey.SetValue(Constants.RunFenceFallbackValueName, currentDefault ?? string.Empty);
-        }
-
-        commandKey.SetValue(null, command);
-    }
-
-    private void AutoSetDirectCommandProtocol(string sid, string key, string command)
-    {
-        using var protocolKey = _hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
-        using var commandKey = _hku.CreateSubKey($@"{sid}\Software\Classes\{key}\shell\open\command");
-
-        var currentCommand = commandKey.GetValue(null) as string;
-
-        if (string.Equals(currentCommand, command, StringComparison.OrdinalIgnoreCase))
-            return;
-
-        if (protocolKey.GetValue(Constants.RunFenceFallbackValueName) == null)
-            protocolKey.SetValue(Constants.RunFenceFallbackValueName, currentCommand ?? string.Empty);
-
-        protocolKey.SetValue("URL Protocol", string.Empty);
-        commandKey.SetValue(null, command);
     }
 
     /// <summary>
@@ -405,7 +325,7 @@ public class AssociationAutoSetService(
             foreach (var sid in credentialSids)
                 hiveHandles.Add(hiveManager.EnsureHiveLoaded(sid));
 
-            foreach (var sidSubKey in _hku.GetSubKeyNames().Where(IsTargetSidSubKey))
+            foreach (var sidSubKey in _hku.GetSubKeyNames().Where(AssociationRegistryWriter.IsTargetSidSubKey))
                 perSidAction(sidSubKey);
         }
         finally
@@ -413,32 +333,5 @@ public class AssociationAutoSetService(
             foreach (var handle in hiveHandles)
                 handle?.Dispose();
         }
-    }
-
-    private void RestoreKey(string sid, string key)
-    {
-        using var assocKey = _hku.OpenSubKey($@"{sid}\Software\Classes\{key}", writable: true);
-        if (assocKey == null)
-            return;
-
-        AssociationCommandHelper.RestoreFromFallback(assocKey, key);
-    }
-
-    private void CleanStalePerUserProgIds(RegistryKey classesKey, string contextDescription)
-    {
-        foreach (var name in classesKey.GetSubKeyNames()
-                     .Where(n => n.StartsWith(Constants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase))
-                     .ToList())
-        {
-            try { classesKey.DeleteSubKeyTree(name, throwOnMissingSubKey: false); }
-            catch (Exception ex) { log.Warn($"AssociationAutoSetService: failed to delete stale ProgId '{name}' for {contextDescription}: {ex.Message}"); }
-        }
-    }
-
-    private static bool IsTargetSidSubKey(string name)
-    {
-        // Include only user SIDs (S-1-5-21-*), exclude _Classes suffix variants
-        return name.StartsWith("S-1-5-21-", StringComparison.OrdinalIgnoreCase)
-               && !name.EndsWith("_Classes", StringComparison.OrdinalIgnoreCase);
     }
 }

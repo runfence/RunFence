@@ -3,9 +3,9 @@ using RunFence.Core.Models;
 namespace RunFence.Firewall;
 
 public class FirewallAccountRuleApplier(
-    FirewallComRuleApplier comApplier,
-    FirewallWfpRuleApplier wfpApplier)
-    : IFirewallDnsRefreshTarget
+    IFirewallComRuleApplier comApplier,
+    IFirewallWfpRuleApplier wfpApplier)
+    : IFirewallAccountRuleApplier
 {
     public FirewallAccountRuleApplyResult ApplyFirewallRules(
         string sid,
@@ -42,7 +42,7 @@ public class FirewallAccountRuleApplier(
             if (capturedRules != null)
             {
                 var rollbackSettings = previousSettings ?? new FirewallAccountSettings();
-                comApplier.RollBackAccountRules(sid, rollbackSettings, capturedRules);
+                comApplier.RollBackAccountRules(sid, capturedRules);
                 wfpApplier.RollBackWfpRules(sid, rollbackSettings);
             }
 

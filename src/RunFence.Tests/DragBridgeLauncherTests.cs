@@ -1,7 +1,9 @@
+using System.Security.Principal;
 using Moq;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.DragBridge;
+using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Launch.Tokens;
 using Xunit;
@@ -19,6 +21,29 @@ public class DragBridgeLauncherTests
         _facade = new Mock<ILaunchFacade>();
         _log = new Mock<ILoggingService>();
         _launcher = new DragBridgeLauncher(_facade.Object, _log.Object);
+    }
+
+    // --- Pipe mandatory label ---
+
+    [Theory]
+    [InlineData(true, 1)]
+    [InlineData(false, 0)]
+    public void CreatePipeServer_LowIntegrityFlag_ControlsMandatoryLabel(bool allowLowIntegrityClient, int expectedCalls)
+    {
+        var mandatoryLabel = new Mock<IKernelObjectMandatoryLabelService>();
+        var processLauncher = new DragBridgeProcessLauncher(
+            _launcher,
+            _log.Object,
+            new LambdaUiThreadInvoker(a => a(), a => a()),
+            mandatoryLabel.Object,
+            @"C:\tools\dragbridge.exe");
+
+        using var pipe = processLauncher.CreatePipeServer(
+            $"RunFenceTest_DragBridgePipe_{Guid.NewGuid():N}",
+            new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+            allowLowIntegrityClient);
+
+        mandatoryLabel.Verify(s => s.ApplyLowIntegrityLabel(It.IsAny<IntPtr>()), Times.Exactly(expectedCalls));
     }
 
     // --- LaunchDirect: failure handling ---
@@ -100,7 +125,8 @@ public class DragBridgeLauncherTests
             .Returns((ProcessInfo?)null);
 
         Assert.Throws<InvalidOperationException>(() =>
-            _launcher.LaunchManaged(@"C:\tools\bridge.exe", "S-1-5-21-9999-9999-9999-1001", []));
+            _launcher.LaunchManaged(@"C:\tools\bridge.exe", "S-1-5-21-9999-9999-9999-1001", [],
+                PrivilegeLevel.Basic));
     }
 
     [Fact]
@@ -116,11 +142,13 @@ public class DragBridgeLauncherTests
             .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((_, id, _) => capturedIdentity = id)
             .Returns(processInfo);
 
-        using var result = _launcher.LaunchManaged(@"C:\tools\bridge.exe", targetSid, []);
+        using var result = _launcher.LaunchManaged(@"C:\tools\bridge.exe", targetSid, [],
+            PrivilegeLevel.AboveBasic);
 
         Assert.NotNull(result);
         Assert.IsType<AccountLaunchIdentity>(capturedIdentity);
         Assert.Equal(targetSid, ((AccountLaunchIdentity)capturedIdentity!).Sid);
+        Assert.Equal(PrivilegeLevel.AboveBasic, ((AccountLaunchIdentity)capturedIdentity).PrivilegeLevel);
     }
 
     // --- LaunchDeElevated: failure handling ---

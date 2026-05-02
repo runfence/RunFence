@@ -10,18 +10,38 @@ public static class TraverseRightsHelper
 
     public static bool HasEffectiveTraverse(
         string dirPath, string sid, IReadOnlyList<string> groupSids,
-        IAclPermissionService aclPermission)
+        IAclPermissionService aclPermission,
+        IFileSystemPathInfo pathInfo)
     {
         try
         {
-            if (!Directory.Exists(dirPath))
+            if (!pathInfo.DirectoryExists(dirPath))
                 return false;
-            var security = new DirectoryInfo(dirPath).GetAccessControl();
+            var security = pathInfo.GetDirectorySecurity(dirPath);
             return aclPermission.HasEffectiveRights(security, sid, groupSids, TraverseRights);
         }
         catch
         {
             return false;
         }
+    }
+
+    public static bool HasEffectiveTraverseForGrantSid(
+        string dirPath,
+        string sid,
+        IReadOnlyList<string> groupSids,
+        IAclPermissionService aclPermission,
+        IFileSystemPathInfo pathInfo)
+    {
+        if (HasEffectiveTraverse(dirPath, sid, groupSids, aclPermission, pathInfo))
+            return true;
+
+        return AclHelper.IsSpecificContainerSid(sid) &&
+               HasEffectiveTraverse(
+                   dirPath,
+                   AclHelper.AllApplicationPackagesSid,
+                   [],
+                   aclPermission,
+                   pathInfo);
     }
 }

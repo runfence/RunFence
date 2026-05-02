@@ -23,7 +23,7 @@ public class AccountCreationOrchestrator(
     ToolLauncher launchService,
     ILoggingService log)
 {
-    private Control? _ownerControl;
+    private Control _ownerControl = null!;
 
     /// <summary>Raised when the panel should save the session and refresh the grid.</summary>
     public event Action<Guid?, int>? SaveAndRefreshRequested;
@@ -37,7 +37,7 @@ public class AccountCreationOrchestrator(
         _ownerControl = ownerControl;
     }
 
-    public async Task OpenCreateUserDialog(string? prefillUsername = null, string? prefillPassword = null)
+    public async Task OpenCreateUserDialog(string? prefillUsername = null, ProtectedString? prefillPassword = null)
     {
         try
         {
@@ -49,14 +49,26 @@ public class AccountCreationOrchestrator(
             var hiddenCount = session.CredentialStore.Credentials.Count(c => accountRestriction.IsLoginBlockedBySid(c.Sid));
             using var dlg = editAccountDialogFactory();
             dlg.InitializeForCreate(prefillUsername, prefillPassword, hiddenCount);
-            if (dlg.ShowDialog(_ownerControl?.FindForm()) != DialogResult.OK)
+            if (await dlg.ShowDialogAsync(_ownerControl.FindForm() ?? _ownerControl) != DialogResult.OK)
                 return;
 
             var password = dlg.CreatedPassword;
             try
             {
                 session = sessionProvider.GetSession();
-                var commitResult = commitService.Commit(dlg, session.Database);
+                var commitData = new AccountCreationData(
+                    CreatedSid: dlg.CreatedSid!,
+                    CreatedPassword: dlg.CreatedPassword!,
+                    NewUsername: dlg.NewUsername!,
+                    IsEphemeral: dlg.IsEphemeral,
+                    PrivilegeLevel: dlg.SelectedPrivilegeLevel,
+                    FirewallSettingsChanged: dlg.FirewallSettingsChanged,
+                    AllowInternet: dlg.AllowInternet,
+                    AllowLocalhost: dlg.AllowLocalhost,
+                    AllowLan: dlg.AllowLan,
+                    UsersGroupUnchecked: dlg.UsersGroupUnchecked,
+                    AdminGroupChecked: dlg.AdminGroupChecked);
+                var commitResult = commitService.Commit(commitData, session.Database);
 
                 if (commitResult == null)
                     return;
@@ -64,7 +76,7 @@ public class AccountCreationOrchestrator(
                 bool hasPackages = dlg.SelectedInstallPackages.Count > 0;
                 bool internetBlocked = dlg is { FirewallSettingsChanged: true, AllowInternet: false };
 
-                var setupRequest = new PostCreateSetupRequest(
+                var setupRequest = new PostCreateSetupContext(
                     SettingsImportPath: dlg.SettingsImportPath,
                     CreatedSid: dlg.CreatedSid!,
                     NewUsername: dlg.NewUsername!,
@@ -125,6 +137,10 @@ public class AccountCreationOrchestrator(
             log.Error("OpenCreateUserDialog failed unexpectedly", ex);
             MessageBox.Show($"An unexpected error occurred: {ex.Message}", "Error",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            prefillPassword?.Dispose();
         }
     }
 }

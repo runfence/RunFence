@@ -1,21 +1,10 @@
 using System.Text;
+using RunFence.Core;
 
 namespace RunFence.Apps.Shortcuts;
 
 public static class ShortcutPathHelper
 {
-    public static bool IsSamePath(string left, string right)
-    {
-        try
-        {
-            return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
-        }
-        catch
-        {
-            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
-        }
-    }
-
     public static string GetLauncherWorkingDirectory(string launcherPath)
         => Path.GetDirectoryName(Path.GetFullPath(launcherPath)) ?? AppContext.BaseDirectory;
 

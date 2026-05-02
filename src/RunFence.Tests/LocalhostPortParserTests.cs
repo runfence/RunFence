@@ -39,6 +39,7 @@ public class LocalhostPortParserTests
     [InlineData("8080-8090", 8080, 8090)]
     [InlineData("1-65535", 1, 65535)]
     [InlineData("  3000 - 3010  ", 3000, 3010)]
+    [InlineData("53-53", 53, 53)]    // low == high: explicit range notation for single port
     public void ParsePortOrRange_ValidInput_ReturnsRange(string input, int low, int high)
     {
         Assert.Equal(new PortRange(low, high), LocalhostPortParser.ParsePortOrRange(input));
@@ -115,4 +116,5 @@ public class LocalhostPortParserTests
     {
         Assert.Equal("8080-8090", new PortRange(8080, 8090).ToString());
     }
+
 }

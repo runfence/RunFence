@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.Acl;
@@ -10,21 +11,36 @@ namespace RunFence.Acl;
 /// </summary>
 public static class AclHelper
 {
-    public const string ContainerSidPrefix = "S-1-15-2-";
+    public const string ContainerSidPrefix = WellKnownSecuritySids.ContainerSidPrefix;
+    public const string AllApplicationPackagesSid = WellKnownSecuritySids.AllApplicationPackagesSid;
 
     public static bool IsContainerSid(string sid)
         => sid.StartsWith(ContainerSidPrefix, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>
-    /// Returns the SID string for the AppContainer with the given name, or null if not found or empty.
-    /// </summary>
-    public static string? ResolveContainerSid(AppDatabase db, string containerName)
-    {
-        var container = db.AppContainers.FirstOrDefault(c =>
-            string.Equals(c.Name, containerName, StringComparison.OrdinalIgnoreCase));
-        var sid = container?.Sid;
-        return string.IsNullOrEmpty(sid) ? null : sid;
-    }
+    public static bool IsSpecificContainerSid(string sid) =>
+        IsContainerSid(sid) &&
+        !string.Equals(sid, AllApplicationPackagesSid, StringComparison.OrdinalIgnoreCase);
+
+    public const string LowIntegritySid = WellKnownSecuritySids.LowIntegritySid;
+
+    public static bool IsLowIntegritySid(string sid) =>
+        string.Equals(sid, LowIntegritySid, StringComparison.OrdinalIgnoreCase);
+
+    public static bool CanAssignGrantOwner(string sid) =>
+        !IsContainerSid(sid) && !IsLowIntegritySid(sid);
+
+    public static bool CanAssignGrantOwner(string sid, bool isContainer) =>
+        !isContainer && CanAssignGrantOwner(sid);
+
+    public static SavedRightsState? ClearBlockedGrantOwner(string sid, SavedRightsState? rights) =>
+        CanAssignGrantOwner(sid) || rights?.Own != true
+            ? rights
+            : rights with { Own = false };
+
+    public static SavedRightsState? ClearBlockedGrantOwner(string sid, bool isContainer, SavedRightsState? rights) =>
+        CanAssignGrantOwner(sid, isContainer) || rights?.Own != true
+            ? rights
+            : rights with { Own = false };
 
     public static HashSet<SecurityIdentifier> BuildLocalUserSidSet(IEnumerable<LocalUserAccount> users)
     {
@@ -144,32 +160,4 @@ public static class AclHelper
     public static InheritanceFlags InheritanceFlagsFor(bool isFolder)
         => isFolder ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit : InheritanceFlags.None;
 
-    public static void ModifyAcl(string path, bool isFolder, Action<FileSystemSecurity> modify)
-        => ModifyAclIf(path, isFolder, security =>
-        {
-            modify(security);
-            return true;
-        });
-
-    public static bool ModifyAclIf(string path, bool isFolder, Func<FileSystemSecurity, bool> modify)
-    {
-        if (isFolder)
-        {
-            var dirInfo = new DirectoryInfo(path);
-            var security = dirInfo.GetAccessControl();
-            if (!modify(security))
-                return false;
-            dirInfo.SetAccessControl(security);
-        }
-        else
-        {
-            var fileInfo = new FileInfo(path);
-            var security = fileInfo.GetAccessControl();
-            if (!modify(security))
-                return false;
-            fileInfo.SetAccessControl(security);
-        }
-
-        return true;
-    }
 }

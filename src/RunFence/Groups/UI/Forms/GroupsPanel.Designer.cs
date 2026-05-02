@@ -35,10 +35,10 @@ partial class GroupsPanel
     private ToolStripMenuItem _ctxCopySid;
     private Panel _statusPanel;
     private Label _statusLabel;
-    private DataGridViewTextBoxColumn _groupNameCol;
-    private DataGridViewTextBoxColumn _groupSidCol;
-    private DataGridViewTextBoxColumn _memberNameCol;
-    private DataGridViewTextBoxColumn _memberSidCol;
+    private DataGridViewTextBoxColumn GroupName;
+    private DataGridViewTextBoxColumn SID;
+    private DataGridViewTextBoxColumn MemberName;
+    private DataGridViewTextBoxColumn MemberSID;
 
     private GroupsPanel() { InitializeComponent(); }
 
@@ -85,6 +85,10 @@ partial class GroupsPanel
         _ctxCopySid = new ToolStripMenuItem();
         _statusLabel = new Label();
         _statusPanel = new Panel();
+        GroupName = new DataGridViewTextBoxColumn();
+        SID = new DataGridViewTextBoxColumn();
+        MemberName = new DataGridViewTextBoxColumn();
+        MemberSID = new DataGridViewTextBoxColumn();
 
         ((ISupportInitialize)_splitContainer).BeginInit();
         _splitContainer.Panel1.SuspendLayout();
@@ -95,42 +99,43 @@ partial class GroupsPanel
         _membersToolStrip.SuspendLayout();
         _descriptionPanel.SuspendLayout();
         _contextMenu.SuspendLayout();
+        _statusPanel.SuspendLayout();
         SuspendLayout();
 
         // _groupsGrid columns
-        _groupNameCol = new DataGridViewTextBoxColumn();
-        _groupNameCol.Name = "Name";
-        _groupNameCol.HeaderText = "Group Name";
-        _groupNameCol.FillWeight = 40;
-        _groupNameCol.ReadOnly = true;
+        GroupName.Name = "GroupName";
+        GroupName.HeaderText = "Group Name";
+        GroupName.FillWeight = 40;
+        GroupName.ReadOnly = true;
 
-        _groupSidCol = new DataGridViewTextBoxColumn();
-        _groupSidCol.Name = "SID";
-        _groupSidCol.HeaderText = "SID";
-        _groupSidCol.FillWeight = 60;
-        _groupSidCol.ReadOnly = true;
+        SID.Name = "SID";
+        SID.HeaderText = "SID";
+        SID.FillWeight = 60;
+        SID.ReadOnly = true;
 
-        _groupsGrid.Columns.AddRange(new DataGridViewColumn[] { _groupNameCol, _groupSidCol });
-        ConfigureReadOnlyGrid(_groupsGrid);
+        _groupsGrid.Columns.AddRange(new DataGridViewColumn[] { GroupName, SID });
+        _groupsGrid.ReadOnly = true;
+        _groupsGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _groupsGrid.ShowCellToolTips = false;
         _groupsGrid.Dock = DockStyle.Fill;
         _groupsGrid.ContextMenuStrip = _contextMenu;
         _groupsGrid.MouseDown += OnGroupsGridMouseDown;
 
         // _membersGrid columns
-        _memberNameCol = new DataGridViewTextBoxColumn();
-        _memberNameCol.Name = "MemberName";
-        _memberNameCol.HeaderText = "Username";
-        _memberNameCol.FillWeight = 50;
-        _memberNameCol.ReadOnly = true;
+        MemberName.Name = "MemberName";
+        MemberName.HeaderText = "Username";
+        MemberName.FillWeight = 50;
+        MemberName.ReadOnly = true;
 
-        _memberSidCol = new DataGridViewTextBoxColumn();
-        _memberSidCol.Name = "MemberSID";
-        _memberSidCol.HeaderText = "SID";
-        _memberSidCol.FillWeight = 50;
-        _memberSidCol.ReadOnly = true;
+        MemberSID.Name = "MemberSID";
+        MemberSID.HeaderText = "SID";
+        MemberSID.FillWeight = 50;
+        MemberSID.ReadOnly = true;
 
-        _membersGrid.Columns.AddRange(new DataGridViewColumn[] { _memberNameCol, _memberSidCol });
-        ConfigureReadOnlyGrid(_membersGrid);
+        _membersGrid.Columns.AddRange(new DataGridViewColumn[] { MemberName, MemberSID });
+        _membersGrid.ReadOnly = true;
+        _membersGrid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+        _membersGrid.ShowCellToolTips = false;
         _membersGrid.Dock = DockStyle.Fill;
 
         // _membersHeaderLabel
@@ -245,7 +250,6 @@ partial class GroupsPanel
         _statusPanel.Controls.Add(_statusLabel);
 
         // GroupsPanel — splitcontainer (fills), then status (bottom), then toolstrip (top)
-        Dock = DockStyle.Fill;
         Controls.Add(_splitContainer);
         Controls.Add(_statusPanel);
         Controls.Add(_toolStrip);
@@ -262,6 +266,7 @@ partial class GroupsPanel
         _descriptionPanel.ResumeLayout(false);
         _descriptionPanel.PerformLayout();
         _contextMenu.ResumeLayout(false);
+        _statusPanel.ResumeLayout(false);
         ResumeLayout(false);
         PerformLayout();
     }

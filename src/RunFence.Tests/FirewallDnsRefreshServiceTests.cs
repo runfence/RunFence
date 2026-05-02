@@ -5,6 +5,7 @@ using RunFence.Firewall;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
 using Xunit;
+using static RunFence.Tests.FirewallTestHelpers;
 
 namespace RunFence.Tests;
 
@@ -21,7 +22,7 @@ public class FirewallDnsRefreshServiceTests
     private readonly Mock<IFirewallNetworkInfo> _networkInfo = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
-    private readonly FirewallResolvedDomainCache _domainCache = new();
+    private readonly FirewallResolvedDomainCache _domainCache = new(new FirewallDomainDirtyTracker());
     private readonly FirewallEnforcementRetryState _retryState = new();
 
     public FirewallDnsRefreshServiceTests()
@@ -91,7 +92,7 @@ public class FirewallDnsRefreshServiceTests
             BlockInternet(addDomainEntry: true, domain: "Example.COM"),
             sid: OtherSid,
             username: OtherUsername,
-            settings: BlockInternet(addDomainEntry: true, domain: "example.com"));
+            secondSettings: BlockInternet(addDomainEntry: true, domain: "example.com"));
         _networkInfo
             .Setup(n => n.ResolveDomainEntriesAsync(It.IsAny<IReadOnlyList<FirewallAllowlistEntry>>()))
             .ReturnsAsync((IReadOnlyList<FirewallAllowlistEntry> entries) =>
@@ -160,7 +161,7 @@ public class FirewallDnsRefreshServiceTests
         var dirtyDecision = _domainCache.GetRefreshDecision(Sid, database.GetOrCreateAccount(Sid).Firewall, EmptyChangedDomains());
 
         Assert.True(dirtyDecision.WasDirty);
-        _log.Verify(l => l.Warn(It.Is<string>(message => message.Contains("DNS resolution failed", StringComparison.Ordinal))), Times.Once);
+        _log.Verify(l => l.Warn(It.Is<string>(message => message.Contains("DNS resolution failed", StringComparison.Ordinal))), Times.Exactly(2));
         _refreshTarget.Verify(f => f.RefreshAllowlistRules(
             Sid,
             Username,
@@ -225,7 +226,7 @@ public class FirewallDnsRefreshServiceTests
             BlockInternet(addDomainEntry: true),
             sid: OtherSid,
             username: OtherUsername,
-            settings: BlockInternet(addDomainEntry: true, domain: "second.example"));
+            secondSettings: BlockInternet(addDomainEntry: true, domain: "second.example"));
         _networkInfo
             .Setup(n => n.ResolveDomainEntriesAsync(It.IsAny<IReadOnlyList<FirewallAllowlistEntry>>()))
             .ReturnsAsync(new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
@@ -264,7 +265,7 @@ public class FirewallDnsRefreshServiceTests
             settings,
             sid: OtherSid,
             username: OtherUsername,
-            settings: BlockInternet(addDomainEntry: true));
+            secondSettings: BlockInternet(addDomainEntry: true));
         SeedCleanCache("203.0.113.10");
         _domainCache.MarkDirty(Sid, [Domain]);
         _domainCache.MarkDirty(OtherSid, [Domain]);
@@ -496,6 +497,7 @@ public class FirewallDnsRefreshServiceTests
     }
 
     [Fact]
+    [Trait("Category", "TimingSensitive")]
     public void RequestRefresh_MultipleRequestsWhileCycleRuns_CoalesceIntoOneFollowUpCycle()
     {
         var firstCycleEntered = new ManualResetEventSlim();
@@ -506,14 +508,15 @@ public class FirewallDnsRefreshServiceTests
         using var service = BuildService(() =>
         {
             int count = Interlocked.Increment(ref snapshotCount);
-            if (count == 1)
+            switch (count)
             {
-                firstCycleEntered.Set();
-                releaseFirstCycle.Wait(TimeSpan.FromSeconds(5));
-            }
-            else if (count == 2)
-            {
-                secondCycleEntered.Set();
+                case 1:
+                    firstCycleEntered.Set();
+                    releaseFirstCycle.Wait(TimeSpan.FromSeconds(5));
+                    break;
+                case 2:
+                    secondCycleEntered.Set();
+                    break;
             }
 
             return database;
@@ -532,6 +535,7 @@ public class FirewallDnsRefreshServiceTests
     }
 
     [Fact]
+    [Trait("Category", "TimingSensitive")]
     public void RequestRefresh_WorkerStateResetsAfterUnexpectedCycleException()
     {
         var firstFailureLogged = new ManualResetEventSlim();
@@ -562,6 +566,7 @@ public class FirewallDnsRefreshServiceTests
     }
 
     [Fact]
+    [Trait("Category", "TimingSensitive")]
     public void ProcessDnsRefresh_WhenWorkerIsRunning_QueuesFollowUpWithoutOverlapping()
     {
         var firstRefreshEntered = new ManualResetEventSlim();
@@ -581,14 +586,15 @@ public class FirewallDnsRefreshServiceTests
                 int active = Interlocked.Increment(ref activeRefreshes);
                 UpdateMax(ref maxActiveRefreshes, active);
                 int call = Interlocked.Increment(ref refreshCalls);
-                if (call == 1)
+                switch (call)
                 {
-                    firstRefreshEntered.Set();
-                    releaseFirstRefresh.Wait(TimeSpan.FromSeconds(5));
-                }
-                else if (call == 2)
-                {
-                    secondRefreshEntered.Set();
+                    case 1:
+                        firstRefreshEntered.Set();
+                        releaseFirstRefresh.Wait(TimeSpan.FromSeconds(5));
+                        break;
+                    case 2:
+                        secondRefreshEntered.Set();
+                        break;
                 }
 
                 Interlocked.Decrement(ref activeRefreshes);
@@ -618,7 +624,7 @@ public class FirewallDnsRefreshServiceTests
             _retryState,
             _log.Object,
             new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(getDatabase), _uiThreadInvoker.Object),
-            _networkInfo.Object);
+            new FirewallDomainBatchResolver(_networkInfo.Object, _log.Object));
 
     private void SeedCleanCache(string address)
     {
@@ -637,26 +643,4 @@ public class FirewallDnsRefreshServiceTests
         }
     }
 
-    private static IReadOnlySet<string> EmptyChangedDomains() => FirewallTestHelpers.EmptyChangedDomains();
-
-    private static Dictionary<string, List<string>> Resolved(string address) => FirewallTestHelpers.Resolved(address);
-
-    private static FirewallAccountSettings BlockInternet(
-        bool addDomainEntry = false,
-        bool addIpEntry = false,
-        bool allowLocalhost = true,
-        string domain = Domain)
-        => FirewallTestHelpers.BlockInternet(addDomainEntry, addIpEntry, allowLocalhost, domain);
-
-    private static FirewallAccountSettings BlockInternetWithDomains(params string[] domains)
-        => FirewallTestHelpers.BlockInternetWithDomains(domains);
-
-    private static AppDatabase BuildDatabase(FirewallAccountSettings settings) => FirewallTestHelpers.BuildDatabase(settings);
-
-    private static AppDatabase BuildDatabase(
-        FirewallAccountSettings firstSettings,
-        string sid,
-        string username,
-        FirewallAccountSettings settings)
-        => FirewallTestHelpers.BuildDatabase(firstSettings, sid, username, settings);
 }

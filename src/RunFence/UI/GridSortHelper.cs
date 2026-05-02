@@ -99,24 +99,6 @@ public class GridSortHelper
     }
 
     /// <summary>
-    /// Re-applies the current sort after a grid repopulation (e.g. after add/edit/remove).
-    /// No-op when no sort is active.
-    /// </summary>
-    public void ReapplySortIfActive(DataGridView grid)
-    {
-        if (SortColumnIndex >= 0 && SortColumnIndex < grid.Columns.Count
-                                 && SortDirection != SortOrder.None)
-        {
-            var col = grid.Columns[SortColumnIndex];
-            var direction = SortDirection == SortOrder.Ascending
-                ? ListSortDirection.Ascending
-                : ListSortDirection.Descending;
-            grid.Sort(col, direction);
-            col.HeaderCell.SortGlyphDirection = SortDirection;
-        }
-    }
-
-    /// <summary>
     /// Re-applies the sort glyph after a sectioned grid repopulation without calling grid.Sort().
     /// Used by sectioned panels that sort within sections manually.
     /// No-op when no sort is active.

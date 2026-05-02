@@ -9,7 +9,7 @@ namespace RunFence.Launch.Container;
 /// Manages COM activation and access permissions for AppContainer SIDs.
 /// Modifies HKCR\AppID\{clsid} LaunchPermission and AccessPermission registry values.
 /// </summary>
-public class AppContainerComAccessService(ILoggingService log)
+public class AppContainerComAccessService(ILoggingService log) : IAppContainerComAccessService
 {
     // COM rights: Execute(1) | ExecuteLocal(2) | ActivateLocal(8) = 11
     private const int ComRightsLocal = 11;
@@ -27,15 +27,9 @@ public class AppContainerComAccessService(ILoggingService log)
             var sid = new SecurityIdentifier(containerSid);
             // HKCR\AppID\{clsid} — machine-wide COM activation/access permissions.
             // Registry.ClassesRoot maps to HKLM\SOFTWARE\Classes in elevated processes.
-            using var appIdKey = Registry.ClassesRoot
-                                     .OpenSubKey($@"AppID\{clsid}", writable: true)
-                                 ?? Registry.ClassesRoot.CreateSubKey($@"AppID\{clsid}");
-            if (appIdKey == null)
-            {
-                log.Warn($"Could not open/create HKCR\\AppID\\{clsid}");
-                return;
-            }
-
+            using RegistryKey appIdKey = Registry.ClassesRoot
+                                              .OpenSubKey($@"AppID\{clsid}", writable: true)
+                                          ?? Registry.ClassesRoot.CreateSubKey($@"AppID\{clsid}");
             foreach (var valueName in new[] { "LaunchPermission", "AccessPermission" })
                 SetComPermissionEntry(appIdKey, valueName, sid, grant);
         }

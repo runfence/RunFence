@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.DirectoryServices.AccountManagement;
 using System.Management;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -14,7 +13,10 @@ public class WindowsAccountService(
     IAccountValidationService accountValidation,
     IAccountLoginRestrictionService restrictions,
     ISidResolver sidResolver,
+    IProfilePathResolver profilePathResolver,
     ILocalUserProvider localUserProvider,
+    ILocalSamSidResolver localSamSidResolver,
+    ILocalAccountProvisioningService localAccountProvisioning,
     IFolderHandlerService folderHandlerService)
     : IWindowsAccountService
 {
@@ -32,9 +34,7 @@ public class WindowsAccountService(
 
         try
         {
-            using var context = new PrincipalContext(ContextType.Machine);
-            using var user = UserPrincipal.FindByIdentity(context, IdentityType.Sid, sid);
-            user?.Delete();
+            localAccountProvisioning.DeleteLocalUserBySid(sid);
 
             try
             {
@@ -71,23 +71,46 @@ public class WindowsAccountService(
 
     // --- Create User ---
 
-    public string CreateLocalUser(string username, string password)
+    public string CreateLocalUser(string username, ProtectedString password)
     {
+        var accountCreated = false;
         try
         {
-            using var context = new PrincipalContext(ContextType.Machine);
-            using var user = new UserPrincipal(context);
-            user.Name = username;
-            user.DisplayName = username;
-            user.PasswordNeverExpires = true;
-            user.Enabled = true;
-            user.SetPassword(password);
-            user.Save();
+            localAccountProvisioning.CreateLocalUser(username, password);
+            accountCreated = true;
 
-            var sid = user.Sid.Value;
-            log.Info($"Created local user: {username} ({sid})");
             localUserProvider.InvalidateCache();
+
+            var sid = localSamSidResolver.GetRequiredLocalUserSid(username);
+
+            try
+            {
+                int setInfoResult = localAccountProvisioning.SetDisplayName(username, username);
+                if (setInfoResult != 0)
+                    log.Warn($"NetUserSetInfo(1011) for display name of '{username}' failed with code {setInfoResult}. Non-critical.");
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"NetUserSetInfo(1011) for display name of '{username}' failed: {ex.Message}. Non-critical.");
+            }
+
+            log.Info($"Created local user: {username} ({sid})");
             return sid;
+        }
+        catch (InvalidOperationException ex) when (accountCreated)
+        {
+            DeleteCreatedAccountAfterFailure(username, ex);
+            throw;
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (accountCreated)
+        {
+            DeleteCreatedAccountAfterFailure(username, ex);
+            log.Error($"Failed to create local user {username}", ex);
+            throw new InvalidOperationException($"Failed to create account: {ex.Message}", ex);
         }
         catch (Exception ex)
         {
@@ -96,9 +119,23 @@ public class WindowsAccountService(
         }
     }
 
+    private void DeleteCreatedAccountAfterFailure(string username, Exception originalFailure)
+    {
+        try
+        {
+            localAccountProvisioning.DeleteLocalUserByName(username);
+            localUserProvider.InvalidateCache();
+            log.Warn($"Deleted newly created local user '{username}' after account creation failed: {originalFailure.Message}");
+        }
+        catch (Exception cleanupEx)
+        {
+            log.Error($"Failed to delete newly created local user '{username}' after account creation failed", cleanupEx);
+        }
+    }
+
     // --- Profile Path ---
 
-    public string? GetProfilePath(string sid) => sidResolver.TryGetProfilePath(sid);
+    public string? GetProfilePath(string sid) => profilePathResolver.TryGetProfilePath(sid);
 
     // --- Rename ---
 
@@ -108,8 +145,7 @@ public class WindowsAccountService(
         {
             var wasHidden = restrictions.IsAccountHidden(currentUsername);
 
-            var info = new WindowsAccountNative.USER_INFO_0 { usri0_name = newUsername };
-            int result = WindowsAccountNative.NetUserSetInfo(null, currentUsername, 0, ref info, out _);
+            int result = localAccountProvisioning.RenameLocalUser(currentUsername, newUsername);
             if (result != 0)
             {
                 var msg = result switch
@@ -170,30 +206,38 @@ public class WindowsAccountService(
     private const int Logon32LogonInteractive = 2;
     private const int Logon32ProviderDefault = 0;
 
-    public string? ValidatePassword(string sid, string password, string usernameFallback)
+    public string? ValidatePassword(string sid, ProtectedString password, string usernameFallback)
     {
         var (domain, username) = SidNameResolver.ResolveDomainAndUsernameWithFallback(sid, usernameFallback, sidResolver);
         var domainArg = string.IsNullOrEmpty(domain) ? null : domain;
 
-        // Try logon types in order; if type-not-granted for all, skip validation
-        int[] logonTypes = [Logon32LogonNetwork, Logon32LogonBatch, Logon32LogonInteractive];
-        foreach (var logonType in logonTypes)
+        var passwordPtr = password.AllocUnicode();
+        try
         {
-            if (WindowsAccountNative.LogonUser(username, domainArg, password, logonType, Logon32ProviderDefault, out var token))
+            // Try logon types in order; if type-not-granted for all, skip validation
+            int[] logonTypes = [Logon32LogonNetwork, Logon32LogonBatch, Logon32LogonInteractive];
+            foreach (var logonType in logonTypes)
             {
-                ProcessNative.CloseHandle(token);
-                return null; // Success
+                if (WindowsAccountNative.LogonUser(username, domainArg, passwordPtr, logonType, Logon32ProviderDefault, out var token))
+                {
+                    ProcessNative.CloseHandle(token);
+                    return null; // Success
+                }
+
+                var error = Marshal.GetLastWin32Error();
+                if (error == ProcessLaunchNative.Win32ErrorLogonFailure)
+                    return "Invalid username or password.";
+                if (error != ProcessLaunchNative.Win32ErrorLogonTypeNotGranted)
+                    return $"Credential validation failed: {new Win32Exception(error).Message}";
+                // ERROR_LOGON_TYPE_NOT_GRANTED — try next type
             }
 
-            var error = Marshal.GetLastWin32Error();
-            if (error == ProcessLaunchNative.Win32ErrorLogonFailure)
-                return "Invalid username or password.";
-            if (error != ProcessLaunchNative.Win32ErrorLogonTypeNotGranted)
-                return $"Credential validation failed: {new Win32Exception(error).Message}";
-            // ERROR_LOGON_TYPE_NOT_GRANTED — try next type
+            // All types returned type-not-granted — can't verify, allow through
+            return null;
         }
-
-        // All types returned type-not-granted — can't verify, allow through
-        return null;
+        finally
+        {
+            Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
+        }
     }
 }

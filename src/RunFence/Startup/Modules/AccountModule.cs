@@ -6,8 +6,12 @@ using RunFence.Account.UI;
 using RunFence.Account.UI.AppContainer;
 using RunFence.Account.UI.Forms;
 using RunFence.Acl.Traverse;
+using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.SidMigration;
+using RunFence.Startup;
+using RunFence.Startup.NonElevatedMocks;
+using RunFence.Wizard;
 
 namespace RunFence.Startup.Modules;
 
@@ -22,6 +26,10 @@ public class AccountModule : Module
 
         builder.RegisterType<WindowsAccountService>()
             .As<IWindowsAccountService>()
+            .SingleInstance();
+
+        builder.RegisterType<LocalAccountProvisioningService>()
+            .As<ILocalAccountProvisioningService>()
             .SingleInstance();
 
         builder.RegisterType<SystemDialogLauncher>()
@@ -57,6 +65,10 @@ public class AccountModule : Module
             .As<IAccountCredentialManager>()
             .SingleInstance();
 
+        builder.RegisterType<ValidationRunner>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<SessionPersistenceHelper>()
             .AsSelf()
             .SingleInstance();
@@ -64,6 +76,8 @@ public class AccountModule : Module
         builder.RegisterType<SessionSaver>()
             .As<ISessionSaver>()
             .SingleInstance();
+
+        builder.RegisterType<SidReconciler>().AsSelf().SingleInstance();
 
         builder.RegisterType<GrantReconciliationService>().AsSelf().SingleInstance();
 
@@ -81,12 +95,14 @@ public class AccountModule : Module
 
         builder.RegisterType<EphemeralAccountService>()
             .AsSelf()
+            .As<IEphemeralAccountChangeSource>()
             .As<IBackgroundService>()
             .OrderBy(0)
             .SingleInstance();
 
         builder.RegisterType<EphemeralContainerService>()
             .AsSelf()
+            .As<IEphemeralContainerChangeSource>()
             .As<IBackgroundService>()
             .OrderBy(1)
             .SingleInstance();
@@ -110,6 +126,11 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<AccountGridSupplementarySections>()
+            .As<IAccountAppsTextProvider>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountGridSorter>()
             .AsSelf()
             .SingleInstance();
 
@@ -133,6 +154,10 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<AccountMenuStateConfigurator>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<AccountContextMenuHandler>()
             .AsSelf()
             .SingleInstance();
@@ -148,6 +173,14 @@ public class AccountModule : Module
         builder.RegisterType<AccountProcessMenuHandler>()
             .AsSelf()
             .SingleInstance();
+
+        builder.RegisterType<ProcessCommandLineFormatter>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ProcessRowGridUpdater>()
+            .AsSelf()
+            .InstancePerDependency();
 
         builder.RegisterType<AccountContextMenuOrchestrator>()
             .AsSelf()
@@ -185,7 +218,15 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<AccountCredentialOperations>()
+        builder.RegisterType<CredentialDialogHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountCredentialCrudHandler>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountEditOrchestrator>()
             .AsSelf()
             .SingleInstance();
 
@@ -242,10 +283,14 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<SecureClipboardService>()
-            .AsSelf()
+            .As<ISecureClipboardService>()
             .InstancePerDependency();
 
-        builder.RegisterType<AccountPasswordHandler>()
+        builder.RegisterType<AccountPasswordAccessHandler>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountPasswordMutationHandler>()
             .AsSelf()
             .SingleInstance();
 
@@ -269,8 +314,23 @@ public class AccountModule : Module
             .AsSelf()
             .InstancePerDependency();
 
+        builder.RegisterType<CredentialDialogRunner>()
+            .As<ICredentialDialogRunner>()
+            .InstancePerDependency();
+
         builder.RegisterType<SidNameCacheService>()
             .As<ISidNameCacheService>()
             .SingleInstance();
+
+        builder.RegisterType<AccountConfigMigrationService>()
+            .As<IAccountConfigMigrationService>()
+            .SingleInstance();
+
+        if (DebugHelper.UseAdminOperationMocks)
+        {
+            builder.RegisterDecorator<MockWindowsAccountService, IWindowsAccountService>();
+            builder.RegisterDecorator<NoOpAccountLoginRestrictionService, IAccountLoginRestrictionService>();
+            builder.RegisterDecorator<NoOpGroupPolicyScriptHelper, IGroupPolicyScriptHelper>();
+        }
     }
 }

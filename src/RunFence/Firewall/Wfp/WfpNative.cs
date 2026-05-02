@@ -13,6 +13,7 @@ public static class WfpNative
     public const uint ERROR_SUCCESS = 0;
     public const uint FWP_E_FILTER_NOT_FOUND = 0x80320003;
     public const uint FWPM_FILTER_FLAG_PERSISTENT = 0x00000001;
+    public const uint FWPM_SESSION_FLAG_DYNAMIC   = 0x00000001;
 
     // FWP_ACTION_TYPE: FWP_ACTION_FLAG_TERMINATING (0x1000) | 1 = block
     public const uint FWP_ACTION_BLOCK = 0x00001001;
@@ -48,14 +49,6 @@ public static class WfpNative
     // FWPM_LAYER_ALE_AUTH_CONNECT_V6: {4a72393b-319f-44bc-84c3-ba54dcb3b6b4}
     public static readonly Guid LayerAleAuthConnectV6 =
         new(0x4a72393b, 0x319f, 0x44bc, 0x84, 0xc3, 0xba, 0x54, 0xdc, 0xb3, 0xb6, 0xb4);
-
-    // FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4: {e1cd9fe7-f4b5-4273-96c0-592e487b8650}
-    public static readonly Guid LayerAleAuthRecvAcceptV4 =
-        new(0xe1cd9fe7, 0xf4b5, 0x4273, 0x96, 0xc0, 0x59, 0x2e, 0x48, 0x7b, 0x86, 0x50);
-
-    // FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6: {a3b42c97-9f04-4672-b87e-cee9c483257f}
-    public static readonly Guid LayerAleAuthRecvAcceptV6 =
-        new(0xa3b42c97, 0x9f04, 0x4672, 0xb8, 0x7e, 0xce, 0xe9, 0xc4, 0x83, 0x25, 0x7f);
 
     // FWPM_CONDITION_FLAGS: {632ce23b-5167-435c-86d7-e903684aa80c}
     public static readonly Guid ConditionFlags =

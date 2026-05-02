@@ -12,23 +12,24 @@ public class AccountToggleService(
     IAccountLoginRestrictionService accountRestriction,
     ILoggingService log,
     ILicenseService licenseService,
-    IAccountFirewallSettingsApplier firewallSettingsApplier,
+    IAccountFirewallToggle firewallToggle,
     ISessionProvider sessionProvider,
     IPathGrantService pathGrantService) : IAccountToggleService
 {
     public SetLogonBlockedResult SetLogonBlocked(string sid, string username, bool blocked)
     {
+        var session = sessionProvider.GetSession();
+        var database = session.Database;
         if (blocked)
         {
-            var credentialStore = sessionProvider.GetSession().CredentialStore;
-            var hiddenCount = credentialStore.Credentials.Count(c => accountRestriction.IsLoginBlockedBySid(c.Sid));
+            var hiddenCount = session.CredentialStore.Credentials
+                .Count(c => accountRestriction.IsLoginBlockedBySid(c.Sid));
             if (!licenseService.CanHideAccount(hiddenCount))
                 return new SetLogonBlockedResult(false,
                     licenseService.GetRestrictionMessage(EvaluationFeature.HiddenAccounts, hiddenCount),
                     IsLicenseLimit: true);
         }
 
-        var database = sessionProvider.GetSession().Database;
         try
         {
             var result = accountRestriction.SetLoginBlockedBySid(sid, username, blocked);
@@ -70,36 +71,10 @@ public class AccountToggleService(
         }
     }
 
-    public string? SetAllowInternet(string sid, string username, bool allowInternet)
+    public string? SetAllowInternet(string sid, bool allowInternet)
     {
         var database = sessionProvider.GetSession().Database;
-        var settings = database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings();
-        var previousSettings = settings.Clone();
-        settings.AllowInternet = allowInternet;
-        FirewallAccountSettings.UpdateOrRemove(database, sid, settings);
-
-        var finalSettings = database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings();
-        var resolvedUsername = database.SidNames.GetValueOrDefault(sid) ?? username;
-        try
-        {
-            firewallSettingsApplier.ApplyAccountFirewallSettings(
-                sid,
-                resolvedUsername,
-                previousSettings,
-                finalSettings,
-                database);
-            return null;
-        }
-        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.AccountRules)
-        {
-            log.Error($"Failed to apply firewall rules for {username}", ex);
-            FirewallAccountSettings.UpdateOrRemove(database, sid, previousSettings);
-            return ex.CauseMessage;
-        }
-        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.GlobalIcmp)
-        {
-            log.Error($"Failed to enforce global ICMP after applying firewall rules for {username}", ex);
-            return ex.CauseMessage;
-        }
+        var existing = database.GetAccount(sid)?.Firewall;
+        return firewallToggle.SetAllowInternet(sid, allowInternet, existing);
     }
 }

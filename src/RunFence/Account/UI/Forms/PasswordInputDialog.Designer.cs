@@ -20,7 +20,7 @@ partial class PasswordInputDialog
         if (disposing)
         {
             components?.Dispose();
-            _passwordTextBox.Clear();
+            _passwordSecure?.Dispose();
         }
         base.Dispose(disposing);
     }

@@ -1,5 +1,4 @@
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 using InfraWindowNative = RunFence.Infrastructure.WindowNative;
 
 namespace RunFence.DragBridge.UI.Forms;
@@ -10,6 +9,8 @@ namespace RunFence.DragBridge.UI.Forms;
 /// </summary>
 public partial class DragBridgeSection : UserControl
 {
+    protected override Size DefaultSize => new Size(150, 55);
+
     private readonly KeysConverter _keysConverter = new();
     private bool _loading;
 

@@ -128,10 +128,12 @@ public class WizardExecutionHandler
 
     private void ShowCompletionStep(List<string> errors, List<string> statusMessages)
     {
-        var summaryLines = new List<string>();
-        summaryLines.Add(errors.Count == 0
-            ? $"\u2705 {_ctx.SelectedTemplate!.DisplayName} completed successfully."
-            : $"\u26A0\uFE0F {_ctx.SelectedTemplate!.DisplayName} completed with {errors.Count} error(s).");
+        var summaryLines = new List<string>
+        {
+            errors.Count == 0
+                ? $"\u2705 {_ctx.SelectedTemplate!.DisplayName} completed successfully."
+                : $"\u26A0\uFE0F {_ctx.SelectedTemplate!.DisplayName} completed with {errors.Count} error(s)."
+        };
 
         summaryLines.AddRange(statusMessages.Select(msg => $"\u2022 {msg}"));
 

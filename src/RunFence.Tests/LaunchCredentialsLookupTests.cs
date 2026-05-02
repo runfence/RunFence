@@ -1,4 +1,3 @@
-using System.Security;
 using Moq;
 using RunFence.Account;
 using RunFence.Core;
@@ -10,11 +9,6 @@ using Xunit;
 
 namespace RunFence.Tests;
 
-/// <summary>
-/// Tests for <see cref="LaunchCredentialsLookup.GetBySid"/>.
-/// The method delegates to <see cref="ICredentialDecryptionService.DecryptAndResolve"/> for
-/// credential resolution and wraps the result, throwing well-typed exceptions on failure.
-/// </summary>
 public class LaunchCredentialsLookupTests : IDisposable
 {
     private const string TestSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
@@ -60,7 +54,7 @@ public class LaunchCredentialsLookupTests : IDisposable
             EncryptedPassword = encryptedBytes
         });
 
-        var password = new SecureString();
+        using var password = new ProtectedString();
         password.AppendChar('p');
         password.MakeReadOnly();
         _encryptionService.Setup(e => e.Decrypt(encryptedBytes, _pinDerivedKey)).Returns(password);
@@ -80,8 +74,6 @@ public class LaunchCredentialsLookupTests : IDisposable
     {
         // Arrange — credential entry for the current account (SID = running process SID)
         // → no password needed; token source = CurrentProcess
-        // ResolveDomainAndUsername returns Environment.UserName for current account,
-        // so sidResolver.TryResolveName is not called.
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
         _credentialStore.Credentials.Add(new CredentialEntry
         {
@@ -91,30 +83,8 @@ public class LaunchCredentialsLookupTests : IDisposable
         // Act
         var result = _lookup.GetBySid(currentSid);
 
-        // Assert — IsCurrentAccount=true → CurrentProcess token source; no password required
-        Assert.Equal(LaunchTokenSource.CurrentProcess, result.TokenSource);
-        Assert.Null(result.Password);
-    }
-
-    [Fact]
-    public void Lookup_InteractiveUserSid_ReturnsInteractiveTokenSource()
-    {
-        // The interactive user SID is sourced from explorer.exe via InitializeInteractiveUserSid(),
-        // which is never called in tests. When GetInteractiveUserSid() returns null the
-        // InteractiveUser code path cannot be exercised without OS side effects.
-        // This test runs the interactive-user branch when explorer is available.
-        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-        if (interactiveSid == null)
-            return; // Test requires explorer.exe — skip silently in non-interactive environments.
-
-        // Arrange — no credential entry: SID matches interactive user → InteractiveUser path
-        // (code path: credEntry == null && GetInteractiveUserSid() == accountSid)
-
-        // Act
-        var result = _lookup.GetBySid(interactiveSid!);
-
         // Assert
-        Assert.Equal(LaunchTokenSource.InteractiveUser, result.TokenSource);
+        Assert.Equal(LaunchTokenSource.CurrentProcess, result.TokenSource);
         Assert.Null(result.Password);
     }
 
@@ -140,5 +110,27 @@ public class LaunchCredentialsLookupTests : IDisposable
 
         // Act & Assert
         Assert.Throws<MissingPasswordException>(() => _lookup.GetBySid(TestSid));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Lookup_SystemSid_ReturnsSystemAccountTokenSource(bool hasCredentialEntry)
+    {
+        // Arrange — SYSTEM always returns SystemAccount, even if a spurious credential entry exists.
+        if (hasCredentialEntry)
+            _credentialStore.Credentials.Add(new CredentialEntry
+            {
+                Id = Guid.NewGuid(),
+                Sid = Core.SidConstants.SystemSid,
+                EncryptedPassword = [1, 2, 3]
+            });
+
+        // Act
+        var result = _lookup.GetBySid(Core.SidConstants.SystemSid);
+
+        // Assert
+        Assert.Equal(LaunchTokenSource.SystemAccount, result.TokenSource);
+        Assert.Null(result.Password);
     }
 }

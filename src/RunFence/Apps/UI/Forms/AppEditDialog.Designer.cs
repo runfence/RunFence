@@ -48,6 +48,7 @@ partial class AppEditDialog
     private Button _okButton;
     private Button _cancelButton;
     private Button _removeButton;
+    private Panel _buttonPanel;
 
     private AppEditDialog() { InitializeComponent(); }
 
@@ -103,12 +104,14 @@ partial class AppEditDialog
         _okButton = new Button();
         _cancelButton = new Button();
         _removeButton = new Button();
+        _buttonPanel = new Panel();
 
         SuspendLayout();
         _tabControl.SuspendLayout();
         _tabMain.SuspendLayout();
         _tabParameters.SuspendLayout();
         _tabAccess.SuspendLayout();
+        _buttonPanel.SuspendLayout();
 
         // Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -118,8 +121,7 @@ partial class AppEditDialog
         ClientSize = new Size(510, 640);
 
         // _tabControl
-        _tabControl.Location = new Point(0, 0);
-        _tabControl.Size = new Size(510, 584);
+        _tabControl.Dock = DockStyle.Fill;
         _tabControl.Controls.AddRange(new TabPage[] { _tabMain, _tabParameters, _tabAccess, _tabAssociations });
 
         // _tabMain
@@ -308,7 +310,7 @@ partial class AppEditDialog
         // _envVarsContainer (EnvVarsSection added in code; fills remaining height in tab)
         _envVarsContainer.Location = new Point(10, 152);
         _envVarsContainer.Size = new Size(480, 377);
-        _envVarsContainer.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+        _envVarsContainer.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Bottom;
 
         // Add controls to _tabParameters
         _tabParameters.Controls.Add(_defaultArgsLabel);
@@ -331,7 +333,7 @@ partial class AppEditDialog
         // _ipcContainer (IpcCallerSection added in code; placeholder position; set in code)
         _ipcContainer.Location = new Point(10, 32);
         _ipcContainer.Size = new Size(460, 120);
-        _ipcContainer.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        _ipcContainer.Anchor = AnchorStyles.Top | AnchorStyles.Left;
 
         // Add IPC controls to _tabAccess (AclSection added in code below ipcContainer)
         _tabAccess.Controls.Add(_overrideIpcCallersCheckBox);
@@ -341,51 +343,58 @@ partial class AppEditDialog
 
         // --- Bottom form controls ---
 
-        // _statusLabel
+        // _statusLabel (inside _buttonPanel)
         _statusLabel.Size = new Size(480, 16);
         _statusLabel.ForeColor = Color.Red;
-        _statusLabel.Location = new Point(15, 586);
+        _statusLabel.Location = new Point(15, 2);
 
-        // _launchNowCheckBox (position set in code relative to OK button)
+        // _launchNowCheckBox (position set in code relative to OK button; inside _buttonPanel)
         _launchNowCheckBox.Text = "Launch now";
         _launchNowCheckBox.AutoSize = true;
-        _launchNowCheckBox.Location = new Point(190, 611);
+        _launchNowCheckBox.Location = new Point(190, 27);
 
-        // _okButton
+        // _okButton (inside _buttonPanel)
         _okButton.Text = "OK";
         _okButton.Size = new Size(75, 28);
         _okButton.FlatStyle = FlatStyle.System;
-        _okButton.Location = new Point(330, 606);
+        _okButton.Location = new Point(330, 22);
         _okButton.Click += OnOkClick;
 
-        // _cancelButton
+        // _cancelButton (inside _buttonPanel)
         _cancelButton.Text = "Cancel";
         _cancelButton.DialogResult = DialogResult.Cancel;
         _cancelButton.Size = new Size(75, 28);
         _cancelButton.FlatStyle = FlatStyle.System;
-        _cancelButton.Location = new Point(415, 606);
+        _cancelButton.Location = new Point(415, 22);
 
-        // _removeButton (Visible set in code)
+        // _removeButton (Visible set in code; inside _buttonPanel)
         _removeButton.Text = "Remove";
         _removeButton.Size = new Size(75, 28);
         _removeButton.FlatStyle = FlatStyle.System;
-        _removeButton.Location = new Point(15, 606);
+        _removeButton.Location = new Point(15, 22);
         _removeButton.Visible = false;
         _removeButton.Click += OnRemoveClick;
 
+        // _buttonPanel
+        _buttonPanel.Dock = DockStyle.Bottom;
+        _buttonPanel.Height = 56;
+        _buttonPanel.Controls.Add(_statusLabel);
+        _buttonPanel.Controls.Add(_launchNowCheckBox);
+        _buttonPanel.Controls.Add(_okButton);
+        _buttonPanel.Controls.Add(_cancelButton);
+        _buttonPanel.Controls.Add(_removeButton);
+
         // Add controls to Form
         Controls.Add(_tabControl);
-        Controls.Add(_statusLabel);
-        Controls.Add(_launchNowCheckBox);
-        Controls.Add(_okButton);
-        Controls.Add(_cancelButton);
-        Controls.Add(_removeButton);
+        Controls.Add(_buttonPanel);
 
         _tabAccess.ResumeLayout(false);
         _tabParameters.ResumeLayout(false);
         _tabMain.ResumeLayout(false);
         _tabMain.PerformLayout();
         _tabControl.ResumeLayout(false);
+        _buttonPanel.ResumeLayout(false);
+        _buttonPanel.PerformLayout();
         ResumeLayout(false);
         PerformLayout();
     }

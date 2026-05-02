@@ -14,7 +14,6 @@ public class SidNameResolverTests
     {
         var mock = new Mock<ISidResolver>();
         mock.Setup(r => r.TryResolveName(It.IsAny<string>())).Returns((string?)null);
-        mock.Setup(r => r.TryResolveNameFromRegistry(It.IsAny<string>())).Returns((string?)null);
         return mock.Object;
     }
 
@@ -58,7 +57,7 @@ public class SidNameResolverTests
     [Fact]
     public void GetDisplayName_PreResolvedName_ExtractsUsername()
     {
-        var result = SidNameResolver.GetDisplayName(FakeSid, "DOMAIN\\alice", NullResolver(), null);
+        var result = SidNameResolver.GetDisplayName(FakeSid, "DOMAIN\\alice", NullResolver(), null, null);
         Assert.Equal("alice", result);
     }
 
@@ -69,14 +68,14 @@ public class SidNameResolverTests
         {
             [FakeSid] = "mapuser"
         };
-        var result = SidNameResolver.GetDisplayName(FakeSid, null, NullResolver(), sidNames);
+        var result = SidNameResolver.GetDisplayName(FakeSid, null, NullResolver(), sidNames, null);
         Assert.Equal("mapuser", result);
     }
 
     [Fact]
     public void GetDisplayName_NoSourceAvailable_ReturnsSid()
     {
-        var result = SidNameResolver.GetDisplayName(FakeSid, null, NullResolver(), null);
+        var result = SidNameResolver.GetDisplayName(FakeSid, null, NullResolver(), null, null);
         Assert.Equal(FakeSid, result);
     }
 

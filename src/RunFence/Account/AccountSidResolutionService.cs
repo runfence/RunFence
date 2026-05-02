@@ -6,6 +6,7 @@ namespace RunFence.Account;
 
 public class AccountSidResolutionService(
     ISidResolver sidResolver,
+    IProfilePathResolver profilePathResolver,
     ILocalUserProvider localUserProvider) : IAccountSidResolutionService
 {
     public async Task<Dictionary<string, string?>> ResolveSidsAsync(CredentialStore credentialStore,
@@ -65,9 +66,9 @@ public class AccountSidResolutionService(
             var suffixed = SidNameResolver.ApplyAccountSuffix(username, cred.IsCurrentAccount, cred.IsInteractiveUser);
             if (suffixed != username)
                 return suffixed;
-            return SidNameResolver.GetDisplayName(cred.Sid, preResolved, sidResolver, sidNames);
+            return SidNameResolver.GetDisplayName(cred.Sid, preResolved, sidResolver, sidNames, profilePathResolver);
         }
 
-        return SidNameResolver.GetDisplayName(cred, sidResolver, sidNames);
+        return SidNameResolver.GetDisplayName(cred, sidResolver, sidNames, profilePathResolver);
     }
 }

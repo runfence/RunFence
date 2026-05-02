@@ -57,7 +57,7 @@ public interface IWizardTemplate
 
     /// <summary>
     /// Called when the wizard dialog is closed (normally or via cancel) to release sensitive resources
-    /// such as <see cref="System.Security.SecureString"/> fields held in commit data.
+    /// such as <see cref="RunFence.Core.ProtectedString"/> fields held in commit data.
     /// Templates without sensitive resources should implement this as a no-op.
     /// </summary>
     void Cleanup();

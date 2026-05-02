@@ -107,7 +107,7 @@ public class InAppMigrationHandler(
         var migratedApps = snapshot.Apps
             .Where(app => migratedSids.Contains(app.AccountSid))
             .ToList();
-        var shortcutCache = CreateShortcutCacheIfNeeded(migratedApps);
+        var shortcutCache = shortcutDiscovery.CreateTraversalCacheIfNeeded(migratedApps);
         foreach (var app in migratedApps)
         {
             try
@@ -148,7 +148,7 @@ public class InAppMigrationHandler(
         var affectedApps = sidsToDelete
             .SelectMany(sid => snapshot.Apps
                 .Where(a => string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase)));
-        var shortcutCache = CreateShortcutCacheIfNeeded(affectedApps);
+        var shortcutCache = shortcutDiscovery.CreateTraversalCacheIfNeeded(affectedApps);
         sidDeletionHandler.Apply(sidsToDelete, snapshot, session.CredentialStore, shortcutCache, messages);
     }
 
@@ -166,9 +166,4 @@ public class InAppMigrationHandler(
             return saveEx.Message;
         }
     }
-
-    private ShortcutTraversalCache CreateShortcutCacheIfNeeded(IEnumerable<AppEntry> apps)
-        => apps.Any(a => a.ManageShortcuts)
-            ? shortcutDiscovery.CreateTraversalCache()
-            : new ShortcutTraversalCache([]);
 }

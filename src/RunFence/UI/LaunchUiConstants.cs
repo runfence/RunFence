@@ -6,5 +6,5 @@ namespace RunFence.UI;
 internal static class LaunchUiConstants
 {
     public const string PrivilegeLevelTooltip =
-        "Highest Allowed — elevate if possible\nBasic — strip privileges, set medium integrity\nLow Integrity — de-elevate + set low integrity level";
+        "Highest Allowed — elevate if possible\nAbove Basic — Basic with better compatibility (no restriction job)\nBasic — strip privileges, set medium integrity\nLow Integrity — de-elevate + set low integrity level";
 }

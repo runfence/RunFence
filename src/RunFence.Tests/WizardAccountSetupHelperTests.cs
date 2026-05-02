@@ -1,4 +1,3 @@
-using System.Security;
 using Moq;
 using RunFence.Account;
 using RunFence.Account.UI;
@@ -20,7 +19,7 @@ public class WizardAccountSetupHelperTests : IDisposable
 
     private readonly Mock<IAccountCredentialManager> _credentialManager = new();
     private readonly Mock<ILocalUserProvider> _localUserProvider = new();
-    private readonly Mock<ISidResolver> _sidResolver = new();
+    private readonly Mock<IProfilePathResolver> _profilePathResolver = new();
     private readonly Mock<ISidNameCacheService> _sidNameCache = new();
     private readonly Mock<ISettingsTransferService> _settingsTransferService = new();
     private readonly Mock<IAccountFirewallSettingsApplier> _firewallSettingsApplier = new();
@@ -29,7 +28,7 @@ public class WizardAccountSetupHelperTests : IDisposable
     private readonly Mock<IWizardProgressReporter> _progress = new();
 
     private readonly List<ProtectedBuffer> _pinKeys = new();
-    private readonly List<SecureString> _secureStrings = new();
+    private readonly List<ProtectedString> _secureStrings = new();
 
     private SessionContext CreateSession()
     {
@@ -52,12 +51,12 @@ public class WizardAccountSetupHelperTests : IDisposable
     }
 
     private PackageInstallService CreatePackageInstallService() =>
-        new(_facade.Object, new AccountToolResolver(_sidResolver.Object), _log.Object);
+        new(_facade.Object, new AccountToolResolver(_profilePathResolver.Object), _log.Object);
 
     private WizardAccountSetupHelper CreateHelper(SessionContext session) =>
         new(_credentialManager.Object, _localUserProvider.Object, _sidNameCache.Object,
             _settingsTransferService.Object,
-            new FirewallApplyHelper(_firewallSettingsApplier.Object, _log.Object),
+            new FirewallApplyHelper(_firewallSettingsApplier.Object, new DynamicPortRangeChecker(_log.Object, new Mock<IUserConfirmationService>().Object), _log.Object),
             CreatePackageInstallService(), session);
 
     private WizardAccountSetupHelper.SetupRequest MakeRequest(
@@ -67,7 +66,7 @@ public class WizardAccountSetupHelperTests : IDisposable
         PrivilegeLevel privilegeLevel = PrivilegeLevel.Basic,
         bool trayTerminal = false)
     {
-        var pw = new SecureString();
+        var pw = new ProtectedString();
         pw.AppendChar('P');
         pw.MakeReadOnly();
         _secureStrings.Add(pw);
@@ -98,7 +97,7 @@ public class WizardAccountSetupHelperTests : IDisposable
         await helper.SetupAsync(request, _progress.Object);
 
         _credentialManager.Verify(c => c.StoreCreatedUserCredential(
-                It.IsAny<string>(), It.IsAny<SecureString>(),
+                It.IsAny<string>(), It.IsAny<ProtectedString>(),
                 It.IsAny<CredentialStore>(), It.IsAny<ProtectedBuffer>()),
             storeCredential ? Times.Once() : Times.Never());
     }
@@ -156,7 +155,7 @@ public class WizardAccountSetupHelperTests : IDisposable
         var session = CreateSession();
         var helper = CreateHelper(session);
 
-        using var pw = new SecureString();
+        using var pw = new ProtectedString();
         pw.AppendChar('P');
         pw.MakeReadOnly();
         var request = new WizardAccountSetupHelper.SetupRequest(
@@ -268,7 +267,7 @@ public class WizardAccountSetupHelperTests : IDisposable
             // Also set up firewall so we can verify setup continued to that step
             var firewallSettings = new FirewallAccountSettings { AllowInternet = false };
 
-            using var pw = new SecureString();
+            using var pw = new ProtectedString();
             pw.AppendChar('P');
             pw.MakeReadOnly();
             var request = new WizardAccountSetupHelper.SetupRequest(
@@ -345,8 +344,11 @@ public class WizardAccountSetupHelperTests : IDisposable
         Assert.Equal(["example.com"], capturedSettings.Allowlist.Select(entry => entry.Value));
     }
 
-    [Fact]
-    public async Task SetupAsync_AccountRuleFailure_RestoresDefaultFirewallSettingsForNewAccount()
+    [Theory]
+    [InlineData(FirewallApplyPhase.AccountRules, "firewall unavailable", "Firewall rules: firewall unavailable", true)]
+    [InlineData(FirewallApplyPhase.GlobalIcmp, "global icmp unavailable", "Global ICMP firewall rule: global icmp unavailable", false)]
+    public async Task SetupAsync_FirewallPhaseFailure_HandledCorrectly(
+        FirewallApplyPhase failingPhase, string innerMessage, string expectedError, bool expectAccountNull)
     {
         var session = CreateSession();
         var firewallSettings = new FirewallAccountSettings { AllowInternet = false };
@@ -359,45 +361,25 @@ public class WizardAccountSetupHelperTests : IDisposable
                 It.IsAny<AppDatabase>(),
                 It.IsAny<CancellationToken>()))
             .ThrowsAsync(new FirewallApplyException(
-                FirewallApplyPhase.AccountRules,
+                failingPhase,
                 TestSid,
-                new InvalidOperationException("firewall unavailable")));
+                new InvalidOperationException(innerMessage)));
 
         var helper = CreateHelper(session);
         var request = MakeRequest(firewallSettings: firewallSettings);
 
         await helper.SetupAsync(request, _progress.Object);
 
-        Assert.Null(session.Database.GetAccount(TestSid));
-        _progress.Verify(p => p.ReportError("Firewall rules: firewall unavailable"), Times.Once);
-    }
-
-    [Fact]
-    public async Task SetupAsync_GlobalIcmpFailure_KeepsSavedFirewallSettingsForNewAccount()
-    {
-        var session = CreateSession();
-        var firewallSettings = new FirewallAccountSettings { AllowInternet = false };
-        _firewallSettingsApplier
-            .Setup(f => f.ApplyAccountFirewallSettingsAsync(
-                TestSid,
-                It.IsAny<string>(),
-                null,
-                It.IsAny<FirewallAccountSettings>(),
-                It.IsAny<AppDatabase>(),
-                It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new FirewallApplyException(
-                FirewallApplyPhase.GlobalIcmp,
-                TestSid,
-                new InvalidOperationException("global icmp unavailable")));
-
-        var helper = CreateHelper(session);
-        var request = MakeRequest(firewallSettings: firewallSettings);
-
-        await helper.SetupAsync(request, _progress.Object);
-
-        Assert.NotNull(session.Database.GetAccount(TestSid));
-        Assert.False(session.Database.GetAccount(TestSid)!.Firewall.AllowInternet);
-        _progress.Verify(p => p.ReportError("Global ICMP firewall rule: global icmp unavailable"), Times.Once);
+        if (expectAccountNull)
+        {
+            Assert.Null(session.Database.GetAccount(TestSid));
+        }
+        else
+        {
+            Assert.NotNull(session.Database.GetAccount(TestSid));
+            Assert.False(session.Database.GetAccount(TestSid)!.Firewall.AllowInternet);
+        }
+        _progress.Verify(p => p.ReportError(expectedError), Times.Once);
     }
 
     private static FirewallApplyResult SuccessfulFirewallApply() => new(

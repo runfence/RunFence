@@ -11,12 +11,14 @@ namespace RunFence.Acl;
 /// must receive the same grant so the desktop user token can reach the path.
 /// </summary>
 public class ContainerInteractiveUserSync(
-    GrantCoreOperations grantCore,
-    TraverseCoreOperations traverseCore,
+    IGrantCoreOperations grantCore,
+    ITraverseCoreOperations traverseCore,
     IInteractiveUserResolver interactiveUserResolver,
     IAclPermissionService aclPermission,
     UiThreadDatabaseAccessor dbAccessor,
-    ILoggingService log)
+    ILoggingService log,
+    IFileSystemPathInfo pathInfo)
+    : GrantSyncBase(grantCore, traverseCore, dbAccessor)
 {
     /// <summary>
     /// Adds a matching allow grant for the interactive user when the container gains a new
@@ -29,7 +31,7 @@ public class ContainerInteractiveUserSync(
         if (string.IsNullOrEmpty(iuSid))
             return default;
 
-        bool isFolder = Directory.Exists(path);
+        bool isFolder = pathInfo.DirectoryExists(path);
         var fsRights = GrantRightsMapper.MapAllowRights(rights, isFolder);
         if (!aclPermission.NeedsPermissionGrant(path, iuSid, fsRights))
             return default;
@@ -42,14 +44,13 @@ public class ContainerInteractiveUserSync(
     /// <paramref name="containerSid"/> loses its grant, provided no other container still
     /// needs that path.
     /// </summary>
-    public void RevertInteractiveUserGrant(string containerSid, string path,
-        SavedRightsState? containerRights)
+    public void RevertInteractiveUserGrant(string containerSid, string path)
     {
         var iuSid = interactiveUserResolver.GetInteractiveUserSid();
         if (string.IsNullOrEmpty(iuSid))
             return;
 
-        var shouldRevert = dbAccessor.Read(db =>
+        var shouldRevert = DbAccessor.Read(db =>
         {
             var iuEntry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, path, isDeny: false);
             if (iuEntry == null) return false;
@@ -59,15 +60,14 @@ public class ContainerInteractiveUserSync(
             if (iuEntry.OwnerContainerSid != null &&
                 !string.Equals(iuEntry.OwnerContainerSid, containerSid, StringComparison.OrdinalIgnoreCase))
                 return false;
-            if (iuEntry.SavedRights != containerRights) return false;
             return !AnyOtherContainerNeedsPath(db, containerSid, path);
         });
 
         if (!shouldRevert)
             return;
 
-        grantCore.RemoveGrant(iuSid, path, isDeny: false, updateFileSystem: true);
-        traverseCore.CleanupOrphanedTraverse(iuSid, path);
+        GrantCore.RemoveGrant(iuSid, path, isDeny: false, updateFileSystem: true);
+        TraverseCore.CleanupOrphanedTraverse(iuSid, path);
     }
 
     /// <summary>
@@ -81,12 +81,12 @@ public class ContainerInteractiveUserSync(
         if (string.IsNullOrEmpty(iuSid))
             return;
 
-        var shouldRemove = dbAccessor.Read(db => !AnyOtherContainerNeedsPath(db, containerSid, path));
+        var shouldRemove = DbAccessor.Read(db => !AnyOtherContainerNeedsPath(db, containerSid, path));
 
         if (!shouldRemove)
             return;
 
-        traverseCore.RemoveTraverse(iuSid, path, updateFileSystem: true);
+        TraverseCore.RemoveTraverse(iuSid, path, updateFileSystem: true);
     }
 
     /// <summary>
@@ -101,10 +101,10 @@ public class ContainerInteractiveUserSync(
         if (string.IsNullOrEmpty(iuSid))
             return;
 
-        var pathsToRevert = dbAccessor.Read(db =>
+        var pathsToRevert = DbAccessor.Read(db =>
         {
             var result = new List<string>();
-            foreach (var ce in containerGrants.Where(e => !e.IsDeny && !e.IsTraverseOnly))
+            foreach (var ce in containerGrants.Where(e => e is { IsDeny: false, IsTraverseOnly: false }))
             {
                 var iuEntry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, ce.Path, isDeny: false);
                 if (iuEntry == null) continue;
@@ -112,7 +112,6 @@ public class ContainerInteractiveUserSync(
                 if (iuEntry.OwnerContainerSid != null &&
                     !string.Equals(iuEntry.OwnerContainerSid, containerSid, StringComparison.OrdinalIgnoreCase))
                     continue;
-                if (iuEntry.SavedRights != ce.SavedRights) continue;
                 if (AnyOtherContainerNeedsPath(db, containerSid, ce.Path)) continue;
                 result.Add(ce.Path);
             }
@@ -123,9 +122,9 @@ public class ContainerInteractiveUserSync(
         {
             try
             {
-                grantCore.RemoveGrant(iuSid, revertPath, isDeny: false,
+                GrantCore.RemoveGrant(iuSid, revertPath, isDeny: false,
                     updateFileSystem: updateFileSystem);
-                traverseCore.CleanupOrphanedTraverse(iuSid, revertPath);
+                TraverseCore.CleanupOrphanedTraverse(iuSid, revertPath);
             }
             catch (Exception ex)
             {
@@ -138,25 +137,24 @@ public class ContainerInteractiveUserSync(
     private GrantOperationResult AddGrantForInteractiveUser(string containerSid, string iuSid,
         string path, SavedRightsState rights)
     {
-        var coreResult = grantCore.AddGrant(iuSid, path, isDeny: false, rights, ownerSid: null);
+        var coreResult = GrantCore.AddGrant(iuSid, path, isDeny: false, rights, ownerSid: null);
 
         if (!coreResult.AlreadyExisted)
         {
             // Tag the newly created entry as owned by this container so RevertInteractiveUserGrant
             // can distinguish it from user-added IU grants that happen to cover the same path.
-            dbAccessor.Write(db =>
+            DbAccessor.Write(db =>
             {
                 var entry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, Path.GetFullPath(path), isDeny: false);
-                if (entry != null)
-                    entry.OwnerContainerSid = containerSid;
+                entry?.OwnerContainerSid = containerSid;
             });
 
-            bool isFolder = Directory.Exists(path);
+            bool isFolder = pathInfo.DirectoryExists(path);
             var traverseDir = isFolder ? path : Path.GetDirectoryName(path);
             bool traverseAdded = false;
             if (!string.IsNullOrEmpty(traverseDir))
             {
-                var (modified, _) = traverseCore.AddTraverse(iuSid, traverseDir);
+                var (modified, _) = TraverseCore.AddTraverse(iuSid, traverseDir);
                 traverseAdded = modified;
             }
 
@@ -178,7 +176,7 @@ public class ContainerInteractiveUserSync(
             AclHelper.IsContainerSid(acct.Sid) &&
             !string.Equals(acct.Sid, excludeContainerSid, StringComparison.OrdinalIgnoreCase) &&
             acct.Grants.Any(e =>
-                !e.IsTraverseOnly && !e.IsDeny &&
+                e is { IsTraverseOnly: false, IsDeny: false } &&
                 string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase)));
 
 }

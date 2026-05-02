@@ -35,19 +35,18 @@ public class CoreAudioSessionChecker : ICoreAudioSessionChecker
             IMMDevice? device = null;
             try
             {
-                if (enumerator.GetDefaultAudioEndpoint(0, 0, out device) != 0 || device == null)
+                if (enumerator.GetDefaultAudioEndpoint(0, 0, out device) != 0)
                     return false;
 
                 var iid = IidAudioSessionManager2;
-                if (device.Activate(ref iid, ClsctxAll, IntPtr.Zero, out var managerObj) != 0
-                    || managerObj == null)
+                if (device.Activate(ref iid, ClsctxAll, IntPtr.Zero, out var managerObj) != 0)
                     return false;
 
                 var manager = (IAudioSessionManager2)managerObj;
                 IAudioSessionEnumerator? sessionEnum = null;
                 try
                 {
-                    if (manager.GetSessionEnumerator(out sessionEnum) != 0 || sessionEnum == null)
+                    if (manager.GetSessionEnumerator(out sessionEnum) != 0)
                         return false;
 
                     if (sessionEnum.GetCount(out int count) != 0)
@@ -55,16 +54,15 @@ public class CoreAudioSessionChecker : ICoreAudioSessionChecker
 
                     for (int i = 0; i < count; i++)
                     {
-                        IAudioSessionControl? sessionControl = null;
+                        IAudioSessionControl2? sessionControl = null;
                         try
                         {
-                            if (sessionEnum.GetSession(i, out sessionControl) != 0 || sessionControl == null)
+                            if (sessionEnum.GetSession(i, out sessionControl) != 0)
                                 continue;
 
-                            var sc2 = (IAudioSessionControl2)sessionControl;
-                            if (sc2.GetProcessId(out uint pid) != 0)
+                            if (sessionControl.GetProcessId(out uint pid) != 0)
                                 continue;
-                            if (sc2.GetState(out int state) != 0)
+                            if (sessionControl.GetState(out int state) != 0)
                                 continue;
                             if (state != AudioSessionStateActive)
                                 continue;
@@ -160,23 +158,7 @@ public class CoreAudioSessionChecker : ICoreAudioSessionChecker
     private interface IAudioSessionEnumerator
     {
         [PreserveSig] int GetCount(out int sessionCount);
-        [PreserveSig] int GetSession(int sessionCount, out IAudioSessionControl session);
-    }
-
-    [ComImport]
-    [Guid("F4B1A599-7266-4319-A8CA-E70ACB11E8CD")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IAudioSessionControl
-    {
-        [PreserveSig] int GetState(out int state);
-        [PreserveSig] int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string displayName);
-        [PreserveSig] int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string displayName, ref Guid eventContext);
-        [PreserveSig] int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string iconPath);
-        [PreserveSig] int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string iconPath, ref Guid eventContext);
-        [PreserveSig] int GetGroupingParam(out Guid groupingParam);
-        [PreserveSig] int SetGroupingParam(ref Guid groupingParam, ref Guid eventContext);
-        [PreserveSig] int RegisterAudioSessionNotification(IntPtr notify);
-        [PreserveSig] int UnregisterAudioSessionNotification(IntPtr notify);
+        [PreserveSig] int GetSession(int sessionCount, out IAudioSessionControl2 session);
     }
 
     // IAudioSessionControl2 extends IAudioSessionControl — inherited methods must be listed first

@@ -2,16 +2,19 @@ using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Security;
 
 namespace RunFence.Account.UI;
 
 /// <summary>
-/// Toggles tray-pin flags (folder browser, discovery, terminal) and manage-associations flag for account entries.
+/// Toggles tray-pin flags (folder browser, discovery, terminal), manage-associations flag,
+/// and receive-injected-input flag for account entries.
 /// </summary>
 public class AccountTrayToggleService(
     SessionPersistenceHelper persistenceHelper,
     ISessionProvider sessionProvider,
-    IAssociationAutoSetService associationAutoSetService)
+    IAssociationAutoSetService associationAutoSetService,
+    IInputInjectionBlockerService injectionBlocker)
 {
     public void ToggleFolderBrowserTray(string accountSid, Action onSaved)
     {
@@ -37,13 +40,33 @@ public class AccountTrayToggleService(
         var acct = session.Database.GetOrCreateAccount(accountSid);
         var newValue = !acct.ManageAssociations;
         acct.ManageAssociations = newValue;
+        try
+        {
+            if (!newValue)
+                associationAutoSetService.RestoreForUser(accountSid);
+            else
+                associationAutoSetService.AutoSetForUser(accountSid);
+        }
+        catch
+        {
+            acct.ManageAssociations = !newValue;
+            session.Database.RemoveAccountIfEmpty(accountSid);
+            throw;
+        }
+
         session.Database.RemoveAccountIfEmpty(accountSid);
         persistenceHelper.SaveConfig(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
-        if (!newValue)
-            associationAutoSetService.RestoreForUser(accountSid);
-        else
-            associationAutoSetService.AutoSetForUser(accountSid);
         onSaved();
+    }
+
+    public void ToggleReceiveInjectedInput(string accountSid, Action onSaved)
+    {
+        var session = sessionProvider.GetSession();
+        ToggleTrayFlag(session.Database, accountSid,
+            a => a.ReceiveInjectedInput, (a, v) => a.ReceiveInjectedInput = v,
+            session.CredentialStore, session.PinDerivedKey, onSaved);
+        injectionBlocker.UpdateExemptedSids(
+            session.Database.Accounts.Where(a => a.ReceiveInjectedInput).Select(a => a.Sid).ToList());
     }
 
     private void ToggleTrayFlag(AppDatabase db, string sid,

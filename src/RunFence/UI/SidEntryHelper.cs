@@ -6,7 +6,7 @@ namespace RunFence.UI;
 
 public interface ISidEntryHelper
 {
-    string? ResolveOrPrompt(string accountName, List<LocalUserAccount>? localUsers, IWin32Window? owner);
+    string? ResolveOrPrompt(string accountName, IReadOnlyList<LocalUserAccount>? localUsers, IWin32Window? owner);
 }
 
 /// <summary>
@@ -18,7 +18,7 @@ public class SidEntryHelper(ISidResolver sidResolver) : ISidEntryHelper
     /// Resolves an account name to a SID using SidResolutionHelper, local users list,
     /// and a manual SID entry dialog as last resort. Returns null if the user cancels.
     /// </summary>
-    public string? ResolveOrPrompt(string accountName, List<LocalUserAccount>? localUsers, IWin32Window? owner)
+    public string? ResolveOrPrompt(string accountName, IReadOnlyList<LocalUserAccount>? localUsers, IWin32Window? owner)
     {
         var sid = sidResolver.ResolveSidFromName(accountName, localUsers);
         if (sid != null)

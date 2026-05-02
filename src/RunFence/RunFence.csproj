@@ -6,17 +6,19 @@
         <UseWindowsForms>true</UseWindowsForms>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
-        <ApplicationIcon>app.ico</ApplicationIcon>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <Authors>Vladyslav (RunFence)</Authors>
         <Company>Vladyslav (RunFence)</Company>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
         <ApplicationManifest>app.debug.manifest</ApplicationManifest>
+        <ApplicationIcon>app.debug.ico</ApplicationIcon>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)' != 'Debug'">
         <ApplicationManifest>app.manifest</ApplicationManifest>
+        <ApplicationIcon>app.ico</ApplicationIcon>
     </PropertyGroup>
 
     <ItemGroup>
@@ -26,9 +28,11 @@
 
     <ItemGroup>
         <ProjectReference Include="..\RunFence.Core\RunFence.Core.csproj"/>
+        <ProjectReference Include="..\RunFence.Launching\RunFence.Launching.csproj"/>
         <ProjectReference Include="..\RunFence.FolderBrowser\RunFence.FolderBrowser.csproj"/>
         <ProjectReference Include="..\RunFence.Launcher\RunFence.Launcher.csproj"/>
         <ProjectReference Include="..\RunFence.DragBridge\RunFence.DragBridge.csproj"/>
+        <ProjectReference Include="..\RunFence.JobKeeper\RunFence.JobKeeper.csproj"/>
         <ProjectReference Include="..\RunFence.PinHelper\RunFence.PinHelper.csproj"/>
         <ProjectReference Include="..\preftrans\preftrans.csproj"/>
         <ProjectReference Include="..\RunFence.SecurityScanner\RunFence.SecurityScanner.csproj"/>
@@ -41,11 +45,19 @@
         <Content Include="unlock.cmd">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </Content>
+        <Content Include="unlock-operation.cmd">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
         <Content Include="unregister-folder-handler.cmd">
             <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </Content>
         <EmbeddedResource Include="Account\install-claude-code.ps1"/>
-        <EmbeddedResource Include="app.ico"/>
+        <EmbeddedResource Include="app.ico" Condition="'$(Configuration)' != 'Debug'">
+            <LogicalName>RunFence.app.ico</LogicalName>
+        </EmbeddedResource>
+        <EmbeddedResource Include="app.debug.ico" Condition="'$(Configuration)' == 'Debug'">
+            <LogicalName>RunFence.app.ico</LogicalName>
+        </EmbeddedResource>
     </ItemGroup>
 
     <ItemGroup>
@@ -54,6 +66,10 @@
         <PackageReference Include="BouncyCastle.Cryptography"/>
         <PackageReference Include="System.Management"/>
         <PackageReference Include="System.DirectoryServices.AccountManagement"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
     </ItemGroup>
 
 </Project>

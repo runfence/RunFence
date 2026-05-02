@@ -20,12 +20,6 @@ public static class FileSecurityNative
     public const uint OPEN_EXISTING = 3;
     public const uint GENERIC_READ = 0x80000000;
 
-    /// <summary>
-    /// Specific read access mask for files/directories: read data, read attributes, read extended attributes, synchronize.
-    /// Use instead of GENERIC_READ for AuthzAccessCheck to avoid over-broad access check masks.
-    /// </summary>
-    public const uint FILE_GENERIC_READ = 0x120089;
-
     public const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     public const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
     public const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
@@ -36,12 +30,15 @@ public static class FileSecurityNative
     public const uint MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16384;
     public const uint IO_REPARSE_TAG_SYMLINK = 0xA000000C;
     public const uint IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003;
+    public const uint IO_REPARSE_TAG_APPEXECLINK = 0x8000001B;
     public const uint READ_CONTROL = 0x00020000;
     public const uint WRITE_DAC = 0x00040000;
+    public const uint WRITE_OWNER = 0x00080000;
 
     public enum SE_OBJECT_TYPE
     {
-        SE_FILE_OBJECT = 1
+        SE_FILE_OBJECT = 1,
+        SE_KERNEL_OBJECT = 6,
     }
 
     [Flags]
@@ -49,6 +46,7 @@ public static class FileSecurityNative
     {
         OWNER_SECURITY_INFORMATION = 0x00000001,
         DACL_SECURITY_INFORMATION = 0x00000004,
+        LABEL_SECURITY_INFORMATION = 0x00000010,
     }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -81,6 +79,39 @@ public static class FileSecurityNative
         SECURITY_INFORMATION SecurityInfo,
         IntPtr psidOwner, IntPtr psidGroup,
         IntPtr pDacl, IntPtr pSacl);
+
+    // ── Security descriptor manipulation ─────────────────────────────────────
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptor(
+        string StringSecurityDescriptor,
+        uint StringSDRevision,
+        out IntPtr SecurityDescriptor,
+        out uint SecurityDescriptorSize);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool GetSecurityDescriptorSacl(
+        IntPtr pSecurityDescriptor,
+        [MarshalAs(UnmanagedType.Bool)] out bool lpbSaclPresent,
+        out IntPtr pSacl,
+        [MarshalAs(UnmanagedType.Bool)] out bool lpbSaclDefaulted);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint SetNamedSecurityInfo(
+        string pObjectName, SE_OBJECT_TYPE ObjectType, SECURITY_INFORMATION SecurityInfo,
+        IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint GetNamedSecurityInfo(
+        string pObjectName, SE_OBJECT_TYPE ObjectType, SECURITY_INFORMATION SecurityInfo,
+        out IntPtr pSidOwner, out IntPtr pSidGroup, out IntPtr pDacl, out IntPtr pSacl,
+        out IntPtr ppSecurityDescriptor);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(
+        IntPtr SecurityDescriptor, uint StringSDRevision,
+        SECURITY_INFORMATION SecurityInformation,
+        out IntPtr StringSecurityDescriptor, out uint StringSecurityDescriptorLen);
 
     // ── File attributes / reparse point resolution ────────────────────────────
 

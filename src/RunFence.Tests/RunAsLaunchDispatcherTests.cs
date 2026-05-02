@@ -66,6 +66,7 @@ public class RunAsLaunchDispatcherTests : IDisposable
             _shortcutService.Object,
             new Mock<IBesideTargetShortcutService>().Object,
             sessionProvider,
+            new Mock<IInteractiveUserSidResolver>().Object,
             _log.Object);
     }
 
@@ -211,5 +212,91 @@ public class RunAsLaunchDispatcherTests : IDisposable
             It.IsAny<LaunchIdentity>(),
             It.IsAny<Func<string, string, bool>?>()), Times.Once);
     }
+
+    // ── TC-28: adHocPassword forwarding ──────────────────────────────────────
+
+    [Fact]
+    public void DispatchCredentialResult_WithAdHocPassword_ForwardsCredentialsToDirectLaunch()
+    {
+        // Arrange — adHocPassword provided (user typed password in the dialog, not stored).
+        // No existing app → direct launch. Verify the ad-hoc password reaches the facade
+        // as credentials in the AccountLaunchIdentity (not null credentials).
+        var credential = new CredentialEntry { Sid = UserSid };
+        using var adHocPassword = new ProtectedString();
+        adHocPassword.AppendChar('s');
+        adHocPassword.AppendChar('e');
+        adHocPassword.AppendChar('c');
+
+        using var result = new RunAsDialogResult(
+            Credential: credential,
+            SelectedContainer: null,
+            PermissionGrant: null,
+            CreateAppEntryOnly: false,
+            PrivilegeLevel: PrivilegeLevel.Basic,
+            UpdateOriginalShortcut: false,
+            RevertShortcutRequested: false,
+            EditExistingApp: null,
+            ExistingAppForLaunch: null,
+            AdHocPassword: adHocPassword);
+
+        var dispatcher = CreateDispatcher();
+
+        // Act
+        dispatcher.DispatchCredentialResult(result, FilePath, null, null, false, null);
+
+        // Assert — facade called with AccountLaunchIdentity carrying non-null credentials
+        // (the ad-hoc password was resolved to LaunchCredentials by RunAsDirectLauncher)
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t => t.ExePath == FilePath),
+            It.Is<AccountLaunchIdentity>(a =>
+                a.Sid == UserSid &&
+                a.Credentials != null &&
+                a.Credentials.Value.Password == adHocPassword),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
+    [Fact]
+    public void DispatchCredentialResult_WithoutAdHocPassword_UsesNullCredentials()
+    {
+        // Arrange — no ad-hoc password: direct launcher creates identity without Credentials,
+        // letting ProcessLauncher resolve them from the credential store.
+        var credential = new CredentialEntry { Sid = UserSid };
+        using var result = MakeCredentialResult(credential);
+        var dispatcher = CreateDispatcher();
+
+        // Act
+        dispatcher.DispatchCredentialResult(result, FilePath, null, null, false, null);
+
+        // Assert — AccountLaunchIdentity launched with null Credentials
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t => t.ExePath == FilePath),
+            It.Is<AccountLaunchIdentity>(a =>
+                a.Sid == UserSid && a.Credentials == null),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
+    // ── isFolder=true → LaunchFolderBrowser dispatch (Kind=Folder from item 212) ──
+
+    [Fact]
+    public void DispatchCredentialResult_IsFolder_DispatchesToLaunchFolderBrowser()
+    {
+        // Arrange — isFolder=true comes from RunAsFlowHandler when resolution.Kind == Folder
+        var credential = new CredentialEntry { Sid = UserSid };
+        using var result = MakeCredentialResult(credential);
+        var dispatcher = CreateDispatcher();
+
+        // Act
+        dispatcher.DispatchCredentialResult(result, FilePath, null, null, isFolder: true, null);
+
+        // Assert — LaunchFolderBrowser called, not LaunchFile
+        _directLauncherFacade.Verify(f => f.LaunchFolderBrowser(
+            It.Is<AccountLaunchIdentity>(a => a.Sid == UserSid),
+            FilePath,
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(),
+            It.IsAny<Func<string, string, bool>?>()), Times.Never);
+    }
+
 
 }

@@ -51,7 +51,7 @@ public class EventLogBlockedConnectionReader(ILoggingService log) : IBlockedConn
                         continue;
                     // Protocol parsing serves as a validation gate — events with non-integer
                     // protocol values are malformed and intentionally skipped, not dead code.
-                    if (!int.TryParse(props[PropProtocol].Value?.ToString(), out var protocol))
+                    if (!int.TryParse(props[PropProtocol].Value?.ToString(), out _))
                         continue;
 
                     result.Add(new BlockedConnection(destAddress, destPort, record.TimeCreated ?? DateTime.UtcNow));
@@ -94,7 +94,7 @@ public class EventLogBlockedConnectionReader(ILoggingService log) : IBlockedConn
         }
     }
 
-    private static string RunAuditPol(string args)
+    private string RunAuditPol(string args)
     {
         var psi = new ProcessStartInfo("auditpol.exe", args)
         {
@@ -104,8 +104,12 @@ public class EventLogBlockedConnectionReader(ILoggingService log) : IBlockedConn
         };
         using var proc = Process.Start(psi)
                          ?? throw new InvalidOperationException("Failed to start auditpol.exe");
-        var output = proc.StandardOutput.ReadToEnd();
+        var readTask = proc.StandardOutput.ReadToEndAsync();
+        if (!readTask.Wait(5000)) { proc.Kill(); throw new TimeoutException("auditpol.exe timed out"); }
+        var output = readTask.Result;
         proc.WaitForExit();
+        if (proc.ExitCode != 0)
+            log.Warn($"auditpol.exe exited with code {proc.ExitCode} (args: {args})");
         return output;
     }
 }

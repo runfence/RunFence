@@ -83,10 +83,15 @@ public class WindowsHelloService(ILoggingService log, IExplorerTokenProvider exp
                     {
                         var result = WindowsHelloInterop.RequestAsync(hwnd, message).GetAwaiter().GetResult();
 
-                        if (result == HelloVerificationResult.NotAvailable)
-                            log.Warn("Windows Hello not available for interactive user");
-                        else if (result == HelloVerificationResult.Failed)
-                            log.Error("Windows Hello verification failed for interactive user");
+                        switch (result)
+                        {
+                            case HelloVerificationResult.NotAvailable:
+                                log.Warn("Windows Hello not available for interactive user");
+                                break;
+                            case HelloVerificationResult.Failed:
+                                log.Error("Windows Hello verification failed for interactive user");
+                                break;
+                        }
 
                         return result;
                     }

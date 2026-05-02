@@ -1,9 +1,8 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
-using Microsoft.Win32;
-using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.SecurityScanner;
+using RunFence.Tests.Helpers;
 using Xunit;
 using Scanner = RunFence.SecurityScanner.SecurityScanner;
 
@@ -1172,8 +1171,7 @@ public class SecurityScannerTests
             s.ClearStartupPaths();
             s.SetTaskSchedulerData(
             [
-                new ScheduledTaskInfo(@"\TaskWithExe", @"\", "TaskWithExe",
-                    [@"C:\Program Files\app.exe"], false, null)
+                new ScheduledTaskInfo([@"C:\Program Files\app.exe"], false, null)
             ]);
             s.AddFileExists(@"C:\Program Files\app.exe");
             s.AddFileSecurity(@"C:\Program Files\app.exe", fileSec);
@@ -1199,8 +1197,7 @@ public class SecurityScannerTests
             s.ClearStartupPaths();
             s.SetTaskSchedulerData(
             [
-                new ScheduledTaskInfo(@"\MyTask", @"\", "MyTask",
-                    [@"C:\Program Files\app.exe"], true, UserSid1)
+                new ScheduledTaskInfo([@"C:\Program Files\app.exe"], true, UserSid1)
             ]);
             s.AddFileExists(@"C:\Program Files\app.exe");
             s.AddFileSecurity(@"C:\Program Files\app.exe", fileSec);
@@ -1709,8 +1706,7 @@ public class SecurityScannerTests
             s.SetAllUserProfiles([(UserSid2, @"C:\Users\TestUser")]);
             // Global task referencing exe in TestUser's profile
             s.SetTaskSchedulerData([
-                new ScheduledTaskInfo(@"\GlobalUpdater", @"\", "GlobalUpdater",
-                    [@"C:\Users\TestUser\AppData\Local\app\updater.exe"],
+                new ScheduledTaskInfo([@"C:\Users\TestUser\AppData\Local\app\updater.exe"],
                     false, null) // not per-user — global task
             ]);
             s.AddFileExists(@"C:\Users\TestUser\AppData\Local\app\updater.exe");
@@ -2257,336 +2253,5 @@ public class SecurityScannerTests
             f is { Category: StartupSecurityCategory.RegistryRunKey, TargetDescription: @"C:\Tools\verifier.dll" }).ToList();
         Assert.Single(verifierFindings);
         Assert.Equal(UserSid1, verifierFindings[0].VulnerableSid);
-    }
-
-    // --- Test IScannerDataAccess implementation ---
-
-    public sealed class TestScannerDataAccess : IScannerDataAccess
-    {
-        private string? _publicStartupPath;
-        private string? _currentUserStartupPath;
-        private string? _currentUserSid;
-        private string? _interactiveUserSid;
-        private string? _interactiveProfilePath;
-        private bool _interactiveProfilePathSet;
-        private HashSet<string> _adminMemberSids = new(StringComparer.OrdinalIgnoreCase);
-        private RegistrySecurity? _winlogonKeySecurity;
-        private readonly List<string> _winlogonExePaths = [];
-        private RegistrySecurity? _ifeoKeySecurity;
-        private List<ScheduledTaskInfo>? _taskSchedulerData;
-        private List<(string SubKeyPath, string DisplayPath)>? _wow6432RunKeyPaths;
-        private string _machineGpScriptsDir = "";
-        private List<string>? _machineGpScriptPaths;
-        private readonly List<AppInitDllEntry> _appInitDllEntries = [];
-        private readonly List<RegistryDllEntry> _printMonitorEntries = [];
-        private readonly List<(RegistrySecurity? Security, List<string> DllPaths)> _lsaPackageEntries = [];
-        private readonly List<RegistryDllEntry> _networkProviderEntries = [];
-        private string _sharedWrapperScriptsDir = "";
-        private readonly Dictionary<string, List<string>> _logonScriptPaths = new(StringComparer.OrdinalIgnoreCase);
-        private readonly List<string> _ifeoSubkeyNames = [];
-        private readonly Dictionary<string, string?> _ifeoDebuggerPaths = new(StringComparer.OrdinalIgnoreCase);
-
-        private readonly Dictionary<string, DirectorySecurity> _dirSecurities = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, FileSecurity> _fileSecurities = new(StringComparer.OrdinalIgnoreCase);
-
-        private readonly Dictionary<(string Hive, string Path), RegistrySecurity> _regSecurities =
-            new(CaseInsensitiveTupleComparer.Instance);
-
-        private readonly Dictionary<string, string[]> _folderFiles = new(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _dirSecurityThrows = new(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _fileSecurityThrows = new(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> _existingFiles = new(StringComparer.OrdinalIgnoreCase);
-
-        private readonly Dictionary<(string Hive, string Path), List<string>> _registryAutorunPaths =
-            new(CaseInsensitiveTupleComparer.Instance);
-
-        private readonly Dictionary<string, string> _shortcutTargets = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, RegistrySecurity> _serviceRegSecurities = new(StringComparer.OrdinalIgnoreCase);
-        private readonly List<(string Name, string ImagePath, string Expanded, string? Dll)> _services = [];
-        private List<(string Sid, string? ProfilePath)>? _allUserProfiles;
-        private readonly Dictionary<string, HashSet<string>?> _groupMembers = new(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, string> _gpScriptsDirs = new(StringComparer.OrdinalIgnoreCase);
-
-        // --- Public setters for test configuration ---
-
-        public void SetGroupMemberSids(string groupSid, HashSet<string>? memberSids) =>
-            _groupMembers[groupSid] = memberSids;
-
-        public void SetPublicStartupPath(string? path) => _publicStartupPath = path;
-        public void SetCurrentUserStartupPath(string? path) => _currentUserStartupPath = path;
-
-        /// <summary>Nulls out startup paths and interactive user SID to isolate non-startup tests.</summary>
-        public void ClearStartupPaths()
-        {
-            _publicStartupPath = null;
-            _currentUserStartupPath = null;
-            _interactiveUserSid = null;
-        }
-
-        public void SetCurrentUserSid(string? sid) => _currentUserSid = sid;
-        public void SetInteractiveUserSid(string? sid) => _interactiveUserSid = sid;
-        public void SetAdminMemberSids(HashSet<string> sids) => _adminMemberSids = sids;
-
-        public void SetInteractiveProfilePath(string? path)
-        {
-            _interactiveProfilePath = path;
-            _interactiveProfilePathSet = true;
-        }
-
-        public void SetTaskSchedulerData(List<ScheduledTaskInfo> data) => _taskSchedulerData = data;
-        public void SetWow6432RunKeyPaths(List<(string SubKeyPath, string DisplayPath)> paths) => _wow6432RunKeyPaths = paths;
-        public void SetMachineGpScriptsDir(string dir) => _machineGpScriptsDir = dir;
-        public void SetMachineGpScriptPaths(List<string> paths) => _machineGpScriptPaths = paths;
-
-        public void AddDirectorySecurity(string path, DirectorySecurity security) =>
-            _dirSecurities[path] = security;
-
-        public void AddFileSecurity(string path, FileSecurity security) =>
-            _fileSecurities[path] = security;
-
-        public void AddRegistryKeySecurity((string Hive, string Path) key, RegistrySecurity security) =>
-            _regSecurities[key] = security;
-
-        public void AddFolderFiles(string folderPath, params string[] files) =>
-            _folderFiles[folderPath] = files;
-
-        public void AddFileExists(string path) => _existingFiles.Add(path);
-
-        public void AddRegistryAutorunPaths((string Hive, string Path) key, List<string> paths) =>
-            _registryAutorunPaths[key] = paths;
-
-        public void AddShortcutTarget(string lnkPath, string targetPath) =>
-            _shortcutTargets[lnkPath] = targetPath;
-
-        public void AddServiceEntry(string name, string imagePath, string expanded, string? dll = null) =>
-            _services.Add((name, imagePath, expanded, dll));
-
-        public void AddServiceRegistryKeySecurity(string name, RegistrySecurity security) =>
-            _serviceRegSecurities[name] = security;
-
-        public void SetWinlogonRegistryKeySecurity(RegistrySecurity security) =>
-            _winlogonKeySecurity = security;
-
-        public void SetIfeoRegistryKeySecurity(RegistrySecurity security) =>
-            _ifeoKeySecurity = security;
-
-        public void AddAppInitDllEntry(RegistrySecurity? security, string displayPath, List<string> dllPaths) =>
-            _appInitDllEntries.Add(new AppInitDllEntry(security, displayPath, dllPaths));
-
-        public void AddPrintMonitorEntry(string displayPath, RegistrySecurity? security, List<string> dllPaths, string navTarget) =>
-            _printMonitorEntries.Add(new RegistryDllEntry(displayPath, security, dllPaths, navTarget));
-
-        public void AddLsaPackageEntry(RegistrySecurity? security, List<string> dllPaths) =>
-            _lsaPackageEntries.Add((security, dllPaths));
-
-        public void AddNetworkProviderEntry(string displayPath, RegistrySecurity? security, List<string> dllPaths, string navTarget) =>
-            _networkProviderEntries.Add(new RegistryDllEntry(displayPath, security, dllPaths, navTarget));
-
-        public void SetSharedWrapperScriptsDir(string dir) => _sharedWrapperScriptsDir = dir;
-
-        public void AddLogonScriptPaths(string userSid, List<string> paths) =>
-            _logonScriptPaths[userSid] = paths;
-
-        public void SetGpScriptsDir(string userSid, string dir) => _gpScriptsDirs[userSid] = dir;
-        public void AddIfeoSubkeyName(string name) => _ifeoSubkeyNames.Add(name);
-        public void SetIfeoDebuggerPath(string exeName, string? path) => _ifeoDebuggerPaths[exeName] = path;
-        public void AddFileSecurityThrows(string path) => _fileSecurityThrows.Add(path);
-        public void SetAllUserProfiles(List<(string Sid, string? ProfilePath)> profiles) => _allUserProfiles = profiles;
-
-        private int? _accountLockoutThreshold;
-        public void SetAccountLockoutThreshold(int? threshold) => _accountLockoutThreshold = threshold;
-
-        private bool? _adminAccountLockoutEnabled = true;
-        public void SetAdminAccountLockoutEnabled(bool? value) => _adminAccountLockoutEnabled = value;
-
-        private bool? _blankPasswordRestrictionEnabled = true;
-        public void SetBlankPasswordRestrictionEnabled(bool? value) => _blankPasswordRestrictionEnabled = value;
-
-        private List<(string ProfileName, bool Enabled)>? _firewallProfileStates;
-
-        public void SetFirewallProfileStates(List<(string ProfileName, bool Enabled)>? states) =>
-            _firewallProfileStates = states;
-
-        private (bool IsDisabled, bool IsStopped)? _firewallServiceState;
-
-        public void SetWindowsFirewallServiceState((bool IsDisabled, bool IsStopped)? state) =>
-            _firewallServiceState = state;
-
-        // --- IScannerDataAccess implementation ---
-
-        public string? GetPublicStartupPath() => _publicStartupPath;
-        public string? GetCurrentUserStartupPath() => _currentUserStartupPath;
-        public string? GetCurrentUserSid() => _currentUserSid;
-        public string? GetInteractiveUserSid() => _interactiveUserSid;
-        public HashSet<string> GetAdminMemberSids() => _adminMemberSids;
-
-        public string? GetInteractiveUserProfilePath(string sid)
-        {
-            if (_interactiveProfilePathSet)
-                return _interactiveProfilePath;
-            return null;
-        }
-
-        public List<(string Sid, string? ProfilePath)> GetAllLocalUserProfiles() => _allUserProfiles ?? [];
-
-        public HashSet<string>? TryGetGroupMemberSids(string groupSid) =>
-            _groupMembers.GetValueOrDefault(groupSid);
-
-        public Dictionary<string, HashSet<string>?> BulkLookupGroupMemberSids(IReadOnlyList<string> sids)
-        {
-            var result = new Dictionary<string, HashSet<string>?>(StringComparer.OrdinalIgnoreCase);
-            foreach (var sid in sids)
-                result[sid] = _groupMembers.GetValueOrDefault(sid);
-            return result;
-        }
-
-        public List<ScheduledTaskInfo> GetTaskSchedulerData() => _taskSchedulerData ?? [];
-
-        public List<string> GetLogonScriptPaths(string userSid) =>
-            _logonScriptPaths.TryGetValue(userSid, out var paths) ? paths : [];
-
-        public string GetGpScriptsDir(string userSid) =>
-            _gpScriptsDirs.GetValueOrDefault(userSid, "");
-
-        public string GetMachineGpScriptsDir() => _machineGpScriptsDir;
-        public List<string> GetMachineGpScriptPaths() => _machineGpScriptPaths ?? [];
-        public string GetSharedWrapperScriptsDir() => _sharedWrapperScriptsDir;
-
-        public List<(string SubKeyPath, string DisplayPath)> GetWow6432RunKeyPaths(string? userSid)
-        {
-            if (_wow6432RunKeyPaths != null)
-                return _wow6432RunKeyPaths;
-            // Default: same logic as DefaultScannerDataAccess
-            var paths = new List<(string, string)>
-            {
-                (@"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Run", @"HKLM\...\Wow6432Node\Run"),
-                (@"SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce", @"HKLM\...\Wow6432Node\RunOnce")
-            };
-            if (userSid != null)
-            {
-                paths.Add(($@"{userSid}\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Run", $@"HKU\{userSid}\...\Wow6432Node\Run"));
-                paths.Add(($@"{userSid}\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce", $@"HKU\{userSid}\...\Wow6432Node\RunOnce"));
-            }
-
-            return paths;
-        }
-
-        public List<string> GetIfeoSubkeyNames() => _ifeoSubkeyNames;
-
-        public string? GetIfeoDebuggerPath(string exeName) =>
-            _ifeoDebuggerPaths.GetValueOrDefault(exeName);
-
-        private readonly Dictionary<string, string?> _ifeoVerifierDlls = new(StringComparer.OrdinalIgnoreCase);
-        public void SetIfeoVerifierDlls(string exeName, string? dlls) => _ifeoVerifierDlls[exeName] = dlls;
-        public string? GetIfeoVerifierDlls(string exeName) => _ifeoVerifierDlls.GetValueOrDefault(exeName);
-
-        public List<AppInitDllEntry> GetAppInitDllEntries() =>
-            _appInitDllEntries.Count > 0 ? _appInitDllEntries : [];
-
-        public List<RegistryDllEntry> GetPrintMonitorEntries() =>
-            _printMonitorEntries.Count > 0 ? _printMonitorEntries : [];
-
-        public List<(RegistrySecurity? Security, List<string> DllPaths)> GetLsaPackageEntries() =>
-            _lsaPackageEntries.Count > 0 ? _lsaPackageEntries : [];
-
-        public List<RegistryDllEntry> GetNetworkProviderEntries() =>
-            _networkProviderEntries.Count > 0 ? _networkProviderEntries : [];
-
-        public string GetMachineGpUserScriptsDir() => "";
-
-        public List<ServiceInfo> GetAutoStartServices() =>
-            _services.Select(s => new ServiceInfo(s.Name, s.ImagePath, s.Expanded, s.Dll)).ToList();
-
-        public RegistrySecurity? GetServiceRegistryKeySecurity(string serviceName) =>
-            _serviceRegSecurities.GetValueOrDefault(serviceName);
-
-        public RegistrySecurity? GetWinlogonRegistryKeySecurity() => _winlogonKeySecurity;
-        public List<string> GetWinlogonExePaths() => _winlogonExePaths;
-        public RegistrySecurity? GetIfeoRegistryKeySecurity() => _ifeoKeySecurity;
-        private RegistrySecurity? _ifeoWow6432KeySecurity;
-        public void SetIfeoWow6432RegistryKeySecurity(RegistrySecurity security) => _ifeoWow6432KeySecurity = security;
-        public RegistrySecurity? GetIfeoWow6432RegistryKeySecurity() => _ifeoWow6432KeySecurity;
-
-        public bool DirectoryExists(string path) =>
-            _dirSecurities.ContainsKey(path) || _folderFiles.ContainsKey(path) || _dirSecurityThrows.Contains(path);
-
-        public bool FileExists(string path) => _existingFiles.Contains(path);
-
-        public DirectorySecurity GetDirectorySecurity(string path)
-        {
-            if (_dirSecurityThrows.Contains(path))
-                throw new UnauthorizedAccessException("Access denied (test)");
-            if (_dirSecurities.TryGetValue(path, out var sec))
-                return sec;
-            throw new DirectoryNotFoundException($"Not found: {path}");
-        }
-
-        public FileSecurity GetFileSecurity(string path)
-        {
-            if (_fileSecurityThrows.Contains(path))
-                throw new UnauthorizedAccessException("Access denied (test)");
-            if (_fileSecurities.TryGetValue(path, out var sec))
-                return sec;
-            throw new FileNotFoundException($"Not found: {path}");
-        }
-
-        public RegistrySecurity? GetRegistryKeySecurity(RegistryKey hive, string subKeyPath)
-        {
-            var hiveName = GetHiveName(hive);
-            var key = (hiveName, subKeyPath);
-            return _regSecurities.GetValueOrDefault(key);
-        }
-
-        public string[] GetFilesInFolder(string folderPath)
-        {
-            if (_folderFiles.TryGetValue(folderPath, out var files))
-                return files;
-            return [];
-        }
-
-        public IEnumerable<string> GetDriveRoots() => _driveRoots;
-
-        private readonly List<string> _driveRoots = [];
-        public void AddDriveRoot(string root) => _driveRoots.Add(root);
-
-        public List<string> GetRegistryAutorunPaths(RegistryKey hive, string subKeyPath)
-        {
-            var hiveName = GetHiveName(hive);
-            var key = (hiveName, subKeyPath);
-            if (_registryAutorunPaths.TryGetValue(key, out var paths))
-                return paths;
-            return [];
-        }
-
-        public string? ResolveShortcutTarget(string lnkPath)
-        {
-            return _shortcutTargets.GetValueOrDefault(lnkPath);
-        }
-
-        public string ResolveDisplayName(string sidString) => sidString;
-
-        public int? GetAccountLockoutThreshold() => _accountLockoutThreshold;
-        public bool? GetAdminAccountLockoutEnabled() => _adminAccountLockoutEnabled;
-        public bool? GetBlankPasswordRestrictionEnabled() => _blankPasswordRestrictionEnabled;
-        public List<(string ProfileName, bool Enabled)>? GetFirewallProfileStates() => _firewallProfileStates;
-        public (bool IsDisabled, bool IsStopped)? GetWindowsFirewallServiceState() => _firewallServiceState;
-
-        public void LogError(string message)
-        {
-            /* suppress in tests */
-        }
-
-        public void AddDirSecurityThrows(string path) => _dirSecurityThrows.Add(path);
-
-        private static string GetHiveName(RegistryKey hive)
-        {
-            if (hive == Registry.LocalMachine)
-                return "HKLM";
-            if (hive == Registry.CurrentUser)
-                return "HKCU";
-            if (hive == Registry.Users)
-                return "HKU";
-            return hive.Name;
-        }
     }
 }

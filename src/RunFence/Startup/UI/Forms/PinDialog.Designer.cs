@@ -25,8 +25,8 @@ partial class PinDialog
     {
         if (disposing)
         {
-            _pinTextBox?.Clear();
-            _confirmPinTextBox?.Clear();
+            _passwordSecure?.Dispose();
+            _confirmPasswordSecure?.Dispose();
             components?.Dispose();
         }
         base.Dispose(disposing);

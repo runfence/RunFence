@@ -1,6 +1,7 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
 using RunFence.Acl;
+using RunFence.Acl.Permissions;
 using RunFence.Core;
 
 namespace RunFence.PrefTrans;
@@ -8,27 +9,26 @@ namespace RunFence.PrefTrans;
 public class SettingsTransferService(
     ILoggingService log,
     IPrefTransLauncher launcher,
-    IPathGrantService pathGrantService)
+    IPathGrantService pathGrantService,
+    IInteractiveUserResolver interactiveUserResolver,
+    string baseDirectory)
     : ISettingsTransferService
 {
     /// <summary>
     /// Base directory used to locate <c>preftrans.exe</c>.
-    /// Defaults to <see cref="AppContext.BaseDirectory"/>; settable by tests.
     /// </summary>
-    internal string BaseDirectory { get; set; } = AppContext.BaseDirectory;
+    public string BaseDirectory { get; } = baseDirectory;
 
     /// <summary>
     /// Returns the shared ProgramData temp directory path used for preftrans log files and settings copies.
     /// The directory is not created by this method — callers call <see cref="Directory.CreateDirectory"/> as needed.
     /// </summary>
     public static string GetSharedTempDir() =>
-        Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            Constants.AppName, "temp");
+        Path.Combine(PathConstants.ProgramDataDir, "temp");
 
     public bool ValidatePrefTransExists(out string expectedPath)
     {
-        expectedPath = Path.Combine(BaseDirectory, Constants.PrefTransExeName);
+        expectedPath = Path.Combine(BaseDirectory, PathConstants.PrefTransExeName);
         return File.Exists(expectedPath);
     }
 
@@ -41,9 +41,15 @@ public class SettingsTransferService(
             return new SettingsTransferResult(false, notFoundMsg);
         }
 
-        return launcher.RunAndWait(prefTransPath, "store", outputFilePath,
-            SidResolutionHelper.GetInteractiveUserSid() ?? SidResolutionHelper.GetCurrentUserSid()!,
-            timeoutMs, pollCallback);
+        var interactiveSid = interactiveUserResolver.GetInteractiveUserSid();
+        if (interactiveSid == null)
+        {
+            var noSessionMsg = "Cannot export desktop settings: no interactive user session is active.";
+            log.Error(noSessionMsg);
+            return new SettingsTransferResult(false, noSessionMsg);
+        }
+
+        return launcher.RunAndWait(prefTransPath, "store", outputFilePath, interactiveSid, timeoutMs, pollCallback);
     }
 
     public SettingsTransferResult Import(string settingsFilePath, string accountSid,
@@ -75,7 +81,7 @@ public class SettingsTransferService(
         }
 
         if (string.Equals(accountSid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase)
-            || string.Equals(accountSid, SidResolutionHelper.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
+            || string.Equals(accountSid, interactiveUserResolver.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
         {
             // De-elevated launch: the process runs as the current or interactive user who already has
             // access to settingsFilePath. No temp copy is needed — pass the file directly.
@@ -91,10 +97,9 @@ public class SettingsTransferService(
         try
         {
             Directory.CreateDirectory(sharedTempDir);
-            File.Create(tempSettingsPath).Dispose();
-            RestrictFileAccess(tempSettingsPath, accountSid);
+            var fileSecurity = BuildRestrictedFileSecurity(accountSid);
+            using (var dst = FileSystemAclExtensions.Create(new FileInfo(tempSettingsPath), FileMode.CreateNew, FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, fileSecurity))
             using (var src = File.OpenRead(settingsFilePath))
-            using (var dst = new FileStream(tempSettingsPath, FileMode.Truncate, FileAccess.Write))
                 src.CopyTo(dst);
 
             var launcherResult = launcher.RunAndWait(prefTransPath, "load", tempSettingsPath, accountSid, timeoutMs, pollCallback);
@@ -118,42 +123,25 @@ public class SettingsTransferService(
         }
     }
 
-    private void RestrictFileAccess(string filePath, string accountSid)
+    private static FileSecurity BuildRestrictedFileSecurity(string accountSid)
     {
-        try
-        {
-            var fileInfo = new FileInfo(filePath);
-            var security = fileInfo.GetAccessControl();
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(true, false);
 
-            security.SetAccessRuleProtection(true, false);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        security.AddAccessRule(new FileSystemAccessRule(
+            admins, FileSystemRights.FullControl, AccessControlType.Allow));
 
-            var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var currentUser = WindowsIdentity.GetCurrent().User;
+        if (currentUser != null)
             security.AddAccessRule(new FileSystemAccessRule(
-                admins, FileSystemRights.FullControl, AccessControlType.Allow));
+                currentUser, FileSystemRights.FullControl, AccessControlType.Allow));
 
-            var currentUser = WindowsIdentity.GetCurrent().User;
-            if (currentUser != null)
-                security.AddAccessRule(new FileSystemAccessRule(
-                    currentUser, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(accountSid),
+            FileSystemRights.Read | FileSystemRights.Synchronize,
+            AccessControlType.Allow));
 
-            security.AddAccessRule(new FileSystemAccessRule(
-                new SecurityIdentifier(accountSid),
-                FileSystemRights.Read | FileSystemRights.Synchronize,
-                AccessControlType.Allow));
-
-            fileInfo.SetAccessControl(security);
-        }
-        catch (Exception ex)
-        {
-            try
-            {
-                File.Delete(filePath);
-            }
-            catch
-            {
-            }
-
-            throw new InvalidOperationException($"Failed to secure settings file: {ex.Message}", ex);
-        }
+        return security;
     }
 }

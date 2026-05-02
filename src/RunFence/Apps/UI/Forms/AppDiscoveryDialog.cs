@@ -1,23 +1,23 @@
 using RunFence.Apps.Shortcuts;
 using RunFence.Core.Models;
-using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI.Forms;
 
 public partial class AppDiscoveryDialog : Form
 {
     private readonly List<DiscoveredApp> _allApps;
+    private readonly IShortcutIconHelper _iconHelper;
     private readonly Dictionary<string, Image?> _iconCache = new(StringComparer.OrdinalIgnoreCase);
 
     public string? SelectedPath { get; private set; }
     public string? SelectedName { get; private set; }
 
-    public AppDiscoveryDialog(List<DiscoveredApp> apps)
+    public AppDiscoveryDialog(List<DiscoveredApp> apps, IShortcutIconHelper iconHelper)
     {
         _allApps = apps;
+        _iconHelper = iconHelper;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
-        DataPanel.ConfigureReadOnlyGrid(_grid);
         _searchTextBox.TextChanged += (_, _) => ApplyFilter();
         Shown += (_, _) => _searchTextBox.Focus();
         ApplyFilter();
@@ -36,7 +36,7 @@ public partial class AppDiscoveryDialog : Form
         {
             if (!_iconCache.TryGetValue(app.TargetPath, out var icon))
             {
-                icon = ShortcutIconHelper.ExtractIcon(app.TargetPath);
+                icon = _iconHelper.ExtractIcon(app.TargetPath);
                 _iconCache[app.TargetPath] = icon;
             }
 

@@ -24,7 +24,20 @@ public interface IPathGrantService :
     IGrantMutatorService,
     ITraverseService,
     IGrantInspectionService,
-    IGrantSyncService;
+    IGrantSyncService
+{
+    /// <summary>
+    /// Validates a prospective grant against the DB: throws <see cref="InvalidOperationException"/>
+    /// if a same-mode duplicate or an opposite-mode entry exists. No side effects.
+    /// </summary>
+    void ValidateGrant(string sid, string path, bool isDeny);
+
+    /// <summary>
+    /// Changes the owner of <paramref name="path"/> (and contents when
+    /// <paramref name="recursive"/>) to BUILTIN\Administrators.
+    /// </summary>
+    void ResetOwner(string path, bool recursive);
+}
 
 /// <summary>Current ACE/ownership state for a path+SID combination.</summary>
 public record GrantRightsState(

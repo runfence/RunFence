@@ -8,7 +8,7 @@ namespace RunFence.Account.UI;
 /// </summary>
 public class AccountGridSorter(
     IWindowsAccountService windowsAccountService,
-    Func<AppDatabase, string?, string> getAccountAppsText)
+    IAccountAppsTextProvider appsTextProvider)
 {
     private DataGridView _grid = null!;
 
@@ -33,7 +33,7 @@ public class AccountGridSorter(
         var sidIdx = SidColumnIndex;
         Func<CredentialEntry, string> key = data.SortColumnIndex switch
         {
-            var i when i == appsIdx && i >= 0 => c => getAccountAppsText(data.Database, c.Sid),
+            var i when i == appsIdx && i >= 0 => c => appsTextProvider.GetAppsText(data.Database, c.Sid),
             var i when i == profileIdx && i >= 0 => c => windowsAccountService.GetProfilePath(c.Sid) ?? "",
             var i when i == sidIdx && i >= 0 => c => c.Sid,
             _ => c => data.DisplayNameCache.GetValueOrDefault(c.Id, "")
@@ -51,7 +51,7 @@ public class AccountGridSorter(
         var sidIdx = SidColumnIndex;
         Func<LocalUserAccount, string> key = data.SortColumnIndex switch
         {
-            var i when i == appsIdx && i >= 0 => u => getAccountAppsText(data.Database, u.Sid),
+            var i when i == appsIdx && i >= 0 => u => appsTextProvider.GetAppsText(data.Database, u.Sid),
             var i when i == profileIdx && i >= 0 => u => windowsAccountService.GetProfilePath(u.Sid) ?? "",
             var i when i == sidIdx && i >= 0 => u => u.Sid,
             _ => u => u.Username
@@ -69,7 +69,7 @@ public class AccountGridSorter(
         var sidIdx = SidColumnIndex;
         Func<string, string> key = data.SortColumnIndex switch
         {
-            var i when i == appsIdx && i >= 0 => s => getAccountAppsText(data.Database, s),
+            var i when i == appsIdx && i >= 0 => s => appsTextProvider.GetAppsText(data.Database, s),
             var i when i == profileIdx && i >= 0 => _ => "",
             var i when i == sidIdx && i >= 0 => s => s,
             _ => s => data.Database.SidNames.GetValueOrDefault(s, s)

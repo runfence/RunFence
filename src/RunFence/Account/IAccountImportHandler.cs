@@ -11,9 +11,6 @@ public interface IAccountImportHandler
         List<ImportAccount> accounts,
         CredentialStore credStore,
         ProtectedBuffer pinKey,
-        Func<string?> selectFile,
-        Action<string> appendLog,
-        Action enableOk,
-        Action<string> onStatusUpdate,
+        IImportProgressSink sink,
         AppDatabase? db = null);
 }

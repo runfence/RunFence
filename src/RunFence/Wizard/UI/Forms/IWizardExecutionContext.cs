@@ -60,9 +60,6 @@ public interface IWizardExecutionContext
     /// <summary>Invalidates the step indicator panel to trigger repaint.</summary>
     void InvalidateStepIndicator();
 
-    /// <summary>Closes the wizard dialog.</summary>
-    void Close();
-
     /// <summary>Enqueues an action to run on the UI thread after the current call stack unwinds.</summary>
     void BeginInvokeOnUI(Action action);
 

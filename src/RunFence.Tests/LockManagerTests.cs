@@ -14,6 +14,7 @@ public class LockManagerTests : IDisposable
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<ISecureDesktopRunner> _secureDesktop = new();
     private readonly Mock<IWindowsHelloService> _windowsHello = new();
+    private readonly Mock<IUnlockProcessLauncher> _unlockProcessLauncher = new();
 
     private readonly AppDatabase _database = new();
     private readonly ProtectedBuffer _pinKey;
@@ -34,11 +35,14 @@ public class LockManagerTests : IDisposable
 
     public void Dispose() => _pinKey.Dispose();
 
+    private readonly Mock<IAutoLockTimerService> _autoLockTimer = new();
+
     private LockManager CreateManager() =>
         new(_session, _pinService.Object, _log.Object,
             secureDesktop: _secureDesktop.Object,
             windowsHello: _windowsHello.Object,
-            autoLockTimerService: new Mock<IAutoLockTimerService>().Object);
+            autoLockTimerService: _autoLockTimer.Object,
+            unlockProcessLauncher: _unlockProcessLauncher.Object);
 
     [Fact]
     public async Task TryShowWindow_HelloVerified_Unlocks()
@@ -173,6 +177,101 @@ public class LockManagerTests : IDisposable
         _windowsHello.Verify(h => h.VerifyAsync(It.IsAny<string>()), Times.Never);
     }
 
+    // ── StartAutoLockTimer ────────────────────────────────────────────────────
+
+    [Fact]
+    public void StartAutoLockTimer_FeatureDisabled_DoesNothing()
+    {
+        // Arrange
+        _database.Settings.AutoLockInBackground = false;
+        _database.Settings.AutoLockTimeoutMinutes = 5;
+        var manager = CreateManager();
+
+        // Act
+        manager.StartAutoLockTimer();
+
+        // Assert
+        _autoLockTimer.Verify(t => t.Start(It.IsAny<int>(), It.IsAny<Action>()), Times.Never);
+        Assert.False(manager.IsLocked);
+    }
+
+    [Fact]
+    public void StartAutoLockTimer_ImmediateOnZero_True_LocksImmediately()
+    {
+        // Arrange
+        _database.Settings.AutoLockInBackground = true;
+        _database.Settings.AutoLockTimeoutMinutes = 0;
+        var manager = CreateManager();
+        bool postLockCalled = false;
+
+        // Act
+        manager.StartAutoLockTimer(immediateOnZero: true, postLockAction: () => postLockCalled = true);
+
+        // Assert
+        Assert.True(manager.IsLocked);
+        Assert.True(postLockCalled);
+        _autoLockTimer.Verify(t => t.Start(It.IsAny<int>(), It.IsAny<Action>()), Times.Never);
+    }
+
+    [Fact]
+    public void StartAutoLockTimer_ImmediateOnZero_False_UsesOneMinute()
+    {
+        // Arrange
+        _database.Settings.AutoLockInBackground = true;
+        _database.Settings.AutoLockTimeoutMinutes = 0;
+        var manager = CreateManager();
+
+        // Act
+        manager.StartAutoLockTimer(immediateOnZero: false);
+
+        // Assert
+        Assert.False(manager.IsLocked);
+        _autoLockTimer.Verify(t => t.Start(60, It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void StartAutoLockTimer_NonZeroTimeout_StartsTimer()
+    {
+        // Arrange
+        _database.Settings.AutoLockInBackground = true;
+        _database.Settings.AutoLockTimeoutMinutes = 3;
+        var manager = CreateManager();
+
+        // Act
+        manager.StartAutoLockTimer();
+
+        // Assert
+        Assert.False(manager.IsLocked);
+        _autoLockTimer.Verify(t => t.Start(180, It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void StartAutoLockTimer_PostLockAction_InvokedAfterLock()
+    {
+        // Arrange
+        _database.Settings.AutoLockInBackground = true;
+        _database.Settings.AutoLockTimeoutMinutes = 1;
+        var manager = CreateManager();
+        Action? capturedCallback = null;
+        _autoLockTimer.Setup(t => t.Start(It.IsAny<int>(), It.IsAny<Action>()))
+            .Callback<int, Action>((_, cb) => capturedCallback = cb);
+        bool postLockCalled = false;
+        bool wasLockedWhenPostLockCalled = false;
+
+        // Act
+        manager.StartAutoLockTimer(postLockAction: () =>
+        {
+            postLockCalled = true;
+            wasLockedWhenPostLockCalled = manager.IsLocked;
+        });
+        capturedCallback!.Invoke();
+
+        // Assert
+        Assert.True(postLockCalled);
+        Assert.True(wasLockedWhenPostLockCalled);
+        Assert.True(manager.IsLocked);
+    }
+
     // ── UnlockMode.AdminAndPin ────────────────────────────────────────────────
 
     [Fact]
@@ -210,4 +309,207 @@ public class LockManagerTests : IDisposable
         _windowsHello.Verify(h => h.VerifyAsync(It.IsAny<string>()), Times.Never);
         _secureDesktop.Verify(s => s.Run(It.IsAny<Action>()), Times.Never);
     }
+
+    [Fact]
+    public async Task TryUnlock_AdminMode_RunAsExternalUnlock_DoesNotShowWindow()
+    {
+        _database.Settings.UnlockMode = UnlockMode.Admin;
+        var manager = CreateManager();
+        manager.LockWindow();
+        var showWindowCount = 0;
+        var windowlessUnlockCount = 0;
+        manager.ShowWindowUnlockedRequested += () => showWindowCount++;
+        manager.WindowlessUnlockCompleted += () => windowlessUnlockCount++;
+
+        var unlockTask = manager.TryUnlockForOperationAsync(isAdmin: false);
+        Assert.True(manager.IsUnlockPolling);
+
+        Assert.True(manager.CompletePendingOperationUnlock());
+        var result = await unlockTask;
+
+        Assert.True(result);
+        Assert.False(manager.IsLocked);
+        Assert.Equal(0, showWindowCount);
+        Assert.Equal(1, windowlessUnlockCount);
+        _unlockProcessLauncher.Verify(l => l.LaunchUnlockProcess(true), Times.Once);
+    }
+
+    [Fact]
+    public async Task TryUnlock_AdminMode_NormalExternalUnlock_LaunchesWithoutWaiting()
+    {
+        _database.Settings.UnlockMode = UnlockMode.Admin;
+        var manager = CreateManager();
+        manager.LockWindow();
+
+        var result = await manager.TryUnlockAsync(isAdmin: false);
+
+        Assert.False(result);
+        Assert.True(manager.IsLocked);
+        Assert.False(manager.IsUnlockPolling);
+        _unlockProcessLauncher.Verify(l => l.LaunchUnlockProcess(false), Times.Once);
+    }
+
+    [Fact]
+    public async Task Unlock_NormalExternalUnlockCompletion_CancelsPendingRunAsUnlockAndShowsWindow()
+    {
+        _database.Settings.UnlockMode = UnlockMode.Admin;
+        var manager = CreateManager();
+        manager.LockWindow();
+        var showWindowCount = 0;
+        manager.ShowWindowUnlockedRequested += () => showWindowCount++;
+
+        var runAsUnlockTask = manager.TryUnlockForOperationAsync(isAdmin: false);
+        Assert.True(manager.IsUnlockPolling);
+        manager.Unlock();
+        var runAsResult = await runAsUnlockTask;
+
+        Assert.False(runAsResult);
+        Assert.False(manager.IsLocked);
+        Assert.False(manager.IsUnlockPolling);
+        Assert.Equal(1, showWindowCount);
+        _unlockProcessLauncher.Verify(l => l.LaunchUnlockProcess(true), Times.Once);
+    }
+
+    [Fact]
+    public async Task TryUnlock_AdminMode_AdminRunAsUnlock_DoesNotShowWindow()
+    {
+        _database.Settings.UnlockMode = UnlockMode.Admin;
+        var manager = CreateManager();
+        manager.LockWindow();
+        var showWindowCount = 0;
+        var windowlessUnlockCount = 0;
+        manager.ShowWindowUnlockedRequested += () => showWindowCount++;
+        manager.WindowlessUnlockCompleted += () => windowlessUnlockCount++;
+
+        var result = await manager.TryUnlockForOperationAsync(isAdmin: true);
+
+        Assert.True(result);
+        Assert.False(manager.IsLocked);
+        Assert.Equal(0, showWindowCount);
+        Assert.Equal(1, windowlessUnlockCount);
+    }
+
+    [Fact]
+    public async Task TryUnlock_AdminAndPinMode_AdminRunAsUnlock_RequiresPinAndDoesNotShowWindow()
+    {
+        _database.Settings.UnlockMode = UnlockMode.AdminAndPin;
+        _secureDesktop.Setup(s => s.Run(It.IsAny<Action>()));
+        var manager = CreateManager();
+        manager.LockWindow();
+        var showWindowCount = 0;
+        manager.ShowWindowUnlockedRequested += () => showWindowCount++;
+
+        var result = await manager.TryUnlockForOperationAsync(isAdmin: true);
+
+        Assert.False(result);
+        Assert.True(manager.IsLocked);
+        Assert.Equal(0, showWindowCount);
+        _secureDesktop.Verify(s => s.Run(It.IsAny<Action>()), Times.Once);
+        _windowsHello.Verify(h => h.VerifyAsync(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task TryUnlock_PinMode_AdminRunAsUnlock_RequiresPinAndDoesNotShowWindow()
+    {
+        _database.Settings.UnlockMode = UnlockMode.Pin;
+        _secureDesktop.Setup(s => s.Run(It.IsAny<Action>()));
+        var manager = CreateManager();
+        manager.LockWindow();
+        var showWindowCount = 0;
+        manager.ShowWindowUnlockedRequested += () => showWindowCount++;
+
+        var result = await manager.TryUnlockForOperationAsync(isAdmin: true);
+
+        Assert.False(result);
+        Assert.True(manager.IsLocked);
+        Assert.Equal(0, showWindowCount);
+        _secureDesktop.Verify(s => s.Run(It.IsAny<Action>()), Times.Once);
+        _windowsHello.Verify(h => h.VerifyAsync(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task TryUnlock_WindowsHelloRunAsUnlock_DoesNotShowWindow()
+    {
+        _database.Settings.UnlockMode = UnlockMode.WindowsHello;
+        _windowsHello.Setup(h => h.VerifyAsync(It.IsAny<string>()))
+            .ReturnsAsync(HelloVerificationResult.Verified);
+        var manager = CreateManager();
+        manager.LockWindow();
+        var showWindowCount = 0;
+        manager.ShowWindowUnlockedRequested += () => showWindowCount++;
+
+        var result = await manager.TryUnlockForOperationAsync(isAdmin: false);
+
+        Assert.True(result);
+        Assert.False(manager.IsLocked);
+        Assert.Equal(0, showWindowCount);
+    }
+
+    [Fact]
+    public async Task TryUnlock_WindowsHelloMode_ConcurrentCredentialUnlockReturnsFalse()
+    {
+        _database.Settings.UnlockMode = UnlockMode.WindowsHello;
+        var verificationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseVerification = new TaskCompletionSource<HelloVerificationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _windowsHello.Setup(h => h.VerifyAsync(It.IsAny<string>()))
+            .Returns(() =>
+            {
+                verificationStarted.TrySetResult();
+                return releaseVerification.Task;
+            });
+        var manager = CreateManager();
+        manager.LockWindow();
+
+        var firstUnlockTask = manager.TryUnlockAsync(isAdmin: false);
+        await verificationStarted.Task;
+        var secondResult = await manager.TryUnlockAsync(isAdmin: false);
+        releaseVerification.SetResult(HelloVerificationResult.Verified);
+        var firstResult = await firstUnlockTask;
+
+        Assert.False(secondResult);
+        Assert.True(firstResult);
+        Assert.False(manager.IsLocked);
+        _windowsHello.Verify(h => h.VerifyAsync(It.IsAny<string>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task TryUnlock_AdminMode_SecondRunAsUnlockCancelsPreviousWait()
+    {
+        _database.Settings.UnlockMode = UnlockMode.Admin;
+        var manager = CreateManager();
+        manager.LockWindow();
+
+        var firstUnlockTask = manager.TryUnlockForOperationAsync(isAdmin: false);
+        Assert.True(manager.IsUnlockPolling);
+
+        var secondUnlockTask = manager.TryUnlockForOperationAsync(isAdmin: false);
+        Assert.False(await firstUnlockTask);
+        Assert.True(manager.IsUnlockPolling);
+
+        Assert.True(manager.CompletePendingOperationUnlock());
+        Assert.True(await secondUnlockTask);
+        Assert.False(manager.IsUnlockPolling);
+        _unlockProcessLauncher.Verify(l => l.LaunchUnlockProcess(true), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task TryShowWindow_AdminMode_CancelsPendingRunAsUnlock()
+    {
+        _database.Settings.UnlockMode = UnlockMode.Admin;
+        var manager = CreateManager();
+        manager.LockWindow();
+
+        var runAsUnlockTask = manager.TryUnlockForOperationAsync(isAdmin: false);
+        Assert.True(manager.IsUnlockPolling);
+
+        await manager.TryShowWindowAsync();
+        var runAsResult = await runAsUnlockTask;
+
+        Assert.False(runAsResult);
+        Assert.True(manager.IsLocked);
+        Assert.False(manager.IsUnlockPolling);
+        _unlockProcessLauncher.Verify(l => l.LaunchUnlockProcess(true), Times.Once);
+        _unlockProcessLauncher.Verify(l => l.LaunchUnlockProcess(false), Times.Once);
+    }
+
 }

@@ -11,6 +11,7 @@ public class FirewallWfpRuleApplier(
     IWfpLocalhostBlocker wfpBlocker,
     IWfpIcmpBlocker wfpIcmpBlocker,
     ILoggingService log)
+    : IFirewallWfpRuleApplier
 {
     public void ApplyLocalhostRules(string sid, FirewallAccountSettings settings)
     {

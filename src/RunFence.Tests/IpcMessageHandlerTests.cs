@@ -18,6 +18,9 @@ public class IpcMessageHandlerTests
 {
     private readonly Mock<IAppStateProvider> _appState;
     private readonly Mock<IAppLockControl> _appLock;
+    private readonly Mock<IElevatedUnlockRequestHandler> _elevatedUnlockRequestHandler;
+    private readonly Mock<IOperationUnlockRequestHandler> _operationUnlockRequestHandler;
+    private readonly Mock<IShowWindowRequestHandler> _showWindowRequestHandler;
     private readonly Mock<IUiThreadInvoker> _uiThreadInvoker;
     private readonly Mock<IAppEntryLauncher> _orchestrator;
     private readonly Mock<ILoggingService> _log;
@@ -31,12 +34,18 @@ public class IpcMessageHandlerTests
         _database = new AppDatabase();
         _appState = new Mock<IAppStateProvider>();
         _appLock = new Mock<IAppLockControl>();
+        _elevatedUnlockRequestHandler = new Mock<IElevatedUnlockRequestHandler>();
+        _operationUnlockRequestHandler = new Mock<IOperationUnlockRequestHandler>();
+        _showWindowRequestHandler = new Mock<IShowWindowRequestHandler>();
         _uiThreadInvoker = new Mock<IUiThreadInvoker>();
 
         _appState.Setup(c => c.Database).Returns(_database);
         _appState.Setup(c => c.IsShuttingDown).Returns(false);
         _uiThreadInvoker.Setup(c => c.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
         _uiThreadInvoker.Setup(c => c.BeginInvoke(It.IsAny<Action>())).Callback<Action>(a => a());
+        _elevatedUnlockRequestHandler.Setup(c => c.HandleElevatedUnlockRequestAsync()).ReturnsAsync(true);
+        _operationUnlockRequestHandler.Setup(c => c.HandleOperationUnlockRequestAsync()).ReturnsAsync(true);
+        _showWindowRequestHandler.Setup(c => c.RequestShowWindow());
 
         _orchestrator = new Mock<IAppEntryLauncher>();
         _log = new Mock<ILoggingService>();
@@ -48,23 +57,29 @@ public class IpcMessageHandlerTests
     private IpcMessageHandler CreateHandler(
         IIdleMonitorService? idleMonitor = null,
         IConfigManagementContext? configContext = null,
-        IRunAsFlowHandler? runAsFlowHandler = null)
+        IRunAsFlowHandler? runAsFlowHandler = null,
+        IpcAssociationHandler? associationHandler = null)
     {
         var resolvedIdleMonitor = idleMonitor ?? _idleMonitor.Object;
         var sidResolver = new Mock<ISidResolver>();
         var authorizer = new IpcCallerAuthorizer(_log.Object, sidResolver.Object);
         var ipcUiInvoker = new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object);
+        var configHandler = new IpcConfigHandler(
+            _appState.Object, _appLock.Object, ipcUiInvoker,
+            resolvedIdleMonitor, _log.Object, configContext);
+        var lifecycleHandler = new IpcLifecycleHandler(
+            _appState.Object, _appLock.Object, ipcUiInvoker,
+            _elevatedUnlockRequestHandler.Object, _operationUnlockRequestHandler.Object,
+            _showWindowRequestHandler.Object, _log.Object);
         var launchHandler = new IpcLaunchHandler(
             _appState.Object, _appLock.Object, ipcUiInvoker,
             _orchestrator.Object, authorizer, _sidNameCache.Object, _log.Object,
-            resolvedIdleMonitor, runAsFlowHandler);
+            resolvedIdleMonitor, null!, runAsFlowHandler);
         var openFolderHandler = new IpcOpenFolderHandler(
             _appLock.Object, ipcUiInvoker,
             null, _log.Object, new ShellFolderOpener());
         return new IpcMessageHandler(
-            _appState.Object, _appLock.Object, ipcUiInvoker,
-            _log.Object, launchHandler, openFolderHandler,
-            resolvedIdleMonitor, configContext, null);
+            _log.Object, configHandler, lifecycleHandler, launchHandler, openFolderHandler, associationHandler);
     }
 
     private IpcMessageHandler CreateHandlerWithConfig(Mock<IConfigManagementContext> configContext)
@@ -254,14 +269,15 @@ public class IpcMessageHandlerTests
     }
 
     [Fact]
-    public void Unlock_Admin_ReturnsSuccess()
+    public void Unlock_DifferentAdminCaller_UsesNormalShowFlow_AndReturnsSuccess()
     {
         var message = new IpcMessage { Command = IpcCommands.Unlock };
 
         var result = _handler.HandleIpcMessage(message, new IpcCallerContext(@"DOMAIN\Admin", null, true, true));
 
         Assert.True(result.Success);
-        _appLock.Verify(c => c.Unlock(), Times.Once);
+        _showWindowRequestHandler.Verify(c => c.RequestShowWindow(), Times.Once);
+        _elevatedUnlockRequestHandler.Verify(c => c.HandleElevatedUnlockRequestAsync(), Times.Never);
     }
 
     [Fact]
@@ -281,16 +297,111 @@ public class IpcMessageHandlerTests
     [Fact]
     public void Unlock_Admin_StillLockedAfterUnlock_ReturnsCancelled()
     {
-        // Simulate Unlock() being called but IsLocked remaining true (e.g. PIN cancelled)
-        _appLock.Setup(c => c.IsLocked).Returns(true);
+        _elevatedUnlockRequestHandler.Setup(c => c.HandleElevatedUnlockRequestAsync()).ReturnsAsync(false);
 
         var message = new IpcMessage { Command = IpcCommands.Unlock };
 
-        var result = _handler.HandleIpcMessage(message, new IpcCallerContext(@"DOMAIN\Admin", null, true, true));
+        var result = _handler.HandleIpcMessage(
+            message,
+            new IpcCallerContext(@"DOMAIN\Admin", SidResolutionHelper.GetCurrentUserSid(), true, true));
 
         Assert.False(result.Success);
         Assert.Equal("Unlock cancelled.", result.ErrorMessage);
-        _appLock.Verify(c => c.Unlock(), Times.Once);
+        _elevatedUnlockRequestHandler.Verify(c => c.HandleElevatedUnlockRequestAsync(), Times.Once);
+    }
+
+    [Fact]
+    public void Unlock_Admin_WaitsForAsyncUnlockCompletion()
+    {
+        using var started = new ManualResetEventSlim();
+        using var completed = new ManualResetEventSlim();
+        var unlockCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _elevatedUnlockRequestHandler
+            .Setup(c => c.HandleElevatedUnlockRequestAsync())
+            .Returns(() =>
+            {
+                started.Set();
+                return unlockCompletion.Task;
+            });
+
+        IpcResponse? result = null;
+        var thread = new Thread(() =>
+        {
+            result = _handler.HandleIpcMessage(
+                new IpcMessage { Command = IpcCommands.Unlock },
+                new IpcCallerContext(@"DOMAIN\Admin", SidResolutionHelper.GetCurrentUserSid(), true, true));
+            completed.Set();
+        });
+
+        thread.Start();
+
+        Assert.True(started.Wait(1000));
+        Assert.False(completed.Wait(100));
+
+        unlockCompletion.SetResult(true);
+
+        Assert.True(completed.Wait(1000));
+        Assert.True(thread.Join(1000));
+        Assert.NotNull(result);
+        Assert.True(result!.Success);
+    }
+
+    [Fact]
+    public void Unlock_CurrentAdminCaller_UsesDirectUnlockPath()
+    {
+        var message = new IpcMessage { Command = IpcCommands.Unlock };
+
+        var result = _handler.HandleIpcMessage(
+            message,
+            new IpcCallerContext(@"DOMAIN\Admin", SidResolutionHelper.GetCurrentUserSid(), true, true));
+
+        Assert.True(result.Success);
+        _elevatedUnlockRequestHandler.Verify(c => c.HandleElevatedUnlockRequestAsync(), Times.Once);
+        _showWindowRequestHandler.Verify(c => c.RequestShowWindow(), Times.Never);
+    }
+
+    [Fact]
+    public void UnlockOperation_CurrentAdminCaller_CompletesPendingOperationUnlock()
+    {
+        var message = new IpcMessage { Command = IpcCommands.UnlockOperation };
+
+        var result = _handler.HandleIpcMessage(
+            message,
+            new IpcCallerContext(@"DOMAIN\Admin", SidResolutionHelper.GetCurrentUserSid(), true, true));
+
+        Assert.True(result.Success);
+        _operationUnlockRequestHandler.Verify(c => c.HandleOperationUnlockRequestAsync(), Times.Once);
+        _elevatedUnlockRequestHandler.Verify(c => c.HandleElevatedUnlockRequestAsync(), Times.Never);
+        _showWindowRequestHandler.Verify(c => c.RequestShowWindow(), Times.Never);
+    }
+
+    [Fact]
+    public void UnlockOperation_DifferentAdminCaller_RequestsOperationUnlockFlow()
+    {
+        var message = new IpcMessage { Command = IpcCommands.UnlockOperation };
+
+        var result = _handler.HandleIpcMessage(
+            message,
+            new IpcCallerContext(@"DOMAIN\Admin", null, true, true));
+
+        Assert.True(result.Success);
+        _operationUnlockRequestHandler.Verify(c => c.HandleOperationUnlockRequestAsync(), Times.Never);
+        _operationUnlockRequestHandler.Verify(c => c.RequestOperationUnlock(), Times.Once);
+        _showWindowRequestHandler.Verify(c => c.RequestShowWindow(), Times.Never);
+    }
+
+    [Fact]
+    public void UnlockOperation_NoPendingOperation_ReturnsError()
+    {
+        _operationUnlockRequestHandler.Setup(c => c.HandleOperationUnlockRequestAsync()).ReturnsAsync(false);
+        var message = new IpcMessage { Command = IpcCommands.UnlockOperation };
+
+        var result = _handler.HandleIpcMessage(
+            message,
+            new IpcCallerContext(@"DOMAIN\Admin", SidResolutionHelper.GetCurrentUserSid(), true, true));
+
+        Assert.False(result.Success);
+        Assert.Equal("No pending operation unlock.", result.ErrorMessage);
     }
 
     [Fact]
@@ -597,9 +708,15 @@ public class IpcMessageHandlerTests
     private IpcAssociationHandler CreateAssociationHandler(
         Mock<IIpcCallerAuthorizer> authorizer,
         Mock<IHandlerMappingService> handlerMappingService)
-        => new(_appState.Object, _appLock.Object, new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object),
-            _orchestrator.Object, authorizer.Object, _sidNameCache.Object, handlerMappingService.Object,
+    {
+        var associationLaunchResolver = new AssociationLaunchResolver(handlerMappingService.Object, authorizer.Object);
+        return new IpcAssociationHandler(
+            _appState.Object,
+            _appLock.Object,
+            new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object),
+            _orchestrator.Object, associationLaunchResolver, _sidNameCache.Object,
             _log.Object, _idleMonitor.Object);
+    }
 
     [Fact]
     public void HandleAssociation_NullAssociationKey_ReturnsError()
@@ -796,8 +913,7 @@ public class IpcMessageHandlerTests
 
         // The launcher must be called with associationArgsTemplate = "" (not null)
         // because null template coalesces to "" by design.
-        _orchestrator.Verify(o => o.Launch(app, "https://example.com", null,
-            It.IsAny<Func<string, string, bool>?>(), ""), Times.Once);
+        _orchestrator.Verify(o => o.Launch(app, "https://example.com", null, It.IsAny<Func<string, string, bool>?>(), ""), Times.Once);
     }
 
     [Fact]
@@ -818,9 +934,14 @@ public class IpcMessageHandlerTests
         var idleMonitor = new Mock<IIdleMonitorService>();
 
         var handler = new IpcAssociationHandler(
-            _appState.Object, _appLock.Object, new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object),
-            _orchestrator.Object, authorizer.Object, _sidNameCache.Object, handlerMappingService.Object,
-            _log.Object, idleMonitor.Object);
+            _appState.Object,
+            _appLock.Object,
+            new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object),
+            _orchestrator.Object,
+            new AssociationLaunchResolver(handlerMappingService.Object, authorizer.Object),
+            _sidNameCache.Object,
+            _log.Object,
+            idleMonitor.Object);
 
         var msg = new IpcMessage { Command = IpcCommands.HandleAssociation, Association = "https" };
         handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
@@ -915,7 +1036,411 @@ public class IpcMessageHandlerTests
         var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
 
         Assert.False(result.Success);
-        Assert.Equal("Launch failed.", result.ErrorMessage);
+        Assert.Equal("Launch failed: InvalidOperationException", result.ErrorMessage);
         _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
+    }
+
+    // --- Path prefix filtering tests ---
+
+    public static IEnumerable<object?[]> PrefixMatchCases =>
+    [
+        // No prefixes anywhere → success
+        [null, null, false, "any.pdf", IpcErrorCode.None],
+        // App-level prefix matches (Add mode)
+        [new[] { @"C:\Work\" }, null, false, @"C:\Work\report.pdf", IpcErrorCode.None],
+        // App-level prefix mismatch → PathPrefixMismatch
+        [new[] { @"C:\Work\" }, null, false, @"C:\Other\doc.pdf", IpcErrorCode.PathPrefixMismatch],
+        // Association adds prefix — union match
+        [new[] { @"C:\Work\" }, new[] { @"C:\Docs\" }, false, @"C:\Docs\file.pdf", IpcErrorCode.None],
+        // Replace mode ignores app prefixes
+        [new[] { @"C:\Work\" }, new[] { @"C:\Other\" }, true, @"C:\Other\doc.pdf", IpcErrorCode.None],
+        // Replace mode with empty entry = catch-all
+        [new[] { @"C:\Work\" }, Array.Empty<string>(), true, @"C:\Other\doc.pdf", IpcErrorCode.None],
+        // Case-insensitive
+        [new[] { @"C:\WORK\" }, null, false, @"C:\work\doc.pdf", IpcErrorCode.None],
+        // URL prefix (per-association level)
+        [null, new[] { "https://internal.company.com/" }, false, "https://internal.company.com/page", IpcErrorCode.None],
+        // Null arguments + prefix exists → PathPrefixMismatch
+        [new[] { @"C:\Work\" }, null, false, null, IpcErrorCode.PathPrefixMismatch],
+        // Entry-only prefix, no app prefix (Add mode) — match
+        [null, new[] { @"C:\Work\" }, false, @"C:\Work\file.pdf", IpcErrorCode.None],
+        // Entry-only prefix, no app prefix (Add mode) — mismatch
+        [null, new[] { @"C:\Work\" }, false, @"C:\Other\file.pdf", IpcErrorCode.PathPrefixMismatch],
+        // Boundary separator: C:\Work must NOT match C:\WorkEvil\file.pdf
+        [new[] { @"C:\Work" }, null, false, @"C:\WorkEvil\file.pdf", IpcErrorCode.PathPrefixMismatch],
+        // Boundary separator: C:\Work must match C:\Work\report.pdf
+        [new[] { @"C:\Work" }, null, false, @"C:\Work\report.pdf", IpcErrorCode.None]
+    ];
+
+    [Theory]
+    [MemberData(nameof(PrefixMatchCases))]
+    public void HandleAssociation_PrefixFiltering(string[]? appPrefixes, string[]? entryPrefixes,
+        bool replacePrefixes, string? arguments, IpcErrorCode expectedError)
+    {
+        // Arrange
+        var app = new AppEntry
+        {
+            Id = "browser01",
+            Name = "RunFence Browser",
+            PathPrefixes = appPrefixes?.Length > 0 ? [..appPrefixes] : null
+        };
+        _database.Apps.Add(app);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), app, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.HasExplicitPerAppAuthorization(It.IsAny<string?>(), app, _database))
+            .Returns(false);
+
+        List<string>? entryPathPrefixes = entryPrefixes?.Length > 0 ? [..entryPrefixes] : null;
+        var entry = new HandlerMappingEntry("browser01", null, entryPathPrefixes, replacePrefixes);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>> { [".pdf"] = [entry] });
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage
+        {
+            Command = IpcCommands.HandleAssociation,
+            Association = ".pdf",
+            Arguments = arguments
+        };
+
+        // Act
+        var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        // Assert
+        if (expectedError == IpcErrorCode.None)
+        {
+            Assert.True(result.Success);
+        }
+        else
+        {
+            Assert.False(result.Success);
+            Assert.Equal(expectedError, result.ErrorCode);
+        }
+    }
+
+    [Fact]
+    public void HandleAssociation_UnauthorizedCaller_AccessDeniedRegardlessOfPrefix()
+    {
+        // Even when the prefix would match, unauthorized caller gets AccessDenied (not PathPrefixMismatch)
+        var app = new AppEntry
+        {
+            Id = "browser01",
+            Name = "RunFence Browser",
+            PathPrefixes = [$@"C:\Work\"]
+        };
+        _database.Apps.Add(app);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), app, _database, It.IsAny<bool>()))
+            .Returns(false);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>
+                { [".pdf"] = [new HandlerMappingEntry("browser01")] });
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage
+        {
+            Command = IpcCommands.HandleAssociation,
+            Association = ".pdf",
+            Arguments = @"C:\Work\report.pdf"
+        };
+
+        var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\Attacker", null, false, true));
+
+        Assert.False(result.Success);
+        Assert.Equal(IpcErrorCode.AccessDenied, result.ErrorCode);
+        _orchestrator.Verify(o => o.Launch(It.IsAny<AppEntry>(), It.IsAny<string?>(), It.IsAny<string?>(),
+            It.IsAny<Func<string, string, bool>?>(), It.IsAny<string?>()), Times.Never);
+    }
+
+    [Fact]
+    public void HandleAssociation_AllEntriesFailPrefixCheck_ReturnsPathPrefixMismatch()
+    {
+        // Two authorized entries — both fail effective prefix filter → PathPrefixMismatch
+        var appA = new AppEntry
+        {
+            Id = "appA",
+            Name = "App A",
+            PathPrefixes = [$@"C:\Restricted\"]
+        };
+        var appB = new AppEntry
+        {
+            Id = "appB",
+            Name = "App B",
+            PathPrefixes = [$@"C:\Other\"]
+        };
+        _database.Apps.Add(appA);
+        _database.Apps.Add(appB);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), appA, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), appB, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.HasExplicitPerAppAuthorization(It.IsAny<string?>(), It.IsAny<AppEntry>(), _database))
+            .Returns(false);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>
+            {
+                [".pdf"] = [new HandlerMappingEntry("appA"), new HandlerMappingEntry("appB")]
+            });
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage
+        {
+            Command = IpcCommands.HandleAssociation,
+            Association = ".pdf",
+            Arguments = @"C:\Elsewhere\file.pdf"
+        };
+
+        var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        Assert.False(result.Success);
+        Assert.Equal(IpcErrorCode.PathPrefixMismatch, result.ErrorCode);
+    }
+
+    [Fact]
+    public void HandleAssociation_ExplicitAuthWinsAmongPrefixMatchingCandidates()
+    {
+        // App A has explicit per-app auth + matching prefix; App B is catch-all → App A launched
+        var appA = new AppEntry { Id = "appA", Name = "App A" };
+        var appB = new AppEntry { Id = "appB", Name = "App B" };
+        _database.Apps.Add(appA);
+        _database.Apps.Add(appB);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), appA, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), appB, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.HasExplicitPerAppAuthorization(It.IsAny<string?>(), appA, _database))
+            .Returns(true);
+        authorizer.Setup(a => a.HasExplicitPerAppAuthorization(It.IsAny<string?>(), appB, _database))
+            .Returns(false);
+
+        var entryA = new HandlerMappingEntry("appA", "template-a", [$@"C:\Work\"], false);
+        var entryB = new HandlerMappingEntry("appB", "template-b");
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>
+                { [".pdf"] = [entryB, entryA] });
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage
+        {
+            Command = IpcCommands.HandleAssociation,
+            Association = ".pdf",
+            Arguments = @"C:\Work\report.pdf"
+        };
+
+        handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", "S-1-5-21-caller", false, true));
+
+        _orchestrator.Verify(o => o.Launch(appA, It.IsAny<string?>(), It.IsAny<string?>(),
+            It.IsAny<Func<string, string, bool>?>(), It.IsAny<string?>()), Times.Once);
+        _orchestrator.Verify(o => o.Launch(appB, It.IsAny<string?>(), It.IsAny<string?>(),
+            It.IsAny<Func<string, string, bool>?>(), It.IsAny<string?>()), Times.Never);
+    }
+
+    [Fact]
+    public void HandleAssociation_MixedUnauthorizedAndPrefixFail_ReturnsPathPrefixMismatch()
+    {
+        // Entry A: authorized + prefix fails; Entry B: unauthorized + prefix would match
+        // Expected: PathPrefixMismatch (because at least one entry was authorized)
+        var appA = new AppEntry
+        {
+            Id = "appA",
+            Name = "App A",
+            PathPrefixes = [$@"C:\Restricted\"]
+        };
+        var appB = new AppEntry { Id = "appB", Name = "App B" };
+        _database.Apps.Add(appA);
+        _database.Apps.Add(appB);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), appA, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), appB, _database, It.IsAny<bool>()))
+            .Returns(false);
+        authorizer.Setup(a => a.HasExplicitPerAppAuthorization(It.IsAny<string?>(), It.IsAny<AppEntry>(), _database))
+            .Returns(false);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>
+            {
+                [".pdf"] = [new HandlerMappingEntry("appA"), new HandlerMappingEntry("appB")]
+            });
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage
+        {
+            Command = IpcCommands.HandleAssociation,
+            Association = ".pdf",
+            Arguments = @"C:\Elsewhere\file.pdf"
+        };
+
+        var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        Assert.False(result.Success);
+        Assert.Equal(IpcErrorCode.PathPrefixMismatch, result.ErrorCode);
+    }
+
+    [Fact]
+    public void HandleAssociation_MatchedEntryTemplateUsed()
+    {
+        // Two apps for same key with different ArgumentsTemplate values and different prefix configs.
+        // Argument matches App A's prefix only. Assert launcher called with App A's template.
+        var appA = new AppEntry
+        {
+            Id = "appA",
+            Name = "App A",
+            PathPrefixes = [$@"C:\Work\"]
+        };
+        var appB = new AppEntry
+        {
+            Id = "appB",
+            Name = "App B",
+            PathPrefixes = [$@"C:\Docs\"]
+        };
+        _database.Apps.Add(appA);
+        _database.Apps.Add(appB);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), appA, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), appB, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.HasExplicitPerAppAuthorization(It.IsAny<string?>(), It.IsAny<AppEntry>(), _database))
+            .Returns(false);
+
+        var entryA = new HandlerMappingEntry("appA", "template-a");
+        var entryB = new HandlerMappingEntry("appB", "template-b");
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>
+                { [".pdf"] = [entryA, entryB] });
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage
+        {
+            Command = IpcCommands.HandleAssociation,
+            Association = ".pdf",
+            Arguments = @"C:\Work\report.pdf"
+        };
+
+        handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        _orchestrator.Verify(o => o.Launch(appA, It.IsAny<string?>(), It.IsAny<string?>(),
+            It.IsAny<Func<string, string, bool>?>(), "template-a"), Times.Once);
+        _orchestrator.Verify(o => o.Launch(appB, It.IsAny<string?>(), It.IsAny<string?>(),
+            It.IsAny<Func<string, string, bool>?>(), It.IsAny<string?>()), Times.Never);
+    }
+
+    [Fact]
+    public void HandleAssociation_PathTraversalBypassBlocked()
+    {
+        // Prefix C:\Work\, argument with ".." traversal → PathPrefixMismatch after canonicalization
+        var app = new AppEntry
+        {
+            Id = "browser01",
+            Name = "RunFence Browser",
+            PathPrefixes = [$@"C:\Work\"]
+        };
+        _database.Apps.Add(app);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), app, _database, It.IsAny<bool>()))
+            .Returns(true);
+        authorizer.Setup(a => a.HasExplicitPerAppAuthorization(It.IsAny<string?>(), app, _database))
+            .Returns(false);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>
+                { [".txt"] = [new HandlerMappingEntry("browser01")] });
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage
+        {
+            Command = IpcCommands.HandleAssociation,
+            Association = ".txt",
+            Arguments = @"C:\Work\..\Secrets\file.txt"
+        };
+
+        var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        Assert.False(result.Success);
+        Assert.Equal(IpcErrorCode.PathPrefixMismatch, result.ErrorCode);
+        _orchestrator.Verify(o => o.Launch(It.IsAny<AppEntry>(), It.IsAny<string?>(), It.IsAny<string?>(),
+            It.IsAny<Func<string, string, bool>?>(), It.IsAny<string?>()), Times.Never);
+    }
+
+    // --- HandleAssociation routing through IpcMessageHandler.HandleIpcMessage ---
+
+    [Fact]
+    public void HandleIpcMessage_HandleAssociationCommand_RoutesToAssociationHandlerAndReturnsSuccess()
+    {
+        // Arrange: app registered in database, handler mapping resolves to it, caller authorized
+        var app = new AppEntry { Id = "browser99", Name = "Browser" };
+        _database.Apps.Add(app);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), app, _database, It.IsAny<bool>()))
+            .Returns(true);
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>
+                { ["https"] = [new HandlerMappingEntry("browser99")] });
+
+        var messageHandler = CreateHandler(associationHandler: CreateAssociationHandler(authorizer, handlerMappingService));
+
+        var msg = new IpcMessage
+        {
+            Command = IpcCommands.HandleAssociation,
+            Association = "https",
+            Arguments = "https://example.com"
+        };
+
+        // Act
+        var result = messageHandler.HandleIpcMessage(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        // Assert — routed through HandleIpcMessage dispatcher to association handler
+        Assert.True(result.Success);
+        _orchestrator.Verify(o => o.Launch(app, "https://example.com", null,
+            It.IsAny<Func<string, string, bool>?>(), ""), Times.Once);
+    }
+
+    [Fact]
+    public void HandleIpcMessage_HandleAssociationCommand_NullAssociationHandler_ReturnsNotAvailable()
+    {
+        // _handler constructed in ctor uses null associationHandler
+        var msg = new IpcMessage { Command = IpcCommands.HandleAssociation, Association = "https" };
+
+        var result = _handler.HandleIpcMessage(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        Assert.False(result.Success);
+        Assert.Contains("not available", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
     }
 }

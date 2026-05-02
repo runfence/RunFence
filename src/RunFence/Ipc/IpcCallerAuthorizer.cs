@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 
 namespace RunFence.Ipc;
@@ -48,7 +49,7 @@ public class IpcCallerAuthorizer(ILoggingService log, ISidResolver sidResolver) 
     public bool HasExplicitPerAppAuthorization(string? callerSid, AppEntry app, AppDatabase database)
         => app.AllowedIpcCallers != null
            && callerSid != null
-           && app.AllowedIpcCallers.Any(s => string.Equals(s, callerSid, StringComparison.OrdinalIgnoreCase));
+           && app.AllowedIpcCallers.Any(s => SidComparer.SidEquals(s, callerSid));
 
     private List<string> GetEffectiveCallerList(AppEntry? app, AppDatabase database)
     {
@@ -57,7 +58,7 @@ public class IpcCallerAuthorizer(ILoggingService log, ISidResolver sidResolver) 
         return database.Accounts.Where(a => a.IsIpcCaller).Select(a => a.Sid).ToList();
     }
 
-    public bool AuthorizeAgainstList(string? callerIdentity, string? callerSid,
+    private bool AuthorizeAgainstList(string? callerIdentity, string? callerSid,
         IEnumerable<string> allowedList, string logContext, IReadOnlyDictionary<string, string>? sidNames = null,
         bool identityFromImpersonation = true)
     {
@@ -100,7 +101,7 @@ public class IpcCallerAuthorizer(ILoggingService log, ISidResolver sidResolver) 
         IReadOnlyDictionary<string, string>? sidNames = null)
     {
         // SID-based match
-        if (callerSid != null && string.Equals(callerSid, allowedSid, StringComparison.OrdinalIgnoreCase))
+        if (callerSid != null && SidComparer.SidEquals(callerSid, allowedSid))
             return true;
 
         // Fallback: name-based match using SidNames map if SID resolution fails.

@@ -26,6 +26,9 @@ public class StartupEnforcementRunnerTests
     private readonly Mock<IAppContainerService> _appContainerService = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
     private readonly Mock<ILoggingService> _log = new();
+    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IInteractiveUserResolver> _interactiveUserResolver = new();
+    private readonly TestFileSystemPathInfo _pathInfo = new();
 
     private AppDatabase _database = new();
 
@@ -38,16 +41,23 @@ public class StartupEnforcementRunnerTests
             .Returns(true);
 
         _appContainerService.Setup(s => s.GetSid(ContainerName)).Returns(ContainerSid);
+        _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns(UserSid);
     }
 
     private StartupEnforcementRunner BuildRunner()
     {
         var sessionProvider = new LambdaSessionProvider(() => new SessionContext { Database = _database });
+        var sidReconciler = new SidReconciler(
+            _aclPermission.Object,
+            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object,
+                _pathInfo),
+            _log.Object,
+            new Mock<IInteractiveUserResolver>().Object,
+            _pathInfo);
         var reconciliationService = new GrantReconciliationService(
             _aclPermission.Object, new Mock<ILocalGroupMembershipService>().Object, _log.Object, _sessionSaver.Object,
             new LambdaDatabaseProvider(() => _database),
-            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object),
-            new Mock<IInteractiveUserResolver>().Object);
+            sidReconciler);
         var enforcementResultApplier = new EnforcementResultApplier(_appContainerService.Object);
         var stubPersistenceHelper = new SessionPersistenceHelper(
             new Mock<ICredentialRepository>().Object, new Mock<IConfigRepository>().Object,
@@ -76,12 +86,12 @@ public class StartupEnforcementRunnerTests
             _enforcementService.Object,
             sessionProvider,
             _sessionSaver.Object,
-            new Mock<IPathGrantService>().Object,
+            _pathGrantService.Object,
             ephemeralAccountService,
             ephemeralContainerService,
             reconciliationService,
             _appContainerService.Object,
-            new Mock<IInteractiveUserResolver>().Object,
+            _interactiveUserResolver.Object,
             _log.Object,
             enforcementResultApplier);
     }
@@ -198,10 +208,8 @@ public class StartupEnforcementRunnerTests
         // Act
         await runner.ApplyEnforcementResult(result);
 
-        // Assert: the traverse path is now tracked on the live database for the container SID
-        var account = _database.GetAccount(ContainerSid);
-        Assert.NotNull(account);
-        var grant = account.Grants.SingleOrDefault(g => g.IsTraverseOnly);
+        // Assert: the traverse path is now tracked in the shared container traverse store.
+        var grant = _database.SharedContainerTraverseGrants.SingleOrDefault(g => g.IsTraverseOnly);
         Assert.NotNull(grant);
         Assert.Equal(Path.GetFullPath(traverseDir), Path.GetFullPath(grant.Path));
         Assert.Equal(appliedPaths, grant.AllAppliedPaths);
@@ -254,11 +262,9 @@ public class StartupEnforcementRunnerTests
         // Act
         await runner.ApplyEnforcementResult(result);
 
-        // Assert: GetSid was called and the traverse path was tracked under the resolved SID
+        // Assert: GetSid was called and the traverse path was tracked in the shared store.
         _appContainerService.Verify(s => s.GetSid(ContainerName), Times.Once);
-        var account = _database.GetAccount(ContainerSid);
-        Assert.NotNull(account);
-        Assert.Single(account.Grants, g => g.IsTraverseOnly);
+        Assert.Single(_database.SharedContainerTraverseGrants, g => g.IsTraverseOnly);
     }
 
     // --- FixAppEntryDefaults tests ---
@@ -329,5 +335,37 @@ public class StartupEnforcementRunnerTests
 
         // Non-folder app: AclTarget must NOT be changed
         Assert.Equal(AclTarget.File, nonFolderApp.AclTarget);
+    }
+
+    [Fact]
+    public void GrantUnlockDirAccess_EnsuresAccessForInteractiveUserAndLowIntegrity()
+    {
+        var runner = BuildRunner();
+
+        runner.GrantUnlockDirAccess();
+
+        var unlockDir = Path.GetDirectoryName(PathConstants.UnlockCmdPath)!;
+        _pathGrantService.Verify(g => g.EnsureAccess(
+            UserSid, unlockDir, FileSystemRights.ReadAndExecute,
+            null, true), Times.Once);
+        _pathGrantService.Verify(g => g.EnsureAccess(
+            AclHelper.LowIntegritySid, unlockDir, FileSystemRights.ReadAndExecute,
+            null, true), Times.Once);
+        _pathGrantService.Verify(g => g.EnsureAccess(
+            AclHelper.AllApplicationPackagesSid, unlockDir, FileSystemRights.ReadAndExecute,
+            null, true), Times.Once);
+    }
+
+    [Fact]
+    public void GrantUnlockDirAccess_WhenInteractiveUserUnavailable_DoesNotGrantAccess()
+    {
+        _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
+        var runner = BuildRunner();
+
+        runner.GrantUnlockDirAccess();
+
+        _pathGrantService.Verify(g => g.EnsureAccess(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<FileSystemRights>(),
+            It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()), Times.Never);
     }
 }

@@ -2,15 +2,16 @@ using System.Text.RegularExpressions;
 
 namespace RunFence.Firewall;
 
-public static class FirewallSddlHelper
+public static partial class FirewallSddlHelper
 {
-    private static readonly Regex SddlSidPattern = new(@"D:\(A;;CC;;;([^)]+)\)", RegexOptions.Compiled);
+    [GeneratedRegex(@"D:\(A;;CC;;;([^)]+)\)")]
+    private static partial Regex SddlSidPattern();
 
     public static string BuildSddl(string sid) => $"D:(A;;CC;;;{sid})";
 
     public static string? ExtractSid(string sddl)
     {
-        var match = SddlSidPattern.Match(sddl);
+        var match = SddlSidPattern().Match(sddl);
         return match.Success ? match.Groups[1].Value : null;
     }
 }

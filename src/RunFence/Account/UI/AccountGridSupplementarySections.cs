@@ -11,7 +11,7 @@ namespace RunFence.Account.UI;
 public class AccountGridSupplementarySections(
     IWindowsAccountService windowsAccountService,
     IAccountLoginRestrictionService accountRestriction,
-    SidDisplayNameResolver displayNameResolver)
+    SidDisplayNameResolver displayNameResolver) : IAccountAppsTextProvider
 {
     public void AddEphemeralSection(
         DataGridView grid,
@@ -41,14 +41,12 @@ public class AccountGridSupplementarySections(
                 : "Expired (deletion postponed)";
             var accountRow = new AccountRow(cred, username, cred.Sid, hasStoredPassword, isEphemeral: true);
             Image credIcon = hasStoredPassword ? lockIcon : AccountGridHelper.EmptyIcon;
-            var appsText = GetAccountAppsText(data.Database, cred.Sid);
+            var appsText = GetAppsText(data.Database, cred.Sid);
             var profilePath = windowsAccountService.GetProfilePath(cred.Sid) ?? "";
             var ephCredAllowInternet = data.Database.GetAccount(cred.Sid)?.Firewall.AllowInternet ?? true;
-            var idx = grid.Rows.Add(false, credIcon, displayName, state.NoLogonState == false, ephCredAllowInternet, appsText, profilePath, cred.Sid);
-            var row = grid.Rows[idx];
-            row.Tag = accountRow;
+            var row = AccountGridHelper.AddAccountGridRow(grid, accountRow, credIcon, displayName,
+                state.NoLogonState == false, ephCredAllowInternet, appsText, profilePath);
             row.Cells["Account"].ToolTipText = expiryTooltip;
-            row.Cells["SID"].ToolTipText = cred.Sid;
             row.Cells["Credential"].ToolTipText = hasStoredPassword ? "Stored" : "No Password";
             row.Cells["Import"].ReadOnly = !hasStoredPassword;
             SetLogonCellState(row, state);
@@ -68,14 +66,12 @@ public class AccountGridSupplementarySections(
                 : "Expired (deletion postponed)";
             var displayName = state.IsInteractive ? localUser.Username + " (interactive)" : localUser.Username;
             var accountRow = new AccountRow(null, localUser.Username, localUser.Sid, false, isEphemeral: true);
-            var appsText = GetAccountAppsText(data.Database, localUser.Sid);
+            var appsText = GetAppsText(data.Database, localUser.Sid);
             var profilePath = windowsAccountService.GetProfilePath(localUser.Sid) ?? "";
             var ephLocalAllowInternet = data.Database.GetAccount(localUser.Sid)?.Firewall.AllowInternet ?? true;
-            var idx = grid.Rows.Add(false, AccountGridHelper.EmptyIcon, displayName, state.NoLogonState == false, ephLocalAllowInternet, appsText, profilePath, localUser.Sid);
-            var row = grid.Rows[idx];
-            row.Tag = accountRow;
+            var row = AccountGridHelper.AddAccountGridRow(grid, accountRow, AccountGridHelper.EmptyIcon, displayName,
+                state.NoLogonState == false, ephLocalAllowInternet, appsText, profilePath);
             row.Cells["Account"].ToolTipText = expiryTooltip;
-            row.Cells["SID"].ToolTipText = localUser.Sid;
             row.Cells["Import"].ReadOnly = true;
             row.Cells["Import"].ToolTipText = "No credentials stored \u2014 use Edit to add";
             SetLogonCellState(row, state);
@@ -156,11 +152,9 @@ public class AccountGridSupplementarySections(
             var hasStoredPassword = cred is { EncryptedPassword.Length: > 0 };
             var accountRow = new AccountRow(cred, SidNameResolver.ExtractUsername(mapName), sid, hasStoredPassword, isUnavailable: true);
             Image credIcon = hasStoredPassword ? lockIcon : AccountGridHelper.EmptyIcon;
-            var unavailableAppsText = GetAccountAppsText(data.Database, sid);
-            var idx = grid.Rows.Add(false, credIcon, displayName, true, true, unavailableAppsText, "", sid);
-            var row = grid.Rows[idx];
-            row.Tag = accountRow;
-            row.Cells["SID"].ToolTipText = sid;
+            var unavailableAppsText = GetAppsText(data.Database, sid);
+            var row = AccountGridHelper.AddAccountGridRow(grid, accountRow, credIcon, displayName,
+                true, true, unavailableAppsText, "");
             row.DefaultCellStyle.ForeColor = SystemColors.GrayText;
             foreach (DataGridViewCell cell in row.Cells)
                 cell.ReadOnly = true;
@@ -210,6 +204,7 @@ public class AccountGridSupplementarySections(
                 {
                     cell.ThreeState = true;
                     cell.Value = CheckState.Indeterminate;
+                    cell.ToolTipText = "Internet access partially configured \u2014 click to fully enable or disable.";
                 }
                 else
                 {
@@ -252,7 +247,7 @@ public class AccountGridSupplementarySections(
         }
     }
 
-    public string GetAccountAppsText(AppDatabase database, string? sid)
+    public string GetAppsText(AppDatabase database, string? sid)
         => string.Join(", ", database.Apps
             .Where(a => string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase))
             .OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
