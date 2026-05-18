@@ -39,8 +39,9 @@ internal sealed class SecurePasswordWndProcInterceptor : NativeWindow
                 HandleChar(ref m);
                 return;
 
-            case WM_KEYDOWN when (int)m.WParam == VK_DELETE:
-                HandleDeleteKey(ref m);
+            case WM_KEYDOWN:
+                if (HandleKeyDown(ref m))
+                    return;
                 return;
 
             case WM_PASTE:
@@ -78,19 +79,20 @@ internal sealed class SecurePasswordWndProcInterceptor : NativeWindow
             base.WndProc(ref m);
     }
 
-    private void HandleDeleteKey(ref Message m)
+    private bool HandleKeyDown(ref Message m)
     {
-        var modifiers = Control.ModifierKeys;
+        var keyCode = (Keys)(int)m.WParam;
+        var modifiers = Control.ModifierKeys & (Keys.Control | Keys.Shift | Keys.Alt);
+        if (_owner.HandleShortcutKey(keyCode, modifiers))
+            return true;
 
-        if ((modifiers & Keys.Control) != 0)
-            return;
-
-        if ((modifiers & Keys.Shift) != 0)
+        if (keyCode == (Keys)VK_DELETE && (modifiers & Keys.Control) == 0)
         {
-            base.WndProc(ref m);
-            return;
+            _owner.ApplyEditResult(_owner.HandleDelete());
+            return true;
         }
 
-        _owner.ApplyEditResult(_owner.HandleDelete());
+        base.WndProc(ref m);
+        return true;
     }
 }

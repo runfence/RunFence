@@ -1,7 +1,6 @@
 using RunFence.Acl.Traverse;
 using RunFence.Core;
 using RunFence.Infrastructure;
-using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Account.UI;
 
@@ -14,10 +13,13 @@ public class AccountCheckTimerService(
     ISessionProvider sessionProvider,
     ILoggingService log,
     ReconciliationGuard reconciliationGuard,
-    GrantReconciliationService reconciler)
+    IAccountGrantReconciliationRunner reconciliationRunner,
+    IUiTimerFactory uiTimerFactory)
     : IDisposable
 {
-    private Timer? _timer;
+    private IUiTimer? _timer;
+    private bool _disposed;
+    private bool _visible = true;
     private Dictionary<string, string>? _currentOsAccounts; // SID → username
 
     /// <summary>Raised when a SID change is detected that requires user attention.</summary>
@@ -28,16 +30,21 @@ public class AccountCheckTimerService(
 
     public void Start()
     {
-        if (_timer != null)
+        if (_disposed || _timer != null)
             return;
 
-        _timer = new Timer { Interval = 3000 };
-        _timer.Tick += OnTick;
+        _timer = uiTimerFactory.Create();
+        _timer.Interval = 3000;
+        _timer.Tick += (_, _) => OnTimerTick();
         _timer.Start();
     }
 
     public void HandleVisibilityChanged(bool visible)
     {
+        _visible = visible;
+
+        if (_disposed)
+            return;
         if (_timer == null)
             return;
 
@@ -49,8 +56,12 @@ public class AccountCheckTimerService(
 
     private bool _inProcess;
 
+    private void OnTimerTick() => OnTick(null, EventArgs.Empty);
+
     private async void OnTick(object? sender, EventArgs e)
     {
+        if (_disposed)
+            return;
         if (_inProcess)
             return;
         if (reconciliationGuard.IsInProgress)
@@ -60,36 +71,23 @@ public class AccountCheckTimerService(
         // Set the guard before any await so that a concurrent manual refresh cannot start
         // reconciliation during the DetectGroupChanges async gap on the UI thread.
         reconciliationGuard.IsInProgress = true;
-        var reconciliationDispatched = false;
         try
         {
             // Detect group membership changes and reconcile traverse grants asynchronously.
             // Done before the SID-change check so snapshot is updated even if no SID change.
-            var changedSids = await reconciler.DetectGroupChanges();
+            var changedSids = await reconciliationRunner.DetectGroupChanges();
             if (changedSids.Count > 0)
             {
                 _timer?.Stop();
                 var db = sessionProvider.GetSession().Database;
                 var grantsSnapshot = db.Accounts.ToDictionary(
-                    a => a.Sid, a => a.Grants.ToList(), StringComparer.OrdinalIgnoreCase);
-                reconciliationDispatched = true;
-                _ = Task.Run(() => reconciler.ReconcileChangedSids(changedSids, grantsSnapshot))
-                    .ContinueWith(task =>
-                    {
-                        reconciliationGuard.IsInProgress = false;
-                        if (task.IsCompletedSuccessfully)
-                        {
-                            reconciler.ApplyReconciliationResult(task.Result);
-                            RefreshNeeded?.Invoke();
-                        }
-                        else if (task.Exception != null)
-                        {
-                            log.Error("Grant reconciliation failed", task.Exception);
-                        }
-
-                        _timer?.Start();
-                    }, TaskScheduler.FromCurrentSynchronizationContext());
-                return; // skip rest of tick; will fire again after reconciliation
+                    account => account.Sid,
+                    account => (IReadOnlyList<RunFence.Core.Models.GrantedPathEntry>)account.Grants
+                        .Select(entry => entry.Clone())
+                        .ToArray(),
+                    StringComparer.OrdinalIgnoreCase);
+                await RunGrantReconciliationAsync(changedSids, grantsSnapshot);
+                return;
             }
 
             try
@@ -149,8 +147,7 @@ public class AccountCheckTimerService(
         finally
         {
             _inProcess = false;
-            if (!reconciliationDispatched)
-                reconciliationGuard.IsInProgress = false;
+            reconciliationGuard.IsInProgress = false;
         }
     }
 
@@ -158,7 +155,41 @@ public class AccountCheckTimerService(
 
     public void Dispose()
     {
+        _disposed = true;
+        reconciliationGuard.IsInProgress = false;
+        _timer?.Stop();
         _timer?.Dispose();
         _timer = null;
+    }
+
+    private async Task RunGrantReconciliationAsync(
+        List<(string Sid, List<string> NewGroups)> changedSids,
+        IReadOnlyDictionary<string, IReadOnlyList<RunFence.Core.Models.GrantedPathEntry>> grantsSnapshot)
+    {
+        try
+        {
+            var result = await reconciliationRunner.ReconcileChangedSidsAsync(changedSids, grantsSnapshot);
+            if (_disposed)
+                return;
+
+            reconciliationRunner.ApplyReconciliationResult(result);
+            RefreshNeeded?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            log.Error("Grant reconciliation failed", ex);
+        }
+        finally
+        {
+            RestartTimerIfVisible();
+        }
+    }
+
+    private void RestartTimerIfVisible()
+    {
+        if (_disposed || !_visible)
+            return;
+
+        _timer?.Start();
     }
 }

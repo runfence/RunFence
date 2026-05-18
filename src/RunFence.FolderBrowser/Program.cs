@@ -1,29 +1,36 @@
 using System.Diagnostics;
 using System.Drawing.Drawing2D;
 using RunFence.Core;
+using RunFence.Core.Infrastructure;
 
 namespace RunFence.FolderBrowser;
 
-static class Program
+public static class Program
 {
+    private sealed record FolderBrowserCommand(string RawPathTail);
+
+    public interface IOpenFileDialogAdapter : IDisposable
+    {
+        OpenFileDialog Dialog { get; }
+        void AddInteractiveUserCustomPlaces();
+        DialogResult ShowDialog(IWin32Window? owner);
+    }
+
+    private sealed class OpenFileDialogAdapter : IOpenFileDialogAdapter
+    {
+        private readonly OpenFileDialog _dialog = new();
+        public OpenFileDialog Dialog => _dialog;
+
+        public void AddInteractiveUserCustomPlaces() => FileDialogHelper.AddInteractiveUserCustomPlaces(_dialog);
+        public DialogResult ShowDialog(IWin32Window? owner) => _dialog.ShowDialog(owner);
+        public void Dispose() => _dialog.Dispose();
+    }
+
     [STAThread]
     static void Main(string[] args)
     {
-        string rawPath;
-        if (args.Length > 0)
-        {
-            // Use SkipArgs on the raw command line to extract the path verbatim, preserving
-            // original quoting and any trailing backslash. string.Join(" ", args) would corrupt
-            // paths like "C:\My Folder\" (trailing backslash + closing quote is MSVC-escaped).
-            var tail = CommandLineHelper.SkipArgs(Environment.CommandLine, 1);
-            rawPath = tail ?? string.Empty;
-            if (rawPath is ['"', _, ..] && rawPath[^1] == '"')
-                rawPath = rawPath[1..^1];
-        }
-        else
-        {
-            rawPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        }
+        var command = Route(args);
+        var rawPath = command.RawPathTail;
 
         if (!Directory.Exists(rawPath))
             rawPath = "";
@@ -58,37 +65,8 @@ static class Program
 
                 try
                 {
-                    using var dlg = new OpenFileDialog();
-                    dlg.Title = Environment.UserName;
-                    dlg.InitialDirectory = rawPath;
-                    dlg.Filter = "All files (*.*)|*.*";
-                    dlg.CheckFileExists = true; // We don't launch multiple files but the purpose of this is not to launch,
-                    // it's for browsing files instead of running explorer.exe.
-                    // So the multiselect gives copy/cut capability for multiple files.
-                    dlg.Multiselect = true;
-                    dlg.ShowPreview = true;
-                    dlg.CheckPathExists = true;
-                    dlg.ShowHiddenFiles = true;
-                    dlg.ShowPinnedPlaces = true;
-                    dlg.DereferenceLinks = true;
-                    dlg.SupportMultiDottedExtensions = true;
-                    dlg.CustomPlaces.Add(new FileDialogCustomPlace(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu)));
-                    dlg.CustomPlaces.Add(new FileDialogCustomPlace(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)));
-                    dlg.CustomPlaces.Add(new FileDialogCustomPlace(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData)));
-                    dlg.CustomPlaces.Add(new FileDialogCustomPlace(Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\"));
-
-                    if (dlg.ShowDialog(ownerForm) == DialogResult.OK)
-                    {
-                        if (dlg.FileNames.Length > 1)
-                        {
-                            MessageBox.Show("Launching multiple files is not supported.",
-                                "Folder Browser", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        }
-                        else
-                        {
-                            LaunchFile(dlg.FileName);
-                        }
-                    }
+                    using var dlgAdapter = new OpenFileDialogAdapter();
+                    ShowDialogAndLaunch(ownerForm, rawPath, dlgAdapter);
                 }
                 catch (Exception ex)
                 {
@@ -103,6 +81,46 @@ static class Program
         };
 
         Application.Run(ownerForm);
+    }
+
+    public static void ShowDialogAndLaunch(Form ownerForm, string rawPath, IOpenFileDialogAdapter dlgAdapter)
+    {
+        var dlg = dlgAdapter.Dialog;
+        dlg.Title = Environment.UserName;
+        dlg.InitialDirectory = rawPath;
+        dlg.Filter = "All files (*.*)|*.*";
+        dlg.CheckFileExists = true;
+        dlg.Multiselect = true;
+        dlg.ShowPreview = true;
+        dlg.CheckPathExists = true;
+        dlg.ShowHiddenFiles = true;
+        dlg.ShowPinnedPlaces = true;
+        dlg.DereferenceLinks = true;
+        dlg.SupportMultiDottedExtensions = true;
+        dlgAdapter.AddInteractiveUserCustomPlaces();
+        if (dlgAdapter.ShowDialog(ownerForm) != DialogResult.OK)
+            return;
+
+        if (dlg.FileNames.Length > 1)
+        {
+            MessageBox.Show("Launching multiple files is not supported.",
+                "Folder Browser", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        LaunchFile(dlg.FileName);
+    }
+
+    private static FolderBrowserCommand Route(string[] args)
+    {
+        if (args.Length < 1)
+            return new FolderBrowserCommand(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+
+        var tail = CommandLineHelper.SkipArgs(Environment.CommandLine, 1) ?? string.Empty;
+        var rawPath = tail;
+        if (rawPath is ['"', _, ..] && rawPath[^1] == '"')
+            rawPath = rawPath[1..^1];
+        return new FolderBrowserCommand(rawPath);
     }
 
     private static void LaunchFile(string filePath)

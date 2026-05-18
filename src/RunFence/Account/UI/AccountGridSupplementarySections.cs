@@ -9,22 +9,23 @@ namespace RunFence.Account.UI;
 /// Extracted from <see cref="AccountGridPopulator"/> to keep each section independently maintainable.
 /// </summary>
 public class AccountGridSupplementarySections(
-    IWindowsAccountService windowsAccountService,
+    IWindowsAccountQueryService windowsAccountQueryService,
     IAccountLoginRestrictionService accountRestriction,
-    SidDisplayNameResolver displayNameResolver) : IAccountAppsTextProvider
+    SidDisplayNameResolver displayNameResolver,
+    AccountGridIconLifetimeManager iconLifetimeManager,
+    IAppContainerPathProvider appContainerPathProvider) : IAccountAppsTextProvider
 {
     public void AddEphemeralSection(
         DataGridView grid,
         PopulateData data,
         List<CredentialEntry> ephemeralCredRows,
         List<LocalUserAccount> ephemeralLocalRows,
-        Dictionary<string, AccountEntry> ephemeralLookup,
-        Image lockIcon)
+        Dictionary<string, AccountEntry> ephemeralLookup)
     {
         if (ephemeralCredRows.Count == 0 && ephemeralLocalRows.Count == 0)
             return;
 
-        AccountGridHelper.AddGroupHeaderRow(grid, "Ephemeral Accounts");
+        AccountGridHelper.AddGroupHeaderRow(grid, iconLifetimeManager, "Ephemeral Accounts");
 
         foreach (var cred in ephemeralCredRows)
         {
@@ -40,11 +41,11 @@ public class AccountGridSupplementarySections(
                 ? $"Expires: {localExpiry:g}"
                 : "Expired (deletion postponed)";
             var accountRow = new AccountRow(cred, username, cred.Sid, hasStoredPassword, isEphemeral: true);
-            Image credIcon = hasStoredPassword ? lockIcon : AccountGridHelper.EmptyIcon;
+            Image credIcon = hasStoredPassword ? AccountGridHelper.CreateKeyIcon() : AccountGridHelper.EmptyIcon;
             var appsText = GetAppsText(data.Database, cred.Sid);
-            var profilePath = windowsAccountService.GetProfilePath(cred.Sid) ?? "";
+            var profilePath = windowsAccountQueryService.GetProfilePath(cred.Sid).ProfilePath ?? "";
             var ephCredAllowInternet = data.Database.GetAccount(cred.Sid)?.Firewall.AllowInternet ?? true;
-            var row = AccountGridHelper.AddAccountGridRow(grid, accountRow, credIcon, displayName,
+            var row = AccountGridHelper.AddAccountGridRow(grid, iconLifetimeManager, accountRow, credIcon, displayName,
                 state.NoLogonState == false, ephCredAllowInternet, appsText, profilePath);
             row.Cells["Account"].ToolTipText = expiryTooltip;
             row.Cells["Credential"].ToolTipText = hasStoredPassword ? "Stored" : "No Password";
@@ -67,9 +68,9 @@ public class AccountGridSupplementarySections(
             var displayName = state.IsInteractive ? localUser.Username + " (interactive)" : localUser.Username;
             var accountRow = new AccountRow(null, localUser.Username, localUser.Sid, false, isEphemeral: true);
             var appsText = GetAppsText(data.Database, localUser.Sid);
-            var profilePath = windowsAccountService.GetProfilePath(localUser.Sid) ?? "";
+            var profilePath = windowsAccountQueryService.GetProfilePath(localUser.Sid).ProfilePath ?? "";
             var ephLocalAllowInternet = data.Database.GetAccount(localUser.Sid)?.Firewall.AllowInternet ?? true;
-            var row = AccountGridHelper.AddAccountGridRow(grid, accountRow, AccountGridHelper.EmptyIcon, displayName,
+            var row = AccountGridHelper.AddAccountGridRow(grid, iconLifetimeManager, accountRow, AccountGridHelper.EmptyIcon, displayName,
                 state.NoLogonState == false, ephLocalAllowInternet, appsText, profilePath);
             row.Cells["Account"].ToolTipText = expiryTooltip;
             row.Cells["Import"].ReadOnly = true;
@@ -85,7 +86,6 @@ public class AccountGridSupplementarySections(
         PopulateData data,
         HashSet<string> localSidSet,
         HashSet<string> representedSids,
-        Image lockIcon,
         AccountGridSorter sorter)
     {
         var currentUserSid = SidResolutionHelper.GetCurrentUserSid();
@@ -141,7 +141,7 @@ public class AccountGridSupplementarySections(
         if (unavailableSids.Count == 0)
             return;
 
-        AccountGridHelper.AddGroupHeaderRow(grid, "Unavailable Accounts");
+        AccountGridHelper.AddGroupHeaderRow(grid, iconLifetimeManager, "Unavailable Accounts");
 
         foreach (var sid in sorter.SortUnavailableSids(data, unavailableSids))
         {
@@ -151,9 +151,9 @@ public class AccountGridSupplementarySections(
                 string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase));
             var hasStoredPassword = cred is { EncryptedPassword.Length: > 0 };
             var accountRow = new AccountRow(cred, SidNameResolver.ExtractUsername(mapName), sid, hasStoredPassword, isUnavailable: true);
-            Image credIcon = hasStoredPassword ? lockIcon : AccountGridHelper.EmptyIcon;
+            Image credIcon = hasStoredPassword ? AccountGridHelper.CreateKeyIcon() : AccountGridHelper.EmptyIcon;
             var unavailableAppsText = GetAppsText(data.Database, sid);
-            var row = AccountGridHelper.AddAccountGridRow(grid, accountRow, credIcon, displayName,
+            var row = AccountGridHelper.AddAccountGridRow(grid, iconLifetimeManager, accountRow, credIcon, displayName,
                 true, true, unavailableAppsText, "");
             row.DefaultCellStyle.ForeColor = SystemColors.GrayText;
             foreach (DataGridViewCell cell in row.Cells)
@@ -166,21 +166,22 @@ public class AccountGridSupplementarySections(
         if (database.AppContainers.Count == 0)
             return;
 
-        AccountGridHelper.AddGroupHeaderRow(grid, "App Containers");
+        AccountGridHelper.AddGroupHeaderRow(grid, iconLifetimeManager, "App Containers");
 
-        var containerIcon = AccountGridHelper.CreateContainerIcon();
         foreach (var container in database.AppContainers.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
         {
             var containerSid = container.Sid;
             var appsText = GetContainerAppsText(database, container.Name);
-            var dataPath = AppContainerPaths.GetContainerDataPath(container.Name);
+            var dataPath = appContainerPathProvider.GetContainerDataPath(container.Name);
             var displayName = container.DisplayName;
             if (container.IsEphemeral)
                 displayName += " (ephemeral)";
 
+            var containerIcon = AccountGridHelper.CreateContainerIcon();
             var idx = grid.Rows.Add(false, containerIcon, displayName,
                 true, true, appsText, dataPath, containerSid);
             var row = grid.Rows[idx];
+            iconLifetimeManager.TrackOwned(row, containerIcon);
             row.Tag = new ContainerRow(container, containerSid);
             row.Cells["SID"].ToolTipText = containerSid;
             row.Cells["Credential"].ToolTipText = "App Container";

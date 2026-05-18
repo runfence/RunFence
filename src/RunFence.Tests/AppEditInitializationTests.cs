@@ -51,7 +51,7 @@ public class AppEditInitializationTests
         Assert.Equal(DeniedRights.Execute, model.AclState.DeniedRights);
         Assert.Equal(AclTarget.Folder, model.AclState.AclTarget);
         Assert.Equal(0, model.AclState.FolderAclDepth);
-        Assert.Equal(PrivilegeLevel.AboveBasic, model.State.SelectedPrivilegeLevel);
+        Assert.Equal(PrivilegeLevel.Basic, model.State.SelectedPrivilegeLevel);
         Assert.True(model.State.OverrideIpcCallers);
         Assert.Equal(AccountSid, model.AccountSelection.AccountSid);
         Assert.False(model.AccountSelection.IsAppContainer);
@@ -88,25 +88,25 @@ public class AppEditInitializationTests
                 existing: app,
                 credentials: [new CredentialEntry { Sid = AccountSid }],
                 existingApps: [app],
+                commandContext: AppEditDialogTestsAccessor.CreateNoOpCommandContext(),
                 sidNames: new Dictionary<string, string> { [AccountSid] = "Test User" },
                 database: database);
 
-            var state = (IAppEditDialogState)dialog;
-            Assert.Equal("Existing App", state.NameText);
-            Assert.Equal(app.ExePath, state.FilePathText);
-            Assert.False(state.IsFolder);
-            Assert.Equal("--default", state.DefaultArgsText);
-            Assert.True(state.AllowPassArgs);
-            Assert.Equal("\"%1\"", state.ArgumentsTemplateText);
-            Assert.Equal(@"C:\Work", state.WorkingDirText);
-            Assert.True(state.AllowPassWorkDir);
-            Assert.True(state.ManageShortcuts);
-            Assert.Equal(PrivilegeLevel.AboveBasic, state.SelectedPrivilegeLevel);
-            Assert.True(state.OverrideIpcCallers);
-            Assert.Equal(["C:\\Allowed\\"], state.AppPathPrefixes);
+            var snapshot = dialog.CaptureInputSnapshot();
+            Assert.Equal("Existing App", snapshot.NameText);
+            Assert.Equal(app.ExePath, snapshot.FilePathText);
+            Assert.False(snapshot.IsFolder);
+            Assert.Equal("--default", snapshot.DefaultArgsText);
+            Assert.True(snapshot.AllowPassArgs);
+            Assert.Equal("\"%1\"", snapshot.ArgumentsTemplateText);
+            Assert.Equal(@"C:\Work", snapshot.WorkingDirText);
+            Assert.True(snapshot.AllowPassWorkDir);
+            Assert.True(snapshot.ManageShortcuts);
+            Assert.Equal(PrivilegeLevel.Basic, snapshot.SelectedPrivilegeLevel);
+            Assert.True(snapshot.OverrideIpcCallers);
+            Assert.Equal(["C:\\Allowed\\"], snapshot.AppPathPrefixes);
             Assert.Equal(ExtraConfigPath, dialog.SelectedConfigPath);
-            var selectedCredential = Assert.IsType<CredentialDisplayItem>(state.SelectedAccountItem);
-            Assert.Equal(AccountSid, selectedCredential.Credential.Sid);
+            Assert.Equal(AccountSid, snapshot.SelectedAccountSid);
         });
     }
 
@@ -122,7 +122,7 @@ public class AppEditInitializationTests
         WorkingDirectory = @"C:\Work",
         AllowPassingWorkingDirectory = true,
         ManageShortcuts = true,
-        PrivilegeLevel = PrivilegeLevel.AboveBasic,
+        PrivilegeLevel = PrivilegeLevel.Basic,
         AllowedIpcCallers = [CallerSid],
         EnvironmentVariables = new Dictionary<string, string> { ["RF_TEST"] = "value" },
         PathPrefixes = ["C:\\Allowed"],
@@ -138,8 +138,6 @@ public class AppEditInitializationTests
         out Mock<IAppConfigService> appConfigService,
         out Mock<IHandlerMappingService> handlerMappingService)
     {
-        var sidResolver = CreateSidResolver();
-        var profilePathResolver = new Mock<IProfilePathResolver>();
         appConfigService = new Mock<IAppConfigService>();
         handlerMappingService = new Mock<IHandlerMappingService>();
         handlerMappingService.Setup(s => s.GetAllHandlerMappings(database))
@@ -168,6 +166,7 @@ public class AppEditInitializationTests
         aclService.Setup(s => s.IsBlockedPath(It.IsAny<string>())).Returns(false);
         var log = new Mock<ILoggingService>();
         var displayNameResolver = new SidDisplayNameResolver(sidResolver.Object, profilePathResolver.Object);
+        var aclConfigValidator = new AclConfigValidator(aclService.Object, log.Object);
         var aclSection = new AclConfigSection(
             new AclAllowListGridHandler(),
             new AllowListEntryFactory(
@@ -175,7 +174,7 @@ public class AppEditInitializationTests
                 new Mock<ILocalGroupMembershipService>().Object,
                 new Mock<ISidEntryHelper>().Object,
                 displayNameResolver),
-            new AclConfigValidator(aclService.Object, log.Object),
+            aclConfigValidator,
             new FolderDepthHelper(aclService.Object, log.Object));
         var executablePathResolver = new Mock<IExecutablePathResolver>();
         executablePathResolver.Setup(r => r.TryResolvePath(It.IsAny<string>(), It.IsAny<ExecutablePathResolutionContext>()))
@@ -188,30 +187,38 @@ public class AppEditInitializationTests
             new Mock<IExecutableKindService>().Object);
         var controller = new AppEditDialogController(
             new AppEntryBuilder(new AppEntryIdGenerator()),
-            executablePathResolver.Object);
+            executablePathResolver.Object,
+            new AppEditDialogInputValidator(),
+            new AppEditDialogAclConfigBuilder(aclConfigValidator));
+        var saveHandler = new AppEditDialogSaveHandler(associationHandler, appConfigService.Object);
+        var submitController = new AppEditDialogSubmitController(
+            controller,
+            saveHandler);
+        var credentialDisplayItemFactory = new CredentialDisplayItemFactory(sidResolver.Object, profilePathResolver.Object);
+        var populator = new AppEditDialogPopulator(
+            appConfigService.Object,
+            credentialDisplayItemFactory,
+            new CredentialFilterHelper(sidResolver.Object));
+        var binder = new AppEditDialogInitializationBinder(
+            populator,
+            initializer,
+            credentialDisplayItemFactory,
+            () => new IpcCallerSection(
+                () => [],
+                new Mock<ISidEntryHelper>().Object,
+                new SidDisplayNameResolver(sidResolver.Object, profilePathResolver.Object)));
 
         return new AppEditDialog(
             appConfigService.Object,
             aclSection,
             browseHelper,
-            associationHandler,
-            new AppEditDialogSaveHandler(associationHandler, appConfigService.Object),
             new AppEditAccountSwitchHandler(),
             controller,
+            submitController,
             executablePathResolver.Object,
-            sidResolver.Object,
-            profilePathResolver.Object,
-            new AppEditDialogPopulator(
-                appConfigService.Object,
-                sidResolver.Object,
-                profilePathResolver.Object,
-                new CredentialFilterHelper(sidResolver.Object)),
-            initializer,
             new HandlerAssociationsSection(),
-            () => new IpcCallerSection(
-                () => [],
-                new Mock<ISidEntryHelper>().Object,
-                new SidDisplayNameResolver(sidResolver.Object, profilePathResolver.Object)));
+            binder,
+            new Mock<IUserConfirmationService>().Object);
     }
 
     private static AppEditAssociationHandler CreateAssociationHandler(
@@ -225,10 +232,7 @@ public class AppEditInitializationTests
             new Mock<IAssociationAutoSetService>().Object,
             databaseProvider,
             () => new HandlerMappingMutationHandler(
-                handlerMappingService,
-                new Mock<IAssociationAutoSetService>().Object,
-                databaseProvider,
-                new Mock<IHandlerMappingNotifier>().Object));
+                handlerMappingService));
     }
 
     private static Mock<ISidResolver> CreateSidResolver()

@@ -61,7 +61,7 @@ public class DefaultScannerDataAccess : IScannerDataAccess
     public DirectorySecurity GetDirectorySecurity(string path) => new DirectoryInfo(path).GetAccessControl();
     public FileSecurity GetFileSecurity(string path) => new FileInfo(path).GetAccessControl();
     public string[] GetFilesInFolder(string folderPath) => Directory.GetFiles(folderPath);
-    public string? ResolveShortcutTarget(string lnkPath) => _shortcutResolver.ResolveShortcutTarget(lnkPath);
+    public ShortcutTargetInfo? ResolveShortcutTarget(string lnkPath) => _shortcutResolver.ResolveShortcutTarget(lnkPath);
 
     // IAutorunRegistryAccess
     public RegistrySecurity? GetRegistryKeySecurity(RegistryKey hive, string subKeyPath) => _autorunRegistry.GetRegistryKeySecurity(hive, subKeyPath);
@@ -74,15 +74,12 @@ public class DefaultScannerDataAccess : IScannerDataAccess
     public List<AppInitDllEntry> GetAppInitDllEntries() => _winlogonRegistry.GetAppInitDllEntries();
 
     // IServiceRegistryAccess
-    public RegistrySecurity? GetServiceRegistryKeySecurity(string serviceName) => _serviceRegistry.GetServiceRegistryKeySecurity(serviceName);
     public List<ServiceInfo> GetAutoStartServices() => _serviceRegistry.GetAutoStartServices();
 
     // IIfeoRegistryAccess
     public RegistrySecurity? GetIfeoRegistryKeySecurity() => _ifeoRegistry.GetIfeoRegistryKeySecurity();
     public RegistrySecurity? GetIfeoWow6432RegistryKeySecurity() => _ifeoRegistry.GetIfeoWow6432RegistryKeySecurity();
-    public List<string> GetIfeoSubkeyNames() => _ifeoRegistry.GetIfeoSubkeyNames();
-    public string? GetIfeoDebuggerPath(string exeName) => _ifeoRegistry.GetIfeoDebuggerPath(exeName);
-    public string? GetIfeoVerifierDlls(string exeName) => _ifeoRegistry.GetIfeoVerifierDlls(exeName);
+    public List<IfeoSubkeyInfo> GetIfeoSubkeys() => _ifeoRegistry.GetIfeoSubkeys();
 
     // IWindowsComponentRegistryAccess
     public List<RegistryDllEntry> GetPrintMonitorEntries() => _windowsComponentRegistry.GetPrintMonitorEntries();

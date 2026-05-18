@@ -41,6 +41,15 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
             FileSystemRights.ChangePermissions | FileSystemRights.ReadPermissions |
             FileSystemRights.ReadAttributes | FileSystemRights.ReadExtendedAttributes,
             inhFlags, propFlags, AccessControlType.Allow));
+        var currentMockSid = AdminOperationMockAccessHelper.GetCurrentProcessSidWhenUsingMocks();
+        if (currentMockSid != null)
+        {
+            desiredRules.Add(new FileSystemAccessRule(
+                currentMockSid,
+                FileSystemRights.ChangePermissions | FileSystemRights.ReadPermissions |
+                FileSystemRights.ReadAttributes | FileSystemRights.ReadExtendedAttributes,
+                inhFlags, propFlags, AccessControlType.Allow));
+        }
 
         foreach (var entry in entries)
         {
@@ -70,6 +79,8 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
         }
 
         var managedSids = new HashSet<SecurityIdentifier> { systemSid, adminsSid };
+        if (currentMockSid != null)
+            managedSids.Add(currentMockSid);
         foreach (var entry in entries)
         {
             try
@@ -150,6 +161,9 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
             new(WellKnownSidType.LocalSystemSid, null),
             new(WellKnownSidType.BuiltinAdministratorsSid, null)
         };
+        var currentMockSid = AdminOperationMockAccessHelper.GetCurrentProcessSidWhenUsingMocks();
+        if (currentMockSid != null)
+            managedSids.Add(currentMockSid);
         if (app.AllowedAclEntries != null)
         {
             foreach (var entry in app.AllowedAclEntries)

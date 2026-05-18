@@ -7,5 +7,5 @@ namespace RunFence.Launch.Tokens;
 public interface ICreateProcessLauncherHelper
 {
     ProcessInfo LaunchUsingAcquiredToken(IntPtr hToken, ProcessLaunchTarget psi, AccountLaunchIdentity identity);
-    (IntPtr Token, ProcessLaunchNative.PROCESS_INFORMATION TempProcess) AcquireBootstrapToken(AccountLaunchIdentity identity);
+    IntPtr AcquireProfileKeeperToken(AccountLaunchIdentity identity);
 }

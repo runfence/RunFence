@@ -10,6 +10,7 @@ public interface IAccountFirewallSettingsApplier
         FirewallAccountSettings? previousSettings,
         FirewallAccountSettings settings,
         AppDatabase database,
+        Action? saveAction = null,
         CancellationToken cancellationToken = default);
 
     FirewallApplyResult ApplyAccountFirewallSettings(
@@ -17,5 +18,6 @@ public interface IAccountFirewallSettingsApplier
         string username,
         FirewallAccountSettings? previousSettings,
         FirewallAccountSettings settings,
-        AppDatabase database);
+        AppDatabase database,
+        Action? saveAction = null);
 }

@@ -1,5 +1,5 @@
 using RunFence.Core;
-using Timer = System.Windows.Forms.Timer;
+using RunFence.Infrastructure;
 
 namespace RunFence.Account.UI;
 
@@ -7,17 +7,22 @@ namespace RunFence.Account.UI;
 /// Manages process-related timers for the accounts panel: periodic process list refresh
 /// and periodic check for which accounts have running processes (for expand indicators).
 /// </summary>
-public class AccountProcessTimerManager(ILoggingService log) : IDisposable
+public class AccountProcessTimerManager(ILoggingService log, IUiTimerFactory uiTimerFactory) : IDisposable
 {
     private AccountGridProcessExpander _processExpander = null!;
     private DataGridView _grid = null!;
     private Func<bool> _isSortActive = null!;
     private Func<bool> _isVisibleAndParentVisible = null!;
 
-    private Timer? _processRefreshTimer;
-    private Timer? _processCheckTimer;
+    private IUiTimer? _processRefreshTimer;
+    private IUiTimer? _processCheckTimer;
+    private CancellationTokenSource? _processRefreshCts;
+    private CancellationTokenSource? _processCheckCts;
+    private long _processRefreshGeneration;
+    private long _processCheckGeneration;
     private bool _wasMinimized;
     private bool _started;
+    private bool _disposed;
 
     public void Initialize(DataGridView grid, AccountGridProcessExpander processExpander,
         Func<bool> isSortActive)
@@ -29,17 +34,21 @@ public class AccountProcessTimerManager(ILoggingService log) : IDisposable
 
     public void Start(Func<bool> isVisibleAndParentVisible)
     {
+        if (_disposed)
+            return;
         if (_started)
             return;
         _started = true;
         _isVisibleAndParentVisible = isVisibleAndParentVisible;
 
         log.Info("AccountsPanel: starting process refresh timers.");
-        _processRefreshTimer = new Timer { Interval = 2000 };
-        _processRefreshTimer.Tick += OnProcessRefreshTimerTick;
+        _processRefreshTimer = uiTimerFactory.Create();
+        _processRefreshTimer.Interval = 2000;
+        _processRefreshTimer.Tick += (_, _) => OnProcessRefreshTimerTick();
 
-        _processCheckTimer = new Timer { Interval = 5000 };
-        _processCheckTimer.Tick += OnProcessCheckTimerTick;
+        _processCheckTimer = uiTimerFactory.Create();
+        _processCheckTimer.Interval = 5000;
+        _processCheckTimer.Tick += (_, _) => OnProcessCheckTimerTick();
 
         if (_isVisibleAndParentVisible())
         {
@@ -50,6 +59,9 @@ public class AccountProcessTimerManager(ILoggingService log) : IDisposable
 
     public void HandleVisibilityChanged(bool isVisible)
     {
+        if (_disposed)
+            return;
+
         if (isVisible)
         {
             _processRefreshTimer?.Start();
@@ -64,6 +76,9 @@ public class AccountProcessTimerManager(ILoggingService log) : IDisposable
 
     public void HandleParentFormResize(bool isMinimized)
     {
+        if (_disposed)
+            return;
+
         bool justRestored = _wasMinimized && !isMinimized;
         _wasMinimized = isMinimized;
 
@@ -79,17 +94,25 @@ public class AccountProcessTimerManager(ILoggingService log) : IDisposable
     /// </summary>
     public void TriggerImmediateRefresh()
     {
+        if (_disposed)
+            return;
+
         _processCheckTimer?.Stop();
         _processRefreshTimer?.Stop();
         try
         {
-            OnProcessCheckTimerTick(null, EventArgs.Empty);
-            OnProcessRefreshTimerTick(null, EventArgs.Empty);
+            _ = RunProcessCheckAsync(fromTimer: false);
+            _ = RunProcessRefreshAsync();
         }
         finally
         {
-            _processCheckTimer?.Start();
-            _processRefreshTimer?.Start();
+            var processCheckTimer = _processCheckTimer;
+            if (processCheckTimer != null && CanRestartTimer(processCheckTimer))
+                processCheckTimer.Start();
+
+            var processRefreshTimer = _processRefreshTimer;
+            if (processRefreshTimer != null && CanRestartTimer(processRefreshTimer, requireExpandedRows: true))
+                processRefreshTimer.Start();
         }
     }
 
@@ -98,13 +121,18 @@ public class AccountProcessTimerManager(ILoggingService log) : IDisposable
     /// </summary>
     public void TriggerDelayedRefresh(int delayMs)
     {
+        if (_disposed)
+            return;
+
         if (delayMs <= 0)
         {
             TriggerImmediateRefresh();
             return;
         }
 
-        var timer = new Timer { Interval = delayMs };
+        IUiTimer? timer = null;
+        timer = uiTimerFactory.Create();
+        timer.Interval = delayMs;
         timer.Tick += (_, _) =>
         {
             timer.Stop();
@@ -128,35 +156,84 @@ public class AccountProcessTimerManager(ILoggingService log) : IDisposable
     /// </summary>
     public async Task<Dictionary<string, IReadOnlyList<ProcessInfo>>> FetchRefreshDataAsync(IReadOnlyList<string> expandedSids)
     {
+        if (_disposed)
+            return new Dictionary<string, IReadOnlyList<ProcessInfo>>(StringComparer.OrdinalIgnoreCase);
+
         var sidList = expandedSids as List<string> ?? expandedSids.ToList();
-        return await Task.Run(() => _processExpander.FetchRefreshData(sidList));
+        var generation = Interlocked.Increment(ref _processRefreshGeneration);
+        _processRefreshCts?.Cancel();
+        _processRefreshCts?.Dispose();
+        _processRefreshCts = new CancellationTokenSource();
+        var ct = _processRefreshCts.Token;
+        try
+        {
+            return await Task.Run(() =>
+            {
+                ct.ThrowIfCancellationRequested();
+                var data = _processExpander.FetchRefreshData(sidList, ct);
+                if (_disposed || generation != Volatile.Read(ref _processRefreshGeneration))
+                    throw new OperationCanceledException(ct);
+                return data;
+            }, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            return new Dictionary<string, IReadOnlyList<ProcessInfo>>(StringComparer.OrdinalIgnoreCase);
+        }
     }
 
-    private async void OnProcessRefreshTimerTick(object? sender, EventArgs e)
+    private async void OnProcessRefreshTimerTick()
+        => await RunProcessRefreshAsync();
+
+    private async Task RunProcessRefreshAsync()
     {
-        if (!_isVisibleAndParentVisible() || !_processExpander.HasExpandedRows || _isSortActive())
+        if (!CanRestartTimer(_processRefreshTimer, requireExpandedRows: true))
             return;
+
         _processRefreshTimer!.Stop();
+        var generation = Interlocked.Increment(ref _processRefreshGeneration);
+        _processRefreshCts?.Cancel();
+        _processRefreshCts?.Dispose();
+        _processRefreshCts = new CancellationTokenSource();
+        var ct = _processRefreshCts.Token;
         try
         {
             var sids = _processExpander.GetExpandedSidSnapshot();
-            var data = await Task.Run(() => _processExpander.FetchRefreshData(sids));
-            if (_isVisibleAndParentVisible() && !_grid.IsDisposed && !_isSortActive())
+            var data = await Task.Run(() => _processExpander.FetchRefreshData(sids, ct), ct);
+            if (generation != Volatile.Read(ref _processRefreshGeneration))
+                return;
+            if (CanRestartTimer(_processRefreshTimer, requireExpandedRows: true))
                 _processExpander.ApplyRefreshData(data);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            log.Error("Account process refresh failed.", ex);
         }
         finally
         {
-            _processRefreshTimer!.Start();
+            if (CanRestartTimer(_processRefreshTimer, requireExpandedRows: true))
+                _processRefreshTimer.Start();
         }
     }
 
-    private async void OnProcessCheckTimerTick(object? sender, EventArgs e)
+    private async void OnProcessCheckTimerTick()
+        => await RunProcessCheckAsync(fromTimer: true);
+
+    private async Task RunProcessCheckAsync(bool fromTimer)
     {
-        if (!_isVisibleAndParentVisible() || _isSortActive())
+        if (!CanRestartTimer(_processCheckTimer))
             return;
-        bool fromTimer = sender != null;
+
         if (fromTimer)
             _processCheckTimer!.Stop();
+        var generation = Interlocked.Increment(ref _processCheckGeneration);
+        _processCheckCts?.Cancel();
+        _processCheckCts?.Dispose();
+        _processCheckCts = new CancellationTokenSource();
+        var ct = _processCheckCts.Token;
         try
         {
             var sids = _grid.Rows.Cast<DataGridViewRow>()
@@ -166,22 +243,63 @@ public class AccountProcessTimerManager(ILoggingService log) : IDisposable
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            var withProcesses = await Task.Run(() => _processExpander.FetchSidsWithProcesses(sids));
-            if (_isVisibleAndParentVisible() && !_grid.IsDisposed && !_isSortActive())
+            var withProcesses = await Task.Run(() => _processExpander.FetchSidsWithProcesses(sids, ct), ct);
+            if (generation != Volatile.Read(ref _processCheckGeneration))
+                return;
+            if (CanRestartTimer(_processCheckTimer))
                 _processExpander.ApplySidsWithProcesses(withProcesses);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            log.Error("Account process check failed.", ex);
         }
         finally
         {
-            if (fromTimer)
-                _processCheckTimer!.Start();
+            var processCheckTimer = _processCheckTimer;
+            if (fromTimer && processCheckTimer != null && CanRestartTimer(processCheckTimer))
+                processCheckTimer.Start();
         }
     }
 
     public void Dispose()
     {
-        _processRefreshTimer?.Stop();
-        _processRefreshTimer?.Dispose();
-        _processCheckTimer?.Stop();
-        _processCheckTimer?.Dispose();
+        if (_disposed)
+            return;
+
+        _disposed = true;
+        _started = false;
+
+        var refreshCts = _processRefreshCts;
+        var checkCts = _processCheckCts;
+        _processRefreshCts = null;
+        _processCheckCts = null;
+
+        refreshCts?.Cancel();
+        checkCts?.Cancel();
+
+        var refreshTimer = _processRefreshTimer;
+        var checkTimer = _processCheckTimer;
+        _processRefreshTimer = null;
+        _processCheckTimer = null;
+
+        refreshTimer?.Stop();
+        checkTimer?.Stop();
+        refreshTimer?.Dispose();
+        checkTimer?.Dispose();
+        refreshCts?.Dispose();
+        checkCts?.Dispose();
+    }
+
+    private bool CanRestartTimer(IUiTimer? timer, bool requireExpandedRows = false)
+    {
+        if (_disposed || timer == null || _grid.IsDisposed)
+            return false;
+        if (!_isVisibleAndParentVisible() || _isSortActive())
+            return false;
+
+        return !requireExpandedRows || _processExpander.HasExpandedRows;
     }
 }

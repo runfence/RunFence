@@ -16,6 +16,7 @@ public sealed class JobKeeperProtocolTests
             "--flag",
             @"C:\Apps",
             HideWindow: true,
+            SuppressStartupFeedback: true,
             new Dictionary<string, string> { ["A"] = "B" });
 
         JobKeeperProtocol.WriteMessage(stream, request);
@@ -27,6 +28,7 @@ public sealed class JobKeeperProtocolTests
         Assert.Equal(request.Arguments, result.Arguments);
         Assert.Equal(request.WorkingDirectory, result.WorkingDirectory);
         Assert.Equal(request.HideWindow, result.HideWindow);
+        Assert.Equal(request.SuppressStartupFeedback, result.SuppressStartupFeedback);
         Assert.Equal("B", result.EnvOverrides?["A"]);
     }
 
@@ -63,5 +65,66 @@ public sealed class JobKeeperProtocolTests
         stream.Position = 0;
 
         Assert.Throws<JsonException>(() => JobKeeperProtocol.ReadMessage<JobKeeperLaunchRequest>(stream));
+    }
+
+    [Fact]
+    public async Task ReadMessageAsync_CancelledRead_ThrowsOperationCanceledException()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            JobKeeperProtocol.ReadMessageAsync<JobKeeperLaunchRequest>(new BlockingReadStream(), cts.Token));
+    }
+
+    [Fact]
+    public async Task WriteMessageAsync_CancelledWrite_ThrowsOperationCanceledException()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            JobKeeperProtocol.WriteMessageAsync(
+                new BlockingWriteStream(),
+                new JobKeeperLaunchRequest(@"C:\Apps\App.exe", null, null, false, false, null),
+                cts.Token));
+    }
+
+    private sealed class BlockingReadStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var blocked = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            return await blocked.Task.WaitAsync(cancellationToken);
+        }
+    }
+
+    private sealed class BlockingWriteStream : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await blocked.Task.WaitAsync(cancellationToken);
+        }
     }
 }

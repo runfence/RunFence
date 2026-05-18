@@ -18,10 +18,12 @@ public class AccountEditHelperTests : IDisposable
     private const string TestSid = "S-1-5-21-111-222-333-1001";
 
     private readonly Mock<IModalCoordinator> _modalCoordinator = new();
-    private readonly Mock<ICredentialDecryptionService> _credentialDecryption = new();
+    private readonly TestCredentialDecryptionService _credentialDecryption = new();
     private readonly Mock<IAccountPasswordService> _accountPassword = new();
     private readonly Mock<ISessionProvider> _sessionProvider = new();
-    private readonly ProtectedBuffer _pinKey;
+    private readonly Mock<IConfigRepository> _configRepository = new();
+    private readonly Mock<ISettingsTransferService> _settingsTransferService = new();
+    private readonly SecureSecret _pinKey;
 
     private readonly AccountEditHelper _helper;
 
@@ -34,30 +36,30 @@ public class AccountEditHelperTests : IDisposable
     {
         var persistenceHelper = new SessionPersistenceHelper(
             new Mock<ICredentialRepository>().Object,
-            new Mock<IConfigRepository>().Object,
+            _configRepository.Object,
             new Mock<ISidNameCacheService>().Object,
+            () => new InlineUiThreadInvoker(action => action()),
             new Mock<ILoggingService>().Object);
 
         var firewallApplyHelper = new FirewallApplyHelper(
             new Mock<IAccountFirewallSettingsApplier>().Object,
-            new DynamicPortRangeChecker(new Mock<ILoggingService>().Object, new Mock<IUserConfirmationService>().Object),
+            new DynamicPortRangeChecker(new Mock<ILoggingService>().Object, new Mock<IUserConfirmationService>().Object, new StandardNetshCommandRunner()),
             new Mock<ILoggingService>().Object);
 
-        _pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        _pinKey = TestSecretFactory.Create(32);
         var session = new SessionContext
-        {
+{
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(_pinKey);
         _sessionProvider.Setup(s => s.GetSession()).Returns(session);
 
         _helper = new AccountEditHelper(
             _modalCoordinator.Object,
             persistenceHelper,
-            _credentialDecryption.Object,
+            _credentialDecryption,
             _accountPassword.Object,
-            new Mock<ISettingsTransferService>().Object,
+            _settingsTransferService.Object,
             _sessionProvider.Object,
             new OperationGuard(),
             firewallApplyHelper);
@@ -66,7 +68,7 @@ public class AccountEditHelperTests : IDisposable
     public void Dispose() => _pinKey.Dispose();
 
     [Fact]
-    public void ApplyPasswordChange_StoredPassword_NonWin32Exception_Propagates()
+    public void ApplyPasswordChange_StoredPassword_FailedResult_FallsThrough()
     {
         // Arrange
         var newPwd = ProtectedString.FromChars("newpassword".AsSpan());
@@ -74,27 +76,27 @@ public class AccountEditHelperTests : IDisposable
 
         var oldPwd = new ProtectedString();
         oldPwd.AppendChar('x');
-
-        CredentialEntry? outEntry = null;
-        ProtectedString? outPwd = oldPwd;
-        _credentialDecryption
-            .Setup(d => d.TryDecryptCredential(TestSid, It.IsAny<CredentialStore>(), It.IsAny<byte[]>(), out outEntry, out outPwd))
-            .Returns(CredentialLookupStatus.Success);
+        _credentialDecryption.Handler = (string _, CredentialStore _, ReadOnlySpan<byte> _, out CredentialEntry? credEntry, out ProtectedString? password) =>
+        {
+            credEntry = null;
+            password = oldPwd;
+            return CredentialLookupStatus.Success;
+        };
 
         _accountPassword
             .Setup(p => p.ChangeAccountPassword(TestSid, oldPwd, It.IsAny<ProtectedString>()))
-            .Throws(new InvalidOperationException("Test non-Win32 error"));
+            .Returns(new AccountPasswordResult(AccountPasswordStatus.Failed, TestSid, "Test non-Win32 error"));
 
         var credential = new CredentialEntry { Sid = TestSid, EncryptedPassword = [1, 2, 3] };
         var accountRow = new AccountRow(credential, "testuser", TestSid, hasStoredPassword: true);
 
-        // Act & Assert: non-Win32Exception propagates because catch clause is Win32Exception-specific
-        Assert.Throws<InvalidOperationException>(() =>
-            _helper.ApplyPasswordChange(accountRow, editResult, isCurrentAccount: false));
+        var result = _helper.ApplyPasswordChange(accountRow, editResult, isCurrentAccount: false);
+        Assert.False(result);
+        _modalCoordinator.Verify(m => m.RunOnSecureDesktop(It.IsAny<Action>()), Times.Once);
     }
 
     [Fact]
-    public void ApplyPasswordChange_StoredPassword_Win32Exception_FallsThrough()
+    public void ApplyPasswordChange_StoredPassword_InvalidPasswordResult_FallsThrough()
     {
         // Arrange
         var newPwd = ProtectedString.FromChars("newpassword".AsSpan());
@@ -102,16 +104,16 @@ public class AccountEditHelperTests : IDisposable
 
         var oldPwd = new ProtectedString();
         oldPwd.AppendChar('x');
-
-        CredentialEntry? outEntry = null;
-        ProtectedString? outPwd = oldPwd;
-        _credentialDecryption
-            .Setup(d => d.TryDecryptCredential(TestSid, It.IsAny<CredentialStore>(), It.IsAny<byte[]>(), out outEntry, out outPwd))
-            .Returns(CredentialLookupStatus.Success);
+        _credentialDecryption.Handler = (string _, CredentialStore _, ReadOnlySpan<byte> _, out CredentialEntry? credEntry, out ProtectedString? password) =>
+        {
+            credEntry = null;
+            password = oldPwd;
+            return CredentialLookupStatus.Success;
+        };
 
         _accountPassword
             .Setup(p => p.ChangeAccountPassword(TestSid, oldPwd, It.IsAny<ProtectedString>()))
-            .Throws(new Win32Exception(86, "The specified network password is not correct."));
+            .Returns(new AccountPasswordResult(AccountPasswordStatus.InvalidPassword, TestSid, "The specified network password is not correct."));
 
         // Modal coordinator does NOT execute the callback (which would show a dialog).
         // The default mock behavior returns without calling the action, so methodResult
@@ -120,12 +122,60 @@ public class AccountEditHelperTests : IDisposable
         var credential = new CredentialEntry { Sid = TestSid, EncryptedPassword = [1, 2, 3] };
         var accountRow = new AccountRow(credential, "testuser", TestSid, hasStoredPassword: true);
 
-        // Act: Win32Exception is caught, falls through to method dialog.
+        // Act: invalid-password result falls through to method dialog.
         // Since RunOnSecureDesktop is mocked (no-op), methodResult remains None → returns false.
         var result = _helper.ApplyPasswordChange(accountRow, editResult, isCurrentAccount: false);
 
         // Assert
         Assert.False(result);
         _modalCoordinator.Verify(m => m.RunOnSecureDesktop(It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ImportDesktopSettingsAsync_DatabaseModified_DoesNotSaveConfigAgain()
+    {
+        var editResult = new TestAccountEditResult(null, @"C:\settings.json");
+        var accountRow = new AccountRow(null, "testuser", TestSid, hasStoredPassword: false);
+        _settingsTransferService
+            .Setup(s => s.Import(editResult.SettingsImportPath!, TestSid, It.IsAny<int>(), It.IsAny<Action?>()))
+            .Returns(new SettingsTransferResult(true, "", DatabaseModified: true));
+
+        using var owner = new Control();
+        await _helper.ImportDesktopSettingsAsync(accountRow, editResult, owner);
+
+        _configRepository.Verify(r => r.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Never);
+        Assert.Empty(editResult.Errors);
+    }
+
+    private sealed class TestCredentialDecryptionService : ICredentialDecryptionService
+    {
+        public delegate CredentialLookupStatus TryDecryptHandler(
+            string accountSid,
+            CredentialStore credentialStore,
+            ReadOnlySpan<byte> pinDerivedKey,
+            out CredentialEntry? credEntry,
+            out ProtectedString? password);
+
+        public TryDecryptHandler? Handler { get; set; }
+
+        public RunFence.Launch.LaunchCredentials? DecryptAndResolve(
+            string accountSid,
+            CredentialStore credentialStore,
+            ReadOnlySpan<byte> pinDerivedKey,
+            IReadOnlyDictionary<string, string>? sidNames,
+            out CredentialLookupStatus status)
+            => throw new NotSupportedException();
+
+        public CredentialLookupStatus TryDecryptCredential(
+            string accountSid,
+            CredentialStore credentialStore,
+            ReadOnlySpan<byte> pinDerivedKey,
+            out CredentialEntry? credEntry,
+            out ProtectedString? password)
+            => Handler?.Invoke(accountSid, credentialStore, pinDerivedKey, out credEntry, out password)
+                ?? throw new InvalidOperationException("Handler was not configured.");
+
+        public CredentialLookupStatus CheckCredential(string accountSid, CredentialStore credentialStore)
+            => throw new NotSupportedException();
     }
 }

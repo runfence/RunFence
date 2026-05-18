@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using RunFence.Core;
+using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.RunAs;
@@ -17,6 +18,7 @@ public partial class AccountsPanel : DataPanel,
     private readonly SessionPersistenceHelper _persistenceHelper;
     private readonly OperationGuard _operationGuard;
     private readonly IRunAsFlowHandler _runAsFlowHandler;
+    private long _processRefreshGeneration;
     private bool _staleDone;
     private Form? _parentForm;
 
@@ -28,6 +30,7 @@ public partial class AccountsPanel : DataPanel,
     private readonly AccountSidMigrationLauncher _migrationLauncher;
     private readonly AccountProcessDisplayManager _processDisplayManager;
     private readonly AccountsPanelGridInteraction _gridInteraction;
+    private readonly AccountListPresenter _accountListPresenter;
 
     // Injected handlers (initialized in BuildDynamicContent)
     private readonly AccountsPanelRefreshOrchestrator _refreshOrchestrator;
@@ -54,7 +57,6 @@ public partial class AccountsPanel : DataPanel,
     // IAccountsPanelDataContext implementation
     AppDatabase IAccountsPanelDataContext.Database => Database;
     CredentialStore IAccountsPanelDataContext.CredentialStore => CredentialStore;
-    ProtectedBuffer IAccountsPanelDataContext.PinDerivedKey => PinDerivedKey;
     bool IAccountsPanelDataContext.IsRefreshing => IsRefreshing;
 
     // IAccountsPanelOperationContext implementation
@@ -63,14 +65,23 @@ public partial class AccountsPanel : DataPanel,
     bool IAccountsPanelOperationContext.RenameInProgress { set => RenameInProgress = value; }
     DialogResult IAccountsPanelOperationContext.ShowModal(Form dialog) => ShowModalDialog(dialog);
     void IAccountsPanelOperationContext.SaveAndRefresh(Guid? selectCredentialId, int fallbackIndex) => SaveAndRefresh(selectCredentialId, fallbackIndex);
+    void IAccountsPanelOperationContext.RefreshAndNotifyDataChanged(Guid? selectCredentialId, int fallbackIndex) => RefreshAndNotifyDataChanged(selectCredentialId, fallbackIndex);
     void IAccountsPanelOperationContext.UpdateStatus(string text) => _statusLabel.Text = text;
     void IAccountsPanelOperationContext.UpdateButtonState() => UpdateButtonState();
     void IAccountsPanelOperationContext.SetControlsEnabled(bool enabled) => SetControlsEnabled(enabled);
     void IAccountsPanelOperationContext.SaveLastPrefsPath(string path) => SaveLastPrefsPath(path);
     void IAccountsPanelOperationContext.RefreshGrid() => RefreshGrid();
 
-    void IAccountsPanelOperationContext.TriggerProcessRefresh(int delayMs)
-        => _processDisplayManager.TriggerDelayedRefresh(delayMs);
+    long IAccountsPanelOperationContext.BeginProcessRefreshGeneration()
+        => Interlocked.Increment(ref _processRefreshGeneration);
+
+    void IAccountsPanelOperationContext.TriggerProcessRefresh(long generation, int delayMs)
+    {
+        if (generation != Volatile.Read(ref _processRefreshGeneration))
+            return;
+
+        _processDisplayManager.TriggerDelayedRefresh(delayMs);
+    }
 
     // IGridSortState implementation
     bool IGridSortState.IsSortActive => IsSortActive;
@@ -104,6 +115,7 @@ public partial class AccountsPanel : DataPanel,
         AccountImportUIHandler importUIHandler,
         AccountGridEditHandler gridEditHandler,
         AccountGridTypeAheadHandler typeAheadHandler,
+        AccountListPresenter accountListPresenter,
         IRunAsFlowHandler runAsFlowHandler,
         IAccountBulkScanHandler? bulkScanHandler = null,
         WizardLauncher? wizardButtonHandler = null)
@@ -126,6 +138,7 @@ public partial class AccountsPanel : DataPanel,
         _importUIHandler = importUIHandler;
         _gridEditHandler = gridEditHandler;
         _typeAheadHandler = typeAheadHandler;
+        _accountListPresenter = accountListPresenter;
         _bulkScanHandler = bulkScanHandler;
 
         InitializeComponent();
@@ -160,6 +173,7 @@ public partial class AccountsPanel : DataPanel,
         _scanAclsButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F50D", Color.FromArgb(0x22, 0x88, 0x44), 42);
         _scanAclsButton.Visible = _bulkScanHandler != null;
         _lowIntegrityAclManagerButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4DC", Color.FromArgb(0x22, 0x88, 0x44), 42);
+        _appContainersAclManagerButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F4DC", Color.FromArgb(0x33, 0x66, 0xCC), 42);
         _firewallButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F310", Color.FromArgb(0x22, 0x66, 0xCC), 42);
         _firewallButton.ToolTipText = "Internet Allowlist";
         _firewallButton.Visible = _contextMenuOrchestrator.IsFirewallAvailable;
@@ -198,7 +212,10 @@ public partial class AccountsPanel : DataPanel,
         _contextMenuOrchestrator.ShowSystemInRunAsToggleRequested += () =>
         {
             Database.ShowSystemInRunAs = !Database.ShowSystemInRunAs;
-            _persistenceHelper.SaveConfig(Database, PinDerivedKey, CredentialStore.ArgonSalt);
+            _persistenceHelper.SaveConfig(
+                Database,
+                Session.PinDerivedKey,
+                CredentialStore.ArgonSalt);
             DataChanged?.Invoke();
             RefreshGrid();
         };
@@ -211,9 +228,6 @@ public partial class AccountsPanel : DataPanel,
         _credentialHandler.CreateUserDialogRequested += (username, password) => OpenCreateUserDialog(username, password);
         _credentialHandler.DeleteUserRequested += (accountRow, selectedIndex) => _deletionOrchestrator.DeleteUser(accountRow, selectedIndex);
         _credentialHandler.SaveAndRefreshRequested += (credId, fallbackIndex) => SaveAndRefresh(credId, fallbackIndex);
-
-        // Wire creation handler events
-        _creationHandler.SaveAndRefreshRequested += (credId, fallbackIndex) => SaveAndRefresh(credId, fallbackIndex);
 
         // Wire deletion handler events
         _deletionOrchestrator.SaveAndRefreshRequested += (credId, fallbackIndex) => SaveAndRefresh(credId, fallbackIndex);
@@ -305,6 +319,13 @@ public partial class AccountsPanel : DataPanel,
         };
     }
 
+    public void RegisterContextHelp(ContextHelpForm host)
+    {
+        host.SetContextHelp(
+            _appContainersAclManagerButton,
+            ContextHelpTextCatalog.Account_AppContainersAclManager);
+    }
+
     // Forwarding handlers for Designer-wired events and internal call sites
     private void OnCreateContainerClick(object? sender, EventArgs e)
     {
@@ -325,6 +346,9 @@ public partial class AccountsPanel : DataPanel,
 
     private void OnLowIntegrityAclManagerClick(object? sender, EventArgs e)
         => _containerHandler.OpenLowIntegrityAclManager(FindForm());
+
+    private void OnAppContainersAclManagerClick(object? sender, EventArgs e)
+        => _containerHandler.OpenAppContainersAclManager(FindForm());
 
     private sealed class ScanProgressReporter(ToolStripButton scanButton, Label statusLabel) : IScanProgressReporter
     {
@@ -406,7 +430,7 @@ public partial class AccountsPanel : DataPanel,
         _operationGuard.Begin(this);
         try
         {
-            _migrationLauncher.LaunchMigrationDialog(Session, FindForm(), () =>
+            _migrationLauncher.LaunchMigrationDialog(FindForm(), () =>
             {
                 DataChanged?.Invoke();
                 RefreshGrid();
@@ -456,7 +480,16 @@ public partial class AccountsPanel : DataPanel,
     // --- Grid population ---
 
     private void RefreshGrid(Action? afterPopulate = null)
-        => _refreshOrchestrator.RefreshGrid(afterPopulate);
+    {
+        var generation = _accountListPresenter.NextGeneration();
+        _refreshOrchestrator.RefreshGrid(() =>
+        {
+            if (!_accountListPresenter.IsCurrent(generation))
+                return;
+
+            afterPopulate?.Invoke();
+        });
+    }
 
     protected override void UpdateButtonState()
     {
@@ -725,7 +758,15 @@ public partial class AccountsPanel : DataPanel,
 
     private void SaveAndRefresh(Guid? selectCredId = null, int fallbackIndex = -1)
     {
-        _persistenceHelper.SaveCredentialStoreAndConfig(CredentialStore, Database, PinDerivedKey);
+        _persistenceHelper.SaveCredentialStoreAndConfig(
+            CredentialStore,
+            Database,
+            Session.PinDerivedKey);
+        RefreshAndNotifyDataChanged(selectCredId, fallbackIndex);
+    }
+
+    private void RefreshAndNotifyDataChanged(Guid? selectCredId = null, int fallbackIndex = -1)
+    {
         RefreshGrid(afterPopulate: () =>
         {
             if (selectCredId != null)
@@ -739,7 +780,10 @@ public partial class AccountsPanel : DataPanel,
     private void SaveLastPrefsPath(string path)
     {
         Database.LastPrefsFilePath = path;
-        _persistenceHelper.SaveConfig(Database, PinDerivedKey, CredentialStore.ArgonSalt);
+        _persistenceHelper.SaveConfig(
+            Database,
+            Session.PinDerivedKey,
+            CredentialStore.ArgonSalt);
     }
 
     private void SetControlsEnabled(bool enabled)
@@ -753,6 +797,7 @@ public partial class AccountsPanel : DataPanel,
         _openFolderBrowserButton.Enabled = enabled;
         _aclManagerButton.Enabled = enabled;
         _lowIntegrityAclManagerButton.Enabled = enabled;
+        _appContainersAclManagerButton.Enabled = enabled;
         _copyPasswordButton.Enabled = enabled;
         _accountsButton.Enabled = enabled;
         _refreshButton.Enabled = enabled;

@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.Infrastructure;
 
 namespace RunFence.Persistence;
 
@@ -7,7 +8,9 @@ namespace RunFence.Persistence;
 /// falling back to <see cref="Environment.SpecialFolder.Startup"/>, and reads
 /// paths from <see cref="AppContext.BaseDirectory"/>.
 /// </summary>
-public class AutoStartShortcutStore(IProfilePathResolver profilePathResolver) : IAutoStartShortcutStore
+public class AutoStartShortcutStore(
+    IProfilePathResolver profilePathResolver,
+    IInteractiveUserSidResolver interactiveUserSidResolver) : IAutoStartShortcutStore
 {
     private static readonly string ShortcutName = !string.IsNullOrEmpty(DebugHelper.AppId)
         ? $"RunFence ({DebugHelper.AppId}).lnk"
@@ -37,10 +40,10 @@ public class AutoStartShortcutStore(IProfilePathResolver profilePathResolver) : 
     {
         try
         {
-            var sid = NativeTokenHelper.TryGetInteractiveUserSid();
-            if (sid != null)
+            var sid = interactiveUserSidResolver.GetInteractiveUserSid();
+            if (!string.IsNullOrWhiteSpace(sid))
             {
-                var profilePath = profilePathResolver.TryGetProfilePath(sid.Value);
+                var profilePath = profilePathResolver.TryGetProfilePath(sid);
                 if (profilePath != null)
                 {
                     return Path.Combine(profilePath,

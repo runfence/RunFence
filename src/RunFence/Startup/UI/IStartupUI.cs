@@ -1,4 +1,6 @@
+using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Security;
 
 namespace RunFence.Startup.UI;
 
@@ -9,15 +11,15 @@ namespace RunFence.Startup.UI;
 public interface IStartupUI
 {
     /// <summary>
-    /// Prompts the user to set a new PIN (first run). Returns the new PIN key and
-    /// created credential store, or null on cancel.
+    /// Prompts the user to set a new PIN (first run). Returns the owned result object,
+    /// or null on cancel.
     /// </summary>
-    (CredentialStore store, byte[] key)? PromptNewPin();
+    PinResetResult? PromptNewPin();
 
     /// <summary>
     /// Prompts the user to verify their PIN. Uses injected services internally for
-    /// verification and key derivation. Returns an outcome with Key.Length == 0 on cancel.
-    /// When the user resets their PIN, <see cref="PinVerifyOutcome.NewStore"/> is set.
+    /// verification and key derivation. When the user resets their PIN,
+    /// <see cref="PinVerifyOutcome.NewStore"/> is set.
     /// </summary>
     PinVerifyOutcome PromptVerifyPin(
         CredentialStore store,
@@ -25,7 +27,7 @@ public interface IStartupUI
 
     /// <summary>
     /// Shows a DPAPI-loss warning then prompts the user to enter a recovery PIN.
-    /// Returns the new credential store and key, or null on cancel.
+    /// Returns the owned recovery result, or null on cancel.
     /// </summary>
     RecoveryPinOutcome? PromptRecoveryPin(byte[]? configSalt);
 
@@ -39,14 +41,24 @@ public interface IStartupUI
     bool ConfirmTakeover(bool isFirstRun, bool isBackground);
 
     /// <summary>
-    /// Shows a configuration decryption error and asks whether to start fresh with an empty config.
-    /// Returns true if the user chose to start fresh, false to exit.
+    /// Shows a configuration decryption error and asks whether to restore a loaded-good backup,
+    /// start fresh with an empty config, or exit.
     /// </summary>
-    bool ConfirmStartFresh();
+    StartupConfigRecoveryChoice ConfirmStartFresh(bool backupAvailable);
+
+    /// <summary>
+    /// Shows a credential store load error and asks whether to restore a loaded-good backup.
+    /// </summary>
+    bool ConfirmRestoreCredentialStoreBackup();
+
+    MainConfigPinPromptResult PromptMainConfigMismatchPin(
+        string configPath,
+        Func<ProtectedString, MainConfigPinVerificationResult> verifyPin);
 }
 
-/// <summary>Outcome of a PIN verification prompt.</summary>
-public record struct PinVerifyOutcome(byte[] Key, CredentialStore? NewStore, byte[]? MismatchKey);
-
-/// <summary>Outcome of a recovery PIN prompt.</summary>
-public record struct RecoveryPinOutcome(CredentialStore Store, byte[] Key, byte[]? MismatchKey);
+public enum StartupConfigRecoveryChoice
+{
+    Exit,
+    StartFresh,
+    UseBackup
+}

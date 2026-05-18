@@ -52,4 +52,65 @@ public class ShortcutClassificationHelperTests
 
         Assert.True(result);
     }
+
+    [Theory]
+    [InlineData(@"C:\windows\explorer.exe", "/select,\"C:\\Users\\alice\\Documents\\report.txt\"", @"C:\Users\alice\Documents")]
+    [InlineData(@"C:\windows\explorer.exe", "/e,/root,\"C:\\Users\\alice\\Documents2\"", @"C:\Users\alice\Documents")]
+    [InlineData(@"C:\windows\explorer.exe", @"/e,/root,C:\Users\alice\Documents2", @"C:\Users\alice\Documents")]
+    public void IsFolderShortcutTarget_DoesNotUseSubstringMatching(string target, string args, string normalizedFolder)
+    {
+        Assert.False(ShortcutClassificationHelper.IsFolderShortcutTarget(target, args, normalizedFolder));
+    }
+
+    [Theory]
+    [InlineData("/e,/root,\"C:\\Users\\alice\\Documents\"", @"C:\Users\alice\Documents")]
+    [InlineData(@"/e,/root,C:\Users\alice\Documents", @"C:\Users\alice\Documents")]
+    [InlineData(@"""C:\Users\alice\Documents""", @"C:\Users\alice\Documents")]
+    public void IsFolderShortcutTarget_ExplorerPathOperandMustMatchExactly(string args, string normalizedFolder)
+    {
+        Assert.True(ShortcutClassificationHelper.IsFolderShortcutTarget(
+            @"C:\windows\explorer.exe",
+            args,
+            normalizedFolder));
+    }
+
+    [Theory]
+    [InlineData("app-id", "app-id", "")]
+    [InlineData("app-id --flag value", "app-id", "--flag value")]
+    [InlineData("\"app-id\" \"C:\\Folder Path\"", "app-id", "\"C:\\Folder Path\"")]
+    [InlineData("\"app-id\" \"C:\\Folder Path\" tail", "app-id", "\"C:\\Folder Path\" tail")]
+    public void ParseManagedShortcutArgs_ParsesFirstCommandLineOperand(string currentArgs, string appId, string expected)
+    {
+        Assert.Equal(expected, ShortcutClassificationHelper.ParseManagedShortcutArgs(currentArgs, appId));
+    }
+
+    [Theory]
+    [InlineData("app-id-2 --flag", "app-id")]
+    [InlineData("\"app-id-2\" --flag", "app-id")]
+    [InlineData("--flag app-id", "app-id")]
+    public void ParseManagedShortcutArgs_DoesNotUseSubstringPrefixMatching(string currentArgs, string appId)
+    {
+        Assert.Null(ShortcutClassificationHelper.ParseManagedShortcutArgs(currentArgs, appId));
+    }
+
+    [Fact]
+    public void ExcludeSystemExecutables_RemovesWindowsDirectoryExecutablesFromDiscoverResults()
+    {
+        var apps = new List<RunFence.Core.Models.DiscoveredApp>
+        {
+            new("App", @"C:\Apps\App.exe"),
+            new("Cmd", @"C:\Windows\System32\cmd.exe"),
+            new("Shell", @"C:\Windows\explorer.exe")
+        };
+
+        var filtered = ShortcutClassificationHelper.ExcludeSystemExecutables(apps);
+
+        Assert.Collection(
+            filtered,
+            app =>
+            {
+                Assert.Equal("App", app.Name);
+                Assert.Equal(@"C:\Apps\App.exe", app.TargetPath);
+            });
+    }
 }

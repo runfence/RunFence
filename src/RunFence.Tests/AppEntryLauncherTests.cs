@@ -1,4 +1,5 @@
 using Moq;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -13,7 +14,7 @@ public class AppEntryLauncherTests : IDisposable
     private readonly AppEntryLauncher _launcher;
     private readonly AppDatabase _database;
     private readonly byte[] _pinDerivedKey = new byte[32];
-    private readonly ProtectedBuffer _protectedPinKey;
+    private readonly SecureSecret _protectedPinKey;
 
     private const string TestSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
     private readonly string _tempExePath;
@@ -29,14 +30,13 @@ public class AppEntryLauncherTests : IDisposable
             SidNames = { [TestSid] = "User" }
         };
         var credentialStore = new CredentialStore();
-        _protectedPinKey = new ProtectedBuffer(_pinDerivedKey, protect: false);
+        _protectedPinKey = TestSecretFactory.FromBytes(_pinDerivedKey);
 
         sessionProvider.Setup(s => s.GetSession()).Returns(new SessionContext
-        {
+{
             Database = _database,
             CredentialStore = credentialStore,
-            PinDerivedKey = _protectedPinKey
-        });
+        }.WithOwnedPinDerivedKey(_protectedPinKey));
 
         _launcher = new AppEntryLauncher(
             _facade.Object,
@@ -51,6 +51,12 @@ public class AppEntryLauncherTests : IDisposable
         catch { }
     }
 
+    private static LaunchExecutionResult MakeLaunchResult(params string[] warnings)
+        => new(
+            warnings.Length == 0 ? LaunchExecutionStatus.ProcessStarted : LaunchExecutionStatus.ProcessStartedWithMaintenanceWarnings,
+            null,
+            warnings);
+
     // --- Normal file launch ---
 
     [Fact]
@@ -58,10 +64,39 @@ public class AppEntryLauncherTests : IDisposable
     {
         var app = new AppEntry { AccountSid = TestSid, ExePath = _tempExePath };
 
-        _launcher.Launch(app, "--flag");
+        using var result = _launcher.Launch(app, "--flag");
 
         _facade.Verify(f => f.LaunchFile(It.Is<ProcessLaunchTarget>(t => t.ExePath == _tempExePath),
             It.Is<AccountLaunchIdentity>(a => a.Sid == TestSid), null), Times.Once);
+    }
+
+    [Fact]
+    public void Launch_NormalApp_MarksInitialTargetApproved()
+    {
+        var app = new AppEntry { AccountSid = TestSid, ExePath = _tempExePath, AllowPassingArguments = true };
+
+        _launcher.Launch(app, "--flag");
+
+        _facade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == _tempExePath &&
+                t.Arguments == "--flag" &&
+                t.IsPathApproved),
+            It.IsAny<AccountLaunchIdentity>(),
+            null), Times.Once);
+    }
+
+    [Fact]
+    public void Launch_NormalApp_ReturnsFacadeResult()
+    {
+        var app = new AppEntry { AccountSid = TestSid, ExePath = _tempExePath };
+        var expected = MakeLaunchResult("post-launch warning");
+        _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()))
+            .Returns(expected);
+
+        using var result = _launcher.Launch(app, null);
+
+        Assert.Same(expected, result);
     }
 
     [Fact]
@@ -97,6 +132,23 @@ public class AppEntryLauncherTests : IDisposable
         Assert.Throws<MissingPasswordException>(() => _launcher.Launch(app, null));
     }
 
+    [Fact]
+    public void Launch_FacadeThrowsGrantOperationException_Propagates()
+    {
+        var app = new AppEntry { AccountSid = TestSid, ExePath = _tempExePath };
+        var exception = new GrantOperationException(
+            GrantApplyFailureStep.GrantAclApply,
+            _tempExePath,
+            null,
+            new UnauthorizedAccessException("denied"));
+        _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()))
+            .Throws(exception);
+
+        var actual = Assert.Throws<GrantOperationException>(() => _launcher.Launch(app, null));
+
+        Assert.Same(exception, actual);
+    }
+
     // --- URL scheme launch ---
 
     [Fact]
@@ -123,8 +175,39 @@ public class AppEntryLauncherTests : IDisposable
 
         _facade.Verify(f => f.LaunchFolderBrowser(
             It.Is<AccountLaunchIdentity>(a => a.Sid == TestSid),
-            folderPath, null), Times.Once);
+            folderPath, null, true), Times.Once);
         _facade.Verify(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()), Times.Never);
+    }
+
+    [Fact]
+    public void Launch_AssociationResolvedFolderApp_KeepsConfiguredFolderApproved()
+    {
+        var folderPath = @"C:\Users\User\Documents";
+        var app = new AppEntry { AccountSid = TestSid, ExePath = folderPath, IsFolder = true };
+
+        _launcher.Launch(app, "--assoc-target", associationArgsTemplate: "");
+
+        _facade.Verify(f => f.LaunchFolderBrowser(
+            It.Is<AccountLaunchIdentity>(a => a.Sid == TestSid),
+            folderPath,
+            null,
+            true), Times.Once);
+    }
+
+    [Fact]
+    public void Launch_AssociationResolvedApp_MarksInitialTargetUnapproved()
+    {
+        var app = new AppEntry { AccountSid = TestSid, ExePath = _tempExePath, AllowPassingArguments = true };
+
+        _launcher.Launch(app, "--assoc-target", associationArgsTemplate: "");
+
+        _facade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == _tempExePath &&
+                t.Arguments == "--assoc-target" &&
+                !t.IsPathApproved),
+            It.IsAny<AccountLaunchIdentity>(),
+            null), Times.Once);
     }
 
     // --- AppContainer launch path ---
@@ -169,10 +252,10 @@ public class AppEntryLauncherTests : IDisposable
     // --- Null/default privilege level passing ---
 
     [Theory]
-    [InlineData(PrivilegeLevel.Basic)]
+    [InlineData(PrivilegeLevel.Isolated)]
     [InlineData(PrivilegeLevel.HighestAllowed)]
     [InlineData(PrivilegeLevel.LowIntegrity)]
-    [InlineData(PrivilegeLevel.AboveBasic)]
+    [InlineData(PrivilegeLevel.Basic)]
     [InlineData(null)]
     public void Launch_PassesPrivilegeLevelToFacade(PrivilegeLevel? privilegeLevel)
     {

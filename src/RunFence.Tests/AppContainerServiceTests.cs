@@ -1,26 +1,35 @@
+using System.Diagnostics;
+using System.Security.Principal;
+using Microsoft.Win32;
 using Moq;
 using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Launch;
 using RunFence.Launch.Container;
 using RunFence.Launch.Tokens;
+using RunFence.Infrastructure;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
 
-public class AppContainerServiceTests
+public class AppContainerServiceTests : IDisposable
 {
-    private static AppContainerService CreateService()
+    private readonly RegistryTestHelper _registry = new("AppContainerServiceHku", "AppContainerServiceHklm");
+    private readonly string _containersRootPath = Path.Combine(Path.GetTempPath(), "RunFence_AppContainerService_" + Guid.NewGuid().ToString("N"));
+
+    public void Dispose()
     {
-        var log = new Mock<ILoggingService>();
-        var pathGrantService = new Mock<IPathGrantService>();
-        var environmentSetup = new Mock<IAppContainerEnvironmentSetup>();
-        var profileSetup = new AppContainerProfileSetup(log.Object, environmentSetup.Object);
-        var dataFolderService = new AppContainerDataFolderService(log.Object, pathGrantService.Object);
-        var explorerTokenProvider = new Mock<IExplorerTokenProvider>();
-        var sidProvider = new AppContainerSidProvider();
-        return new AppContainerService(log.Object, pathGrantService.Object, profileSetup, dataFolderService,
-            new AppContainerComAccessService(log.Object), explorerTokenProvider.Object, sidProvider);
+        _registry.Dispose();
+        try
+        {
+            if (Directory.Exists(_containersRootPath))
+                Directory.Delete(_containersRootPath, recursive: true);
+        }
+        catch
+        {
+        }
     }
 
     [Fact]
@@ -42,130 +51,282 @@ public class AppContainerServiceTests
     }
 
     [Fact]
-    public void GetContainerDataPath_DifferentProfileNames_ReturnDistinctPaths()
-    {
-        var path1 = AppContainerPaths.GetContainerDataPath("ram_browser");
-        var path2 = AppContainerPaths.GetContainerDataPath("ram_sandbox");
-
-        Assert.NotEqual(path1, path2);
-    }
-
-    // --- GetSid ---
-
-    [Fact]
     public void GetSid_ValidName_ReturnsAppContainerSidFormat()
     {
-        // DeriveAppContainerSidFromAppContainerName is a pure Windows computation —
-        // no profile needs to exist on disk. Result is always an AppContainer SID (S-1-15-2-...).
-        var sid = CreateService().GetSid("ram_test_container");
+        var service = CreateService();
 
-        Assert.NotEmpty(sid);
-        // AppContainer SIDs have integrity level 15 (Low IL is 12; AC SIDs use authority 15)
+        var sid = service.GetSid("ram_test_container");
+
         Assert.StartsWith("S-1-15-2-", sid);
     }
 
-    [Theory]
-    [InlineData("ram_browser")]
-    [InlineData("ram_sandbox")]
-    public void GetSid_SameName_ReturnsDeterministicSid(string name)
+    [Fact]
+    public void GetContainerDataPath_UsesInjectedPathProvider()
     {
         var service = CreateService();
 
-        var sid1 = service.GetSid(name);
-        var sid2 = service.GetSid(name);
+        var path = service.GetContainerDataPath("ram_test");
 
-        Assert.Equal(sid1, sid2);
+        Assert.Equal(Path.Combine(_containersRootPath, "ram_test"), path);
     }
 
     [Fact]
-    public void GetSid_DifferentNames_ReturnDistinctSids()
+    public void CreateProfile_ProfileSetupFailure_ReturnsFailureAndSkipsDataFolderSetup()
     {
+        var profileSetup = new Mock<IAppContainerProfileSetup>();
+        var dataFolderService = new Mock<IAppContainerDataFolderService>();
+        profileSetup.Setup(s => s.EnsureProfileUnderToken(It.IsAny<AppContainerEntry>(), It.IsAny<IntPtr>()))
+            .Returns(AppContainerProfileSetupResult.Failure(
+                AppContainerProfileSetupStatus.ProfileFailed,
+                "profile failed"));
+
+        var service = CreateService(
+            profileSetup: profileSetup.Object,
+            dataFolderService: dataFolderService.Object);
+
+        var result = service.CreateProfile(new AppContainerEntry { Name = "ram_test", DisplayName = "Test" });
+
+        Assert.Equal(AppContainerProfileSetupStatus.ProfileFailed, result.Status);
+        dataFolderService.Verify(s => s.EnsureContainerDataFolder(It.IsAny<AppContainerEntry>(), It.IsAny<string>()), Times.Never);
+        dataFolderService.Verify(s => s.EnsureInteractiveUserAccess(It.IsAny<AppContainerEntry>()), Times.Never);
+    }
+
+    [Fact]
+    public void ProfileExists_UsesInteractiveUserHiveInsteadOfCurrentUser()
+    {
+        var interactiveSid = WindowsIdentity.GetCurrent().User!.Value;
+        var containerSid = "S-1-15-2-99-1-2-3";
+
+        _registry.HkuRoot.CreateSubKey(
+            $@"{interactiveSid}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\{containerSid}")
+            ?.Dispose();
+        _registry.HkuRoot.CreateSubKey(
+            $@"S-1-5-21-unrelated\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\other")
+            ?.Dispose();
+
+        var sidProvider = new Mock<IAppContainerSidProvider>();
+        sidProvider.Setup(s => s.GetSidString("ram_browser")).Returns(containerSid);
+
+        var service = CreateService(sidProvider: sidProvider.Object);
+
+        Assert.True(service.ProfileExists("ram_browser"));
+    }
+
+    [Fact]
+    public async Task DeleteProfile_RemovesOnlyTargetContainerStateFromLoadedHives()
+    {
+        const string targetSid = "S-1-15-2-99-9-9";
+        const string otherSid = "S-1-15-2-88-8-8";
+        const string hiveA = "S-1-5-21-100-100-100-1000";
+        const string hiveB = "S-1-5-21-200-200-200-2000";
+
+        CreateContainerState(hiveA, targetSid);
+        CreateContainerState(hiveA, otherSid);
+        CreateContainerState(hiveB, targetSid);
+        CreateContainerState(hiveB, otherSid);
+
+        var sidProvider = new Mock<IAppContainerSidProvider>();
+        sidProvider.Setup(s => s.GetSidString("ram_delete")).Returns(targetSid);
+        var service = CreateService(sidProvider: sidProvider.Object);
+
+        await service.DeleteProfile("ram_delete");
+
+        Assert.Null(_registry.HkuRoot.OpenSubKey(
+            $@"{hiveA}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\{targetSid}"));
+        Assert.Null(_registry.HkuRoot.OpenSubKey(
+            $@"{hiveA}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{targetSid}"));
+        Assert.Null(_registry.HkuRoot.OpenSubKey(
+            $@"{hiveB}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\{targetSid}"));
+        Assert.Null(_registry.HkuRoot.OpenSubKey(
+            $@"{hiveB}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{targetSid}"));
+
+        Assert.NotNull(_registry.HkuRoot.OpenSubKey(
+            $@"{hiveA}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\{otherSid}"));
+        Assert.NotNull(_registry.HkuRoot.OpenSubKey(
+            $@"{hiveB}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{otherSid}"));
+    }
+
+    [Fact]
+    public async Task DeleteProfile_DeletesInjectedContainerDataPath()
+    {
+        var path = Path.Combine(_containersRootPath, "ram_delete_data");
+        Directory.CreateDirectory(path);
+        await File.WriteAllTextAsync(Path.Combine(path, "test.txt"), "x");
+
         var service = CreateService();
 
-        var sid1 = service.GetSid("ram_container_alpha");
-        var sid2 = service.GetSid("ram_container_beta");
+        await service.DeleteProfile("ram_delete_data");
 
-        Assert.NotEqual(sid1, sid2);
+        Assert.False(Directory.Exists(path));
     }
 
-    // --- ProfileExists failure path ---
-
     [Fact]
-    public void ProfileExists_UnknownContainer_ReturnsFalse()
+    public async Task DeleteProfile_NativeDeleteFailure_PreservesRegistryAndData()
     {
-        // A name with no associated registry mapping returns false (not an exception)
-        // Use a name that has never been created on this machine
-        var result = CreateService().ProfileExists("ram_nonexistent_profile_xyz_test");
+        const string targetSid = "S-1-15-2-99-9-9";
+        const string hive = "S-1-5-21-100-100-100-1000";
+        var path = Path.Combine(_containersRootPath, "ram_delete_fail");
+        Directory.CreateDirectory(path);
+        await File.WriteAllTextAsync(Path.Combine(path, "test.txt"), "x");
+        CreateContainerState(hive, targetSid);
 
-        Assert.False(result);
+        var sidProvider = new Mock<IAppContainerSidProvider>();
+        sidProvider.Setup(s => s.GetSidString("ram_delete_fail")).Returns(targetSid);
+        var service = CreateService(sidProvider: sidProvider.Object, deleteProfileHResult: unchecked((int)0x80070005));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.DeleteProfile("ram_delete_fail"));
+
+        Assert.Contains("0x80070005", exception.Message, StringComparison.Ordinal);
+        Assert.NotNull(_registry.HkuRoot.OpenSubKey(
+            $@"{hive}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\{targetSid}"));
+        Assert.NotNull(_registry.HkuRoot.OpenSubKey(
+            $@"{hive}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{targetSid}"));
+        Assert.True(Directory.Exists(path));
     }
 
-    // --- GetContainerDataPath delegates to AppContainerPaths ---
-
     [Fact]
-    public void GetContainerDataPath_MatchesStaticHelper()
+    public async Task DeleteProfile_NativeDeleteFailure_WithMissingLoadedHiveState_PreservesDataFolder()
     {
-        var result = CreateService().GetContainerDataPath("ram_browser");
+        const string targetSid = "S-1-15-2-99-7-7";
+        var path = Path.Combine(_containersRootPath, "ram_delete_missing_hive");
+        Directory.CreateDirectory(path);
+        await File.WriteAllTextAsync(Path.Combine(path, "test.txt"), "x");
 
-        Assert.Equal(AppContainerPaths.GetContainerDataPath("ram_browser"), result);
+        var sidProvider = new Mock<IAppContainerSidProvider>();
+        sidProvider.Setup(s => s.GetSidString("ram_delete_missing_hive")).Returns(targetSid);
+        var service = CreateService(sidProvider: sidProvider.Object, deleteProfileHResult: unchecked((int)0x80070005));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.DeleteProfile("ram_delete_missing_hive"));
+
+        Assert.Contains("0x80070005", exception.Message, StringComparison.Ordinal);
+        Assert.True(Directory.Exists(path));
     }
 
     [Fact]
-    public void EnsureDataFolderTraverse_ExistingDataRoot_TracksFullControlGrantBeforeTraverse()
+    public void RevertTraverseAccess_UsesCachedEntrySidWhenPresent()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        var expected = new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: true);
+        pathGrantService.Setup(p => p.RemoveAll("S-1-15-2-99-cached")).Returns(expected);
+        var sidProvider = new Mock<IAppContainerSidProvider>();
+        sidProvider.Setup(s => s.GetSidString("ram_cached_sid")).Returns("S-1-15-2-99-override");
+        var service = CreateService(pathGrantService: pathGrantService.Object, sidProvider: sidProvider.Object);
+        var entry = new AppContainerEntry
+        {
+            Name = "ram_cached_sid",
+            Sid = "S-1-15-2-99-cached"
+        };
+
+        var result = service.RevertTraverseAccess(entry, new AppDatabase());
+
+        pathGrantService.Verify(p => p.RemoveAll(entry.Sid), Times.Once);
+        sidProvider.Verify(s => s.GetSidString(It.IsAny<string>()), Times.Never);
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public void RevertTraverseAccess_ReturnsRemoveAllWarnings()
+    {
+        var warning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostRemoveAllSave,
+            @"C:\ContainerRoot",
+            null,
+            new InvalidOperationException("save failed"));
+        var expected = new GrantApplyResult(
+            DatabaseModified: true,
+            DurableSaveCompleted: false,
+            Warnings: [warning]);
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService.Setup(p => p.RemoveAll("S-1-15-2-99-test")).Returns(expected);
+        var sidProvider = new Mock<IAppContainerSidProvider>();
+        sidProvider.Setup(s => s.GetSidString("ram_test")).Returns("S-1-15-2-99-test");
+        var service = CreateService(pathGrantService: pathGrantService.Object, sidProvider: sidProvider.Object);
+
+        var result = service.RevertTraverseAccess(new AppContainerEntry { Name = "ram_test" }, new AppDatabase());
+
+        Assert.Equal(expected, result);
+    }
+
+    private AppContainerService CreateService(
+        IPathGrantService? pathGrantService = null,
+        IAppContainerProfileSetup? profileSetup = null,
+        IAppContainerDataFolderService? dataFolderService = null,
+        IAppContainerComAccessService? comAccessService = null,
+        IExplorerTokenProvider? explorerTokenProvider = null,
+        IAppContainerSidProvider? sidProvider = null,
+        IAppContainerUserRegistryRoot? userRegistryRoot = null,
+        IAppContainerPathProvider? pathProvider = null,
+        int deleteProfileHResult = 0)
     {
         var log = new Mock<ILoggingService>();
-        var pathGrantService = new Mock<IPathGrantService>();
-        var service = new AppContainerDataFolderService(log.Object, pathGrantService.Object);
-        var entry = new AppContainerEntry { Name = "ram_data_acl_test_" + Guid.NewGuid().ToString("N") };
-        var containerSid = "S-1-15-2-99-1-2-3-4-5-6";
-        var dataPath = AppContainerPaths.GetContainerDataPath(entry.Name);
-
-        Directory.CreateDirectory(dataPath);
-        try
-        {
-            service.EnsureDataFolderTraverse(entry, containerSid);
-
-            pathGrantService.Verify(p => p.AddGrant(
-                containerSid,
-                dataPath,
-                false,
-                It.Is<SavedRightsState>(r =>
-                    r.Read && r.Execute && r.Write && r.Special && !r.Own),
-                null), Times.Once);
-            pathGrantService.Verify(p => p.AddTraverse(containerSid, dataPath), Times.Once);
-        }
-        finally
-        {
-            if (Directory.Exists(dataPath))
-                Directory.Delete(dataPath, recursive: true);
-        }
+        var explorerProvider = explorerTokenProvider ?? CreateExplorerTokenProvider().Object;
+        return new TestAppContainerService(
+            log.Object,
+            pathGrantService ?? new Mock<IPathGrantService>().Object,
+            profileSetup ?? new Mock<IAppContainerProfileSetup>().Object,
+            dataFolderService ?? new Mock<IAppContainerDataFolderService>().Object,
+            comAccessService ?? new Mock<IAppContainerComAccessService>().Object,
+            explorerProvider,
+            sidProvider ?? new AppContainerSidProvider(),
+            userRegistryRoot ?? AppContainerProviderTestDoubles.CreateUserRegistryRoot(_registry.HkuRoot),
+            pathProvider ?? AppContainerProviderTestDoubles.CreatePathProvider(_containersRootPath),
+            deleteProfileHResult);
     }
 
-    // --- DeleteProfile (non-existent profile) ---
-
-    [Fact]
-    public async Task DeleteProfile_NonExistentProfile_DoesNotThrow()
+    private static Mock<IExplorerTokenProvider> CreateExplorerTokenProvider()
     {
-        // DeleteProfile should log a warning but not throw when the OS profile doesn't exist.
-        // DeleteAppContainerProfile returns a non-zero HRESULT for missing profiles, which is logged.
-        var service = CreateService();
-
-        var exception = await Record.ExceptionAsync(() => service.DeleteProfile("ram_nonexistent_profile_xyz_test"));
-
-        Assert.Null(exception);
+        var provider = new Mock<IExplorerTokenProvider>();
+        provider.Setup(p => p.TryGetExplorerToken()).Returns(() => OpenCurrentProcessToken());
+        provider.Setup(p => p.GetExplorerToken()).Returns(() => OpenCurrentProcessToken());
+        return provider;
     }
 
-    [Fact]
-    public async Task ProfileExists_NonExistentProfile_ReturnsFalse_AfterDeleteProfile()
+    private static IntPtr OpenCurrentProcessToken()
     {
-        // After deleting a profile that doesn't exist, ProfileExists should return false
-        // (same as if it was never created). This verifies that DeleteProfile + ProfileExists
-        // are consistent even when the profile was not present.
-        var service = CreateService();
+        if (!ProcessNative.OpenProcessToken(
+                Process.GetCurrentProcess().Handle,
+                ProcessLaunchNative.TOKEN_QUERY,
+                out var token))
+        {
+            throw new InvalidOperationException("Unable to open the current process token for test setup.");
+        }
 
-        await service.DeleteProfile("ram_never_created_xyz_test");
-        var exists = service.ProfileExists("ram_never_created_xyz_test");
+        return token;
+    }
 
-        Assert.False(exists);
+    private void CreateContainerState(string hiveName, string containerSid)
+    {
+        _registry.HkuRoot.CreateSubKey(
+            $@"{hiveName}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\{containerSid}")
+            ?.Dispose();
+        _registry.HkuRoot.CreateSubKey(
+            $@"{hiveName}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{containerSid}\User Shell Folders")
+            ?.Dispose();
+    }
+
+    private sealed class TestAppContainerService(
+        ILoggingService log,
+        IPathGrantService pathGrantService,
+        IAppContainerProfileSetup profileSetup,
+        IAppContainerDataFolderService dataFolderService,
+        IAppContainerComAccessService comAccessService,
+        IExplorerTokenProvider explorerTokenProvider,
+        IAppContainerSidProvider sidProvider,
+        IAppContainerUserRegistryRoot userRegistryRoot,
+        IAppContainerPathProvider pathProvider,
+        int deleteProfileHResult)
+        : AppContainerService(
+            log,
+            pathGrantService,
+            profileSetup,
+            dataFolderService,
+            comAccessService,
+            explorerTokenProvider,
+            sidProvider,
+            userRegistryRoot,
+            pathProvider)
+    {
+        protected override int DeleteAppContainerProfile(string name)
+            => deleteProfileHResult;
     }
 }

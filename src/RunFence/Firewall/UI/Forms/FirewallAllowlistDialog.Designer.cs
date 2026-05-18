@@ -160,38 +160,32 @@ partial class FirewallAllowlistDialog
         _grid.ContextMenuStrip = _contextMenu;
 
         // _addButton
-        _addButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 30);
         _addButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _addButton.ToolTipText = "Add entry (IP, CIDR, or domain — auto-detected)";
         _addButton.Click += OnAddButtonClick;
 
         // _removeButton
-        _removeButton.Image = UiIconFactory.CreateToolbarIcon("\u2212", Color.FromArgb(0xCC, 0x33, 0x33), 30);
         _removeButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _removeButton.ToolTipText = "Remove";
         _removeButton.Enabled = false;
         _removeButton.Click += OnRemoveButtonClick;
 
         // _exportButton
-        _exportButton.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x22, 0x8B, 0x22), 30);
         _exportButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _exportButton.ToolTipText = "Export selected entries to file (exports all entries and ports when nothing is selected)";
         _exportButton.Click += OnExportButtonClick;
 
         // _importButton
-        _importButton.Image = UiIconFactory.CreateToolbarIcon("\u2193", Color.FromArgb(0x33, 0x66, 0xCC), 30);
         _importButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _importButton.ToolTipText = "Import entries and ports from file";
         _importButton.Click += OnImportClick;
 
         // _resolveButton
-        _resolveButton.Image = UiIconFactory.CreateToolbarIcon("\u21BB", Color.FromArgb(0x33, 0x66, 0x99), 30);
         _resolveButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _resolveButton.ToolTipText = "Resolve DNS";
         _resolveButton.Click += OnResolveClick;
 
         // _viewBlockedButton
-        _viewBlockedButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F6AB", Color.FromArgb(0xCC, 0x44, 0x00), 30);
         _viewBlockedButton.DisplayStyle = ToolStripItemDisplayStyle.ImageAndText;
         _viewBlockedButton.Text = "View Blocked";
         _viewBlockedButton.ToolTipText = "View recently blocked outbound connections for this account";
@@ -204,13 +198,11 @@ partial class FirewallAllowlistDialog
 
         // _ctxRemoveItem
         _ctxRemoveItem.Text = "Remove";
-        _ctxRemoveItem.Image = UiIconFactory.CreateToolbarIcon("\u2212", Color.FromArgb(0xCC, 0x33, 0x33), 16);
         _ctxRemoveItem.Visible = false;
         _ctxRemoveItem.Click += OnRemoveClick;
 
         // _ctxExportItem
         _ctxExportItem.Text = "Export Selected";
-        _ctxExportItem.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x22, 0x8B, 0x22), 16);
         _ctxExportItem.Visible = false;
         _ctxExportItem.Click += OnExportClick;
 
@@ -274,13 +266,11 @@ partial class FirewallAllowlistDialog
 
         // _portsCtxRemove
         _portsCtxRemove.Text = "Remove";
-        _portsCtxRemove.Image = UiIconFactory.CreateToolbarIcon("\u2212", Color.FromArgb(0xCC, 0x33, 0x33), 16);
         _portsCtxRemove.Visible = false;
         _portsCtxRemove.Click += OnPortsRemoveClick;
 
         // _portsCtxExport
         _portsCtxExport.Text = "Export Selected";
-        _portsCtxExport.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x22, 0x8B, 0x22), 16);
         _portsCtxExport.Visible = false;
         _portsCtxExport.Click += OnPortsExportClick;
 

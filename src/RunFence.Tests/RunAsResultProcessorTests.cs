@@ -29,6 +29,7 @@ public class RunAsResultProcessorTests : IDisposable
     private const string ContainerName = "rfn_testcontainer";
     private const string ContainerSid = "S-1-15-2-1-2-3-4-5-6-7";
     private const string FilePath = @"C:\Apps\test.exe";
+    private const string LauncherWorkingDirectory = @"D:\LaunchFrom";
 
     private readonly Mock<IAppStateProvider> _appState = new();
     private readonly Mock<ILoggingService> _log = new();
@@ -38,35 +39,47 @@ public class RunAsResultProcessorTests : IDisposable
     private readonly Mock<IAppEntryLauncher> _launchOrchestrator = new();
     private readonly Mock<IPathGrantService> _pathGrantService = new();
 
-    private readonly Mock<ICredentialEncryptionService> _encryptionService = new();
+    private readonly Mock<IByteArrayCredentialEncryptionService> _encryptionService = new();
     private readonly Mock<ISidResolver> _sidResolver = new();
     private readonly Mock<IRunAsLaunchErrorHandler> _launchErrorHandler = new();
     private readonly Mock<ILaunchFacade> _directLauncherFacade = new();
     private readonly AppDatabase _database = new();
     private readonly CredentialStore _credentialStore = new();
-    private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
     private readonly FakeRunAsAppEditDialogHandler _fakeDialogHandler;
+    private readonly List<SessionContext> _sessions = [];
 
     public RunAsResultProcessorTests()
     {
         _fakeDialogHandler = new FakeRunAsAppEditDialogHandler(_pinKey);
         _appState.Setup(c => c.Database).Returns(_database);
         _launchErrorHandler
-            .Setup(h => h.RunWithErrorHandling(It.IsAny<Action>(), It.IsAny<string>()))
-            .Callback<Action, string>((action, _) => action());
+            .Setup(h => h.RunWithErrorHandling(It.IsAny<Func<LaunchExecutionResult>>(), It.IsAny<string>()))
+            .Callback<Func<LaunchExecutionResult>, string>((action, _) =>
+            {
+                using var launch = action();
+            });
     }
 
     public void Dispose()
     {
+        _fakeDialogHandler.Dispose();
+        foreach (var session in _sessions)
+            session.Dispose();
+
         _pinKey.Dispose();
     }
 
-    private SessionContext CreateSession() => new()
+    private SessionContext CreateSession()
     {
-        Database = _database,
-        CredentialStore = _credentialStore,
-        PinDerivedKey = _pinKey
-    };
+        var session = new SessionContext
+{
+            Database = _database,
+            CredentialStore = _credentialStore,
+        }.WithOwnedPinDerivedKey(_pinKey);
+        _sessions.Add(session);
+        return session;
+    }
 
     private RunAsAppShortcutCreator CreateShortcutCreator()
     {
@@ -79,6 +92,7 @@ public class RunAsResultProcessorTests : IDisposable
             new Mock<IBesideTargetShortcutService>().Object,
             sessionProvider,
             new Mock<IInteractiveUserSidResolver>().Object,
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: false),
             _log.Object);
     }
 
@@ -86,7 +100,7 @@ public class RunAsResultProcessorTests : IDisposable
         => new(
             _appState.Object,
             CreateSession(),
-            _encryptionService.Object,
+            new ByteArrayCredentialEncryptionSpanAdapter(_encryptionService.Object),
             _databaseService.Object,
             _log.Object);
 
@@ -107,10 +121,6 @@ public class RunAsResultProcessorTests : IDisposable
     private RunAsPermissionApplier CreatePermissionApplier()
         => new(
             _pathGrantService.Object,
-            _databaseService.Object,
-            CreateSession(),
-            _appState.Object,
-            _log.Object,
             new Mock<IQuickAccessPinService>().Object);
 
     private RunAsLaunchDispatcher CreateLaunchDispatcher(RunAsDirectLauncher directLauncher)
@@ -154,7 +164,7 @@ public class RunAsResultProcessorTests : IDisposable
             SelectedContainer: null,
             PermissionGrant: permissionGrant,
             CreateAppEntryOnly: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             UpdateOriginalShortcut: updateOriginalShortcut,
             RevertShortcutRequested: false,
             EditExistingApp: null,
@@ -185,7 +195,7 @@ public class RunAsResultProcessorTests : IDisposable
                 It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()),
             Times.Never);
         _databaseService.Verify(d => d.SaveConfig(It.IsAny<AppDatabase>(),
-            It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+            It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Never);
     }
 
     [Fact]
@@ -195,7 +205,7 @@ public class RunAsResultProcessorTests : IDisposable
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
         _pathGrantService
             .Setup(p => p.EnsureAccess(UserSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
-            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
+            .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
         using var result = MakeCredentialResult(credential, permissionGrant: permissionGrant);
         var processor = CreateProcessor();
@@ -205,10 +215,6 @@ public class RunAsResultProcessorTests : IDisposable
         _pathGrantService.Verify(
             p => p.EnsureAccess(UserSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false),
             Times.Once);
-        // SaveConfig may be called multiple times (permission grant save + last-used account save)
-        _databaseService.Verify(
-            d => d.SaveConfig(_database, It.IsAny<byte[]>(), It.IsAny<byte[]>()),
-            Times.AtLeastOnce);
     }
 
     [Fact]
@@ -222,7 +228,7 @@ public class RunAsResultProcessorTests : IDisposable
         _pathGrantService
             .Setup(p => p.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
-            .Returns(new GrantOperationResult());
+            .Returns(default(GrantApplyResult));
 
         using var result = MakeCredentialResult(credential, permissionGrant: permissionGrant);
         var processor = CreateProcessor();
@@ -231,7 +237,56 @@ public class RunAsResultProcessorTests : IDisposable
 
         // EnsureAccess returned false → no permission-grant save
         _databaseService.Verify(d => d.SaveConfig(It.IsAny<AppDatabase>(),
-            It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+            It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Never);
+    }
+
+    [Fact]
+    public void ProcessCredentialResult_WhenGrantSaveFails_ThrowsSaveSpecificMessage()
+    {
+        _database.Settings.LastUsedRunAsAccountSid = UserSid;
+        var credential = new CredentialEntry { Sid = UserSid };
+        var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
+        _pathGrantService
+            .Setup(p => p.EnsureAccess(UserSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
+            .Throws(new GrantOperationException(
+                GrantApplyFailureStep.GrantIntentSave,
+                @"C:\Data",
+                null,
+                new InvalidOperationException("save failed")));
+
+        using var result = MakeCredentialResult(credential, permissionGrant: permissionGrant);
+        var processor = CreateProcessor();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            processor.ProcessCredentialResult(result, FilePath, null, null, false, null));
+
+        Assert.Equal(
+            "RunFence could not save the permission grant before applying it: save failed",
+            ex.Message);
+    }
+
+    [Fact]
+    public void ProcessContainerResult_WhenGrantAclFails_ThrowsAclSpecificMessage()
+    {
+        var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
+        var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
+        _pathGrantService
+            .Setup(p => p.EnsureAccess(ContainerSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
+            .Throws(new GrantOperationException(
+                GrantApplyFailureStep.GrantAclApply,
+                @"C:\Data",
+                null,
+                new InvalidOperationException("acl failed")));
+
+        using var result = MakeContainerResult(container, permissionGrant: permissionGrant);
+        var processor = CreateProcessor();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            processor.ProcessContainerResult(result, FilePath, null, null, false, null));
+
+        Assert.Equal(
+            "RunFence saved the permission grant, but applying filesystem access failed: acl failed",
+            ex.Message);
     }
 
     [Fact]
@@ -261,6 +316,40 @@ public class RunAsResultProcessorTests : IDisposable
             It.Is<AccountLaunchIdentity>(a => a.Sid == UserSid), It.IsAny<Func<string, string, bool>?>()), Times.Once);
     }
 
+    [Fact]
+    public void ProcessCredentialResult_NoExistingApp_PreservesExplicitLauncherWorkingDirectory()
+    {
+        var credential = new CredentialEntry { Sid = UserSid };
+        using var result = MakeCredentialResult(credential);
+        var processor = CreateProcessor();
+
+        processor.ProcessCredentialResult(result, FilePath, null, LauncherWorkingDirectory, false, null);
+
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == FilePath &&
+                t.WorkingDirectory == LauncherWorkingDirectory),
+            It.Is<AccountLaunchIdentity>(a => a.Sid == UserSid),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
+    [Fact]
+    public void ProcessCredentialResult_NoExistingApp_WithNullLauncherWorkingDirectory_UsesFilePathFallback()
+    {
+        var credential = new CredentialEntry { Sid = UserSid };
+        using var result = MakeCredentialResult(credential);
+        var processor = CreateProcessor();
+
+        processor.ProcessCredentialResult(result, FilePath, null, null, false, null);
+
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == FilePath &&
+                t.WorkingDirectory == @"C:\Apps"),
+            It.Is<AccountLaunchIdentity>(a => a.Sid == UserSid),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
     // ── ProcessContainerResult — basic flow ─────────────────────────────
 
     [Fact]
@@ -270,7 +359,7 @@ public class RunAsResultProcessorTests : IDisposable
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
         _pathGrantService
             .Setup(p => p.EnsureAccess(ContainerSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
-            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
+            .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
         using var result = MakeContainerResult(container, permissionGrant: permissionGrant);
         var processor = CreateProcessor();
@@ -280,9 +369,6 @@ public class RunAsResultProcessorTests : IDisposable
         _pathGrantService.Verify(
             p => p.EnsureAccess(ContainerSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false),
             Times.Once);
-        // SaveConfig must be called at least once for the permission grant save
-        _databaseService.Verify(d => d.SaveConfig(_database,
-            It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.AtLeastOnce);
     }
 
     [Fact]
@@ -301,6 +387,40 @@ public class RunAsResultProcessorTests : IDisposable
         processor.ProcessContainerResult(result, FilePath, null, null, false, null);
 
         _launchOrchestrator.Verify(o => o.Launch(existingApp, null, null, It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
+    [Fact]
+    public void ProcessContainerResult_NoExistingApp_PreservesExplicitLauncherWorkingDirectory()
+    {
+        var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
+        using var result = MakeContainerResult(container);
+        var processor = CreateProcessor();
+
+        processor.ProcessContainerResult(result, FilePath, null, LauncherWorkingDirectory, false, null);
+
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == FilePath &&
+                t.WorkingDirectory == LauncherWorkingDirectory),
+            It.Is<AppContainerLaunchIdentity>(a => a.Entry.Sid == ContainerSid),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
+    [Fact]
+    public void ProcessContainerResult_NoExistingApp_WithNullLauncherWorkingDirectory_UsesFilePathFallback()
+    {
+        var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
+        using var result = MakeContainerResult(container);
+        var processor = CreateProcessor();
+
+        processor.ProcessContainerResult(result, FilePath, null, null, false, null);
+
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == FilePath &&
+                t.WorkingDirectory == @"C:\Apps"),
+            It.Is<AppContainerLaunchIdentity>(a => a.Entry.Sid == ContainerSid),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
     }
 
     // ── TC-29: UpdateOriginalShortcut=true ───────────────────────────────────

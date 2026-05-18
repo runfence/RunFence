@@ -4,9 +4,8 @@ internal sealed class JobKeeperRunner(JobKeeperPipeClientLoop pipeLoop)
 {
     public void Run()
     {
-        while (true)
+        while (pipeLoop.RunOnce())
         {
-            pipeLoop.RunOnce();
             Thread.Sleep(500);
         }
     }

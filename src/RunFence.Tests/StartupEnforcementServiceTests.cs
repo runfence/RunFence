@@ -27,7 +27,7 @@ public class StartupEnforcementServiceTests : IDisposable
     private readonly TempDirectory _tempDir;
 
     private ShortcutEnforcementHelper CreateShortcutHelper() =>
-        new(_shortcutService.Object, _besideTargetShortcutService.Object, DefaultDisplayNameResolver,
+        new(_shortcutService.Object, _besideTargetShortcutService.Object, _iconService.Object, DefaultDisplayNameResolver,
             _interactiveUserSidResolver.Object, _log.Object);
 
     public StartupEnforcementServiceTests()
@@ -568,10 +568,12 @@ public class StartupEnforcementServiceTests : IDisposable
             _aclService.Object,
             _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
-            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
+            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, _iconService.Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
             containerService.Object);
 
         var entry = new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser" };
+        containerService.Setup(s => s.EnsureProfile(entry))
+            .Returns(AppContainerProfileSetupResult.Success(profileCreatedOrAlreadyExists: true));
         var app = new AppEntry
         {
             Name = "BrowserApp",
@@ -598,7 +600,7 @@ public class StartupEnforcementServiceTests : IDisposable
             _aclService.Object,
             _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
-            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
+            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, _iconService.Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
             containerService.Object);
 
         var fakeExe2 = Path.Combine(_tempDir.Path, "app2.exe");
@@ -624,7 +626,9 @@ public class StartupEnforcementServiceTests : IDisposable
 
         containerService
             .Setup(s => s.EnsureProfile(containerEntry))
-            .Throws(new InvalidOperationException("Test failure"));
+            .Returns(AppContainerProfileSetupResult.Failure(
+                AppContainerProfileSetupStatus.ProfileFailed,
+                "Test failure"));
         containerService
             .Setup(s => s.EnsureTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<string>()))
             .Returns((false, new List<string>()));
@@ -650,7 +654,7 @@ public class StartupEnforcementServiceTests : IDisposable
             _aclService.Object,
             _shortcutDiscovery.Object,
             _iconService.Object, _log.Object,
-            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
+            new ShortcutEnforcementHelper(_shortcutService.Object, new Mock<IBesideTargetShortcutService>().Object, _iconService.Object, DefaultDisplayNameResolver, new Mock<IInteractiveUserSidResolver>().Object, _log.Object),
             containerService.Object);
 
         var containerEntry = new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = "S-1-15-2-1" };
@@ -667,6 +671,8 @@ public class StartupEnforcementServiceTests : IDisposable
         _iconService.Setup(i => i.NeedsRegeneration(It.IsAny<AppEntry>())).Returns(false);
         _aclService.Setup(a => a.ResolveAclTargetPath(app)).Returns(_fakeExePath);
         var fakeAppliedPaths = new List<string> { Path.GetDirectoryName(_fakeExePath)! };
+        containerService.Setup(s => s.EnsureProfile(containerEntry))
+            .Returns(AppContainerProfileSetupResult.Success(profileCreatedOrAlreadyExists: true));
         containerService.Setup(s => s.EnsureTraverseAccess(containerEntry, It.IsAny<string>()))
             .Returns((false, fakeAppliedPaths));
 

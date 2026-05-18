@@ -59,7 +59,8 @@ public class ReparsePointPromptHelper : IReparsePointPromptHelper
             Heading = "This path is a junction or symbolic link.",
             Text = $"Path:    {path}\nTarget:  {target}",
             Buttons = { addTargetButton, addBothButton, cancelButton },
-            DefaultButton = addTargetButton
+            DefaultButton = addTargetButton,
+            AllowCancel = true
         };
 
         var result = TaskDialog.ShowDialog(owner, page);

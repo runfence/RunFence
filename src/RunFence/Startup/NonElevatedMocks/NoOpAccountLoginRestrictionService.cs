@@ -9,7 +9,9 @@ public sealed class NoOpAccountLoginRestrictionService(IAccountLoginRestrictionS
     // to keep DI validation working; all calls are no-ops in non-elevated debug mode
 
     public bool IsAccountHidden(string username) => false;
+    public bool GetAccountHiddenStateOrThrow(string username) => false;
     public void SetAccountHidden(string username, string sid, bool hidden) { }
+    public void RestoreAccountHiddenState(string username, bool hidden) { }
     public bool IsLoginBlockedBySid(string sid) => false;
     public SetLoginBlockedResult SetLoginBlockedBySid(string sid, string username, bool blocked)
         => new(null, null);

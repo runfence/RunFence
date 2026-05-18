@@ -9,4 +9,5 @@ public record PostCreateSetupContext(
     bool FirewallSettingsChanged,
     List<InstallablePackage> SelectedInstallPackages,
     bool AllowInternet,
-    List<string> Errors);
+    List<string> Errors,
+    List<string> Warnings);

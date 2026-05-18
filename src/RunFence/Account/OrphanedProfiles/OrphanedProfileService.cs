@@ -8,11 +8,12 @@ public class OrphanedProfileService(
     ILoggingService log,
     NTTranslateApi ntTranslate,
     IGroupPolicyScriptHelper gpHelper,
+    IProfileSizeCalculator profileSizeCalculator,
+    IProfileDirectoryRemovalService profileDirectoryRemovalService,
     string? usersDir = null,
     string? systemDir = null)
     : IOrphanedProfileService
 {
-    // Exclude well-known non-profile directories that have no registry entry
     private static readonly HashSet<string> ExcludedNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "Default",
@@ -31,7 +32,6 @@ public class OrphanedProfileService(
         if (!Directory.Exists(_usersDir))
             return [];
 
-        // Build lookup: normalized path → SID, from ProfileList registry
         var registeredByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (sid, path) in GetProfileRegistryEntries())
             registeredByPath[path] = sid;
@@ -43,21 +43,21 @@ public class OrphanedProfileService(
 
             if (registeredByPath.TryGetValue(fullDir, out var sid))
             {
-                // Has registry entry — orphaned only if the Windows account no longer exists
                 if (!AccountExists(sid))
                     result.Add(new OrphanedProfile(sid, fullDir));
             }
-            else
+            else if (!ExcludedNames.Contains(Path.GetFileName(fullDir)))
             {
-                // No registry entry — directory is a leftover; exclude well-known system dirs
-                if (!ExcludedNames.Contains(Path.GetFileName(fullDir)))
-                    result.Add(new OrphanedProfile(null, fullDir));
+                result.Add(new OrphanedProfile(null, fullDir));
             }
         }
 
         result.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.ProfilePath, b.ProfilePath));
         return result;
     }
+
+    public long GetProfileSizeBytes(string profilePath, IProgress<long>? progress, CancellationToken cancellationToken)
+        => profileSizeCalculator.CalculateSizeBytes(profilePath, progress, cancellationToken);
 
     public (List<string> Deleted, List<(string Path, string Error)> Failed) DeleteProfiles(IEnumerable<OrphanedProfile> profiles)
     {
@@ -76,16 +76,15 @@ public class OrphanedProfileService(
             bool renamed = false;
             try
             {
-                // Clean up any leftover .deleted folder from a previous failed deletion attempt
                 if (Directory.Exists(renamedPath))
                     DeleteSafe(renamedPath);
 
                 Directory.Move(profile.ProfilePath, renamedPath);
                 renamed = true;
 
-                DeleteSafe(renamedPath);
+                profileDirectoryRemovalService.RemoveMovedProfileDirectory(renamedPath);
                 deleted.Add(profile.ProfilePath);
-                log.Info($"Deleted orphaned profile: {profile.ProfilePath}");
+                log.Info($"Moved orphaned profile to Recycle Bin: {profile.ProfilePath}");
 
                 if (profile.Sid != null)
                 {
@@ -110,7 +109,7 @@ public class OrphanedProfileService(
                 }
 
                 failed.Add((profile.ProfilePath, ex.Message));
-                log.Warn($"Failed to delete orphaned profile '{profile.ProfilePath}': {ex.Message}");
+                log.Warn($"Failed to move orphaned profile '{profile.ProfilePath}' to the Recycle Bin: {ex.Message}");
             }
         }
 
@@ -128,17 +127,19 @@ public class OrphanedProfileService(
 
             foreach (var sidName in key.GetSubKeyNames())
             {
-                // Skip .bak keys handled by ProfileRepairHelper
                 if (sidName.EndsWith(".bak", StringComparison.OrdinalIgnoreCase))
                     continue;
-                // Skip .deleted and .deleted.NNN keys left by profile repair
                 if (sidName.EndsWith(".deleted", StringComparison.OrdinalIgnoreCase))
                     continue;
+
                 var lastDot = sidName.LastIndexOf('.');
                 var suffix = lastDot > 0 ? sidName[(lastDot + 1)..] : "";
-                if (suffix.Length > 0 && suffix.All(char.IsDigit)
-                                      && sidName[..lastDot].EndsWith(".deleted", StringComparison.OrdinalIgnoreCase))
+                if (suffix.Length > 0 &&
+                    suffix.All(char.IsDigit) &&
+                    sidName[..lastDot].EndsWith(".deleted", StringComparison.OrdinalIgnoreCase))
+                {
                     continue;
+                }
 
                 using var subKey = key.OpenSubKey(sidName);
                 var raw = subKey?.GetValue("ProfileImagePath") as string;
@@ -152,7 +153,6 @@ public class OrphanedProfileService(
                 }
                 catch
                 {
-                    /* skip malformed paths */
                 }
             }
         }
@@ -178,29 +178,24 @@ public class OrphanedProfileService(
         catch (Exception ex)
         {
             log.Warn($"Cannot verify account existence for SID '{sidString}': {ex.Message}");
-            return true; // safe default — don't flag as orphaned when we can't verify
+            return true;
         }
     }
 
-    /// <summary>
-    /// Recursively deletes a directory without following junction points or symbolic links.
-    /// Reparse points (junctions, symlinks) are removed as the link itself — their targets are untouched.
-    /// ReadOnly and System attributes are cleared before each deletion to avoid access-denied errors
-    /// on Windows-managed directories such as AppData\Local\Microsoft\Windows\Application Shortcuts.
-    /// </summary>
     private static void DeleteSafe(string path)
     {
         var attrs = File.GetAttributes(path);
 
         if ((attrs & FileAttributes.ReparsePoint) != 0)
         {
-            // Junction or symbolic link — remove the link itself without entering the target
             if ((attrs & (FileAttributes.ReadOnly | FileAttributes.System)) != 0)
                 File.SetAttributes(path, attrs & ~(FileAttributes.ReadOnly | FileAttributes.System));
+
             if ((attrs & FileAttributes.Directory) != 0)
                 Directory.Delete(path);
             else
                 File.Delete(path);
+
             return;
         }
 
@@ -211,12 +206,14 @@ public class OrphanedProfileService(
 
             if ((attrs & (FileAttributes.ReadOnly | FileAttributes.System)) != 0)
                 File.SetAttributes(path, FileAttributes.Normal);
+
             Directory.Delete(path);
         }
         else
         {
             if ((attrs & (FileAttributes.ReadOnly | FileAttributes.System)) != 0)
                 File.SetAttributes(path, FileAttributes.Normal);
+
             File.Delete(path);
         }
     }
@@ -228,6 +225,7 @@ public class OrphanedProfileService(
             using var key = Registry.LocalMachine.OpenSubKey(PathConstants.ProfileListRegistryKey, writable: true);
             if (key == null)
                 return;
+
             key.DeleteSubKeyTree(sid, throwOnMissingSubKey: false);
             key.DeleteSubKeyTree(sid + "_Classes", throwOnMissingSubKey: false);
         }

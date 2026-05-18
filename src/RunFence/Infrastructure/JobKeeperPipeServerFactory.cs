@@ -1,6 +1,7 @@
 using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.Infrastructure;
@@ -13,6 +14,7 @@ public sealed class JobKeeperPipeServerFactory(
         var pipeSecurity = new PipeSecurity();
         var adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
         pipeSecurity.AddAccessRule(new PipeAccessRule(adminSid, PipeAccessRights.FullControl, AccessControlType.Allow));
+        AdminOperationMockAccessHelper.AddCurrentProcessPipeAccess(pipeSecurity, PipeAccessRights.FullControl);
         pipeSecurity.AddAccessRule(new PipeAccessRule(targetUserSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
         var networkSid = new SecurityIdentifier(WellKnownSidType.NetworkSid, null);
         pipeSecurity.AddAccessRule(new PipeAccessRule(networkSid, PipeAccessRights.FullControl, AccessControlType.Deny));

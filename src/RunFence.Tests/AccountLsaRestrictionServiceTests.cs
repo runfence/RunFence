@@ -194,6 +194,55 @@ public class AccountLsaRestrictionServiceTests : IDisposable
         Assert.Null(state);
     }
 
+    [Fact]
+    public void CaptureSnapshot_AndRestoreLocalOnlyState_PreservesPartialStateExactly()
+    {
+        var rights = new List<string> { LsaRightsHelper.SeDenyNetworkLogonRight };
+        var lsa = CreateLsaMockWithNoRights();
+        lsa.Setup(l => l.EnumerateAccountRights(It.IsAny<byte[]>()))
+            .Returns(() => rights.ToList());
+        lsa.Setup(l => l.AddAccountRights(It.IsAny<byte[]>(), It.IsAny<string[]>()))
+            .Callback<byte[], string[]>((_, r) => rights.AddRange(r.Where(right => !rights.Contains(right))));
+        lsa.Setup(l => l.RemoveAccountRights(It.IsAny<byte[]>(), It.IsAny<string[]>()))
+            .Callback<byte[], string[]>((_, r) => rights.RemoveAll(r.Contains));
+        var service = new AccountLsaRestrictionService(_log.Object, new Mock<IAccountValidationService>().Object, lsa.Object);
+
+        var snapshot = service.CaptureSnapshot("S-1-5-21-1000-2000-3000-500");
+
+        service.SetLocalOnlyBySid("S-1-5-21-1000-2000-3000-500", localOnly: true);
+        Assert.True(service.GetLocalOnlyState("S-1-5-21-1000-2000-3000-500"));
+
+        service.RestoreLocalOnlyState("S-1-5-21-1000-2000-3000-500", snapshot);
+
+        Assert.Null(service.GetLocalOnlyState("S-1-5-21-1000-2000-3000-500"));
+        Assert.Equal([LsaRightsHelper.SeDenyNetworkLogonRight], rights);
+    }
+
+    [Fact]
+    public void SetLocalOnlyBySid_WhenRightMutationPartiallyFails_RollsBackExactState()
+    {
+        var rights = new List<string> { LsaRightsHelper.SeDenyNetworkLogonRight };
+        var lsa = CreateLsaMockWithNoRights();
+        lsa.Setup(l => l.EnumerateAccountRights(It.IsAny<byte[]>()))
+            .Returns(() => rights.ToList());
+        lsa.Setup(l => l.AddAccountRights(It.IsAny<byte[]>(), It.IsAny<string[]>()))
+            .Callback<byte[], string[]>((_, r) =>
+            {
+                rights.AddRange(r.Where(right => !rights.Contains(right)));
+                throw new InvalidOperationException("lsa failed");
+            });
+        lsa.Setup(l => l.RemoveAccountRights(It.IsAny<byte[]>(), It.IsAny<string[]>()))
+            .Callback<byte[], string[]>((_, r) => rights.RemoveAll(r.Contains));
+        var service = new AccountLsaRestrictionService(_log.Object, new Mock<IAccountValidationService>().Object, lsa.Object);
+
+        var ex = Assert.Throws<AccountRestrictionOperationException>(() =>
+            service.SetLocalOnlyBySid("S-1-5-21-1000-2000-3000-500", localOnly: true));
+
+        Assert.Equal(AccountRestrictionStatus.RolledBack, ex.Status);
+        Assert.True(ex.RollbackAttempted);
+        Assert.Equal([LsaRightsHelper.SeDenyNetworkLogonRight], rights);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>

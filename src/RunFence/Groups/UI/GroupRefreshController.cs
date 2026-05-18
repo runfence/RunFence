@@ -20,7 +20,7 @@ public class GroupRefreshController(
     /// Raised on the UI thread after any refresh completes (timer-triggered or manual).
     /// The argument is the currently selected group SID (may differ from pre-refresh if the user changed selection).
     /// </summary>
-    public event Action<string?>? RefreshCompleted;
+    public event Func<GroupRefreshCompletedInfo, Task>? RefreshCompleted;
 
     /// <summary>
     /// Raised when <see cref="IsRefreshing"/> state changes; the panel should call <c>UpdateButtonState</c> accordingly.
@@ -36,6 +36,7 @@ public class GroupRefreshController(
     /// True while a refresh operation is in progress. Used as a reentrancy guard.
     /// </summary>
     public bool IsRefreshing { get; private set; }
+    public GroupRefreshRetryState? RetryState { get; private set; }
 
     /// <summary>
     /// Wires the panel callbacks required before any refresh operations.
@@ -83,8 +84,37 @@ public class GroupRefreshController(
     {
         if (IsRefreshing)
             return;
-        await RefreshGridCore();
-        RefreshCompleted?.Invoke(_getSelectedGroupSid());
+        string? sidBeforeRefresh = null;
+        GroupRefreshCompletedInfo completionInfo;
+        try
+        {
+            sidBeforeRefresh = _getSelectedGroupSid();
+            completionInfo = await RefreshGridCore(sidBeforeRefresh);
+            RetryState = null;
+        }
+        catch (Exception ex)
+        {
+            log.Error("Group refresh failed.", ex);
+            IsRefreshing = false;
+            IsRefreshingChanged?.Invoke(false);
+            IsMembersLoadingChanged?.Invoke(false);
+            RetryState = new GroupRefreshRetryState([], GroupRefreshRetryOperation.Refresh, ex.Message, DateTime.UtcNow);
+            _refreshTimer?.Start();
+            var sidAfterFailure = _getSelectedGroupSid != null ? _getSelectedGroupSid() : null;
+            completionInfo = new GroupRefreshCompletedInfo(sidBeforeRefresh, sidAfterFailure, false);
+        }
+        if (RefreshCompleted is { } refreshCompleted)
+        {
+            try
+            {
+                foreach (Func<GroupRefreshCompletedInfo, Task> handler in refreshCompleted.GetInvocationList())
+                    await handler(completionInfo);
+            }
+            catch (Exception ex)
+            {
+                log.Error("Group refresh completion handler failed.", ex);
+            }
+        }
     }
 
     private void OnRefreshTimerTick(object? sender, EventArgs e)
@@ -103,6 +133,13 @@ public class GroupRefreshController(
         try
         {
             await gridPopulator.PopulateGroups();
+            RetryState = null;
+        }
+        catch (Exception ex)
+        {
+            log.Error("Group refresh timer update failed.", ex);
+            RetryState = new GroupRefreshRetryState([], GroupRefreshRetryOperation.Refresh, ex.Message, DateTime.UtcNow);
+            _refreshTimer?.Start();
         }
         finally
         {
@@ -113,15 +150,27 @@ public class GroupRefreshController(
         var currentSid = _getSelectedGroupSid();
         if (currentSid != sidBeforeRefresh)
             IsMembersLoadingChanged?.Invoke(true);
-        RefreshCompleted?.Invoke(currentSid);
+        if (RefreshCompleted is { } refreshCompleted)
+        {
+            var completionInfo = new GroupRefreshCompletedInfo(sidBeforeRefresh, currentSid, false);
+            try
+            {
+                foreach (Func<GroupRefreshCompletedInfo, Task> handler in refreshCompleted.GetInvocationList())
+                    await handler(completionInfo);
+            }
+            catch (Exception ex)
+            {
+                log.Error("Group refresh completion handler failed.", ex);
+            }
+        }
     }
 
-    private async Task RefreshGridCore()
+    private async Task<GroupRefreshCompletedInfo> RefreshGridCore(string? sidBeforeRefresh)
     {
         IsRefreshing = true;
         IsRefreshingChanged?.Invoke(true);
         IsMembersLoadingChanged?.Invoke(true);
-        var sidBeforeRefresh = _getSelectedGroupSid();
+        var membersWereRefreshed = false;
         try
         {
             var groupsTask = gridPopulator.PopulateGroups();
@@ -129,13 +178,17 @@ public class GroupRefreshController(
                 ? gridPopulator.PopulateMembers(sidBeforeRefresh)
                 : Task.CompletedTask;
             await Task.WhenAll(groupsTask, membersTask);
+            membersWereRefreshed = sidBeforeRefresh != null;
             // On initial load (no prior selection), PopulateGroups selects the first group but
             // skips member loading. Explicitly load members for the newly-selected group.
             if (sidBeforeRefresh == null)
             {
                 var initialSid = _getSelectedGroupSid();
                 if (initialSid != null)
+                {
                     await gridPopulator.PopulateMembers(initialSid);
+                    membersWereRefreshed = true;
+                }
             }
         }
         finally
@@ -151,5 +204,7 @@ public class GroupRefreshController(
         // When sidBeforeRefresh was null (initial load), members were already loaded above.
         if (sidBeforeRefresh != null && currentSid != sidBeforeRefresh)
             IsMembersLoadingChanged?.Invoke(true);
+
+        return new GroupRefreshCompletedInfo(sidBeforeRefresh, currentSid, membersWereRefreshed);
     }
 }

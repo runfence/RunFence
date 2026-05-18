@@ -8,4 +8,7 @@ public interface IAppStateProvider
     bool IsModalOpen { get; }
     bool IsShuttingDown { get; }
     AppDatabase Database { get; }
+    T ReadDatabase<T>(Func<AppDatabase, T> reader);
+    void ReadDatabase(Action<AppDatabase> reader);
+    AppDatabase CreateDatabaseSnapshot();
 }

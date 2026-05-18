@@ -19,26 +19,98 @@ public class RunAsAppEntryManager(
     AppEntryEnforcementHelper enforcementHelper,
     IShortcutDiscoveryService shortcutDiscovery)
 {
-    public void RevertAppChanges(AppEntry app)
+    public RunAsAppEntryPersistenceResult RevertAppChanges(AppEntry app)
     {
+        var shortcutCache = CreateShortcutCacheIfNeeded(app);
+
         try
         {
-            var shortcutCache = CreateShortcutCacheIfNeeded(app);
-            enforcementHelper.RevertChanges(app, appState.Database.Apps, shortcutCache);
+            if (app is { RestrictAcl: true, IsUrlScheme: false })
+                aclService.RevertAcl(app, appState.Database.Apps);
+            enforcementHelper.RevertNonAclChanges(app, shortcutCache);
             var appsAfterRevert = appState.Database.Apps.Where(a => a.Id != app.Id).ToList();
             aclService.RecomputeAllAncestorAcls(appsAfterRevert);
         }
-        catch (Exception ex)
+        catch (Exception cleanupEx)
         {
-            log.Error($"Failed to revert changes for {app.Name}", ex);
+            log.Error($"Failed to revert changes for {app.Name}", cleanupEx);
+
+            var restoreResult = ApplyAppChanges(app);
+            if (restoreResult.Status != RunAsAppEntryPersistenceStatus.Succeeded)
+            {
+                log.Error(
+                    $"Failed to restore previous enforcement for {app.Name} after cleanup failure",
+                    new InvalidOperationException(
+                        restoreResult.WarningMessage ??
+                        restoreResult.ErrorMessage ??
+                        "Unknown restore failure."));
+                return new RunAsAppEntryPersistenceResult(
+                    RunAsAppEntryPersistenceStatus.SaveFailed,
+                    app,
+                    $"{cleanupEx.Message}{Environment.NewLine}{Environment.NewLine}" +
+                    $"Restoring the previous application state also failed: " +
+                    $"{restoreResult.WarningMessage ?? restoreResult.ErrorMessage ?? "Unknown restore failure."}");
+            }
+
+            return new RunAsAppEntryPersistenceResult(
+                RunAsAppEntryPersistenceStatus.SaveFailed,
+                app,
+                cleanupEx.Message);
         }
+
+        return new RunAsAppEntryPersistenceResult(
+            RunAsAppEntryPersistenceStatus.Succeeded,
+            app);
     }
 
-    public void ApplyAppChanges(AppEntry app)
+    public RunAsAppEntryPersistenceResult ApplyAppChanges(AppEntry app)
     {
         var shortcutCache = CreateShortcutCacheIfNeeded(app);
-        enforcementHelper.ApplyChanges(app, appState.Database.Apps, shortcutCache);
-        aclService.RecomputeAllAncestorAcls(appState.Database.Apps);
+
+        if (app is { RestrictAcl: true, IsUrlScheme: false })
+        {
+            try
+            {
+                aclService.ApplyAcl(app, appState.Database.Apps);
+            }
+            catch (Exception ex)
+            {
+                return new RunAsAppEntryPersistenceResult(
+                    app.AclMode == AclMode.Deny
+                        ? RunAsAppEntryPersistenceStatus.ConvenienceEnforcementFailed
+                        : RunAsAppEntryPersistenceStatus.RequiredEnforcementFailed,
+                    app,
+                    WarningMessage: ex.Message);
+            }
+        }
+
+        try
+        {
+            enforcementHelper.ApplyNonAclChanges(app, shortcutCache);
+        }
+        catch (Exception ex)
+        {
+            return new RunAsAppEntryPersistenceResult(
+                RunAsAppEntryPersistenceStatus.ConvenienceEnforcementFailed,
+                app,
+                WarningMessage: ex.Message);
+        }
+
+        try
+        {
+            aclService.RecomputeAllAncestorAcls(appState.Database.Apps);
+        }
+        catch (Exception ex)
+        {
+            return new RunAsAppEntryPersistenceResult(
+                RunAsAppEntryPersistenceStatus.RequiredEnforcementFailed,
+                app,
+                WarningMessage: ex.Message);
+        }
+
+        return new RunAsAppEntryPersistenceResult(
+            RunAsAppEntryPersistenceStatus.Succeeded,
+            app);
     }
 
     private ShortcutTraversalCache CreateShortcutCacheIfNeeded(AppEntry app)

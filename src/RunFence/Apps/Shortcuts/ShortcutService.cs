@@ -7,7 +7,9 @@ namespace RunFence.Apps.Shortcuts;
 
 public class ShortcutService(
     ILoggingService log,
+    IIconService iconService,
     IShortcutProtectionService protection,
+    IShortcutWriteAccessService shortcutWriteAccessService,
     IShortcutComHelper shortcutHelper,
     IInteractiveUserDesktopProvider interactiveUserDesktopProvider,
     ShortcutFinder finder)
@@ -29,21 +31,28 @@ public class ShortcutService(
     public void SaveShortcut(AppEntry app, string shortcutPath)
     {
         var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
-        var iconPath = Path.Combine(PathConstants.ProgramDataIconDir, $"{app.Id}.ico");
-        shortcutHelper.WithShortcut(shortcutPath, sc =>
-        {
-            sc.TargetPath = launcherPath;
-            sc.Arguments = app.Id;
-            sc.WorkingDirectory = ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath);
-            if (File.Exists(iconPath))
-                sc.IconLocation = $"{iconPath},0";
-            sc.Save();
-        });
+        var iconPath = iconService.GetIconPath(app.Id);
+        shortcutWriteAccessService.Save(shortcutPath, new ShortcutMutation(
+                launcherPath,
+                app.Id,
+                ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath),
+                File.Exists(iconPath) ? $"{iconPath},0" : null,
+                File.Exists(iconPath) ? ShortcutIconUpdateMode.Set : ShortcutIconUpdateMode.None,
+                null,
+                null,
+                1),
+            ShortcutDestinationMetadataMode.PreserveExisting,
+            ShortcutContentMode.RecreateCanonical);
+
+        if (File.Exists(shortcutPath) && !IsTaskBarPath(shortcutPath))
+            protection.ProtectShortcut(shortcutPath);
     }
 
     public void RevertShortcuts(AppEntry app, ShortcutTraversalCache cache)
     {
         var shortcuts = finder.FindShortcutsForLauncher(app.Id, cache);
+        List<string>? warnings = null;
+        List<Exception>? warningCauses = null;
 
         foreach (var shortcutPath in shortcuts)
         {
@@ -53,10 +62,23 @@ public class ShortcutService(
                 if (result != null)
                     cache.RecordShortcut(result.Value.Path, result.Value.TargetPath, result.Value.Arguments);
             }
+            catch (ShortcutProtectionException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
-                log.Error($"Failed to revert shortcut: {shortcutPath}", ex);
+                log.Warn($"Failed to revert shortcut for {app.Name}: {shortcutPath} | {ex.GetType().Name}: {ex.Message}");
+                (warnings ??= []).Add($"{shortcutPath}: {ex.Message}");
+                (warningCauses ??= []).Add(ex);
             }
+        }
+
+        if (warnings is { Count: > 0 })
+        {
+            throw new ShortcutEnforcementException(
+                "Failed to revert shortcut changes:\n\n" + string.Join("\n", warnings),
+                warningCauses ?? []);
         }
     }
 
@@ -82,6 +104,8 @@ public class ShortcutService(
             return;
 
         var (byTarget, byLauncherAppId) = finder.ScanAllShortcuts(cache);
+        List<string>? warnings = null;
+        List<Exception>? warningCauses = null;
 
         foreach (var app in appList)
         {
@@ -98,7 +122,7 @@ public class ShortcutService(
             byLauncherAppId.TryGetValue(app.Id, out var existingManaged);
             var managedList = existingManaged ?? [];
             var managedPaths = managedList.Select(s => s.Path).ToList();
-            var iconPath = Path.Combine(PathConstants.ProgramDataIconDir, $"{app.Id}.ico");
+            var iconPath = iconService.GetIconPath(app.Id);
 
             bool hasNewShortcuts = shortcutList.Any(s =>
                 !managedPaths.Contains(s, StringComparer.OrdinalIgnoreCase));
@@ -109,13 +133,30 @@ public class ShortcutService(
                 {
                     ReplaceShortcutsFromList(app, launcherPath, iconPath, shortcutList, cache);
                 }
+                catch (ShortcutProtectionException)
+                {
+                    throw;
+                }
                 catch (Exception ex)
                 {
                     log.Error($"Failed to enforce shortcut for {app.Name}", ex);
                 }
             }
 
-            EnforceManagedShortcuts(app, launcherPath, iconPath, managedList, cache);
+            try
+            {
+                EnforceManagedShortcuts(app, launcherPath, iconPath, managedList, cache);
+            }
+            catch (ShortcutEnforcementException ex)
+            {
+                (warnings ??= []).Add(ex.Message);
+                (warningCauses ??= []).Add(ex);
+            }
+        }
+
+        if (warnings is { Count: > 0 })
+        {
+            throw new ShortcutEnforcementException(string.Join("\n\n", warnings), warningCauses ?? []);
         }
     }
 
@@ -126,6 +167,9 @@ public class ShortcutService(
         IReadOnlyList<ShortcutFinder.ManagedShortcut> managedList,
         ShortcutTraversalCache cache)
     {
+        List<string>? warnings = null;
+        List<Exception>? warningCauses = null;
+
         foreach (var managedShortcut in managedList)
         {
             var shortcutPath = managedShortcut.Path;
@@ -143,11 +187,17 @@ public class ShortcutService(
                 catch (ShortcutPostWriteException ex)
                 {
                     cache.RecordShortcut(ex.Result.Path, ex.Result.TargetPath, ex.Result.Arguments);
-                    log.Error($"Failed to repair managed shortcut launcher path for {app.Name}: {shortcutPath}", ex.InnerException!);
+                    ExceptionDispatchInfo.Capture(ex.InnerException!).Throw();
+                }
+                catch (ShortcutProtectionException)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
                     log.Error($"Failed to repair managed shortcut launcher path for {app.Name}: {shortcutPath}", ex);
+                    (warnings ??= []).Add($"{shortcutPath}: {ex.Message}");
+                    (warningCauses ??= []).Add(ex);
                 }
 
                 continue;
@@ -155,6 +205,13 @@ public class ShortcutService(
 
             if (File.Exists(shortcutPath) && !IsTaskBarPath(shortcutPath))
                 protection.ProtectShortcut(shortcutPath);
+        }
+
+        if (warnings is { Count: > 0 })
+        {
+            throw new ShortcutEnforcementException(
+                "Failed to repair managed shortcut launcher path:\n\n" + string.Join("\n", warnings),
+                warningCauses ?? []);
         }
     }
 
@@ -164,26 +221,26 @@ public class ShortcutService(
         string launcherPath,
         string? iconPath)
     {
-        string? finalArguments = null;
+        string? finalArguments;
 
-        protection.UnprotectShortcut(shortcutPath);
-
-        shortcutHelper.WithShortcut(shortcutPath, sc =>
-        {
-            string currentArgs = sc.Arguments ?? "";
-
-            sc.TargetPath = launcherPath;
-            sc.WorkingDirectory = ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath);
-            sc.Arguments = string.IsNullOrEmpty(currentArgs)
-                ? appId
-                : $"{appId} {currentArgs}";
-            finalArguments = sc.Arguments;
-
-            if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
-                sc.IconLocation = $"{iconPath},0";
-
-            sc.Save();
-        });
+        var currentState = ReadCurrentShortcutState(shortcutPath);
+        var currentArgs = currentState.Arguments ?? "";
+        finalArguments = string.IsNullOrEmpty(currentArgs)
+            ? appId
+            : $"{appId} {currentArgs}";
+        shortcutWriteAccessService.Save(shortcutPath, new ShortcutMutation(
+            launcherPath,
+            finalArguments,
+            ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath),
+            !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath)
+                ? $"{iconPath},0"
+                : currentState.IconLocation,
+            !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath) ? ShortcutIconUpdateMode.Set : ShortcutIconUpdateMode.None,
+            currentState.Description,
+            currentState.Hotkey,
+            currentState.WindowStyle),
+            ShortcutDestinationMetadataMode.PreserveExisting,
+            ShortcutContentMode.PreserveExisting);
 
         var result = new ShortcutWriteResult(shortcutPath, launcherPath, finalArguments);
         if (!IsTaskBarPath(shortcutPath))
@@ -204,44 +261,28 @@ public class ShortcutService(
 
     private ShortcutWriteResult? RevertSingleShortcutCore(string shortcutPath, AppEntry app)
     {
-        string? parsedArgs = null;
-        string? currentArgsForWarning = null;
+        var currentState = ReadCurrentShortcutState(shortcutPath);
+        var parsedArgs = ShortcutClassificationHelper.ParseManagedShortcutArgs(currentState.Arguments ?? "", app.Id);
 
-        var canRevert = shortcutHelper.WithShortcut(shortcutPath, sc =>
+        if (parsedArgs == null)
         {
-            string currentArgs = sc.Arguments ?? "";
-            parsedArgs = ShortcutClassificationHelper.ParseManagedShortcutArgs(currentArgs, app.Id);
-            if (parsedArgs == null)
-                currentArgsForWarning = currentArgs;
-            return parsedArgs != null;
-        });
-
-        if (!canRevert)
-        {
-            log.Warn($"Shortcut {shortcutPath} has unexpected args, cannot revert: {currentArgsForWarning}");
+            log.Warn($"Shortcut {shortcutPath} has unexpected args, cannot revert: {currentState.Arguments}");
             return null;
         }
 
-        protection.UnprotectShortcut(shortcutPath);
-
-        shortcutHelper.WithShortcut(shortcutPath, sc =>
-        {
-            sc.TargetPath = app.ExePath;
-            sc.Arguments = parsedArgs!;
-            try
-            {
-                sc.IconLocation = "";
-            }
-            catch
-            {
-                /* COM 0x80070057 on some systems */
-            }
-
-            sc.WorkingDirectory = !string.IsNullOrWhiteSpace(app.WorkingDirectory)
+        shortcutWriteAccessService.Save(shortcutPath, new ShortcutMutation(
+            app.ExePath,
+            parsedArgs!,
+            !string.IsNullOrWhiteSpace(app.WorkingDirectory)
                 ? app.WorkingDirectory
-                : Path.GetDirectoryName(app.ExePath) ?? "";
-            sc.Save();
-        });
+                : Path.GetDirectoryName(app.ExePath) ?? "",
+            currentState.IconLocation,
+            ShortcutIconUpdateMode.ClearBestEffort,
+            currentState.Description,
+            currentState.Hotkey,
+            currentState.WindowStyle),
+            ShortcutDestinationMetadataMode.ResetForRecreatedShortcut,
+            ShortcutContentMode.PreserveExisting);
 
         log.Info($"Reverted shortcut: {shortcutPath}");
         return new ShortcutWriteResult(shortcutPath, app.ExePath, parsedArgs);
@@ -253,23 +294,27 @@ public class ShortcutService(
         string? iconPath,
         string oldTargetPath)
     {
-        string? arguments = null;
-        protection.UnprotectShortcut(shortcutPath);
+        var currentState = ReadCurrentShortcutState(shortcutPath);
+        var currentWorkingDirectory = currentState.WorkingDirectory;
+        string right = ShortcutPathHelper.GetLauncherWorkingDirectory(oldTargetPath);
+        var updatedWorkingDirectory = PathHelper.IsSamePath(currentWorkingDirectory ?? "", right)
+            ? ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath)
+            : currentWorkingDirectory;
+        shortcutWriteAccessService.Save(shortcutPath, new ShortcutMutation(
+            launcherPath,
+            currentState.Arguments,
+            updatedWorkingDirectory,
+            !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath)
+                ? $"{iconPath},0"
+                : currentState.IconLocation,
+            !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath) ? ShortcutIconUpdateMode.Set : ShortcutIconUpdateMode.None,
+            currentState.Description,
+            currentState.Hotkey,
+            currentState.WindowStyle),
+            ShortcutDestinationMetadataMode.PreserveExisting,
+            ShortcutContentMode.PreserveExisting);
 
-        shortcutHelper.WithShortcut(shortcutPath, sc =>
-        {
-            var oldWorkingDirectory = (string?)sc.WorkingDirectory;
-            sc.TargetPath = launcherPath;
-            string right = ShortcutPathHelper.GetLauncherWorkingDirectory(oldTargetPath);
-            if (PathHelper.IsSamePath(oldWorkingDirectory ?? "", right))
-                sc.WorkingDirectory = ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath);
-            arguments = sc.Arguments;
-            if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
-                sc.IconLocation = $"{iconPath},0";
-            sc.Save();
-        });
-
-        var result = new ShortcutWriteResult(shortcutPath, launcherPath, arguments);
+        var result = new ShortcutWriteResult(shortcutPath, launcherPath, currentState.Arguments);
         if (!IsTaskBarPath(shortcutPath))
         {
             try
@@ -310,6 +355,17 @@ public class ShortcutService(
     private ShortcutWriteResult ReplaceShortcut(string shortcutPath, AppEntry app, string launcherPath, string iconPath)
         => UpdateShortcutToLauncherCore(shortcutPath, app.Id, launcherPath, iconPath);
 
+    private ShortcutMutation ReadCurrentShortcutState(string shortcutPath)
+        => shortcutHelper.WithShortcut(shortcutPath, shortcut => new ShortcutMutation(
+            (string?)shortcut.TargetPath ?? "",
+            (string?)shortcut.Arguments,
+            (string?)shortcut.WorkingDirectory,
+            (string?)shortcut.IconLocation,
+            ShortcutIconUpdateMode.None,
+            (string?)shortcut.Description,
+            (string?)shortcut.Hotkey,
+            (int?)shortcut.WindowStyle ?? 1));
+
     private void ReplaceShortcutsFromList(
         AppEntry app,
         string launcherPath,
@@ -327,7 +383,11 @@ public class ShortcutService(
             catch (ShortcutPostWriteException ex)
             {
                 cache.RecordShortcut(ex.Result.Path, ex.Result.TargetPath, ex.Result.Arguments);
-                log.Error($"Failed to replace shortcut: {shortcutPath}", ex.InnerException!);
+                ExceptionDispatchInfo.Capture(ex.InnerException!).Throw();
+            }
+            catch (ShortcutProtectionException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -335,4 +395,5 @@ public class ShortcutService(
             }
         }
     }
+
 }

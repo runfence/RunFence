@@ -8,13 +8,12 @@ internal sealed class HandlerAssociationDialogValueHelper(IExeAssociationRegistr
     /// Common association key suggestions shown in both app and direct modes.
     /// The first entry is the "Browser" shorthand that expands to http/https/.htm/.html on accept.
     /// </summary>
-    public static readonly string[] CommonOptions =
-        ["Browser (http, https, .htm, .html)", .. AppHandlerRegistrationService.CommonAssociationSuggestions];
+    public static readonly string[] CommonOptions = HandlerAssociationValueNormalization.CommonOptions;
 
-    public static string NormalizeKey(string? rawKey) => rawKey?.Trim().ToLowerInvariant() ?? string.Empty;
+    public static string NormalizeKey(string? rawKey) => HandlerAssociationValueNormalization.NormalizeKey(rawKey);
 
     public static string? NormalizeTemplate(string? rawTemplate)
-        => string.IsNullOrWhiteSpace(rawTemplate) ? null : rawTemplate.Trim();
+        => HandlerAssociationValueNormalization.NormalizeTemplate(rawTemplate);
 
     public string ResolveTemplate(string exePath, string key)
     {

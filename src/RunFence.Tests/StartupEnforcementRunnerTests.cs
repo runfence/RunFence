@@ -58,12 +58,15 @@ public class StartupEnforcementRunnerTests
             _aclPermission.Object, new Mock<ILocalGroupMembershipService>().Object, _log.Object, _sessionSaver.Object,
             new LambdaDatabaseProvider(() => _database),
             sidReconciler);
-        var enforcementResultApplier = new EnforcementResultApplier(_appContainerService.Object);
+        var enforcementResultApplier = new EnforcementResultApplier(
+            _appContainerService.Object,
+            new TraverseGrantOwnerResolver());
         var stubPersistenceHelper = new SessionPersistenceHelper(
             new Mock<ICredentialRepository>().Object, new Mock<IConfigRepository>().Object,
-            new Mock<ISidNameCacheService>().Object, new Mock<ILoggingService>().Object);
+            new Mock<ISidNameCacheService>().Object,
+            () => new InlineUiThreadInvoker(action => action()),
+            new Mock<ILoggingService>().Object);
         var ephemeralAccountService = new EphemeralAccountService(
-            new Mock<IAccountLifecycleManager>().Object,
             new Mock<IAccountDeletionService>().Object,
             stubPersistenceHelper,
             new Mock<ILocalUserProvider>().Object,
@@ -71,6 +74,7 @@ public class StartupEnforcementRunnerTests
             new Mock<IAccountValidationService>().Object,
             sessionProvider,
             new Mock<IUiThreadInvoker>().Object,
+            new Mock<ITrayBalloonService>().Object,
             new Mock<ISidResolver>().Object,
             new Mock<IPathGrantService>().Object);
 
@@ -80,7 +84,8 @@ public class StartupEnforcementRunnerTests
             _log.Object,
             sessionProvider,
             new Mock<IUiThreadInvoker>().Object,
-            new Mock<IProcessListService>().Object);
+            new Mock<IProcessListService>().Object,
+            new Mock<ITrayBalloonService>().Object);
 
         return new StartupEnforcementRunner(
             _enforcementService.Object,
@@ -94,6 +99,65 @@ public class StartupEnforcementRunnerTests
             _interactiveUserResolver.Object,
             _log.Object,
             enforcementResultApplier);
+    }
+
+    // --- RefreshContainerSidsIfUserChanged tests ---
+
+    [Fact]
+    public void RefreshContainerSidsIfUserChanged_WhenInteractiveUserChanged_RewritesContainerSidsAndPersistsLastInteractiveUserSid()
+    {
+        _database.AppContainers =
+        [
+            new AppContainerEntry { Name = ContainerName, Sid = "stale-sid" }
+        ];
+        _database.Settings.LastInteractiveUserSid = "S-1-5-21-previous";
+
+        var runner = BuildRunner();
+
+        runner.RefreshContainerSidsIfUserChanged();
+
+        Assert.Equal(ContainerSid, _database.AppContainers[0].Sid);
+        Assert.Equal(UserSid, _database.Settings.LastInteractiveUserSid);
+        _appContainerService.Verify(s => s.GetSid(ContainerName), Times.Once);
+        _sessionSaver.Verify(s => s.SaveConfig(), Times.Once);
+    }
+
+    [Fact]
+    public void RefreshContainerSidsIfUserChanged_WhenInteractiveUserUnchanged_DoesNothing()
+    {
+        _database.AppContainers =
+        [
+            new AppContainerEntry { Name = ContainerName, Sid = "cached-sid" }
+        ];
+        _database.Settings.LastInteractiveUserSid = UserSid;
+
+        var runner = BuildRunner();
+
+        runner.RefreshContainerSidsIfUserChanged();
+
+        Assert.Equal("cached-sid", _database.AppContainers[0].Sid);
+        _appContainerService.Verify(s => s.GetSid(It.IsAny<string>()), Times.Never);
+        _sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
+    }
+
+    [Fact]
+    public void RefreshContainerSidsIfUserChanged_WhenInteractiveUserUnavailable_DoesNothing()
+    {
+        _database.AppContainers =
+        [
+            new AppContainerEntry { Name = ContainerName, Sid = "cached-sid" }
+        ];
+        _database.Settings.LastInteractiveUserSid = "S-1-5-21-previous";
+        _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
+
+        var runner = BuildRunner();
+
+        runner.RefreshContainerSidsIfUserChanged();
+
+        Assert.Equal("cached-sid", _database.AppContainers[0].Sid);
+        Assert.Equal("S-1-5-21-previous", _database.Settings.LastInteractiveUserSid);
+        _appContainerService.Verify(s => s.GetSid(It.IsAny<string>()), Times.Never);
+        _sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
     }
 
     // --- ApplyEnforcementResult tests ---
@@ -208,8 +272,8 @@ public class StartupEnforcementRunnerTests
         // Act
         await runner.ApplyEnforcementResult(result);
 
-        // Assert: the traverse path is now tracked in the shared container traverse store.
-        var grant = _database.SharedContainerTraverseGrants.SingleOrDefault(g => g.IsTraverseOnly);
+        // Assert: the traverse path is now tracked under ALL APPLICATION PACKAGES.
+        var grant = _database.GetAccount(AclHelper.AllApplicationPackagesSid)?.Grants.SingleOrDefault(g => g.IsTraverseOnly);
         Assert.NotNull(grant);
         Assert.Equal(Path.GetFullPath(traverseDir), Path.GetFullPath(grant.Path));
         Assert.Equal(appliedPaths, grant.AllAppliedPaths);
@@ -262,9 +326,9 @@ public class StartupEnforcementRunnerTests
         // Act
         await runner.ApplyEnforcementResult(result);
 
-        // Assert: GetSid was called and the traverse path was tracked in the shared store.
+        // Assert: GetSid was called and the traverse path was tracked under ALL APPLICATION PACKAGES.
         _appContainerService.Verify(s => s.GetSid(ContainerName), Times.Once);
-        Assert.Single(_database.SharedContainerTraverseGrants, g => g.IsTraverseOnly);
+        Assert.Single(_database.GetAccount(AclHelper.AllApplicationPackagesSid)!.Grants, g => g.IsTraverseOnly);
     }
 
     // --- FixAppEntryDefaults tests ---
@@ -274,6 +338,7 @@ public class StartupEnforcementRunnerTests
     {
         var folderApp = new AppEntry
         {
+            Id = "folder-app",
             Name = "FolderApp",
             IsFolder = true,
             AclTarget = AclTarget.File
@@ -282,9 +347,11 @@ public class StartupEnforcementRunnerTests
 
         var runner = BuildRunner();
 
-        runner.FixAppEntryDefaults();
+        var result = runner.FixAppEntryDefaults();
 
         Assert.Equal(AclTarget.Folder, folderApp.AclTarget);
+        Assert.True(result.Changed);
+        Assert.Contains("folder-app", result.ChangedAppIds);
     }
 
     [Fact]
@@ -354,6 +421,7 @@ public class StartupEnforcementRunnerTests
         _pathGrantService.Verify(g => g.EnsureAccess(
             AclHelper.AllApplicationPackagesSid, unlockDir, FileSystemRights.ReadAndExecute,
             null, true), Times.Once);
+        _sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
     }
 
     [Fact]

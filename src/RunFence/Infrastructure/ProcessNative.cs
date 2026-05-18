@@ -54,6 +54,14 @@ public static class ProcessNative
     public static extern bool IsWow64Process(IntPtr hProcess, out bool wow64Process);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool GetProcessTimes(
+        IntPtr hProcess,
+        out FileTimeStruct creationTime,
+        out FileTimeStruct exitTime,
+        out FileTimeStruct kernelTime,
+        out FileTimeStruct userTime);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress,
         uint dwSize, uint flAllocationType, uint flProtect);
 
@@ -91,6 +99,15 @@ public static class ProcessNative
         public IntPtr Reserved3;
         public IntPtr UniqueProcessId;
         public IntPtr InheritedFromUniqueProcessId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FileTimeStruct
+    {
+        public uint DwLowDateTime;
+        public uint DwHighDateTime;
+
+        public long ToLong() => ((long)DwHighDateTime << 32) | DwLowDateTime;
     }
 
     // ── Advapi32 ───────────────────────────────────────────────────────────────

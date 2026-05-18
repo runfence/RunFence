@@ -101,7 +101,7 @@ public class DragBridgeService(
 
     private void StartBridgeAsync(nint restoreHwnd)
     {
-        var (captured, sourceSid, _) = copyFlow.GetCapturedFiles();
+        var (captured, sourceSid, sourceContainerSid, _) = copyFlow.GetCapturedFiles();
         bool hasCapture = captured is { Count: > 0 };
 
         var ownerInfo = hasCapture
@@ -118,7 +118,7 @@ public class DragBridgeService(
         var cts = processLauncher.BeginOperation();
         var capturedPaths = captured?.ToList() ?? [];
 
-        _ = Task.Run(() => RunBridgeFlowAsync(ownerInfo.Value, capturedPaths, sourceSid, restoreHwnd, cts.Token), cts.Token)
+        _ = Task.Run(() => RunBridgeFlowAsync(ownerInfo.Value, capturedPaths, sourceSid, sourceContainerSid, restoreHwnd, cts.Token), cts.Token)
             .ContinueWith(t =>
             {
                 if (t.IsFaulted)
@@ -128,7 +128,7 @@ public class DragBridgeService(
     }
 
     private async Task RunBridgeFlowAsync(WindowOwnerInfo ownerInfo, List<string> capturedFiles,
-        string? sourceSid, nint restoreHwnd, CancellationToken ct)
+        string? sourceSid, string? sourceContainerSid, nint restoreHwnd, CancellationToken ct)
     {
         var db = _database;
         if (db == null)
@@ -140,11 +140,17 @@ public class DragBridgeService(
         bool filesPreResolved = false;
         if (capturedFiles.Count > 0 && sourceSid != null)
         {
-            try { filesPreResolved = !resolveOrchestrator.NeedsAccessResolution(ownerInfo.Sid, capturedFiles); }
+            try
+            {
+                filesPreResolved = !resolveOrchestrator.NeedsAccessResolution(
+                    ownerInfo.Sid,
+                    ownerInfo.AppContainerSid,
+                    capturedFiles);
+            }
             catch { } // pre-check failure → fall back to lazy resolve
 
             if (!filesPreResolved)
-                resolveDelegate = resolveOrchestrator.CreateResolveDelegate(ownerInfo, capturedFiles, sourceSid, db);
+                resolveDelegate = resolveOrchestrator.CreateResolveDelegate(ownerInfo, capturedFiles, sourceSid, sourceContainerSid, db);
         }
 
         var cursorPos = Cursor.Position;

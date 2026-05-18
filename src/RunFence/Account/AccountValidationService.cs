@@ -37,37 +37,32 @@ public class AccountValidationService(ILoggingService log, ILocalGroupMembership
         }
     }
 
-    public void ValidateNoRunningProcesses(string sid, string action)
-    {
-        var processNames = GetProcessesRunningAsSid(sid);
-        if (processNames.Count > 0)
-        {
-            var list = string.Join(", ", processNames.Take(10));
-            if (processNames.Count > 10)
-                list += $" (and {processNames.Count - 10} more)";
-            log.Warn($"Blocked attempt to {action} account {sid} with {processNames.Count} running processes");
-            throw new InvalidOperationException(
-                $"Cannot {action} this account while it has running processes:\n{list}");
-        }
-    }
+    public IReadOnlyList<ProcessInfo> GetRunningProcesses(string targetSid)
+        => processListService.GetProcessesForSid(targetSid)
+            .OrderBy(GetProcessDisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(p => p.Pid)
+            .ToList();
 
     public List<string> GetProcessesRunningAsSid(string targetSid)
     {
-        var processes = processListService.GetProcessesForSid(targetSid);
+        var processes = GetRunningProcesses(targetSid);
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var processNames = new List<string>();
 
         foreach (var proc in processes)
         {
-            var name = proc.ExecutablePath != null
-                ? Path.GetFileNameWithoutExtension(proc.ExecutablePath)
-                : $"pid:{proc.Pid}";
+            var name = GetProcessDisplayName(proc);
             if (seen.Add(name))
                 processNames.Add(name);
         }
 
         return processNames;
     }
+
+    private static string GetProcessDisplayName(ProcessInfo proc)
+        => proc.ExecutablePath != null
+            ? Path.GetFileNameWithoutExtension(proc.ExecutablePath)
+            : $"pid:{proc.Pid}";
 
     private bool IsLastAdminAccount(string sid)
     {

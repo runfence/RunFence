@@ -16,29 +16,43 @@ public class RunAsCredentialPersisterTests : IDisposable
     private const string ContainerName = "rfn_testcontainer";
 
     private readonly Mock<IAppStateProvider> _appState = new();
-    private readonly Mock<ICredentialEncryptionService> _encryptionService = new();
+    private readonly Mock<IByteArrayCredentialEncryptionService> _encryptionService = new();
     private readonly Mock<IDatabaseService> _databaseService = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly AppDatabase _database = new();
     private readonly CredentialStore _credentialStore = new();
-    private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
+    private readonly List<SessionContext> _sessions = [];
 
     public RunAsCredentialPersisterTests()
     {
         _appState.Setup(c => c.Database).Returns(_database);
     }
 
-    public void Dispose() => _pinKey.Dispose();
-
-    private SessionContext CreateSession() => new()
+    public void Dispose()
     {
-        Database = _database,
-        CredentialStore = _credentialStore,
-        PinDerivedKey = _pinKey
-    };
+        foreach (var session in _sessions)
+            session.Dispose();
+
+        _pinKey.Dispose();
+    }
+
+    private SessionContext CreateSession()
+    {
+        var session = new SessionContext
+{
+            Database = _database,
+            CredentialStore = _credentialStore,
+        }.WithOwnedPinDerivedKey(_pinKey);
+        _sessions.Add(session);
+        return session;
+    }
 
     private RunAsCredentialPersister CreatePersister()
-        => new(_appState.Object, CreateSession(), _encryptionService.Object,
+        => new(
+            _appState.Object,
+            CreateSession(),
+            new ByteArrayCredentialEncryptionSpanAdapter(_encryptionService.Object),
             _databaseService.Object, _log.Object);
 
     // ── Constructor — initial state from database ─────────────────────────
@@ -87,7 +101,7 @@ public class RunAsCredentialPersisterTests : IDisposable
         // Assert: settings updated and config saved
         Assert.Equal(AccountSid, _database.Settings.LastUsedRunAsAccountSid);
         Assert.Null(_database.Settings.LastUsedRunAsContainerName);
-        _databaseService.Verify(d => d.SaveConfig(_database, It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Once);
+        _databaseService.Verify(d => d.SaveConfig(_database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Once);
     }
 
     [Fact]
@@ -102,7 +116,7 @@ public class RunAsCredentialPersisterTests : IDisposable
         persister.SetLastUsedAccount(AccountSid);
 
         // Assert: no redundant save since nothing changed
-        _databaseService.Verify(d => d.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+        _databaseService.Verify(d => d.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Never);
     }
 
     // ── SetLastUsedContainer ──────────────────────────────────────────────
@@ -134,7 +148,7 @@ public class RunAsCredentialPersisterTests : IDisposable
         // Assert
         Assert.Equal(ContainerName, _database.Settings.LastUsedRunAsContainerName);
         Assert.Null(_database.Settings.LastUsedRunAsAccountSid);
-        _databaseService.Verify(d => d.SaveConfig(_database, It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Once);
+        _databaseService.Verify(d => d.SaveConfig(_database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Once);
     }
 
     [Fact]
@@ -149,7 +163,7 @@ public class RunAsCredentialPersisterTests : IDisposable
         persister.SetLastUsedContainer(ContainerName);
 
         // Assert: no redundant save since nothing changed
-        _databaseService.Verify(d => d.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+        _databaseService.Verify(d => d.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Never);
     }
 
     // ── TrySaveRememberedPassword ─────────────────────────────────────────
@@ -270,6 +284,38 @@ public class RunAsCredentialPersisterTests : IDisposable
         Assert.Empty(_credentialStore.Credentials);
     }
 
+    [Fact]
+    public void TrySaveRememberedPassword_EncryptedPassword_RoundTripsWithSnapshotKey()
+    {
+        byte[] pinKeyBytes = new byte[32];
+        for (int i = 0; i < pinKeyBytes.Length; i++)
+            pinKeyBytes[i] = (byte)(255 - i);
+
+        var encryptionService = new CredentialEncryptionService(new NativeDpapiProtector());
+        using var roundTripPinKey = TestSecretFactory.FromBytes(pinKeyBytes.ToArray());
+        using var session = new SessionContext
+{
+            Database = _database,
+            CredentialStore = _credentialStore,
+        }.WithOwnedPinDerivedKey(roundTripPinKey);
+        var persister = new RunAsCredentialPersister(
+            _appState.Object,
+            session,
+            encryptionService,
+            _databaseService.Object,
+            _log.Object);
+
+        using var password = ProtectedString.FromChars("RememberMe!".AsSpan());
+        using var result = MakeResult(new CredentialEntry { Sid = AccountSid }, rememberPassword: true, adHocPassword: password);
+
+        persister.TrySaveRememberedPassword(result);
+
+        var stored = Assert.Single(_credentialStore.Credentials);
+        using var decrypted = encryptionService.Decrypt(stored.EncryptedPassword, pinKeyBytes);
+        Assert.True(ProtectedString.ContentEqual(password, decrypted));
+        _databaseService.Verify(d => d.SaveCredentialStore(_credentialStore), Times.Once);
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────
 
     private static RunAsDialogResult MakeResult(
@@ -281,7 +327,7 @@ public class RunAsCredentialPersisterTests : IDisposable
             SelectedContainer: null,
             PermissionGrant: null,
             CreateAppEntryOnly: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             UpdateOriginalShortcut: false,
             RevertShortcutRequested: false,
             EditExistingApp: null,

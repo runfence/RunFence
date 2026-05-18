@@ -12,7 +12,8 @@ public sealed class JobKeeperService(
     IJobKeeperProcessDiscovery processDiscovery,
     IJobKeeperProcessVerifier processVerifier,
     IJobKeeperRegistry registry,
-    IJobKeeperProcessTerminator processTerminator) : IJobKeeperService
+    IJobKeeperProcessTerminator processTerminator,
+    TimeSpan waitForConnectionTimeout) : IJobKeeperService
 {
     public bool HasJobKeeper(string sid, bool isLow) => registry.Has(sid, isLow);
 
@@ -24,7 +25,7 @@ public sealed class JobKeeperService(
     {
         try
         {
-            if (!WaitForConnection(pipeServer, TimeSpan.FromSeconds(10)))
+            if (!WaitForConnection(pipeServer, waitForConnectionTimeout))
             {
                 log.Warn($"JobKeeper: timed out waiting for connection from job keeper for {identity.TargetSid} ({identity.ExpectedMode})");
                 pipeServer.Dispose();
@@ -35,8 +36,7 @@ public sealed class JobKeeperService(
             var verification = processVerifier.Verify(pipeServer, expectedPid, targetUserSid, identity);
             if (!verification.Succeeded)
             {
-                log.Warn(
-                    $"JobKeeper: verification failed for {identity.TargetSid} ({identity.ExpectedMode}): {verification.FailureReason ?? "unknown reason"}");
+                log.Warn($"JobKeeper: verification failed for {identity.TargetSid} ({identity.ExpectedMode}): {verification.FailureReason ?? "unknown reason"}");
                 pipeServer.Dispose();
                 KillExpectedKeeper(expectedPid);
                 return 0;
@@ -129,34 +129,11 @@ public sealed class JobKeeperService(
 
     public void RemoveJobKeeper(string sid, bool isLow) => registry.RemoveAndDispose(sid, isLow);
 
-    public IReadOnlyList<JobKeeperEntry> GetAllKeepers() => registry.GetAll();
-
-    public void TerminateJobKeeper(string sid, bool isLow)
-    {
-        var state = registry.Take(sid, isLow);
-        if (state == null)
-            return;
-
-        DisposeAndKill(state);
-    }
-
-    public void TerminateAllJobKeepers()
-    {
-        foreach (var state in registry.TakeAll())
-            DisposeAndKill(state);
-    }
-
     private int RejectPersistedIdentity(string sid, bool isLow, string reason)
     {
         log.Warn($"JobKeeper: rejecting persisted identity for {sid} (isLow={isLow}): {reason}");
         identityStore.Remove(sid, isLow);
         return 0;
-    }
-
-    private void DisposeAndKill(JobKeeperState state)
-    {
-        try { state.Pipe.Dispose(); } catch { }
-        processTerminator.Kill(state.Pid);
     }
 
     private void KillExpectedKeeper(int expectedPid)

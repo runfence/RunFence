@@ -76,7 +76,7 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
 
                 log.Info($"WfpLocalhostBlocker: blocking loopback for {sid}, exempted: [{string.Join(", ", exemptedRanges)}], blocking ports 1-65535");
 
-                bool committed = _txHelper.ExecuteInTransaction("WfpLocalhostBlocker", handle =>
+                var tx = _txHelper.ExecuteInTransaction("WfpLocalhostBlocker", handle =>
                 {
                     var v4Key = WfpFilterKeyHelper.DeriveKey("RunFence-LH-V4", sid);
                     var v6Key = WfpFilterKeyHelper.DeriveKey("RunFence-LH-V6", sid);
@@ -87,15 +87,17 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
                     _filterWriter.AddLocalhostFilter(handle, v6Key, sddl, isIPv6: true, blockedRanges);
                 });
 
-                if (committed)
+                if (tx.Committed)
                     _staticState[sid] = exemptedRanges;
+                else
+                    throw tx.FailureException ?? new InvalidOperationException(tx.Error ?? "WFP localhost transaction did not commit.");
             }
             else
             {
                 var ephemeralFilterCount = _ephemeralState.GetValueOrDefault(sid)?.FilterCount ?? 0;
                 log.Info($"WfpLocalhostBlocker: removing loopback block for {sid}");
 
-                bool committed = _txHelper.ExecuteInTransaction("WfpLocalhostBlocker", handle =>
+                var tx = _txHelper.ExecuteInTransaction("WfpLocalhostBlocker", handle =>
                 {
                     var v4Key = WfpFilterKeyHelper.DeriveKey("RunFence-LH-V4", sid);
                     var v6Key = WfpFilterKeyHelper.DeriveKey("RunFence-LH-V6", sid);
@@ -103,7 +105,7 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
                     _filterWriter.DeleteFilter(handle, ref v6Key);
                 });
 
-                if (committed)
+                if (tx.Committed)
                 {
                     _staticState.Remove(sid);
                     _ephemeralState.Remove(sid);
@@ -118,7 +120,7 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
                     var handle = EnsureEphemeralHandle();
                     if (handle != IntPtr.Zero)
                     {
-                        _txHelper.ExecuteOnHandle("WfpLocalhostBlocker", handle, h =>
+                        var ephemeralTx = _txHelper.ExecuteOnHandle("WfpLocalhostBlocker", handle, h =>
                         {
                             for (var chunk = 0; chunk < ephemeralFilterCount; chunk++)
                             {
@@ -128,8 +130,14 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
                                 _filterWriter.DeleteFilter(h, ref ev6Key);
                             }
                         });
+
+                        if (!ephemeralTx.Committed)
+                            throw ephemeralTx.FailureException ?? new InvalidOperationException(ephemeralTx.Error ?? "WFP localhost ephemeral cleanup did not commit.");
                     }
                 }
+
+                if (!tx.Committed)
+                    throw tx.FailureException ?? new InvalidOperationException(tx.Error ?? "WFP localhost transaction did not commit.");
             }
         }
     }
@@ -154,7 +162,7 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
 
             log.Info($"WfpLocalhostBlocker: updating ephemeral blocks for {sid}: [{string.Join(", ", ephemeralBlockedRanges)}]");
 
-            bool committed = _txHelper.ExecuteOnHandle("WfpLocalhostBlocker", handle, h =>
+            var tx = _txHelper.ExecuteOnHandle("WfpLocalhostBlocker", handle, h =>
             {
                 var sddl = FirewallSddlHelper.BuildSddl(sid);
 
@@ -184,8 +192,10 @@ public sealed class WfpLocalhostBlocker(ILoggingService log, IWfpFilterHelper fi
                 }
             });
 
-            if (committed)
+            if (tx.Committed)
                 _ephemeralState[sid] = new EphemeralEntry(ephemeralBlockedRanges, newFilterCount);
+            else
+                throw tx.FailureException ?? new InvalidOperationException(tx.Error ?? "WFP localhost ephemeral transaction did not commit.");
         }
     }
 

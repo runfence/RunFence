@@ -124,8 +124,9 @@ public class AccountCredentialCrudHandler(
             try
             {
                 var session = sessionProvider.GetSession();
+                var pinKeySource = session.PinDerivedKey;
                 if (dialogResult.Password != null)
-                    credentialManager.UpdateCredentialPassword(credEntry, dialogResult.Password, session.PinDerivedKey);
+                    credentialManager.UpdateCredentialPassword(credEntry, dialogResult.Password, pinKeySource);
 
                 SaveAndRefreshRequested?.Invoke(credEntry.Id, -1);
             }

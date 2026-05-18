@@ -70,11 +70,11 @@ public class AccountGridProcessExpander(
 
     public List<string> GetExpandedSidSnapshot() => _expandedSids.ToList();
 
-    public Dictionary<string, IReadOnlyList<ProcessInfo>> FetchRefreshData(List<string> sids)
+    public Dictionary<string, IReadOnlyList<ProcessInfo>> FetchRefreshData(List<string> sids, CancellationToken cancellationToken)
     {
         var result = new Dictionary<string, IReadOnlyList<ProcessInfo>>(StringComparer.OrdinalIgnoreCase);
         foreach (var sid in sids)
-            result[sid] = processListService.GetProcessesForSid(sid);
+            result[sid] = processListService.GetProcessesForSid(sid, cancellationToken);
         return result;
     }
 
@@ -105,8 +105,8 @@ public class AccountGridProcessExpander(
         }
     }
 
-    public HashSet<string> FetchSidsWithProcesses(IEnumerable<string> sids)
-        => processListService.GetSidsWithProcesses(sids);
+    public HashSet<string> FetchSidsWithProcesses(IEnumerable<string> sids, CancellationToken cancellationToken)
+        => processListService.GetSidsWithProcesses(sids, cancellationToken);
 
     public void ApplySidsWithProcesses(HashSet<string> withProcesses)
     {

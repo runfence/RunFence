@@ -6,30 +6,47 @@ using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
 using RunFence.Persistence;
+using RunFence.Persistence.UI;
 using Xunit;
 
 namespace RunFence.Tests;
 
-public class ConfigImportHandlerTests
+public class ConfigImportHandlerTests : IDisposable
 {
-    private static ConfigImportHandler BuildHandler(
+    private readonly List<SessionContext> _sessions = [];
+
+    private sealed record RealAppConfigHarness(
+        AppConfigService AppConfigService,
+        AppConfigIndex Index,
+        GrantIntentOwnershipProjectionService OwnershipProjection,
+        HandlerMappingService HandlerMappings,
+        Mock<IDatabaseService> DatabaseService);
+
+    public void Dispose()
+    {
+        foreach (var session in _sessions)
+        {
+            session.Dispose();
+        }
+    }
+
+    private ConfigImportHandler BuildHandler(
         AppDatabase database,
         CredentialStore store,
-        ProtectedBuffer pinKey,
+        SecureSecret pinKey,
         Mock<IAppConfigService>? appConfigService = null,
         Mock<IHandlerMappingService>? handlerMappingService = null,
         Mock<IPathGrantService>? pathGrantService = null,
         Mock<ILoggingService>? log = null,
         Mock<IAppEntryIdGenerator>? idGenerator = null,
         Mock<IGrantInspectionService>? grantInspection = null,
-        Mock<IGrantConfigTracker>? grantTracker = null)
+        GrantIntentOwnershipProjectionService? ownershipProjection = null)
     {
         // Track which mocks were created here vs passed in — only apply defaults to locally-created mocks
         // so caller-configured setups are not overridden (Moq uses last-setup-wins semantics).
         bool appConfigCreatedHere = appConfigService == null;
         bool idGeneratorCreatedHere = idGenerator == null;
         bool grantInspectionCreatedHere = grantInspection == null;
-        bool grantTrackerCreatedHere = grantTracker == null;
         appConfigService ??= new Mock<IAppConfigService>();
         handlerMappingService ??= new Mock<IHandlerMappingService>();
         pathGrantService ??= new Mock<IPathGrantService>();
@@ -38,7 +55,7 @@ public class ConfigImportHandlerTests
         grantInspection ??= new Mock<IGrantInspectionService>();
         var licenseService = new Mock<ILicenseService>();
         var sessionProvider = new Mock<ISessionProvider>();
-        grantTracker ??= new Mock<IGrantConfigTracker>();
+        ownershipProjection ??= new GrantIntentOwnershipProjectionService();
 
         licenseService.Setup(l => l.IsLicensed).Returns(true);
         if (appConfigCreatedHere)
@@ -54,12 +71,6 @@ public class ConfigImportHandlerTests
                 .Returns(() => Guid.NewGuid().ToString("N"));
         }
 
-        if (grantTrackerCreatedHere)
-        {
-            // Default: treat all pre-existing grants as main-config (correct default: no additional configs loaded in tests)
-            grantTracker.Setup(t => t.IsInMainConfig(It.IsAny<string>(), It.IsAny<GrantedPathEntry>())).Returns(true);
-        }
-
         if (grantInspectionCreatedHere)
         {
             // Default: no ACE on disk — main-config grants not preserved (Available=0 is Moq default,
@@ -69,24 +80,175 @@ public class ConfigImportHandlerTests
         }
 
         var session = new SessionContext
-        {
+{
             Database = database,
             CredentialStore = store,
-            PinDerivedKey = pinKey
-        };
+        }.WithOwnedPinDerivedKey(pinKey);
+        _sessions.Add(session);
         sessionProvider.Setup(s => s.GetSession()).Returns(session);
+        ownershipProjection.CaptureMainOwnershipBaseline(database);
 
         var fileParserInstance = new ConfigImportFileParser();
-        var preservationCollectorInstance = new MainConfigImportPreservationCollector(grantTracker.Object);
+        var preservationCollectorInstance = new MainConfigImportPreservationCollector(ownershipProjection);
         var evaluationValidatorInstance = new MainConfigImportEvaluationValidator(licenseService.Object, appConfigService.Object);
-        var repairServiceInstance = new MainConfigImportRepairService(appConfigService.Object, handlerMappingService.Object, pathGrantService.Object, log.Object, idGenerator.Object);
-        var applyServiceInstance = new MainConfigImportApplyService(appConfigService.Object, grantInspection.Object);
-        var saveHelperInstance = new MainConfigImportSaveHelper(appConfigService.Object);
-
+        var appIdValidatorInstance = new AppIdValidator();
+        var repairServiceInstance = new MainConfigImportRepairService(
+            appConfigService.Object,
+            handlerMappingService.Object,
+            pathGrantService.Object,
+            log.Object,
+            idGenerator.Object,
+            appIdValidatorInstance);
+        var applyServiceInstance = new MainConfigImportApplyService(
+            appConfigService.Object,
+            repairServiceInstance,
+            ownershipProjection,
+            grantInspection.Object);
         return new ConfigImportHandler(
             appConfigService.Object, sessionProvider.Object, log.Object,
             fileParserInstance, preservationCollectorInstance, evaluationValidatorInstance,
-            repairServiceInstance, applyServiceInstance, saveHelperInstance);
+            repairServiceInstance, applyServiceInstance);
+    }
+
+    private static RealAppConfigHarness CreateRealAppConfigHarness(
+        SessionContext session,
+        Mock<ILoggingService>? log = null)
+    {
+        log ??= new Mock<ILoggingService>();
+        var databaseService = new Mock<IDatabaseService>();
+        var appIdValidator = new AppIdValidator();
+        var sessionProvider = new Mock<ISessionProvider>();
+        sessionProvider.Setup(provider => provider.GetSession()).Returns(session);
+        var configSaveOrchestrator = new ConfigSaveOrchestrator(
+            sessionProvider.Object,
+            () => new InlineUiThreadInvoker(action => action()),
+            databaseService.Object,
+            new Mock<IAppConfigService>().Object,
+            new Mock<IHandlerMappingService>().Object);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        var mainStore = new MainGrantIntentStore(
+            sessionProvider.Object,
+            configSaveOrchestrator,
+            ownershipProjection);
+        var grantIntentStoreProvider = new GrantIntentStoreProvider(
+            mainStore,
+            configSaveOrchestrator,
+            ownershipProjection);
+        var index = new AppConfigIndex(ownershipProjection, appIdValidator);
+        var handlerMappings = new HandlerMappingService(index);
+        var appConfigService = new AppConfigService(
+            log.Object,
+            index,
+            ownershipProjection,
+            () => grantIntentStoreProvider,
+            handlerMappings,
+            databaseService.Object,
+            new AppConfigSaveHelper(() => grantIntentStoreProvider, handlerMappings, databaseService.Object),
+            new AppEntryIdGenerator(),
+            appIdValidator);
+
+        return new RealAppConfigHarness(appConfigService, index, ownershipProjection, handlerMappings, databaseService);
+    }
+
+    private static ConfigImportHandler BuildHandlerWithRealAppConfigService(
+        SessionContext session,
+        AppConfigService appConfigService,
+        GrantIntentOwnershipProjectionService ownershipProjection,
+        IHandlerMappingService? handlerMappingService = null,
+        Mock<IPathGrantService>? pathGrantService = null,
+        Mock<ILoggingService>? log = null,
+        Mock<IAppEntryIdGenerator>? idGenerator = null,
+        Mock<IGrantInspectionService>? grantInspection = null)
+    {
+        bool idGeneratorCreatedHere = idGenerator == null;
+        bool grantInspectionCreatedHere = grantInspection == null;
+        handlerMappingService ??= new Mock<IHandlerMappingService>().Object;
+        pathGrantService ??= new Mock<IPathGrantService>();
+        log ??= new Mock<ILoggingService>();
+        idGenerator ??= new Mock<IAppEntryIdGenerator>();
+        grantInspection ??= new Mock<IGrantInspectionService>();
+        var licenseService = new Mock<ILicenseService>();
+        var sessionProvider = new Mock<ISessionProvider>();
+
+        licenseService.Setup(l => l.IsLicensed).Returns(true);
+        if (idGeneratorCreatedHere)
+        {
+            idGenerator.Setup(g => g.GenerateUniqueId(It.IsAny<IEnumerable<string>>()))
+                .Returns(() => Guid.NewGuid().ToString("N"));
+        }
+
+        if (grantInspectionCreatedHere)
+        {
+            grantInspection.Setup(g => g.CheckGrantStatus(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
+                .Returns(PathAclStatus.Broken);
+        }
+
+        sessionProvider.Setup(s => s.GetSession()).Returns(session);
+        ownershipProjection.CaptureMainOwnershipBaseline(session.Database);
+
+        var fileParserInstance = new ConfigImportFileParser();
+        var preservationCollectorInstance = new MainConfigImportPreservationCollector(ownershipProjection);
+        var evaluationValidatorInstance = new MainConfigImportEvaluationValidator(licenseService.Object, appConfigService);
+        var appIdValidatorInstance = new AppIdValidator();
+        var repairServiceInstance = new MainConfigImportRepairService(
+            appConfigService,
+            handlerMappingService,
+            pathGrantService.Object,
+            log.Object,
+            idGenerator.Object,
+            appIdValidatorInstance);
+        var applyServiceInstance = new MainConfigImportApplyService(
+            appConfigService,
+            repairServiceInstance,
+            ownershipProjection,
+            grantInspection.Object);
+        return new ConfigImportHandler(
+            appConfigService,
+            sessionProvider.Object,
+            log.Object,
+            fileParserInstance,
+            preservationCollectorInstance,
+            evaluationValidatorInstance,
+            repairServiceInstance,
+            applyServiceInstance);
+    }
+
+    private static ConfigImportHandler CreateHandlerForSession(
+        SessionContext session,
+        IAppConfigService appConfigService,
+        ILoggingService? log = null)
+    {
+        var sessionProvider = new Mock<ISessionProvider>();
+        sessionProvider.Setup(s => s.GetSession()).Returns(session);
+        var fileParserInstance = new ConfigImportFileParser();
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        ownershipProjection.CaptureMainOwnershipBaseline(session.Database);
+        var preservationCollectorInstance = new MainConfigImportPreservationCollector(ownershipProjection);
+        var licenseService = new Mock<ILicenseService>();
+        licenseService.Setup(l => l.IsLicensed).Returns(true);
+        var evaluationValidatorInstance = new MainConfigImportEvaluationValidator(licenseService.Object, appConfigService);
+        var appIdValidatorInstance = new AppIdValidator();
+        var repairServiceInstance = new MainConfigImportRepairService(
+            appConfigService,
+            new Mock<IHandlerMappingService>().Object,
+            new Mock<IPathGrantService>().Object,
+            log ?? new Mock<ILoggingService>().Object,
+            new Mock<IAppEntryIdGenerator>().Object,
+            appIdValidatorInstance);
+        var applyServiceInstance = new MainConfigImportApplyService(
+            appConfigService,
+            repairServiceInstance,
+            ownershipProjection,
+            new Mock<IGrantInspectionService>().Object);
+        return new ConfigImportHandler(
+            appConfigService,
+            sessionProvider.Object,
+            log ?? new Mock<ILoggingService>().Object,
+            fileParserInstance,
+            preservationCollectorInstance,
+            evaluationValidatorInstance,
+            repairServiceInstance,
+            applyServiceInstance);
     }
 
     private static void WriteJsonToFile(AppDatabase db, string path)
@@ -100,7 +262,7 @@ public class ConfigImportHandlerTests
     {
         // Arrange: database already has "existing-container"; imported config has the same plus "new-container".
         // Full replace: both containers from import present; existing-container has the import's DisplayName.
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         database.AppContainers.Add(new AppContainerEntry { Name = "existing-container", DisplayName = "Existing" });
         var handler = BuildHandler(database, new CredentialStore(), pinKey);
@@ -134,7 +296,7 @@ public class ConfigImportHandlerTests
     {
         // Arrange: existing container named "MyContainer"; imported container "mycontainer" (different case).
         // Full replace: single container with import's name/DisplayName (old one fully replaced).
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         database.AppContainers.Add(new AppContainerEntry { Name = "MyContainer", DisplayName = "Original" });
         var handler = BuildHandler(database, new CredentialStore(), pinKey);
@@ -163,7 +325,7 @@ public class ConfigImportHandlerTests
         // Arrange: an additional-config app has ID "shared-id".
         // The imported main-config app also has "shared-id". The import must assign a new ID
         // to the additional app (preserving the imported app's ID) and update AppConfigIndex.
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var additionalApp = new AppEntry { Id = "shared-id", Name = "AdditionalApp", AccountSid = "S-1-5-21-0-0-0-1" };
         database.Apps.Add(additionalApp);
@@ -209,7 +371,7 @@ public class ConfigImportHandlerTests
     {
         // Arrange: the imported file has two apps with the same ID "dup-id".
         // The collision repair must assign a unique ID to the second one.
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
 
         var newIdCount = 0;
@@ -245,13 +407,29 @@ public class ConfigImportHandlerTests
         // The imported config does NOT include that SID. No additional config uses it.
         // The import must call RemoveAll for the orphaned SID.
         const string orphanSid = "S-1-5-21-0-0-0-9999";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        const string orphanGrantPath = @"C:\OrphanGrant";
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         database.Apps.Add(new AppEntry { Id = "old-app", Name = "OldApp", AccountSid = orphanSid });
+        var orphanGrant = new GrantedPathEntry { Path = orphanGrantPath };
+        database.GetOrCreateAccount(orphanSid).Grants.Add(orphanGrant);
 
         var pathGrantService = new Mock<IPathGrantService>();
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        pathGrantService.Setup(p => p.RemoveAll(orphanSid))
+            .Callback(() =>
+            {
+                var orphanAccount = database.GetAccount(orphanSid);
+                Assert.NotNull(orphanAccount);
+                Assert.Contains(orphanAccount!.Grants, grant =>
+                    string.Equals(grant.Path, orphanGrantPath, StringComparison.OrdinalIgnoreCase));
+                database.Accounts.Remove(orphanAccount);
+                ownershipProjection.RemoveOwnership(configPath: null, orphanSid, orphanGrant);
+            })
+            .Returns(new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: true));
         var handler = BuildHandler(database, new CredentialStore(), pinKey,
-            pathGrantService: pathGrantService);
+            pathGrantService: pathGrantService,
+            ownershipProjection: ownershipProjection);
 
         var importedDb = new AppDatabase();
         importedDb.Apps.Add(new AppEntry { Id = "new-app", Name = "NewApp", AccountSid = "S-1-5-21-0-0-0-1001" });
@@ -264,14 +442,260 @@ public class ConfigImportHandlerTests
         handler.ImportMainConfig(tempFile, null);
 
         // Assert: RemoveAll called for the orphaned SID
-        pathGrantService.Verify(p => p.RemoveAll(orphanSid, true), Times.Once);
+        pathGrantService.Verify(p => p.RemoveAll(orphanSid), Times.Once);
+        Assert.Null(database.GetAccount(orphanSid));
+        Assert.False(ownershipProjection.HasMainOwnership(orphanSid, orphanGrant));
+    }
+
+    [Fact]
+    public void ImportMainConfig_ApplyStateFails_RestoresAdditionalAppOwnershipState()
+    {
+        const string orphanSid = "S-1-5-21-0-0-0-9999";
+        const string sharedId = "shared-id";
+        const string additionalConfigPath = @"C:\extra.rfn";
+        const string preservedGrantPath = @"C:\Preserved";
+
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        database.Apps.Add(new AppEntry { Id = "old-main-app", Name = "OldMainApp", AccountSid = orphanSid });
+        database.Apps.Add(new AppEntry { Id = sharedId, Name = "AdditionalApp", AccountSid = "S-1-5-21-0-0-0-1002" });
+        database.GetOrCreateAccount(orphanSid).Grants.Add(new GrantedPathEntry
+        {
+            Path = preservedGrantPath,
+            IsDeny = false,
+            IsTraverseOnly = false
+        });
+
+        var appConfigService = new Mock<IAppConfigService>();
+        var appConfigSnapshot = new AppConfigRuntimeStateSnapshot(
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                [sharedId] = additionalConfigPath
+            },
+            [additionalConfigPath],
+            new Dictionary<string, IReadOnlyDictionary<string, HandlerMappingEntry>>(StringComparer.OrdinalIgnoreCase));
+        appConfigService.Setup(s => s.GetConfigPath(sharedId)).Returns(additionalConfigPath);
+        appConfigService.Setup(s => s.GetConfigPath(It.Is<string>(id => !string.Equals(id, sharedId, StringComparison.OrdinalIgnoreCase))))
+            .Returns((string?)null);
+        appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([additionalConfigPath]);
+        appConfigService.Setup(s => s.HasLoadedConfigs).Returns(true);
+        appConfigService.Setup(s => s.CaptureRuntimeStateSnapshot()).Returns(appConfigSnapshot);
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        var grantInspection = new Mock<IGrantInspectionService>();
+        grantInspection.Setup(g => g.CheckGrantStatus(preservedGrantPath, orphanSid, false))
+            .Throws(new InvalidOperationException("grant inspection failed"));
+
+        var idGenerator = new Mock<IAppEntryIdGenerator>();
+        idGenerator.Setup(g => g.GenerateUniqueId(It.IsAny<IEnumerable<string>>()))
+            .Returns("renamed-additional-app");
+
+        var handler = BuildHandler(
+            database,
+            new CredentialStore(),
+            pinKey,
+            appConfigService: appConfigService,
+            pathGrantService: pathGrantService,
+            idGenerator: idGenerator,
+            grantInspection: grantInspection);
+
+        var importedDb = new AppDatabase();
+        importedDb.Apps.Add(new AppEntry { Id = sharedId, Name = "ImportedMainApp", AccountSid = "S-1-5-21-0-0-0-1001" });
+
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => handler.ImportMainConfig(tempFile, null));
+        Assert.Equal("grant inspection failed", ex.Message);
+        pathGrantService.Verify(p => p.RemoveAll(orphanSid), Times.Never);
+        appConfigService.Verify(s => s.RemoveApp(sharedId), Times.Once);
+        appConfigService.Verify(s => s.AssignApp("renamed-additional-app", additionalConfigPath), Times.Once);
+        appConfigService.Verify(s => s.RestoreRuntimeStateSnapshot(appConfigSnapshot), Times.Once);
+        Assert.Contains(database.Apps, app => app.Id == "old-main-app");
+        Assert.Contains(database.Apps, app => app.Id == sharedId);
+        Assert.DoesNotContain(database.Apps, app => app.Name == "ImportedMainApp");
+    }
+
+    [Fact]
+    public void ImportMainConfig_ApplyFailsAfterAdditionalAppRename_RestoresDatabaseAndOwnershipMapping()
+    {
+        const string orphanSid = "S-1-5-21-0-0-0-9999";
+        const string sharedId = "shared-id";
+        const string renamedId = "renamed-additional-app";
+        const string preservedGrantPath = @"C:\Preserved";
+
+        using var pinKey = TestSecretFactory.Create(32);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var additionalConfigPath = Path.Combine(tempDir.Path, "extra-config.ramc");
+        var database = new AppDatabase();
+        database.Apps.Add(new AppEntry { Id = "old-main-app", Name = "OldMainApp", AccountSid = orphanSid });
+        database.GetOrCreateAccount(orphanSid).Grants.Add(new GrantedPathEntry
+        {
+            Path = preservedGrantPath,
+            IsDeny = false,
+            IsTraverseOnly = false
+        });
+
+        var log = new Mock<ILoggingService>();
+        using var session = new SessionContext
+        {
+            Database = database,
+            CredentialStore = new CredentialStore()
+        }.WithOwnedPinDerivedKey(pinKey);
+        var harness = CreateRealAppConfigHarness(session, log);
+        harness.DatabaseService
+            .Setup(service => service.LoadAppConfigFromPath(additionalConfigPath, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(new AppConfig
+            {
+                Apps =
+                [
+                    new AppEntry
+                    {
+                        Id = sharedId,
+                        Name = "AdditionalApp",
+                        AccountSid = "S-1-5-21-0-0-0-1002"
+                    }
+                ],
+                HandlerMappings = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["http"] = new(sharedId)
+                }
+            });
+        File.WriteAllText(additionalConfigPath, "stub");
+        harness.AppConfigService.LoadAdditionalConfig(additionalConfigPath, database, session.PinDerivedKey);
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        var grantInspection = new Mock<IGrantInspectionService>();
+        grantInspection.Setup(g => g.CheckGrantStatus(preservedGrantPath, orphanSid, false))
+            .Throws(new InvalidOperationException("grant inspection failed"));
+        var idGenerator = new Mock<IAppEntryIdGenerator>();
+        idGenerator.Setup(g => g.GenerateUniqueId(It.IsAny<IEnumerable<string>>()))
+            .Returns(renamedId);
+
+        var handler = BuildHandlerWithRealAppConfigService(
+            session,
+            harness.AppConfigService,
+            harness.OwnershipProjection,
+            handlerMappingService: harness.HandlerMappings,
+            pathGrantService: pathGrantService,
+            log: log,
+            idGenerator: idGenerator,
+            grantInspection: grantInspection);
+
+        var importedDb = new AppDatabase();
+        importedDb.Apps.Add(new AppEntry { Id = sharedId, Name = "ImportedMainApp", AccountSid = "S-1-5-21-0-0-0-1001" });
+
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => handler.ImportMainConfig(tempFile, null));
+
+        Assert.Equal("grant inspection failed", ex.Message);
+        Assert.Contains(database.Apps, app => app.Id == "old-main-app");
+        Assert.Contains(database.Apps, app => app.Id == sharedId);
+        Assert.DoesNotContain(database.Apps, app => app.Id == renamedId);
+        Assert.DoesNotContain(database.Apps, app => app.Name == "ImportedMainApp");
+        Assert.Equal(additionalConfigPath, harness.AppConfigService.GetConfigPath(sharedId));
+        Assert.Null(harness.AppConfigService.GetConfigPath(renamedId));
+        Assert.Equal(sharedId, harness.HandlerMappings.GetHandlerMappingsForConfig(additionalConfigPath)!["http"].AppId);
+    }
+
+    [Fact]
+    public void ImportMainConfig_ApplyFailsDuringOrphanedGrantRemoval_KeepsImportedOwnershipState()
+    {
+        const string orphanSid = "S-1-5-21-0-0-0-9999";
+        const string mainGrantSid = "S-1-5-21-0-0-0-1001";
+        const string additionalGrantSid = "S-1-5-21-0-0-0-1002";
+        const string oldMainGrantPath = @"C:\OldMainGrant";
+        const string importedMainGrantPath = @"C:\ImportedMainGrant";
+        using var pinKey = TestSecretFactory.Create(32);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var additionalConfigPath = Path.Combine(tempDir.Path, "extra-ownership-rollback.ramc");
+        var database = new AppDatabase();
+        var credentialStore = new CredentialStore
+        {
+            ArgonSalt = new byte[32],
+            EncryptedCanary = [1]
+        };
+        using var session = new SessionContext
+        {
+            Database = database,
+            CredentialStore = credentialStore,
+        }.WithOwnedPinDerivedKey(pinKey);
+        var log = new Mock<ILoggingService>();
+        var harness = CreateRealAppConfigHarness(session, log);
+        harness.DatabaseService
+            .Setup(service => service.LoadAppConfigFromPath(additionalConfigPath, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(new AppConfig
+            {
+                Apps = [new AppEntry { Id = "additional-app", Name = "AdditionalApp" }],
+                Accounts =
+                [
+                    new AppConfigAccountEntry
+                    {
+                        Sid = additionalGrantSid,
+                        Grants =
+                        [
+                            new GrantedPathEntry
+                            {
+                                Path = @"C:\AdditionalGrant",
+                                SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+                            }
+                        ]
+                    }
+                ]
+            });
+        File.WriteAllText(additionalConfigPath, "stub");
+        database.Apps.Add(new AppEntry { Id = "old-main-app", Name = "OldMainApp", AccountSid = orphanSid });
+        database.GetOrCreateAccount(mainGrantSid).Grants.Add(new GrantedPathEntry
+        {
+            Path = oldMainGrantPath,
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+        });
+        harness.AppConfigService.LoadAdditionalConfig(additionalConfigPath, database, session.PinDerivedKey);
+
+        var importedMainGrant = new GrantedPathEntry
+        {
+            Path = importedMainGrantPath,
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+        };
+        var importedDb = new AppDatabase();
+        importedDb.Apps.Add(new AppEntry { Id = "imported-main-app", Name = "ImportedMainApp", AccountSid = mainGrantSid });
+        importedDb.GetOrCreateAccount(mainGrantSid).Grants.Add(importedMainGrant.Clone());
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService.Setup(service => service.RemoveAll(orphanSid))
+            .Throws(new InvalidOperationException("grant removal failed"));
+
+        var handler = BuildHandlerWithRealAppConfigService(
+            session,
+            harness.AppConfigService,
+            harness.OwnershipProjection,
+            pathGrantService: pathGrantService,
+            log: log);
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => handler.ImportMainConfig(tempFile, null));
+
+        Assert.Equal("grant removal failed", ex.Message);
+        var filteredAfterFailure = harness.Index.FilterForMainConfig(database);
+        var remainingGrant = Assert.Single(filteredAfterFailure.GetAccount(mainGrantSid)!.Grants);
+        Assert.Equal(importedMainGrantPath, remainingGrant.Path);
+        Assert.True(harness.OwnershipProjection.HasMainOwnership(mainGrantSid, remainingGrant));
+        Assert.False(harness.OwnershipProjection.HasMainOwnership(mainGrantSid, new GrantedPathEntry
+        {
+            Path = oldMainGrantPath,
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+        }));
     }
 
     [Fact]
     public void ImportMainConfig_SystemAccount_HasHighestAllowedAfterImport()
     {
         // Arrange: imported config has no SYSTEM account entry — import must still guarantee the invariant.
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var handler = BuildHandler(database, new CredentialStore(), pinKey);
 
@@ -294,7 +718,7 @@ public class ConfigImportHandlerTests
         // Arrange: current main config has SID "S-1-keep". The imported config also has it.
         // RemoveAll must NOT be called for that SID.
         const string keepSid = "S-1-5-21-0-0-0-1001";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         database.Apps.Add(new AppEntry { Id = "old-app", Name = "OldApp", AccountSid = keepSid });
 
@@ -313,7 +737,50 @@ public class ConfigImportHandlerTests
         handler.ImportMainConfig(tempFile, null);
 
         // Assert: RemoveAll NOT called because SID is in incoming config
-        pathGrantService.Verify(p => p.RemoveAll(keepSid, It.IsAny<bool>()), Times.Never);
+        pathGrantService.Verify(p => p.RemoveAll(keepSid), Times.Never);
+    }
+
+    [Fact]
+    public void ImportMainConfig_MergesOrphanedGrantCleanupWarningsWithExistingImportWarnings()
+    {
+        const string orphanSid = "S-1-5-21-0-0-0-9999";
+        var warning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostRemoveAllSave,
+            @"C:\orphaned",
+            null,
+            new InvalidOperationException("save failed"));
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        database.Apps.Add(new AppEntry { Id = "old-app", Name = "OldApp", AccountSid = orphanSid });
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService.Setup(p => p.RemoveAll(orphanSid))
+            .Returns(new GrantApplyResult(
+                DatabaseModified: true,
+                DurableSaveCompleted: false,
+                Warnings: [warning]));
+        var handler = BuildHandler(database, new CredentialStore(), pinKey, pathGrantService: pathGrantService);
+
+        var importedDb = new AppDatabase();
+        importedDb.Apps.Add(new AppEntry
+        {
+            Id = "new-app",
+            Name = "NewApp",
+            AccountSid = "S-1-5-21-0-0-0-1001",
+            AppContainerName = "missing-container"
+        });
+
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        var result = handler.ImportMainConfig(tempFile, null);
+
+        Assert.Contains(
+            "App 'NewApp' references container 'missing-container' which is missing from the imported config.",
+            result.Warnings);
+        Assert.Contains(GrantApplyFailureFormatter.Format(warning), result.Warnings);
+        Assert.Null(result.SaveError);
     }
 
     // ── Grant preservation ───────────────────────────────────────────────────
@@ -328,7 +795,7 @@ public class ConfigImportHandlerTests
         // Available → preserved; Unavailable/Broken → dropped.
         const string sid = "S-1-5-21-0-0-0-1001";
         const string path = @"C:\SomeFolder";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var account = database.GetOrCreateAccount(sid);
         account.Grants.Add(new GrantedPathEntry { Path = path, IsDeny = false, IsTraverseOnly = false });
@@ -365,7 +832,7 @@ public class ConfigImportHandlerTests
         // Arrange: traverse-only grant (IsTraverseOnly=true) — isDenyForCheck must be false regardless of IsDeny.
         const string sid = "S-1-5-21-0-0-0-1001";
         const string path = @"C:\TraverseFolder";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var account = database.GetOrCreateAccount(sid);
         account.Grants.Add(new GrantedPathEntry { Path = path, IsDeny = true, IsTraverseOnly = true });
@@ -398,7 +865,7 @@ public class ConfigImportHandlerTests
         // Local entry kept but SavedRights comes from imported grant.
         const string sid = "S-1-5-21-0-0-0-1001";
         const string path = @"C:\SharedFolder";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var account = database.GetOrCreateAccount(sid);
         account.Grants.Add(new GrantedPathEntry { Path = path, IsDeny = false, IsTraverseOnly = false, SavedRights = null });
@@ -436,22 +903,14 @@ public class ConfigImportHandlerTests
     [Fact]
     public void ImportMainConfig_SharedContainerTraverse_ImportedMainReplacesStaleMain()
     {
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
-        var database = new AppDatabase
-        {
-            SharedContainerTraverseGrants =
-            [
-                new GrantedPathEntry { Path = @"C:\OldShared", IsTraverseOnly = true }
-            ]
-        };
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(
+            new GrantedPathEntry { Path = @"C:\OldShared", IsTraverseOnly = true });
 
-        var importedDb = new AppDatabase
-        {
-            SharedContainerTraverseGrants =
-            [
-                new GrantedPathEntry { Path = @"C:\ImportedShared", IsTraverseOnly = true }
-            ]
-        };
+        var importedDb = new AppDatabase();
+        importedDb.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(
+            new GrantedPathEntry { Path = @"C:\ImportedShared", IsTraverseOnly = true });
 
         var handler = BuildHandler(database, new CredentialStore(), pinKey);
         using var tempDir = new TempDirectory("RunFence_ConfigImport");
@@ -460,52 +919,353 @@ public class ConfigImportHandlerTests
 
         handler.ImportMainConfig(tempFile, null);
 
-        Assert.Single(database.SharedContainerTraverseGrants);
-        Assert.Equal(@"C:\ImportedShared", database.SharedContainerTraverseGrants[0].Path);
+        var account = database.GetAccount(WellKnownSecuritySids.AllApplicationPackagesSid);
+        Assert.NotNull(account);
+        Assert.Equal(@"C:\ImportedShared", Assert.Single(account!.Grants).Path);
     }
 
     [Fact]
     public void ImportMainConfig_SharedContainerTraverse_PreservesAdditionalConfigEntries()
     {
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var additionalEntry = new GrantedPathEntry { Path = @"C:\AdditionalShared", IsTraverseOnly = true };
-        var database = new AppDatabase
-        {
-            SharedContainerTraverseGrants = [additionalEntry]
-        };
-        var grantTracker = new Mock<IGrantConfigTracker>();
-        grantTracker.Setup(t => t.IsInMainConfig(
-                WellKnownSecuritySids.AllApplicationPackagesSid,
-                additionalEntry))
-            .Returns(false);
-        grantTracker.Setup(t => t.IsInMainConfig(
-                It.IsAny<string>(),
-                It.Is<GrantedPathEntry>(e => !ReferenceEquals(e, additionalEntry))))
-            .Returns(true);
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(additionalEntry);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        ownershipProjection.CaptureMainOwnershipBaseline(database);
+        ownershipProjection.RegisterAdditionalConfig(
+            @"C:\extra.rfn",
+            [new AppConfigAccountEntry
+            {
+                Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                Grants = [additionalEntry.Clone()]
+            }]);
 
-        var handler = BuildHandler(database, new CredentialStore(), pinKey, grantTracker: grantTracker);
+        var handler = BuildHandler(
+            database,
+            new CredentialStore(),
+            pinKey,
+            ownershipProjection: ownershipProjection);
         using var tempDir = new TempDirectory("RunFence_ConfigImport");
         var tempFile = Path.Combine(tempDir.Path, "config.json");
         WriteJsonToFile(new AppDatabase(), tempFile);
 
         handler.ImportMainConfig(tempFile, null);
 
-        Assert.Single(database.SharedContainerTraverseGrants);
-        Assert.Equal(@"C:\AdditionalShared", database.SharedContainerTraverseGrants[0].Path);
+        var account = database.GetAccount(WellKnownSecuritySids.AllApplicationPackagesSid);
+        Assert.NotNull(account);
+        Assert.Equal(@"C:\AdditionalShared", Assert.Single(account!.Grants).Path);
+    }
+
+    [Fact]
+    public void ImportMainConfig_AdditionalGrantResplice_UsesAdditionalProjectionPayload()
+    {
+        const string sid = "S-1-5-21-0-0-0-1001";
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        var additionalEntry = new GrantedPathEntry
+        {
+            Path = @"C:\AdditionalPayload",
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false),
+            PreviousSaclLabel = "additional-label"
+        };
+        var mainEntry = additionalEntry.Clone();
+        mainEntry.PreviousSaclLabel = "main-label";
+        database.GetOrCreateAccount(sid).Grants.Add(mainEntry);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+
+        var handler = BuildHandler(
+            database,
+            new CredentialStore(),
+            pinKey,
+            ownershipProjection: ownershipProjection);
+        ownershipProjection.RegisterAdditionalConfig(
+            @"C:\extra.rfn",
+            [new AppConfigAccountEntry { Sid = sid, Grants = [additionalEntry.Clone()] }]);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(new AppDatabase(), tempFile);
+
+        handler.ImportMainConfig(tempFile, null);
+
+        var storedEntry = Assert.Single(database.GetAccount(sid)!.Grants);
+        Assert.Equal("additional-label", storedEntry.PreviousSaclLabel);
+    }
+
+    [Fact]
+    public void ImportMainConfig_AdditionalGrantResplice_KeepsDistinctAdditionalIdentityWithSamePath()
+    {
+        const string sid = "S-1-5-21-0-0-0-1001";
+        const string path = @"C:\SharedImportPath";
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        ownershipProjection.CaptureMainOwnershipBaseline(database);
+        var additionalEntry = new GrantedPathEntry
+        {
+            Path = path,
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+        };
+        database.GetOrCreateAccount(sid).Grants.Add(additionalEntry.Clone());
+        var importedRights = new SavedRightsState(
+            Execute: false,
+            Write: true,
+            Read: true,
+            Special: false,
+            Own: false);
+        var importedDb = new AppDatabase();
+        importedDb.GetOrCreateAccount(sid).Grants.Add(new GrantedPathEntry
+        {
+            Path = path,
+            SavedRights = importedRights
+        });
+
+        var handler = BuildHandler(
+            database,
+            new CredentialStore(),
+            pinKey,
+            ownershipProjection: ownershipProjection);
+        ownershipProjection.RegisterAdditionalConfig(
+            @"C:\extra.rfn",
+            [new AppConfigAccountEntry { Sid = sid, Grants = [additionalEntry.Clone()] }]);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        handler.ImportMainConfig(tempFile, null);
+
+        var grants = database.GetAccount(sid)!.Grants;
+        Assert.Equal(2, grants.Count);
+        Assert.Contains(grants, grant => grant.SavedRights == additionalEntry.SavedRights);
+        Assert.Contains(grants, grant => grant.SavedRights == importedRights);
+    }
+
+    [Fact]
+    public void ImportMainConfig_AdditionalSharedTraverseResplice_KeepsDistinctAdditionalIdentityWithSamePath()
+    {
+        const string path = @"C:\SharedTraverseImportPath";
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        ownershipProjection.CaptureMainOwnershipBaseline(database);
+        var additionalEntry = new GrantedPathEntry
+        {
+            Path = path,
+            IsTraverseOnly = true,
+            AllAppliedPaths = [path, @"C:\AdditionalRoot"]
+        };
+        database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(additionalEntry.Clone());
+        var importedEntry = new GrantedPathEntry
+        {
+            Path = path,
+            IsTraverseOnly = true,
+            AllAppliedPaths = [path, @"C:\ImportedRoot"]
+        };
+        var importedDb = new AppDatabase();
+        importedDb.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(importedEntry);
+
+        var handler = BuildHandler(
+            database,
+            new CredentialStore(),
+            pinKey,
+            ownershipProjection: ownershipProjection);
+        ownershipProjection.RegisterAdditionalConfig(
+            @"C:\extra.rfn",
+            [new AppConfigAccountEntry
+            {
+                Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                Grants = [additionalEntry.Clone()]
+            }]);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        handler.ImportMainConfig(tempFile, null);
+
+        var traverseGrants = database.GetAccount(WellKnownSecuritySids.AllApplicationPackagesSid)!.Grants;
+        Assert.Equal(2, traverseGrants.Count);
+        Assert.Contains(traverseGrants, grant =>
+            grant.AllAppliedPaths?.Contains(@"C:\AdditionalRoot", StringComparer.OrdinalIgnoreCase) == true);
+        Assert.Contains(traverseGrants, grant =>
+            grant.AllAppliedPaths?.Contains(@"C:\ImportedRoot", StringComparer.OrdinalIgnoreCase) == true);
+    }
+
+    [Fact]
+    public void ImportMainConfig_RebuildsMainOwnershipForImportedGrants()
+    {
+        const string sid = "S-1-5-21-0-0-0-1001";
+        const string sharedPath = @"C:\ImportedMainGrant";
+        using var pinKey = TestSecretFactory.Create(32);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var additionalConfigPath = Path.Combine(tempDir.Path, "extra-main-grant.ramc");
+        var database = new AppDatabase();
+        var credentialStore = new CredentialStore
+        {
+            ArgonSalt = new byte[32],
+            EncryptedCanary = [1]
+        };
+        using var session = new SessionContext
+{
+            Database = database,
+            CredentialStore = credentialStore,
+        }.WithOwnedPinDerivedKey(pinKey);
+        var log = new Mock<ILoggingService>();
+        var harness = CreateRealAppConfigHarness(session, log);
+        harness.DatabaseService
+            .Setup(service => service.LoadAppConfigFromPath(additionalConfigPath, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(new AppConfig
+            {
+                Accounts =
+                [
+                    new AppConfigAccountEntry
+                    {
+                        Sid = sid,
+                        Grants =
+                        [
+                            new GrantedPathEntry
+                            {
+                                Path = sharedPath,
+                                SavedRights = SavedRightsState.DefaultForMode(isDeny: false),
+                                PreviousSaclLabel = "additional-label"
+                            }
+                        ]
+                    }
+                ]
+            });
+        File.WriteAllText(additionalConfigPath, "stub");
+        database.GetOrCreateAccount(sid).Grants.Add(new GrantedPathEntry
+        {
+            Path = sharedPath,
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false),
+            PreviousSaclLabel = "stale-main-label"
+        });
+        harness.AppConfigService.LoadAdditionalConfig(additionalConfigPath, database, session.PinDerivedKey);
+
+        var importedGrant = new GrantedPathEntry
+        {
+            Path = sharedPath,
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false),
+            PreviousSaclLabel = "imported-main-label"
+        };
+        var importedDb = new AppDatabase();
+        importedDb.GetOrCreateAccount(sid).Grants.Add(importedGrant.Clone());
+
+        var handler = BuildHandlerWithRealAppConfigService(
+            session,
+            harness.AppConfigService,
+            harness.OwnershipProjection,
+            log: log);
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        handler.ImportMainConfig(tempFile, null);
+
+        var filteredAfterImport = harness.Index.FilterForMainConfig(database);
+        var filteredGrant = Assert.Single(filteredAfterImport.GetAccount(sid)!.Grants);
+        Assert.Equal("imported-main-label", filteredGrant.PreviousSaclLabel);
+        Assert.True(harness.OwnershipProjection.HasMainOwnership(sid, importedGrant));
+
+        harness.AppConfigService.UnloadConfig(additionalConfigPath, database);
+
+        var remainingGrant = Assert.Single(database.GetAccount(sid)!.Grants);
+        Assert.Equal("imported-main-label", remainingGrant.PreviousSaclLabel);
+        Assert.True(harness.OwnershipProjection.HasMainOwnership(sid, remainingGrant));
+        Assert.False(harness.OwnershipProjection.HasAdditionalOwnership(additionalConfigPath, sid, remainingGrant));
+    }
+
+    [Fact]
+    public void ImportMainConfig_RebuildsMainOwnershipForImportedSharedTraverseGrants()
+    {
+        const string sharedPath = @"C:\ImportedSharedTraverse";
+        using var pinKey = TestSecretFactory.Create(32);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var additionalConfigPath = Path.Combine(tempDir.Path, "extra-main-traverse.ramc");
+        var database = new AppDatabase();
+        var credentialStore = new CredentialStore
+        {
+            ArgonSalt = new byte[32],
+            EncryptedCanary = [1]
+        };
+        using var session = new SessionContext
+{
+            Database = database,
+            CredentialStore = credentialStore,
+        }.WithOwnedPinDerivedKey(pinKey);
+        var log = new Mock<ILoggingService>();
+        var harness = CreateRealAppConfigHarness(session, log);
+        harness.DatabaseService
+            .Setup(service => service.LoadAppConfigFromPath(additionalConfigPath, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(new AppConfig
+            {
+                Accounts =
+                [
+                    new AppConfigAccountEntry
+                    {
+                        Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                        Grants =
+                        [
+                            new GrantedPathEntry
+                            {
+                                Path = sharedPath,
+                                IsTraverseOnly = true,
+                                AllAppliedPaths = [sharedPath, @"C:\AdditionalRoot"]
+                            }
+                        ]
+                    }
+                ]
+            });
+        File.WriteAllText(additionalConfigPath, "stub");
+        database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(new GrantedPathEntry
+        {
+            Path = sharedPath,
+            IsTraverseOnly = true,
+            AllAppliedPaths = [sharedPath, @"C:\StaleRoot"]
+        });
+        harness.AppConfigService.LoadAdditionalConfig(additionalConfigPath, database, session.PinDerivedKey);
+
+        var importedTraverse = new GrantedPathEntry
+        {
+            Path = sharedPath,
+            IsTraverseOnly = true,
+            AllAppliedPaths = [sharedPath, @"C:\ImportedRoot"]
+        };
+        var importedDb = new AppDatabase();
+        importedDb.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(importedTraverse.Clone());
+
+        var handler = BuildHandlerWithRealAppConfigService(
+            session,
+            harness.AppConfigService,
+            harness.OwnershipProjection,
+            log: log);
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        handler.ImportMainConfig(tempFile, null);
+
+        var filteredAfterImport = harness.Index.FilterForMainConfig(database);
+        var filteredTraverse = Assert.Single(filteredAfterImport.GetAccount(WellKnownSecuritySids.AllApplicationPackagesSid)!.Grants);
+        Assert.Equal(importedTraverse.AllAppliedPaths, filteredTraverse.AllAppliedPaths);
+        Assert.True(harness.OwnershipProjection.HasMainOwnership(WellKnownSecuritySids.AllApplicationPackagesSid, importedTraverse));
+
+        harness.AppConfigService.UnloadConfig(additionalConfigPath, database);
+
+        var remainingTraverse = Assert.Single(database.GetAccount(WellKnownSecuritySids.AllApplicationPackagesSid)!.Grants);
+        Assert.Equal(importedTraverse.AllAppliedPaths, remainingTraverse.AllAppliedPaths);
+        Assert.True(harness.OwnershipProjection.HasMainOwnership(WellKnownSecuritySids.AllApplicationPackagesSid, remainingTraverse));
+        Assert.False(harness.OwnershipProjection.HasAdditionalOwnership(
+            additionalConfigPath,
+            WellKnownSecuritySids.AllApplicationPackagesSid,
+            remainingTraverse));
     }
 
     [Fact]
     public void ImportMainConfig_SharedContainerTraverse_PreservesOldMainWhenAceAvailable()
     {
         const string path = @"C:\LocalShared";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
-        var database = new AppDatabase
-        {
-            SharedContainerTraverseGrants =
-            [
-                new GrantedPathEntry { Path = path, IsTraverseOnly = true }
-            ]
-        };
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(
+            new GrantedPathEntry { Path = path, IsTraverseOnly = true });
         var grantInspection = new Mock<IGrantInspectionService>();
         grantInspection.Setup(g => g.CheckGrantStatus(
                 path,
@@ -520,8 +1280,9 @@ public class ConfigImportHandlerTests
 
         handler.ImportMainConfig(tempFile, null);
 
-        Assert.Single(database.SharedContainerTraverseGrants);
-        Assert.Equal(path, database.SharedContainerTraverseGrants[0].Path);
+        var account = database.GetAccount(WellKnownSecuritySids.AllApplicationPackagesSid);
+        Assert.NotNull(account);
+        Assert.Equal(path, Assert.Single(account!.Grants).Path);
     }
 
     // ── SidNames preservation ────────────────────────────────────────────────
@@ -533,7 +1294,7 @@ public class ConfigImportHandlerTests
         // sidResolutions has it resolved → must be re-added after full replace.
         const string localSid = "S-1-5-21-0-0-0-5000";
         const string localName = "LocalUser";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         database.SidNames[localSid] = localName;
 
@@ -560,7 +1321,7 @@ public class ConfigImportHandlerTests
         // Arrange: database has SID in SidNames; import doesn't include it; sidResolutions is null.
         // Without resolution data, the entry must NOT be re-added.
         const string localSid = "S-1-5-21-0-0-0-5001";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         database.SidNames[localSid] = "LocalUser";
 
@@ -584,7 +1345,7 @@ public class ConfigImportHandlerTests
         // Arrange: database has an account for "S-1-local" with some settings.
         // Import doesn't include that SID. sidResolutions has it resolved → stub must be added.
         const string localSid = "S-1-5-21-0-0-0-6000";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var oldAccount = database.GetOrCreateAccount(localSid);
         oldAccount.IsIpcCaller = true;
@@ -615,7 +1376,7 @@ public class ConfigImportHandlerTests
         // Arrange: database has an account not in the import; sidResolutions is null.
         // Without resolution data, the account must NOT be preserved.
         const string localSid = "S-1-5-21-0-0-0-6001";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var oldAccount = database.GetOrCreateAccount(localSid);
         oldAccount.IsIpcCaller = true;
@@ -638,7 +1399,7 @@ public class ConfigImportHandlerTests
     public void ImportMainConfig_LastKnownExeTimestamp_ClearedOnImport()
     {
         // Arrange: imported app has a non-null LastKnownExeTimestamp.
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var handler = BuildHandler(database, new CredentialStore(), pinKey);
 
@@ -668,7 +1429,7 @@ public class ConfigImportHandlerTests
     public void ImportMainConfig_ShowSystemInRunAs_ImportedValue()
     {
         // Arrange: import config with ShowSystemInRunAs = true.
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase { ShowSystemInRunAs = false };
         var handler = BuildHandler(database, new CredentialStore(), pinKey);
 
@@ -684,6 +1445,28 @@ public class ConfigImportHandlerTests
         Assert.True(database.ShowSystemInRunAs);
     }
 
+    [Fact]
+    public void ImportMainConfig_NagEligibility_IsPreservedWhenImportedValueIsFalse()
+    {
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        database.Settings.NagEligible = true;
+        var handler = BuildHandler(database, new CredentialStore(), pinKey);
+
+        var importedDb = new AppDatabase
+        {
+            Settings = new AppSettings { NagEligible = false }
+        };
+
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        handler.ImportMainConfig(tempFile, null);
+
+        Assert.True(database.Settings.NagEligible);
+    }
+
     // ── Additional-app ID collision updates index mapping ────────────────────
 
     [Fact]
@@ -694,7 +1477,7 @@ public class ConfigImportHandlerTests
         // appConfigService.RemoveApp(oldId) and AssignApp(newId, configPath) must be called.
         const string configPath = @"C:\extra.rfn";
         const string collisionId = "shared-id";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var additionalApp = new AppEntry { Id = collisionId, Name = "AdditionalApp" };
         database.Apps.Add(additionalApp);
@@ -737,7 +1520,7 @@ public class ConfigImportHandlerTests
     {
         const string configPath = @"C:\extra.rfn";
         const string collisionId = "shared-id";
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         database.Apps.Add(new AppEntry { Id = collisionId, Name = "AdditionalApp" });
 
@@ -775,10 +1558,83 @@ public class ConfigImportHandlerTests
     }
 
     [Fact]
+    public void ImportMainConfig_SaveFailsAfterApply_KeepsLiveDatabaseMutated()
+    {
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        database.Apps.Add(new AppEntry { Id = "old-app", Name = "OldApp" });
+
+        var appConfigService = new Mock<IAppConfigService>();
+        appConfigService.Setup(s => s.GetConfigPath(It.IsAny<string>())).Returns((string?)null);
+        appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(Array.Empty<string>());
+        appConfigService.Setup(s => s.HasLoadedConfigs).Returns(false);
+        appConfigService.Setup(s => s.ReencryptAndSaveAll(
+                It.IsAny<CredentialStore>(),
+                database,
+                It.IsAny<ISecureSecretSnapshotSource>()))
+            .Throws(new IOException("disk full"));
+
+        var handler = BuildHandler(
+            database,
+            new CredentialStore(),
+            pinKey,
+            appConfigService: appConfigService);
+
+        var importedDb = new AppDatabase();
+        importedDb.Apps.Add(new AppEntry { Id = "new-app", Name = "ImportedApp" });
+
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        var result = handler.ImportMainConfig(tempFile, null);
+
+        Assert.Equal("disk full", result.SaveError);
+        Assert.DoesNotContain(database.Apps, app => app.Name == "OldApp");
+        Assert.Contains(database.Apps, app => app.Name == "ImportedApp");
+    }
+
+    [Fact]
+    public void ImportMainConfig_AfterKeyReplacement_UsesPinDerivedKeySnapshotSource()
+    {
+        var database = new AppDatabase();
+        using var originalPinKey = TestSecretFactory.Create(32);
+        using var replacementPinKey = new SecureSecret(32, data => data.Fill(0x5A));
+        var session = new SessionContext
+{
+            Database = database,
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(originalPinKey);
+        _sessions.Add(session);
+        session.ReplacePinDerivedKey(replacementPinKey);
+
+        ISecureSecretSnapshotSource? capturedSource = null;
+        var appConfigService = new Mock<IAppConfigService>();
+        appConfigService.Setup(s => s.HasLoadedConfigs).Returns(false);
+        appConfigService.Setup(s => s.GetConfigPath(It.IsAny<string>())).Returns((string?)null);
+        appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(Array.Empty<string>());
+        appConfigService
+            .Setup(s => s.ReencryptAndSaveAll(session.CredentialStore, database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Callback<CredentialStore, AppDatabase, ISecureSecretSnapshotSource>((_, _, source) => capturedSource = source);
+
+        var handler = CreateHandlerForSession(session, appConfigService.Object);
+        var importedDb = new AppDatabase();
+        importedDb.Apps.Add(new AppEntry { Id = "new-app", Name = "ImportedApp" });
+
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var tempFile = Path.Combine(tempDir.Path, "config.json");
+        WriteJsonToFile(importedDb, tempFile);
+
+        handler.ImportMainConfig(tempFile, null);
+
+        Assert.Same(session.PinDerivedKey, capturedSource);
+    }
+
+    [Fact]
     public void ImportAdditionalConfig_DeserializesAndSavesImportedConfigWithoutMutation()
     {
         var expectedKey = new byte[32];
-        using var pinKey = new ProtectedBuffer(expectedKey, protect: false);
+        using var pinKey = TestSecretFactory.FromBytes(expectedKey);
         var database = new AppDatabase();
         var appConfigService = new Mock<IAppConfigService>();
         var log = new Mock<ILoggingService>();
@@ -787,11 +1643,11 @@ public class ConfigImportHandlerTests
         byte[]? capturedPinKey = null;
         byte[]? capturedSalt = null;
         appConfigService
-            .Setup(s => s.SaveImportedConfig(It.IsAny<string>(), It.IsAny<AppConfig>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()))
-            .Callback<string, AppConfig, byte[], byte[]>((_, config, key, salt) =>
+            .Setup(s => s.SaveImportedConfig(It.IsAny<string>(), It.IsAny<AppConfig>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Callback<string, AppConfig, ISecureSecretSnapshotSource, byte[]>((_, config, key, salt) =>
             {
                 capturedConfig = config;
-                capturedPinKey = key.ToArray();
+                capturedPinKey = key.TransformSnapshot(data => data.ToArray());
                 capturedSalt = salt.ToArray();
             });
 
@@ -832,10 +1688,11 @@ public class ConfigImportHandlerTests
         const string targetConfigPath = @"C:\configs\extra.rfn";
         File.WriteAllText(importJsonPath, json);
 
-        handler.ImportAdditionalConfig(importJsonPath, targetConfigPath);
+        var result = handler.ImportAdditionalConfig(importJsonPath, targetConfigPath);
 
+        Assert.Equal(AdditionalConfigImportStatus.Succeeded, result.Status);
         appConfigService.Verify(
-            s => s.SaveImportedConfig(targetConfigPath, It.IsAny<AppConfig>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()),
+            s => s.SaveImportedConfig(targetConfigPath, It.IsAny<AppConfig>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()),
             Times.Once);
         Assert.NotNull(capturedConfig);
         Assert.NotSame(importConfig, capturedConfig);
@@ -862,22 +1719,56 @@ public class ConfigImportHandlerTests
     }
 
     [Fact]
-    public void ImportAdditionalConfig_FileNotFound_PropagatesException()
+    public void ImportAdditionalConfig_AfterKeyReplacement_UsesPinDerivedKeySnapshotSource()
     {
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        var database = new AppDatabase();
+        using var originalPinKey = TestSecretFactory.Create(32);
+        using var replacementPinKey = new SecureSecret(32, data => data.Fill(0x33));
+        var session = new SessionContext
+{
+            Database = database,
+            CredentialStore = new CredentialStore { ArgonSalt = [1, 2, 3, 4] },
+        }.WithOwnedPinDerivedKey(originalPinKey);
+        _sessions.Add(session);
+        session.ReplacePinDerivedKey(replacementPinKey);
+
+        ISecureSecretSnapshotSource? capturedSource = null;
+        var appConfigService = new Mock<IAppConfigService>();
+        appConfigService
+            .Setup(s => s.SaveImportedConfig(It.IsAny<string>(), It.IsAny<AppConfig>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Callback<string, AppConfig, ISecureSecretSnapshotSource, byte[]>((_, _, source, _) => capturedSource = source);
+
+        var handler = CreateHandlerForSession(session, appConfigService.Object);
+        var importConfig = new AppConfig { Apps = [] };
+
+        var json = System.Text.Json.JsonSerializer.Serialize(importConfig, JsonDefaults.Options);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var importJsonPath = Path.Combine(tempDir.Path, "import.json");
+        File.WriteAllText(importJsonPath, json);
+
+        var result = handler.ImportAdditionalConfig(importJsonPath, @"C:\configs\extra.rfn");
+
+        Assert.Equal(AdditionalConfigImportStatus.Succeeded, result.Status);
+        Assert.Same(session.PinDerivedKey, capturedSource);
+    }
+
+    [Fact]
+    public void ImportAdditionalConfig_FileNotFound_ReturnsValidationFailed()
+    {
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var handler = BuildHandler(database, new CredentialStore(), pinKey);
 
         var nonExistentPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".rfn");
 
-        Assert.Throws<FileNotFoundException>(() =>
-            handler.ImportAdditionalConfig(nonExistentPath, @"C:\configs\extra.rfn"));
+        var result = handler.ImportAdditionalConfig(nonExistentPath, @"C:\configs\extra.rfn");
+        Assert.Equal(AdditionalConfigImportStatus.ValidationFailed, result.Status);
     }
 
     [Fact]
     public void ImportAdditionalConfig_MalformedJson_PropagatesJsonException()
     {
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var handler = BuildHandler(database, new CredentialStore(), pinKey);
 
@@ -885,19 +1776,47 @@ public class ConfigImportHandlerTests
         var malformedPath = Path.Combine(tempDir.Path, "malformed.json");
         File.WriteAllText(malformedPath, "{ this is not valid json {{{{");
 
-        Assert.Throws<System.Text.Json.JsonException>(() =>
-            handler.ImportAdditionalConfig(malformedPath, @"C:\configs\extra.rfn"));
+        var result = handler.ImportAdditionalConfig(malformedPath, @"C:\configs\extra.rfn");
+        Assert.Equal(AdditionalConfigImportStatus.ValidationFailed, result.Status);
     }
 
     [Fact]
-    public void ImportAdditionalConfig_SaveImportedConfigFails_PropagatesException()
+    public void ImportAdditionalConfig_SaveImportedConfigFails_RollsBackExistingFileContents()
     {
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        using var pinKey = TestSecretFactory.Create(32);
         var database = new AppDatabase();
         var appConfigService = new Mock<IAppConfigService>();
         appConfigService.Setup(s => s.SaveImportedConfig(
-                It.IsAny<string>(), It.IsAny<AppConfig>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()))
-            .Throws(new InvalidOperationException("Disk full."));
+                It.IsAny<string>(), It.IsAny<AppConfig>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Throws(new IOException("Disk full."));
+
+        var handler = BuildHandler(database, new CredentialStore(), pinKey, appConfigService: appConfigService);
+
+        var importConfig = new AppConfig { Apps = [] };
+        var json = System.Text.Json.JsonSerializer.Serialize(importConfig, JsonDefaults.Options);
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        using var importTargetDir = new TempDirectory("RunFence_ConfigImport_Target");
+        var targetConfigPath = Path.Combine(importTargetDir.Path, "extra.rfn");
+        var originalPayload = "original file content"u8.ToArray();
+        File.WriteAllBytes(targetConfigPath, originalPayload);
+        var importJsonPath = Path.Combine(tempDir.Path, "import.json");
+        File.WriteAllText(importJsonPath, json);
+
+        var result = handler.ImportAdditionalConfig(importJsonPath, targetConfigPath);
+
+        Assert.Equal(AdditionalConfigImportStatus.PersistenceFailed, result.Status);
+        Assert.Equal(originalPayload, File.ReadAllBytes(targetConfigPath));
+    }
+
+    [Fact]
+    public void ImportAdditionalConfig_InvalidImportedAppId_ReturnsValidationFailed()
+    {
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        var appConfigService = new Mock<IAppConfigService>();
+        appConfigService.Setup(s => s.SaveImportedConfig(
+                It.IsAny<string>(), It.IsAny<AppConfig>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Throws(new InvalidAppIdException(@"..\bad", "Imported app ID is invalid."));
 
         var handler = BuildHandler(database, new CredentialStore(), pinKey, appConfigService: appConfigService);
 
@@ -907,7 +1826,89 @@ public class ConfigImportHandlerTests
         var importJsonPath = Path.Combine(tempDir.Path, "import.json");
         File.WriteAllText(importJsonPath, json);
 
-        Assert.Throws<InvalidOperationException>(() =>
-            handler.ImportAdditionalConfig(importJsonPath, @"C:\configs\extra.rfn"));
+        var result = handler.ImportAdditionalConfig(importJsonPath, @"C:\configs\extra.rfn");
+
+        Assert.Equal(AdditionalConfigImportStatus.ValidationFailed, result.Status);
+    }
+
+    [Fact]
+    public void ImportAdditionalConfigCoordinator_WhenTargetIsLoaded_UnloadsThenReloads()
+    {
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        var appConfigService = new Mock<IAppConfigService>();
+        var configManager = new Mock<IAdditionalConfigLoadService>();
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var configPath = Path.Combine(tempDir.Path, "extra.rfn");
+
+        appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([configPath]);
+        configManager.Setup(c => c.UnloadApps(configPath)).Returns(true);
+        configManager.Setup(c => c.LoadApps(configPath)).Returns(new LoadAppsResult(true, null));
+
+        var handler = BuildHandler(
+            database,
+            new CredentialStore(),
+            pinKey,
+            appConfigService: appConfigService);
+        var coordinator = new AdditionalConfigImportCoordinator(
+            appConfigService.Object,
+            configManager.Object,
+            handler,
+            log.Object);
+
+        var importConfig = new AppConfig { Apps = [] };
+        var json = System.Text.Json.JsonSerializer.Serialize(importConfig, JsonDefaults.Options);
+        var importJsonPath = Path.Combine(tempDir.Path, "import.json");
+        File.WriteAllText(importJsonPath, json);
+        File.WriteAllText(configPath, "existing");
+
+        var result = coordinator.ImportAdditionalConfig(importJsonPath, configPath);
+
+        Assert.Equal(AdditionalConfigImportStatus.Succeeded, result.Status);
+        configManager.Verify(c => c.UnloadApps(configPath), Times.Once);
+        configManager.Verify(c => c.LoadApps(configPath), Times.Once);
+    }
+
+    [Fact]
+    public void ImportAdditionalConfigCoordinator_ReloadFailure_RestoresPreviousFileAndReturnsReloadFailed()
+    {
+        using var pinKey = TestSecretFactory.Create(32);
+        var database = new AppDatabase();
+        var appConfigService = new Mock<IAppConfigService>();
+        var configManager = new Mock<IAdditionalConfigLoadService>();
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_ConfigImport");
+        var configPath = Path.Combine(tempDir.Path, "extra.rfn");
+        const string oldFile = "old-content";
+        File.WriteAllText(configPath, oldFile);
+
+        appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([configPath]);
+        configManager.Setup(c => c.UnloadApps(configPath)).Returns(true);
+        configManager.SetupSequence(c => c.LoadApps(configPath))
+            .Returns(new LoadAppsResult(false, "reload failed"))
+            .Returns(new LoadAppsResult(true, null));
+
+        var handler = BuildHandler(
+            database,
+            new CredentialStore(),
+            pinKey,
+            appConfigService: appConfigService);
+        var coordinator = new AdditionalConfigImportCoordinator(
+            appConfigService.Object,
+            configManager.Object,
+            handler,
+            log.Object);
+
+        var importConfig = new AppConfig { Apps = [new AppEntry { Id = "app1", Name = "New" }] };
+        var json = System.Text.Json.JsonSerializer.Serialize(importConfig, JsonDefaults.Options);
+        var importJsonPath = Path.Combine(tempDir.Path, "import.json");
+        File.WriteAllText(importJsonPath, json);
+
+        var result = coordinator.ImportAdditionalConfig(importJsonPath, configPath);
+
+        Assert.Equal(AdditionalConfigImportStatus.ReloadFailed, result.Status);
+        Assert.Equal(oldFile, File.ReadAllText(configPath));
+        configManager.Verify(c => c.LoadApps(configPath), Times.Exactly(2));
     }
 }

@@ -15,13 +15,14 @@ public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper acl
         var findings = ctx.Findings;
         var seen = ctx.Seen;
 
+        EmitPendingWarnings(autorun.PendingWarnings, findings, seen);
+
         foreach (var rawExePath in autorun.Paths)
         {
             try
             {
-                var exePath = Path.IsPathRooted(rawExePath)
-                    ? rawExePath
-                    : CommandLineParser.ResolveViaPath(rawExePath);
+                autorun.PathCommandContexts.TryGetValue(rawExePath, out var commandContexts);
+                var exePath = ResolveAutorunPath(rawExePath, commandContexts);
                 if (exePath == null || !fileSystem.FileExists(exePath))
                     continue;
 
@@ -147,9 +148,27 @@ public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper acl
                 {
                     try
                     {
-                        var target = fileSystem.ResolveShortcutTarget(filePath);
-                        if (!string.IsNullOrEmpty(target))
-                            SecurityScanner.AddAutorunPath(autorun, target, ownerExcluded, category);
+                        var shortcut = fileSystem.ResolveShortcutTarget(filePath);
+                        if (!string.IsNullOrWhiteSpace(shortcut?.TargetPath))
+                        {
+                            var context = new AutorunCommandContext(filePath, shortcut.Arguments, shortcut.WorkingDirectory, filePath);
+                            var command = CommandLineParser.ResolveCommand(shortcut.TargetPath, shortcut.Arguments, shortcut.WorkingDirectory);
+                            if (!string.IsNullOrWhiteSpace(command.ExecutablePath))
+                                SecurityScanner.AddAutorunPath(autorun, command.ExecutablePath, ownerExcluded, category, context);
+                            if (!string.IsNullOrWhiteSpace(command.WrapperPayloadPath))
+                            {
+                                SecurityScanner.AddAutorunPath(autorun, command.WrapperPayloadPath, ownerExcluded, category, context);
+                            }
+                            else if (command.WrapperPayloadParseFailed)
+                            {
+                                SecurityScanner.AddAutorunWarning(autorun, new AutorunWarning(
+                                    category,
+                                    filePath,
+                                    "Startup shortcut",
+                                    "Wrapper command could not be parsed to a payload executable.",
+                                    filePath));
+                            }
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -165,6 +184,45 @@ public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper acl
         catch
         {
             /* already handled in folder check phase */
+        }
+    }
+
+    private static string? ResolveAutorunPath(string rawPath, List<AutorunCommandContext>? commandContexts)
+    {
+        if (Path.IsPathRooted(rawPath))
+            return rawPath;
+
+        if (commandContexts != null)
+        {
+            foreach (var context in commandContexts)
+            {
+                var resolved = CommandLineParser.ResolvePath(rawPath, context.WorkingDirectory);
+                if (!string.IsNullOrWhiteSpace(resolved))
+                    return resolved;
+            }
+        }
+
+        return CommandLineParser.ResolveViaPath(rawPath);
+    }
+
+    private static void EmitPendingWarnings(
+        List<AutorunWarning> warnings,
+        List<StartupSecurityFinding> findings,
+        HashSet<(string, string)> seen)
+    {
+        foreach (var warning in warnings)
+        {
+            var key = (warning.TargetDescription, $"warning:{warning.Category}:{warning.Message}");
+            if (!seen.Add(key))
+                continue;
+
+            findings.Add(new StartupSecurityFinding(
+                warning.Category,
+                warning.TargetDescription,
+                "",
+                warning.AffectedScope,
+                warning.Message,
+                warning.NavigationTarget));
         }
     }
 

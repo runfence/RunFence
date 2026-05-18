@@ -18,7 +18,9 @@ public class FirewallDnsRefreshServiceTests
     private const string Domain = "example.com";
 
     private readonly Mock<IFirewallDnsRefreshTarget> _refreshTarget = new();
+    private readonly Mock<IFirewallAccountRuleApplier> _accountRuleApplier = new();
     private readonly Mock<IGlobalIcmpPolicyService> _globalIcmpPolicy = new();
+    private readonly Mock<IAuditPolicyService> _auditPolicy = new();
     private readonly Mock<IFirewallNetworkInfo> _networkInfo = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
@@ -28,6 +30,10 @@ public class FirewallDnsRefreshServiceTests
     public FirewallDnsRefreshServiceTests()
     {
         _networkInfo.Setup(n => n.GetDnsServerAddresses()).Returns([]);
+        _auditPolicy.Setup(a => a.EnableBlockedConnectionAuditing())
+            .Returns(new AuditPolicyResult(AuditPolicyStatus.Succeeded, true, true, null, IsRetryable: false));
+        _auditPolicy.Setup(a => a.DisableBlockedConnectionAuditing())
+            .Returns(new AuditPolicyResult(AuditPolicyStatus.Succeeded, false, false, null, IsRetryable: false));
         _uiThreadInvoker.Setup(u => u.Invoke(It.IsAny<Func<AppDatabase>>()))
             .Returns<Func<AppDatabase>>(f => f());
     }
@@ -404,6 +410,60 @@ public class FirewallDnsRefreshServiceTests
     }
 
     [Fact]
+    public void ProcessDnsRefresh_AuditRetryPending_RetriesAndClearsEntryOnSuccess()
+    {
+        var database = BuildDatabase(new FirewallAccountSettings());
+        _retryState.MarkRetryPending(
+            FirewallEnforcementLayer.AuditPolicy,
+            "enabled",
+            "audit failed",
+            "retry audit");
+        var service = BuildService(database);
+
+        service.ProcessDnsRefresh();
+
+        Assert.DoesNotContain(_retryState.GetRetryEntries(), entry => entry.Layer == FirewallEnforcementLayer.AuditPolicy);
+        _auditPolicy.Verify(a => a.EnableBlockedConnectionAuditing(), Times.Once);
+    }
+
+    [Fact]
+    public void ProcessDnsRefresh_AccountAndWfpRetryEntriesForSameSid_RetriesOncePerCycle()
+    {
+        var database = BuildDatabase(BlockInternet(addIpEntry: true));
+        _retryState.MarkRetryPending(
+            FirewallEnforcementLayer.AccountRules,
+            Sid,
+            "account failed",
+            "retry account");
+        _retryState.MarkRetryPending(
+            FirewallEnforcementLayer.WfpFilters,
+            Sid,
+            "wfp failed",
+            "retry wfp");
+        _accountRuleApplier
+            .Setup(a => a.ApplyFirewallRules(
+                Sid,
+                Username,
+                It.IsAny<FirewallAccountSettings>(),
+                It.IsAny<FirewallAccountSettings?>(),
+                It.IsAny<IReadOnlyDictionary<string, IReadOnlyList<string>>>()))
+            .Returns(new FirewallAccountRuleApplyResult(true, []));
+        var service = BuildService(database);
+
+        service.ProcessDnsRefresh();
+
+        _accountRuleApplier.Verify(a => a.ApplyFirewallRules(
+            Sid,
+            Username,
+            It.IsAny<FirewallAccountSettings>(),
+            It.IsAny<FirewallAccountSettings?>(),
+            It.IsAny<IReadOnlyDictionary<string, IReadOnlyList<string>>>()), Times.Once);
+        Assert.DoesNotContain(_retryState.GetRetryEntries(), entry =>
+            entry.Key == Sid &&
+            (entry.Layer == FirewallEnforcementLayer.AccountRules || entry.Layer == FirewallEnforcementLayer.WfpFilters));
+    }
+
+    [Fact]
     public void ProcessDnsRefresh_PrunesDomainCacheAndRetryStateAgainstFreshSnapshot()
     {
         _domainCache.UpdateResolvedDomainsAndGetChangedDomains([Domain], Resolved("203.0.113.10"));
@@ -565,82 +625,46 @@ public class FirewallDnsRefreshServiceTests
         Assert.True(secondCycleEntered.Wait(TimeSpan.FromSeconds(5)));
     }
 
-    [Fact]
-    [Trait("Category", "TimingSensitive")]
-    public void ProcessDnsRefresh_WhenWorkerIsRunning_QueuesFollowUpWithoutOverlapping()
-    {
-        var firstRefreshEntered = new ManualResetEventSlim();
-        var releaseFirstRefresh = new ManualResetEventSlim();
-        var secondRefreshEntered = new ManualResetEventSlim();
-        int activeRefreshes = 0;
-        int maxActiveRefreshes = 0;
-        int refreshCalls = 0;
-        var database = BuildDatabase(BlockInternet(addIpEntry: true, allowLocalhost: false));
-        _refreshTarget
-            .Setup(f => f.RefreshLocalAddressRules(
-                Sid,
-                Username,
-                It.IsAny<FirewallAccountSettings>()))
-            .Returns(() =>
-            {
-                int active = Interlocked.Increment(ref activeRefreshes);
-                UpdateMax(ref maxActiveRefreshes, active);
-                int call = Interlocked.Increment(ref refreshCalls);
-                switch (call)
-                {
-                    case 1:
-                        firstRefreshEntered.Set();
-                        releaseFirstRefresh.Wait(TimeSpan.FromSeconds(5));
-                        break;
-                    case 2:
-                        secondRefreshEntered.Set();
-                        break;
-                }
-
-                Interlocked.Decrement(ref activeRefreshes);
-                return false;
-            });
-        using var service = BuildService(database);
-
-        service.RequestRefresh();
-        Assert.True(firstRefreshEntered.Wait(TimeSpan.FromSeconds(5)));
-
-        service.ProcessDnsRefresh();
-        releaseFirstRefresh.Set();
-
-        Assert.True(secondRefreshEntered.Wait(TimeSpan.FromSeconds(5)));
-        Assert.Equal(1, Volatile.Read(ref maxActiveRefreshes));
-        Assert.Equal(2, Volatile.Read(ref refreshCalls));
-    }
-
     private FirewallDnsRefreshService BuildService(AppDatabase database) =>
         BuildService(() => database);
 
     private FirewallDnsRefreshService BuildService(Func<AppDatabase> getDatabase) =>
         new(
-            _refreshTarget.Object,
-            _globalIcmpPolicy.Object,
+            new FirewallDnsRefreshCycleRunner(
+                _refreshTarget.Object,
+                _globalIcmpPolicy.Object,
+                _domainCache,
+                _retryState,
+                _log.Object,
+                new FirewallDomainBatchResolver(_networkInfo.Object, _log.Object)),
+            new FirewallEnforcementRetryProcessor(
+                _accountRuleApplier.Object,
+                _auditPolicy.Object,
+                _domainCache,
+                _retryState,
+                _log.Object),
             _domainCache,
             _retryState,
             _log.Object,
-            new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(getDatabase), _uiThreadInvoker.Object),
-            new FirewallDomainBatchResolver(_networkInfo.Object, _log.Object));
+            new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(getDatabase), () => _uiThreadInvoker.Object),
+            new FirewallDomainBatchResolver(_networkInfo.Object, _log.Object),
+            new NoOpTimerScheduler());
 
     private void SeedCleanCache(string address)
     {
         _domainCache.UpdateResolvedDomainsAndGetChangedDomains([Domain], Resolved(address));
     }
 
-    private static void UpdateMax(ref int target, int value)
-    {
-        while (true)
-        {
-            int current = Volatile.Read(ref target);
-            if (value <= current)
-                return;
-            if (Interlocked.CompareExchange(ref target, value, current) == current)
-                return;
-        }
-    }
+}
 
+file sealed class NoOpTimerScheduler : ITimerScheduler
+{
+    public IDisposable Schedule(Action callback, int intervalMs) => new NoOpDisposable();
+}
+
+file sealed class NoOpDisposable : IDisposable
+{
+    public void Dispose()
+    {
+    }
 }

@@ -3,192 +3,89 @@ using System.Text;
 namespace RunFence.Core;
 
 /// <summary>
-/// Utilities for building and slicing Windows command-line argument strings.
+/// Utilities for Windows process command-line parsing/materialization and verbatim-tail slicing.
 /// </summary>
 public static class CommandLineHelper
 {
-    /// <summary>
-    /// Skips the first <paramref name="count"/> arguments in a raw Windows command-line string
-    /// and returns the remainder verbatim (leading whitespace trimmed). Returns null when no
-    /// arguments remain after skipping.
-    /// <para>
-    /// Use this to extract the "extra args" portion of <see cref="System.Environment.CommandLine"/>
-    /// without any parse/re-quote round-trip that would lose the original quoting.
-    /// For example, skipping 2 from <c>"launcher.exe" "appid" a b "c d" "e"</c>
-    /// returns <c>a b "c d" "e"</c> verbatim.
-    /// </para>
-    /// </summary>
-    public static string? SkipArgs(string cmdLine, int count)
+    public static string[] ParseProcessCommandLine(string commandLine)
     {
-        int pos = 0;
-        int len = cmdLine.Length;
+        var result = new List<string>();
+        var pos = 0;
 
-        for (int i = 0; i < count; i++)
-        {
-            // Skip leading whitespace before this token
-            while (pos < len && cmdLine[pos] == ' ')
-                pos++;
-            if (pos >= len)
-                return null;
+        if (TryReadProgramNameArgument(commandLine, ref pos, out var programName))
+            result.Add(programName);
 
-            // Advance past one argument using CommandLineToArgvW boundary rules
-            bool inQuotes = false;
-            while (pos < len)
-            {
-                char c = cmdLine[pos];
-                if (c == '\\')
-                {
-                    // Count consecutive backslashes
-                    int bsStart = pos;
-                    while (pos < len && cmdLine[pos] == '\\')
-                        pos++;
-                    int bsCount = pos - bsStart;
-                    if (pos < len && cmdLine[pos] == '"')
-                    {
-                        pos++; // consume the quote
-                        if (bsCount % 2 == 0)
-                        {
-                            // Even backslashes: quote toggles in/out of quoted section
-                            inQuotes = !inQuotes;
-                        }
-                        // Odd backslashes: literal quote — inQuotes state unchanged
-                    }
-                    // Backslashes not followed by quote are literal — no state change
-                }
-                else if (c == '"')
-                {
-                    inQuotes = !inQuotes;
-                    pos++;
-                }
-                else if (c == ' ' && !inQuotes)
-                {
-                    break; // unquoted space ends this token
-                }
-                else
-                {
-                    pos++;
-                }
-            }
-        }
+        while (TryReadNextArgument(commandLine, ref pos, out var argument))
+            result.Add(argument);
 
-        // Skip whitespace between the last skipped token and the remaining args
-        while (pos < len && cmdLine[pos] == ' ')
-            pos++;
-
-        return pos < len ? cmdLine[pos..] : null;
+        return result.ToArray();
     }
 
-    /// <summary>
-    /// Joins <paramref name="args"/> into a single command-line string using
-    /// CommandLineToArgvW-compatible quoting. Returns null when the collection is
-    /// null or empty.
-    /// <para>
-    /// Use this only when the source is a programmatic <c>List&lt;string&gt;</c> where the
-    /// individual argument values are known (e.g. DragBridge, LaunchExe). Never use this to
-    /// reconstruct a string from already-parsed shell arguments — use
-    /// <see cref="SkipArgs"/> on <see cref="System.Environment.CommandLine"/> instead.
-    /// </para>
-    /// </summary>
-    public static string? JoinArgs(IEnumerable<string>? args)
+    public static string[] ParseProcessArguments(string commandLine)
     {
-        if (args == null)
+        var result = new List<string>();
+        var pos = 0;
+
+        while (TryReadNextArgument(commandLine, ref pos, out var argument))
+            result.Add(argument);
+
+        return result.ToArray();
+    }
+
+    public static string QuoteProcessArgument(string argument)
+    {
+        var sb = new StringBuilder(argument.Length + 8);
+        AppendQuotedProcessArgument(sb, argument);
+        return sb.ToString();
+    }
+
+    public static string? MaterializeProcessArguments(IEnumerable<string>? arguments)
+    {
+        if (arguments == null)
             return null;
 
         var sb = new StringBuilder();
-        foreach (var arg in args)
+        foreach (var argument in arguments)
         {
             if (sb.Length > 0)
                 sb.Append(' ');
-            AppendQuotedArg(sb, arg);
+            AppendQuotedProcessArgument(sb, argument);
         }
 
         return sb.Length > 0 ? sb.ToString() : null;
     }
 
-    /// <summary>
-    /// Splits a Windows command-line string into an array of unquoted argument values,
-    /// using CommandLineToArgvW boundary and escape rules: outer quotes are stripped;
-    /// backslashes immediately before a <c>"</c> are halved (odd count → literal quote,
-    /// even count → quote toggles in/out of quoted section); backslashes elsewhere are literal.
-    /// </summary>
-    public static string[] SplitArgs(string cmdLine)
+    public static string? SliceVerbatimTail(string commandLine, int count)
     {
-        var result = new List<string>();
-        int pos = 0;
-        int len = cmdLine.Length;
-
-        while (pos < len)
+        var pos = 0;
+        for (var i = 0; i < count; i++)
         {
-            while (pos < len && cmdLine[pos] == ' ')
-                pos++;
-            if (pos >= len)
-                break;
-
-            var token = new StringBuilder();
-            bool inQuotes = false;
-
-            while (pos < len)
-            {
-                char c = cmdLine[pos];
-                if (c == '\\')
-                {
-                    int bsStart = pos;
-                    while (pos < len && cmdLine[pos] == '\\')
-                        pos++;
-                    int bsCount = pos - bsStart;
-
-                    if (pos < len && cmdLine[pos] == '"')
-                    {
-                        // Even backslashes: each pair → one literal backslash, quote toggles mode
-                        // Odd backslashes: each pair → one literal backslash, last + quote → literal quote
-                        token.Append('\\', bsCount / 2);
-                        if (bsCount % 2 == 0)
-                            inQuotes = !inQuotes;
-                        else
-                            token.Append('"');
-                        pos++; // consume quote
-                    }
-                    else
-                    {
-                        // Backslashes not followed by quote are literal
-                        token.Append('\\', bsCount);
-                    }
-                }
-                else if (c == '"')
-                {
-                    inQuotes = !inQuotes;
-                    pos++;
-                }
-                else if (c == ' ' && !inQuotes)
-                {
-                    break;
-                }
-                else
-                {
-                    token.Append(c);
-                    pos++;
-                }
-            }
-
-            result.Add(token.ToString());
+            if (!TrySkipNextArgument(commandLine, ref pos))
+                return null;
         }
 
-        return result.ToArray();
+        SkipWhitespace(commandLine, ref pos);
+        return pos < commandLine.Length ? commandLine[pos..] : null;
     }
 
-    // CommandLineToArgvW-compatible quoting: backslashes before a closing quote
-    // must be doubled; a literal quote is preceded by a backslash.
-    private static void AppendQuotedArg(StringBuilder sb, string arg)
+    // Compatibility wrappers for existing callers.
+    public static string[] SplitArgs(string cmdLine) => ParseProcessArguments(cmdLine);
+
+    public static string? JoinArgs(IEnumerable<string>? args) => MaterializeProcessArguments(args);
+
+    public static string? SkipArgs(string cmdLine, int count) => SliceVerbatimTail(cmdLine, count);
+
+    private static void AppendQuotedProcessArgument(StringBuilder sb, string argument)
     {
-        if (arg.Length > 0 && !arg.Contains(' ') && !arg.Contains('"') && !arg.Contains('\t'))
+        if (argument.Length > 0 && !argument.Contains(' ') && !argument.Contains('\t') && !argument.Contains('"'))
         {
-            sb.Append(arg);
+            sb.Append(argument);
             return;
         }
 
         sb.Append('"');
         var backslashes = 0;
-        foreach (var c in arg)
+        foreach (var c in argument)
         {
             switch (c)
             {
@@ -201,7 +98,6 @@ public static class CommandLineHelper
                     backslashes = 0;
                     break;
                 default:
-                {
                     if (backslashes > 0)
                     {
                         sb.Append('\\', backslashes);
@@ -210,11 +106,144 @@ public static class CommandLineHelper
 
                     sb.Append(c);
                     break;
-                }
             }
         }
 
         sb.Append('\\', backslashes * 2);
         sb.Append('"');
     }
+
+    private static bool TryReadNextArgument(string commandLine, ref int pos, out string argument)
+    {
+        argument = string.Empty;
+        SkipWhitespace(commandLine, ref pos);
+        if (pos >= commandLine.Length)
+            return false;
+
+        var token = new StringBuilder();
+        var inQuotes = false;
+
+        while (pos < commandLine.Length)
+        {
+            var c = commandLine[pos];
+            if (c == '\\')
+            {
+                var start = pos;
+                while (pos < commandLine.Length && commandLine[pos] == '\\')
+                    pos++;
+                var count = pos - start;
+
+                if (pos < commandLine.Length && commandLine[pos] == '"')
+                {
+                    token.Append('\\', count / 2);
+                    if (count % 2 == 0)
+                        inQuotes = !inQuotes;
+                    else
+                        token.Append('"');
+                    pos++;
+                    continue;
+                }
+
+                token.Append('\\', count);
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+                pos++;
+                continue;
+            }
+
+            if (!inQuotes && IsArgumentWhitespace(c))
+                break;
+
+            token.Append(c);
+            pos++;
+        }
+
+        argument = token.ToString();
+        return true;
+    }
+
+    private static bool TryReadProgramNameArgument(string commandLine, ref int pos, out string argument)
+    {
+        argument = string.Empty;
+        SkipWhitespace(commandLine, ref pos);
+        if (pos >= commandLine.Length)
+            return false;
+
+        var token = new StringBuilder();
+        var inQuotes = false;
+        while (pos < commandLine.Length)
+        {
+            var c = commandLine[pos];
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+                pos++;
+                continue;
+            }
+
+            if (!inQuotes && IsArgumentWhitespace(c))
+                break;
+
+            token.Append(c);
+            pos++;
+        }
+
+        argument = token.ToString();
+        return true;
+    }
+
+    private static bool TrySkipNextArgument(string commandLine, ref int pos)
+    {
+        SkipWhitespace(commandLine, ref pos);
+        if (pos >= commandLine.Length)
+            return false;
+
+        var inQuotes = false;
+        while (pos < commandLine.Length)
+        {
+            var c = commandLine[pos];
+            if (c == '\\')
+            {
+                var start = pos;
+                while (pos < commandLine.Length && commandLine[pos] == '\\')
+                    pos++;
+                var count = pos - start;
+
+                if (pos < commandLine.Length && commandLine[pos] == '"')
+                {
+                    pos++;
+                    if (count % 2 == 0)
+                        inQuotes = !inQuotes;
+                }
+
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inQuotes = !inQuotes;
+                pos++;
+                continue;
+            }
+
+            if (!inQuotes && IsArgumentWhitespace(c))
+                break;
+
+            pos++;
+        }
+
+        return true;
+    }
+
+    private static void SkipWhitespace(string commandLine, ref int pos)
+    {
+        while (pos < commandLine.Length && IsArgumentWhitespace(commandLine[pos]))
+            pos++;
+    }
+
+    private static bool IsArgumentWhitespace(char c) => c is ' ' or '\t';
 }

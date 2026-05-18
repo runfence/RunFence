@@ -3,6 +3,7 @@ using System.Security.Principal;
 using Moq;
 using RunFence.Acl;
 using RunFence.Acl.Permissions;
+using RunFence.Acl.Traverse;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using Xunit;
@@ -26,8 +27,9 @@ public class AclPermissionServiceTests
     private readonly AclPermissionService _service = new(
         new NTTranslateApi(new Mock<ILoggingService>().Object),
         new GroupMembershipApi(new Mock<ILoggingService>().Object),
-        new Mock<ILocalGroupMembershipService>().Object,
-        new AclAccessor());
+        new Mock<ILocalGroupQueryService>().Object,
+        AclAccessorFactory.Create(),
+        new DeterministicAclAccessEvaluator());
 
     // --- ResolveAccountGroupSids tests ---
 
@@ -203,10 +205,56 @@ public class AclPermissionServiceTests
     }
 
     [Fact]
-    public void HasEffectiveRights_DenyOnGroupSid_DoesNotOverrideAllowOnAccountSid()
+    public void NeedsPermissionGrant_UnelevatedWithEveryoneAllow_ReturnsFalse()
     {
-        // Documents intentional simplification: per-SID deny does not cross SID boundaries.
-        // Real Windows evaluates deny from ANY token SID before allow from ANY.
+        var fs = new FileSecurity();
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(EveryoneSid),
+            FileSystemRights.ReadAndExecute,
+            AccessControlType.Allow));
+        var aclAccessor = new Mock<IAclAccessor>();
+        aclAccessor.Setup(accessor => accessor.GetSecurity(@"C:\Allowed\App.exe")).Returns(fs);
+        var service = new AclPermissionService(
+            new NTTranslateApi(new Mock<ILoggingService>().Object),
+            new GroupMembershipApi(new Mock<ILoggingService>().Object),
+            new Mock<ILocalGroupQueryService>().Object,
+            aclAccessor.Object,
+            new DeterministicAclAccessEvaluator());
+
+        var needsGrant = service.NeedsPermissionGrant(
+            @"C:\Allowed\App.exe",
+            UserSid,
+            FileSystemRights.ReadAndExecute,
+            unelevated: true);
+
+        Assert.False(needsGrant);
+    }
+
+    [Fact]
+    public void NeedsPermissionGrant_UnelevatedWhenAclReadFails_ReturnsTrue()
+    {
+        var aclAccessor = new Mock<IAclAccessor>();
+        aclAccessor.Setup(accessor => accessor.GetSecurity(@"C:\Denied\App.exe"))
+            .Throws(new UnauthorizedAccessException("denied"));
+        var service = new AclPermissionService(
+            new NTTranslateApi(new Mock<ILoggingService>().Object),
+            new GroupMembershipApi(new Mock<ILoggingService>().Object),
+            new Mock<ILocalGroupQueryService>().Object,
+            aclAccessor.Object,
+            new DeterministicAclAccessEvaluator());
+
+        var needsGrant = service.NeedsPermissionGrant(
+            @"C:\Denied\App.exe",
+            UserSid,
+            FileSystemRights.ReadAndExecute,
+            unelevated: true);
+
+        Assert.True(needsGrant);
+    }
+
+    [Fact]
+    public void HasEffectiveRights_DenyOnGroupSid_OverridesAllowOnAccountSid()
+    {
         var fs = new FileSecurity();
         fs.AddAccessRule(new FileSystemAccessRule(
             new SecurityIdentifier(UserSid), FileSystemRights.ReadAndExecute, AccessControlType.Allow));
@@ -215,8 +263,68 @@ public class AclPermissionServiceTests
 
         var groupSids = _service.ResolveAccountGroupSids(UserSid);
 
-        Assert.True(_service.HasEffectiveRights(
+        Assert.False(_service.HasEffectiveRights(
             fs, UserSid, groupSids, FileSystemRights.ReadAndExecute));
+    }
+
+    [Fact]
+    public void HasEffectiveRights_AllowThenDenyForSameRights_DenyStillBlocksWithCanonicalDacl()
+    {
+        var fs = new FileSecurity();
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(UserSid), FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(EveryoneSid), FileSystemRights.ReadAndExecute, AccessControlType.Deny));
+
+        var groupSids = _service.ResolveAccountGroupSids(UserSid);
+
+        Assert.False(_service.HasEffectiveRights(
+            fs, UserSid, groupSids, FileSystemRights.ReadAndExecute));
+    }
+
+    [Fact]
+    public void HasEffectiveRights_GroupDenyOnlyRead_PartialRequestDenied()
+    {
+        var fs = new FileSecurity();
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(UserSid), FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(EveryoneSid), FileSystemRights.Read, AccessControlType.Deny));
+
+        var groupSids = _service.ResolveAccountGroupSids(UserSid);
+
+        Assert.False(_service.HasEffectiveRights(
+            fs, UserSid, groupSids, FileSystemRights.ReadAndExecute));
+        Assert.True(_service.HasEffectiveRights(
+            fs, UserSid, groupSids, FileSystemRights.ExecuteFile));
+    }
+
+    [Fact]
+    public void HasEffectiveRights_GroupOnlyCheckCanDisagreeWhenUserDenyExists()
+    {
+        var fs = new FileSecurity();
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier("S-1-1-0"), TraverseRightsHelper.TraverseRights, AccessControlType.Allow));
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(UserSid), TraverseRightsHelper.TraverseRights, AccessControlType.Deny));
+
+        var groupSids = _service.ResolveAccountGroupSids(UserSid);
+
+        Assert.True(_service.HasEffectiveRights(fs, "", groupSids, TraverseRightsHelper.TraverseRights));
+        Assert.False(_service.HasEffectiveRights(fs, UserSid, groupSids, TraverseRightsHelper.TraverseRights));
+    }
+
+    [Fact]
+    public void HasEffectiveRights_GroupOnlyCheckCanDisagreeWhenDirectAllowRemains()
+    {
+        var fs = new FileSecurity();
+        fs.AddAccessRule(new FileSystemAccessRule(
+            new SecurityIdentifier(UserSid), FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+
+        var groupSids = _service.ResolveAccountGroupSids(UserSid);
+
+        Assert.False(_service.HasEffectiveRights(fs, "", groupSids, TraverseRightsHelper.TraverseRights));
+        Assert.True(_service.HasEffectiveRights(fs, UserSid, groupSids, TraverseRightsHelper.TraverseRights));
     }
 
     // --- GetGrantableAncestors tests ---
@@ -280,3 +388,4 @@ public class AclPermissionServiceTests
             Assert.NotEqual(Path.GetPathRoot(a), a, StringComparer.OrdinalIgnoreCase);
     }
 }
+

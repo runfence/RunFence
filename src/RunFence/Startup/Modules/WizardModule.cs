@@ -22,6 +22,10 @@ public class WizardModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<PrepareSystemDriveInfoSource>()
+            .As<IPrepareSystemDriveInfoSource>()
+            .SingleInstance();
+
         builder.RegisterType<PrepareSystemTemplate>()
             .As<IWizardTemplate>()
             .SingleInstance();
@@ -83,6 +87,11 @@ public class WizardModule : Module
             .SingleInstance();
 
         builder.RegisterType<GamingLogonBlockHelper>()
+            .As<IGamingLogonBlockHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<GamingExistingAccountPreparationService>()
             .AsSelf()
             .SingleInstance();
 

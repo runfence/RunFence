@@ -1,5 +1,7 @@
 using RunFence.Account;
+using RunFence.Account.UI;
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -8,15 +10,14 @@ namespace RunFence.Wizard.Templates;
 
 /// <summary>
 /// Factory that creates <see cref="AccountPickerStep"/> instances for wizard templates.
-/// Holds the 5 account-picker service dependencies so each template does not need to declare them.
+/// Holds account-picker dependencies so each template does not need to declare them.
 /// </summary>
 public class WizardAccountPickerStepFactory(
     ILocalGroupMembershipService groupMembership,
     ILocalUserProvider localUserProvider,
     ISidResolver sidResolver,
-    IProfilePathResolver profilePathResolver,
     CredentialFilterHelper credentialFilterHelper,
-    Func<WizardCredentialCollector> credentialCollectorFactory)
+    CredentialDisplayItemFactory credentialDisplayItemFactory)
 {
     /// <summary>
     /// Creates an <see cref="AccountPickerStep"/> with the given options and callbacks.
@@ -41,18 +42,11 @@ public class WizardAccountPickerStepFactory(
             setSelection: setSelection,
             groupMembership: groupMembership,
             localUserProvider: localUserProvider,
-            sidResolver: sidResolver,
-            profilePathResolver: profilePathResolver,
+            credentialDisplayItemFactory: credentialDisplayItemFactory,
             credentialFilterHelper: credentialFilterHelper,
             options: options,
             followingStepsFactory: followingStepsFactory,
             commitAction: commitAction);
-
-    /// <summary>
-    /// Creates a new <see cref="WizardCredentialCollector"/> for collecting credentials
-    /// on the secure desktop when an existing account has no stored credentials.
-    /// </summary>
-    public WizardCredentialCollector CreateCredentialCollector() => credentialCollectorFactory();
 
     /// <summary>
     /// Attempts to resolve <paramref name="sid"/> to a display name.

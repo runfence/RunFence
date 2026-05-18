@@ -1,6 +1,7 @@
 using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
 using RunFence.Acl.UI.Forms;
+using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;

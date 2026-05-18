@@ -5,6 +5,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
+using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -12,249 +13,222 @@ namespace RunFence.Tests;
 public class EditAccountDialogCreateHandlerTests
 {
     private const string CreatedSid = "S-1-5-21-1000-2000-3000-1001";
-    private const string AdminGroupSid = "S-1-5-32-544";
-    private const string UserGroupSid = "S-1-5-32-545";
 
-    private readonly Mock<IWindowsAccountService> _account = new();
-    private readonly Mock<ILocalGroupMembershipService> _groupMembership = new();
-    private readonly Mock<IAccountLoginRestrictionService> _loginRestriction = new();
-    private readonly Mock<IAccountLsaRestrictionService> _lsaRestriction = new();
-    private readonly Mock<ILicenseService> _licenseService = new();
-    private readonly EditAccountDialogCreateHandler _handler;
-
-    public EditAccountDialogCreateHandlerTests()
+    private static EditAccountDialogCreateHandler CreateHandler(
+        IWindowsAccountService account,
+        ILocalGroupMutationService groups,
+        IAccountRestrictionCoordinator restrictions,
+        ILicenseService license,
+        IDatabaseService? databaseService = null,
+        ISidNameCacheService? sidNameCache = null)
     {
-        _account.Setup(a => a.CreateLocalUser(It.IsAny<string>(), It.IsAny<ProtectedString>())).Returns(CreatedSid);
-        _licenseService.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(true);
-        _handler = new EditAccountDialogCreateHandler(
-            _account.Object, _groupMembership.Object, _loginRestriction.Object, _lsaRestriction.Object, _licenseService.Object);
+        var database = new AppDatabase();
+        var session = new SessionContext
+{
+            Database = database,
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
+        uiThreadInvoker.Setup(i => i.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
+
+        return new EditAccountDialogCreateHandler(
+            account,
+            groups,
+            restrictions,
+            license,
+            uiThreadInvoker.Object,
+            Mock.Of<IAppStateProvider>(s => s.Database == database),
+            session,
+            databaseService ?? Mock.Of<IDatabaseService>(),
+            sidNameCache ?? Mock.Of<ISidNameCacheService>());
     }
 
     [Fact]
-    public void Execute_CheckedGroups_PassesSidsToAddUserToGroups()
+    public void Execute_AppliesGroupAndRestrictionFlows()
     {
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: "newuser",
-            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
-            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
-            IsEphemeral: false,
-            CheckedGroups: [(AdminGroupSid, "Administrators")],
-            UncheckedGroups: [],
-            AllowLogon: true, AllowNetworkLogin: true, AllowBgAutorun: true,
-            CurrentHiddenCount: 0);
+        var account = new Mock<IWindowsAccountService>();
+        var groups = new Mock<ILocalGroupMutationService>();
+        var restrictions = new Mock<IAccountRestrictionCoordinator>();
+        var license = new Mock<ILicenseService>();
+        account.Setup(a => a.CreateLocalUser("newuser", It.IsAny<ProtectedString>())).Returns(CreatedSid);
+        license.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(true);
+        restrictions.Setup(r => r.ApplyRestrictions(CreatedSid, "newuser", true, true, true))
+            .Returns(SucceededRestrictionResult());
 
-        _handler.Execute(request);
+        var handler = CreateHandler(account.Object, groups.Object, restrictions.Object, license.Object);
+        var request = BuildRequest(
+            checkedGroups: [("S-1-5-32-544", "Administrators")],
+            uncheckedGroups: [("S-1-5-32-545", "Users")]);
 
-        _groupMembership.Verify(g => g.AddUserToGroups(CreatedSid, "newuser",
-            It.Is<List<string>>(l => l.SequenceEqual(new[] { AdminGroupSid }))), Times.Once);
+        var result = handler.Execute(request);
+
+        Assert.Equal(CreateAccountStatus.Succeeded, result.Status);
+        Assert.NotNull(result.RollbackState);
+        Assert.Equal(CreatedSid, result.RollbackState!.Sid);
+        Assert.Equal("newuser", result.RollbackState.Username);
+        Assert.False(result.RollbackState.HadPreviousAccount);
+        groups.Verify(g => g.AddUserToGroups(CreatedSid, "newuser", It.IsAny<List<string>>()), Times.Once);
+        groups.Verify(g => g.RemoveUserFromGroups(CreatedSid, "newuser", It.IsAny<List<string>>()), Times.Once);
+        restrictions.Verify(r => r.ApplyRestrictions(CreatedSid, "newuser", true, true, true), Times.Once);
     }
 
     [Fact]
-    public void Execute_UncheckedGroups_PassesSidsToRemoveUserFromGroups()
+    public void Execute_GroupAddFailure_StillAppliesRestrictions()
     {
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: "newuser",
-            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
-            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
-            IsEphemeral: false,
-            CheckedGroups: [],
-            UncheckedGroups: [(UserGroupSid, "Users")],
-            AllowLogon: true, AllowNetworkLogin: true, AllowBgAutorun: true,
-            CurrentHiddenCount: 0);
+        var account = new Mock<IWindowsAccountService>();
+        var groups = new Mock<ILocalGroupMutationService>();
+        var restrictions = new Mock<IAccountRestrictionCoordinator>();
+        var license = new Mock<ILicenseService>();
+        account.Setup(a => a.CreateLocalUser("newuser", It.IsAny<ProtectedString>())).Returns(CreatedSid);
+        license.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(true);
+        groups.Setup(g => g.AddUserToGroups(CreatedSid, "newuser", It.IsAny<List<string>>()))
+            .Throws(new InvalidOperationException("add failed"));
+        restrictions.Setup(r => r.ApplyRestrictions(CreatedSid, "newuser", true, true, true))
+            .Returns(SucceededRestrictionResult());
 
-        _handler.Execute(request);
+        var handler = CreateHandler(account.Object, groups.Object, restrictions.Object, license.Object);
+        var request = BuildRequest(checkedGroups: [("S-1-5-32-544", "Administrators")]);
 
-        _groupMembership.Verify(g => g.RemoveUserFromGroups(CreatedSid, "newuser",
-            It.Is<List<string>>(l => l.SequenceEqual(new[] { UserGroupSid }))), Times.Once);
+        var result = handler.Execute(request);
+
+        Assert.Equal(CreateAccountStatus.Succeeded, result.Status);
+        Assert.Contains(result.Errors, error => error.Contains("Group membership", StringComparison.Ordinal));
+        restrictions.Verify(r => r.ApplyRestrictions(CreatedSid, "newuser", true, true, true), Times.Once);
     }
 
     [Fact]
-    public void Execute_Success_PassesSidsNotNamesToGroupService()
+    public void Execute_GroupRemoveFailure_StillAppliesRestrictions()
     {
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: "newuser",
-            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
-            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
-            IsEphemeral: false,
-            CheckedGroups: [(AdminGroupSid, "Administrators")],
-            UncheckedGroups: [(UserGroupSid, "Users")],
-            AllowLogon: true, AllowNetworkLogin: true, AllowBgAutorun: true,
-            CurrentHiddenCount: 0);
+        var account = new Mock<IWindowsAccountService>();
+        var groups = new Mock<ILocalGroupMutationService>();
+        var restrictions = new Mock<IAccountRestrictionCoordinator>();
+        var license = new Mock<ILicenseService>();
+        account.Setup(a => a.CreateLocalUser("newuser", It.IsAny<ProtectedString>())).Returns(CreatedSid);
+        license.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(true);
+        groups.Setup(g => g.RemoveUserFromGroups(CreatedSid, "newuser", It.IsAny<List<string>>()))
+            .Throws(new InvalidOperationException("remove failed"));
+        restrictions.Setup(r => r.ApplyRestrictions(CreatedSid, "newuser", true, true, true))
+            .Returns(SucceededRestrictionResult());
 
-        _handler.Execute(request);
+        var handler = CreateHandler(account.Object, groups.Object, restrictions.Object, license.Object);
+        var request = BuildRequest(uncheckedGroups: [("S-1-5-32-545", "Users")]);
 
-        // AddUserToGroups receives SIDs, not display names
-        _groupMembership.Verify(g => g.AddUserToGroups(CreatedSid, "newuser",
-                It.Is<List<string>>(l => l.Contains(AdminGroupSid) && !l.Contains("Administrators"))),
-            Times.Once);
+        var result = handler.Execute(request);
 
-        // RemoveUserFromGroups receives SIDs, not display names
-        _groupMembership.Verify(g => g.RemoveUserFromGroups(CreatedSid, "newuser",
-                It.Is<List<string>>(l => l.Contains(UserGroupSid) && !l.Contains("Users"))),
-            Times.Once);
+        Assert.Equal(CreateAccountStatus.Succeeded, result.Status);
+        Assert.Contains(result.Errors, error => error.Contains("Group removal", StringComparison.Ordinal));
+        restrictions.Verify(r => r.ApplyRestrictions(CreatedSid, "newuser", true, true, true), Times.Once);
     }
 
     [Fact]
-    public void Execute_EmptyPassword_CreatesAccountSuccessfully()
+    public void Execute_HiddenLicenseDenied_StillAttemptsNetworkAndBackgroundRestrictions()
     {
-        // Arrange — empty password is allowed at the handler level; UI enforces non-empty via EditAccountDialog
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: "newuser",
-            Password: ProtectedString.CreateEmpty(),
-            ConfirmPassword: ProtectedString.CreateEmpty(),
-            IsEphemeral: false,
-            CheckedGroups: [],
-            UncheckedGroups: [],
-            AllowLogon: true, AllowNetworkLogin: true, AllowBgAutorun: true,
-            CurrentHiddenCount: 0);
+        var account = new Mock<IWindowsAccountService>();
+        var groups = new Mock<ILocalGroupMutationService>();
+        var restrictions = new Mock<IAccountRestrictionCoordinator>();
+        var license = new Mock<ILicenseService>();
+        account.Setup(a => a.CreateLocalUser("newuser", It.IsAny<ProtectedString>())).Returns(CreatedSid);
+        license.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(false);
+        license.Setup(l => l.GetRestrictionMessage(EvaluationFeature.HiddenAccounts, 3)).Returns("Hidden accounts are not allowed.");
+        restrictions.Setup(r => r.ApplyRestrictions(CreatedSid, "newuser", false, true, true))
+            .Returns(SucceededRestrictionResult());
 
-        // Act
-        var result = _handler.Execute(request);
+        var handler = CreateHandler(account.Object, groups.Object, restrictions.Object, license.Object);
+        var request = BuildRequest(
+            allowLogon: false,
+            allowNetworkLogin: false,
+            allowBgAutorun: false,
+            currentHiddenCount: 3);
 
-        // Assert
-        Assert.NotNull(result);
+        var result = handler.Execute(request);
+
+        Assert.Equal(CreateAccountStatus.Succeeded, result.Status);
+        Assert.Contains("Hidden accounts are not allowed.", result.Errors);
+        restrictions.Verify(r => r.ApplyRestrictions(CreatedSid, "newuser", false, true, true), Times.Once);
+    }
+
+    [Fact]
+    public void Execute_SaveConfigFailsAfterWindowsAccountCreation_ReturnsCleanupStateSaveFailedAndSkipsFurtherSetup()
+    {
+        var account = new Mock<IWindowsAccountService>();
+        var groups = new Mock<ILocalGroupMutationService>();
+        var restrictions = new Mock<IAccountRestrictionCoordinator>();
+        var license = new Mock<ILicenseService>();
+        var databaseService = new Mock<IDatabaseService>();
+        account.Setup(a => a.CreateLocalUser("newuser", It.IsAny<ProtectedString>())).Returns(CreatedSid);
+        databaseService
+            .Setup(s => s.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Throws(new InvalidOperationException("save failed"));
+
+        var handler = CreateHandler(account.Object, groups.Object, restrictions.Object, license.Object, databaseService.Object);
+
+        var result = handler.Execute(BuildRequest());
+
+        Assert.Equal(CreateAccountStatus.CleanupStateSaveFailed, result.Status);
         Assert.Equal(CreatedSid, result.Sid);
-        _account.Verify(a => a.CreateLocalUser("newuser", It.Is<ProtectedString>(ps => ps.Length == 0)), Times.Once);
+        Assert.Null(result.Password);
+        Assert.Equal("save failed", result.ErrorMessage);
+        Assert.NotNull(result.RollbackState);
+        Assert.Equal(CreatedSid, result.RollbackState!.Sid);
+        groups.Verify(g => g.AddUserToGroups(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<List<string>>()), Times.Never);
+        restrictions.Verify(r => r.ApplyRestrictions(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<bool>()), Times.Never);
     }
 
-    [Theory]
-    [InlineData("", "pass", "pass", "1\u201320 characters")]
-    [InlineData("user/bad", "pass", "pass", "invalid characters")]
-    [InlineData("newuser", "pass1", "pass2", "do not match")]
-    public void Execute_ValidationFailure_ReturnsNullWithExpectedError(
-        string name, string pwd, string confirm, string expectedError)
+    [Fact]
+    public void Execute_PersistsCreatedLocalAccountNameWithMachinePrefix()
     {
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: name,
-            Password: ProtectedString.FromChars(pwd.AsSpan()),
-            ConfirmPassword: ProtectedString.FromChars(confirm.AsSpan()),
-            IsEphemeral: false,
-            CheckedGroups: [],
-            UncheckedGroups: [],
-            AllowLogon: true, AllowNetworkLogin: true, AllowBgAutorun: true,
-            CurrentHiddenCount: 0);
+        var account = new Mock<IWindowsAccountService>();
+        var groups = new Mock<ILocalGroupMutationService>();
+        var restrictions = new Mock<IAccountRestrictionCoordinator>();
+        var license = new Mock<ILicenseService>();
+        var sidNameCache = new Mock<ISidNameCacheService>();
 
-        var result = _handler.Execute(request);
+        account.Setup(a => a.CreateLocalUser("newuser", It.IsAny<ProtectedString>())).Returns(CreatedSid);
+        license.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(true);
+        restrictions.Setup(r => r.ApplyRestrictions(CreatedSid, "newuser", true, true, true))
+            .Returns(SucceededRestrictionResult());
 
-        Assert.Null(result);
-        Assert.Contains(expectedError, _handler.LastValidationError);
-        _account.Verify(a => a.CreateLocalUser(It.IsAny<string>(), It.IsAny<ProtectedString>()), Times.Never);
+        var handler = CreateHandler(
+            account.Object,
+            groups.Object,
+            restrictions.Object,
+            license.Object,
+            sidNameCache: sidNameCache.Object);
+
+        var result = handler.Execute(BuildRequest());
+
+        Assert.Equal(CreateAccountStatus.Succeeded, result.Status);
+        sidNameCache.Verify(
+            c => c.UpdateName(CreatedSid, $"{Environment.MachineName}\\newuser"),
+            Times.Once);
     }
 
-    // ── Restriction path tests ────────────────────────────────────────────
+    private static AccountRestrictionResult SucceededRestrictionResult() =>
+        new(
+        [
+            new AccountRestrictionEntry(AccountRestrictionKind.HideLogon, AccountRestrictionStatus.Succeeded, false, null),
+            new AccountRestrictionEntry(AccountRestrictionKind.NetworkLogin, AccountRestrictionStatus.Succeeded, false, null),
+            new AccountRestrictionEntry(AccountRestrictionKind.BackgroundAutorun, AccountRestrictionStatus.Succeeded, false, null),
+            new AccountRestrictionEntry(AccountRestrictionKind.LogonScript, AccountRestrictionStatus.Succeeded, false, null),
+            new AccountRestrictionEntry(AccountRestrictionKind.LsaPolicy, AccountRestrictionStatus.Succeeded, false, null)
+        ]);
 
-    private EditAccountDialogCreateHandler.CreateAccountRequest MakeRequest(
-        bool allowNetworkLogin = true, bool allowLogon = true, bool allowBgAutorun = true,
+    private static EditAccountDialogCreateHandler.CreateAccountRequest BuildRequest(
+        List<(string Sid, string Name)>? checkedGroups = null,
+        List<(string Sid, string Name)>? uncheckedGroups = null,
+        bool allowLogon = false,
+        bool allowNetworkLogin = false,
+        bool allowBgAutorun = false,
         int currentHiddenCount = 0) =>
-        new(Username: "newuser",
-            Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
-            ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
-            IsEphemeral: false, CheckedGroups: [], UncheckedGroups: [],
-            AllowLogon: allowLogon, AllowNetworkLogin: allowNetworkLogin,
-            AllowBgAutorun: allowBgAutorun, CurrentHiddenCount: currentHiddenCount);
-
-    [Fact]
-    public void Execute_AllowNetworkLoginFalse_CallsSetLocalOnly()
-    {
-        _handler.Execute(MakeRequest(allowNetworkLogin: false));
-
-        _lsaRestriction.VerifySetLocalOnly(CreatedSid, true);
-    }
-
-    [Fact]
-    public void Execute_AllowNetworkLoginTrue_DoesNotCallSetLocalOnly()
-    {
-        _handler.Execute(MakeRequest(allowNetworkLogin: true));
-
-        _lsaRestriction.VerifySetLocalOnlyNeverCalled();
-    }
-
-    [Fact]
-    public void Execute_AllowLogonFalse_NoLicenseService_CallsSetLoginBlocked()
-    {
-        // licenseService: null means no license enforcement; blocked logon should be applied directly
-        _handler.Execute(MakeRequest(allowLogon: false));
-
-        _loginRestriction.VerifySetLoginBlocked(CreatedSid, "newuser", true);
-    }
-
-    [Fact]
-    public void Execute_AllowLogonFalse_LicenseDenied_AddsErrorSkipsBlock()
-    {
-        // Arrange: license service denies hiding more accounts
-        var licenseService = new Mock<ILicenseService>();
-        licenseService.Setup(l => l.CanHideAccount(0)).Returns(false);
-        licenseService.Setup(l => l.GetRestrictionMessage(EvaluationFeature.HiddenAccounts, 0))
-            .Returns("Limit reached");
-        var handler = new EditAccountDialogCreateHandler(_account.Object, _groupMembership.Object,
-            _loginRestriction.Object, _lsaRestriction.Object, licenseService.Object);
-
-        var result = handler.Execute(MakeRequest(allowLogon: false));
-
-        Assert.NotNull(result);
-        Assert.Contains("Limit reached", result.Errors);
-        _loginRestriction.VerifySetLoginBlockedNeverCalled();
-    }
-
-    [Fact]
-    public void Execute_AllowLogonTrue_DoesNotCallSetLoginBlocked()
-    {
-        // R2_TL5: AllowLogon=true means no logon restriction should be applied
-        _handler.Execute(MakeRequest(allowLogon: true));
-
-        _loginRestriction.VerifySetLoginBlockedNeverCalled();
-    }
-
-    [Fact]
-    public void Execute_AllowBgAutorunFalse_CallsSetNoBgAutostart()
-    {
-        _handler.Execute(MakeRequest(allowBgAutorun: false));
-
-        _lsaRestriction.VerifySetNoBgAutostart(CreatedSid, true);
-    }
-
-    [Fact]
-    public void Execute_AllowBgAutorunTrue_DoesNotCallSetNoBgAutostart()
-    {
-        _handler.Execute(MakeRequest(allowBgAutorun: true));
-
-        _lsaRestriction.VerifySetNoBgAutostartNeverCalled();
-    }
-
-    [Fact]
-    public void Execute_RestrictionThrows_CollectsErrorInResult()
-    {
-        // Arrange: SetLocalOnlyBySid throws; user was already created
-        _lsaRestriction.Setup(r => r.SetLocalOnlyBySid(It.IsAny<string>(), It.IsAny<bool>()))
-            .Throws(new Exception("LSA error"));
-
-        var result = _handler.Execute(MakeRequest(allowNetworkLogin: false));
-
-        Assert.NotNull(result);
-        Assert.Equal(CreatedSid, result.Sid);
-        Assert.Contains("LSA error", result.Errors[0]);
-    }
-
-    [Fact]
-    public void Execute_GroupAddThrows_CollectsErrorInResult()
-    {
-        // Arrange: AddUserToGroups throws
-        _groupMembership.Setup(g => g.AddUserToGroups(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<List<string>>()))
-            .Throws(new Exception("Group not found"));
-
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
+        new(
             Username: "newuser",
             Password: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
             ConfirmPassword: ProtectedString.FromChars("P@ssw0rd".AsSpan()),
             IsEphemeral: false,
-            CheckedGroups: [("S-1-5-32-544", "Administrators")],
-            UncheckedGroups: [],
-            AllowLogon: true, AllowNetworkLogin: true, AllowBgAutorun: true,
-            CurrentHiddenCount: 0);
-
-        var result = _handler.Execute(request);
-
-        Assert.NotNull(result);
-        Assert.Contains("Group not found", result.Errors[0]);
-    }
+            CheckedGroups: checkedGroups ?? [],
+            UncheckedGroups: uncheckedGroups ?? [],
+            AllowLogon: allowLogon,
+            AllowNetworkLogin: allowNetworkLogin,
+            AllowBgAutorun: allowBgAutorun,
+            CurrentHiddenCount: currentHiddenCount);
 }

@@ -1,4 +1,5 @@
 using RunFence.Core.Models;
+using RunFence.Acl;
 
 namespace RunFence.Acl.Traverse;
 
@@ -12,20 +13,35 @@ public static class TraversePathsHelper
     /// Adds <paramref name="path"/> to <paramref name="traversePaths"/> if not already present.
     /// Returns true if newly added.
     /// </summary>
-    public static bool TrackPath(List<GrantedPathEntry> traversePaths, string path, List<string> appliedPaths)
+    public static bool TrackPath(
+        List<GrantedPathEntry> traversePaths,
+        string path,
+        List<string> appliedPaths,
+        string? trackedSourceSid = null)
     {
         var normalized = Path.GetFullPath(path);
-        if (traversePaths.Any(e =>
-                e.IsTraverseOnly &&
-                string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase)))
-            return false;
+        var existing = traversePaths.FirstOrDefault(e =>
+            e.IsTraverseOnly &&
+            string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+        {
+            if (!AclHelper.IsSpecificContainerSid(trackedSourceSid ?? string.Empty) ||
+                existing.SourceSids == null ||
+                existing.SourceSids.Contains(trackedSourceSid!, StringComparer.OrdinalIgnoreCase))
+                return false;
+            existing.SourceSids.Add(trackedSourceSid!);
+            return true;
+        }
 
-        traversePaths.Add(new GrantedPathEntry
+        var entry = new GrantedPathEntry
         {
             Path = normalized,
             IsTraverseOnly = true,
             AllAppliedPaths = appliedPaths.Count > 0 ? appliedPaths : null
-        });
+        };
+        if (AclHelper.IsSpecificContainerSid(trackedSourceSid ?? string.Empty))
+            entry.SourceSids = [trackedSourceSid!];
+        traversePaths.Add(entry);
         return true;
     }
 
@@ -52,4 +68,5 @@ public static class TraversePathsHelper
 
     public static List<GrantedPathEntry> GetTraversePaths(AppDatabase database, string sid)
         => database.GetAccount(sid)?.Grants ?? [];
+
 }

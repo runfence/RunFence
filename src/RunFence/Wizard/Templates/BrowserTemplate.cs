@@ -24,6 +24,7 @@ internal class BrowserTemplate(
     IHandlerMappingService mappingService,
     IAppHandlerRegistrationService registrationService,
     WizardFolderGrantHelper grantHelper,
+    IWizardSessionSaver sessionSaver,
     IShortcutDiscoveryService discoveryService,
     IShortcutIconHelper iconHelper,
     IExecutablePathResolver executablePathResolver)
@@ -90,7 +91,7 @@ internal class BrowserTemplate(
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
             IsEphemeral: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             FirewallSettings: new FirewallAccountSettings { AllowLan = true, AllowLocalhost = false },
             DesktopSettingsPath: defaults.DesktopSettingsPath,
             InstallPackages: null,
@@ -130,6 +131,7 @@ internal class BrowserTemplate(
                         foreach (var key in EvaluationConstants.BrowserAssociations)
                             mappingService.SetHandlerMapping(key, new HandlerMappingEntry(app.Id), sessionCtx.Database);
 
+                        sessionSaver.SaveConfig();
                         var effectiveMappings = mappingService.GetEffectiveHandlerMappings(sessionCtx.Database);
                         registrationService.Sync(effectiveMappings, sessionCtx.Database.Apps);
                     }

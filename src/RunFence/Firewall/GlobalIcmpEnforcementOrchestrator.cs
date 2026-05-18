@@ -1,4 +1,5 @@
 using RunFence.Core.Models;
+using System.Threading;
 
 namespace RunFence.Firewall;
 
@@ -10,8 +11,11 @@ public class GlobalIcmpEnforcementOrchestrator(
     IFirewallDomainRefreshRequester refreshRequester)
     : IGlobalIcmpSettingsApplier, IGlobalIcmpPendingDomainProcessor, IGlobalIcmpEnforcementTrigger
 {
+    private long _latestRequestedOperationId;
+
     public void ApplyGlobalIcmpSetting(AppDatabase database)
     {
+        var operationId = Interlocked.Increment(ref _latestRequestedOperationId);
         domainCache.Prune(database);
         retryState.Prune(database);
 
@@ -28,12 +32,17 @@ public class GlobalIcmpEnforcementOrchestrator(
         try
         {
             globalIcmpPolicyService.EnforceGlobalIcmpBlock(database, globalSnapshot);
-            retryState.MarkGlobalIcmpSucceeded();
+            if (operationId == Volatile.Read(ref _latestRequestedOperationId))
+                retryState.MarkGlobalIcmpSucceeded();
         }
-        catch
+        catch (Exception)
         {
-            retryState.MarkGlobalIcmpDirty();
-            throw;
+            if (operationId == Volatile.Read(ref _latestRequestedOperationId))
+            {
+                retryState.MarkGlobalIcmpDirty();
+                refreshRequester.RequestRefresh();
+                throw;
+            }
         }
     }
 
@@ -57,15 +66,20 @@ public class GlobalIcmpEnforcementOrchestrator(
 
     public void EnforceGlobalIcmpBlock(AppDatabase database)
     {
+        var operationId = Interlocked.Increment(ref _latestRequestedOperationId);
         try
         {
             globalIcmpPolicyService.EnforceGlobalIcmpBlock(database, domainCache.GetGlobalSnapshot());
-            retryState.MarkGlobalIcmpSucceeded();
+            if (operationId == Volatile.Read(ref _latestRequestedOperationId))
+                retryState.MarkGlobalIcmpSucceeded();
         }
         catch
         {
-            retryState.MarkGlobalIcmpDirty();
-            refreshRequester.RequestRefresh();
+            if (operationId == Volatile.Read(ref _latestRequestedOperationId))
+            {
+                retryState.MarkGlobalIcmpDirty();
+                refreshRequester.RequestRefresh();
+            }
             throw;
         }
     }
@@ -74,6 +88,7 @@ public class GlobalIcmpEnforcementOrchestrator(
         GlobalIcmpPolicyInput input,
         CancellationToken cancellationToken)
     {
+        var operationId = Interlocked.Increment(ref _latestRequestedOperationId);
         var globalResolvedDomains = domainCache.GetGlobalSnapshot();
         try
         {
@@ -84,12 +99,16 @@ public class GlobalIcmpEnforcementOrchestrator(
                     globalIcmpPolicyService.EnforceGlobalIcmpBlock(globalIcmpPlan);
                 },
                 cancellationToken);
-            retryState.MarkGlobalIcmpSucceeded();
+            if (operationId == Volatile.Read(ref _latestRequestedOperationId))
+                retryState.MarkGlobalIcmpSucceeded();
         }
         catch
         {
-            retryState.MarkGlobalIcmpDirty();
-            refreshRequester.RequestRefresh();
+            if (operationId == Volatile.Read(ref _latestRequestedOperationId))
+            {
+                retryState.MarkGlobalIcmpDirty();
+                refreshRequester.RequestRefresh();
+            }
             throw;
         }
     }

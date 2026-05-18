@@ -29,7 +29,8 @@ public class AppEntryPersistenceOrchestratorTests : IDisposable
     private readonly Mock<ISidNameCacheService> _sidNameCache = new();
     private readonly AppDatabase _database = new();
     private readonly CredentialStore _credentialStore = new();
-    private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
+    private readonly List<SessionContext> _sessions = [];
 
     public AppEntryPersistenceOrchestratorTests()
     {
@@ -37,14 +38,168 @@ public class AppEntryPersistenceOrchestratorTests : IDisposable
         _licenseService.Setup(l => l.CanAddApp(It.IsAny<int>())).Returns(true);
     }
 
-    public void Dispose() => _pinKey.Dispose();
-
-    private SessionContext CreateSession() => new()
+    public void Dispose()
     {
-        Database = _database,
-        CredentialStore = _credentialStore,
-        PinDerivedKey = _pinKey
-    };
+        foreach (var session in _sessions)
+            session.Dispose();
+
+        _pinKey.Dispose();
+    }
+
+    [Fact]
+    public void PersistNewAppEntry_Success_ReturnsSucceeded()
+    {
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
+        var orchestrator = CreateOrchestrator();
+
+        var result = orchestrator.PersistNewAppEntry(app, configPath: null);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        Assert.Contains(app, _database.Apps);
+        _dataChangeNotifier.Verify(c => c.NotifyDataChanged(), Times.Once);
+    }
+
+    [Fact]
+    public void PersistNewAppEntry_SaveConfigThrows_ReturnsSaveFailedAndKeepsDatabaseState()
+    {
+        _appConfigService
+            .Setup(s => s.SaveConfigForApp(
+                It.IsAny<string>(),
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()))
+            .Throws(new IOException("disk full"));
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
+        var orchestrator = CreateOrchestrator();
+
+        var result = orchestrator.PersistNewAppEntry(app, @"C:\extra.rfn");
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
+        Assert.Equal("disk full", result.ErrorMessage);
+        Assert.Contains(app, _database.Apps);
+        _appConfigService.Verify(s => s.AssignApp(app.Id, @"C:\extra.rfn"), Times.Once);
+        _appConfigService.Verify(s => s.RemoveApp(It.IsAny<string>()), Times.Never);
+        _aclService.Verify(s => s.RevertAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
+        _besideTargetShortcutService.Verify(s => s.RemoveBesideTargetShortcut(It.IsAny<AppEntry>()), Times.Never);
+    }
+
+    [Fact]
+    public void PersistNewAppEntry_SaveConfigForApp_IsInvokedOutsideKeySnapshot()
+    {
+        _appConfigService
+            .Setup(s => s.SaveConfigForApp(
+                It.IsAny<string>(),
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()))
+            .Callback<string, AppDatabase, ISecureSecretSnapshotSource, byte[]>((_, _, keySource, _) =>
+            {
+                _pinKey.TransformSnapshot(_ => true);
+                keySource.UseSnapshot(_ => { });
+            });
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
+
+        var result = CreateOrchestrator().PersistNewAppEntry(app, configPath: null);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+    }
+
+    [Fact]
+    public void PersistNewAppEntry_DenyModeAclFailure_ReturnsConvenienceEnforcementFailed()
+    {
+        _aclService
+            .Setup(s => s.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Throws(new InvalidOperationException("acl failed"));
+        var app = new AppEntry
+        {
+            Name = "MyApp",
+            AccountSid = UserSid,
+            RestrictAcl = true,
+            AclMode = AclMode.Deny
+        };
+
+        var result = CreateOrchestrator().PersistNewAppEntry(app, configPath: null);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.ConvenienceEnforcementFailed, result.Status);
+        Assert.Equal("acl failed", result.WarningMessage);
+        Assert.Contains(app, _database.Apps);
+        _dataChangeNotifier.Verify(c => c.NotifyDataChanged(), Times.Once);
+    }
+
+    [Fact]
+    public void PersistNewAppEntry_ShortcutFailure_ReturnsConvenienceEnforcementFailed()
+    {
+        _credentialStore.Credentials.Add(new CredentialEntry { Sid = UserSid });
+        _sidNameCache.Setup(c => c.GetDisplayName(UserSid)).Returns("TestUser");
+        _besideTargetShortcutService
+            .Setup(s => s.CreateBesideTargetShortcut(It.IsAny<AppEntry>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
+            .Throws(new InvalidOperationException("shortcut failed"));
+
+        var app = new AppEntry
+        {
+            Name = "MyApp",
+            AccountSid = UserSid,
+            ManageShortcuts = true
+        };
+
+        var result = CreateOrchestrator().PersistNewAppEntry(app, configPath: null);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.ConvenienceEnforcementFailed, result.Status);
+        Assert.Equal("shortcut failed", result.WarningMessage);
+        Assert.Contains(app, _database.Apps);
+        _dataChangeNotifier.Verify(c => c.NotifyDataChanged(), Times.Once);
+    }
+
+    [Fact]
+    public void PersistNewAppEntry_AllowModeAncestorAclFailure_ReturnsRequiredEnforcementFailed()
+    {
+        _aclService
+            .Setup(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Throws(new InvalidOperationException("ancestor failed"));
+        var app = new AppEntry
+        {
+            Name = "MyApp",
+            AccountSid = UserSid,
+            RestrictAcl = true,
+            AclMode = AclMode.Allow
+        };
+
+        var result = CreateOrchestrator().PersistNewAppEntry(app, configPath: null);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.RequiredEnforcementFailed, result.Status);
+        Assert.Equal("ancestor failed", result.WarningMessage);
+    }
+
+    [Fact]
+    public void PersistNewAppEntry_DenyModeAncestorAclFailure_StillReturnsRequiredEnforcementFailed()
+    {
+        _aclService
+            .Setup(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Throws(new InvalidOperationException("ancestor failed"));
+        var app = new AppEntry
+        {
+            Name = "MyApp",
+            AccountSid = UserSid,
+            RestrictAcl = true,
+            AclMode = AclMode.Deny
+        };
+
+        var result = CreateOrchestrator().PersistNewAppEntry(app, configPath: null);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.RequiredEnforcementFailed, result.Status);
+        Assert.Equal("ancestor failed", result.WarningMessage);
+    }
+
+    private SessionContext CreateSession()
+    {
+        var session = new SessionContext
+{
+            Database = _database,
+            CredentialStore = _credentialStore,
+        }.WithOwnedPinDerivedKey(_pinKey);
+        _sessions.Add(session);
+        return session;
+    }
 
     private RunAsAppShortcutCreator CreateShortcutCreator()
     {
@@ -57,6 +212,7 @@ public class AppEntryPersistenceOrchestratorTests : IDisposable
             _besideTargetShortcutService.Object,
             sessionProvider,
             new Mock<IInteractiveUserSidResolver>().Object,
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
             _log.Object);
     }
 
@@ -71,246 +227,4 @@ public class AppEntryPersistenceOrchestratorTests : IDisposable
             _licenseService.Object,
             _log.Object,
             CreateShortcutCreator());
-
-    // ── Success path ───────────────────────────────────────────────────────
-
-    [Fact]
-    public void PersistNewAppEntry_Success_AddsAppToDatabase()
-    {
-        // Arrange
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        var result = orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert
-        Assert.True(result);
-        Assert.Contains(app, _database.Apps);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_Success_SavesConfig()
-    {
-        // Arrange
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert
-        _appConfigService.Verify(s => s.SaveConfigForApp(
-                app.Id, _database, It.IsAny<byte[]>(), It.IsAny<byte[]>()),
-            Times.Once);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_WithConfigPath_AssignsApp()
-    {
-        // Arrange
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var configPath = @"C:\configs\extra.rfn";
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath);
-
-        // Assert
-        _appConfigService.Verify(s => s.AssignApp(app.Id, configPath), Times.Once);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_NoConfigPath_DoesNotAssignApp()
-    {
-        // Arrange
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert
-        _appConfigService.Verify(s => s.AssignApp(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_RestrictAcl_AppliesAcl()
-    {
-        // Arrange
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, RestrictAcl = true };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert
-        _aclService.Verify(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_NoRestrictAcl_SkipsAclApply()
-    {
-        // Arrange
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, RestrictAcl = false };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert
-        _aclService.Verify(s => s.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_Success_RecomputesAncestorAcls()
-    {
-        // Arrange
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert
-        _aclService.Verify(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_Success_NotifiesDataChanged()
-    {
-        // Arrange
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert
-        _dataChangeNotifier.Verify(c => c.NotifyDataChanged(), Times.Once);
-    }
-
-    // ── Failure / rollback path ────────────────────────────────────────────
-
-    [Fact]
-    public void PersistNewAppEntry_SaveConfigThrows_RollsBackAndReturnsFalse()
-    {
-        // Arrange: SaveConfigForApp fails
-        _appConfigService
-            .Setup(s => s.SaveConfigForApp(It.IsAny<string>(), It.IsAny<AppDatabase>(),
-                It.IsAny<byte[]>(), It.IsAny<byte[]>()))
-            .Throws(new IOException("Disk full"));
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        var result = orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert: returns false, app removed from database
-        Assert.False(result);
-        Assert.DoesNotContain(app, _database.Apps);
-        _log.Verify(l => l.Error(It.Is<string>(s => s.Contains("RunAs app entry")),
-            It.IsAny<Exception>()), Times.Once);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_SaveConfigThrows_WithRestrictAcl_RevertsAcl()
-    {
-        // Arrange: save fails before ACL is applied — rollback still calls RevertAcl defensively
-        _appConfigService
-            .Setup(s => s.SaveConfigForApp(It.IsAny<string>(), It.IsAny<AppDatabase>(),
-                It.IsAny<byte[]>(), It.IsAny<byte[]>()))
-            .Throws(new IOException("Disk full"));
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, RestrictAcl = true };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert: RevertAcl called during rollback
-        _aclService.Verify(s => s.RevertAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_SaveConfigThrows_WithConfigPath_RemovesApp()
-    {
-        // Arrange
-        _appConfigService
-            .Setup(s => s.SaveConfigForApp(It.IsAny<string>(), It.IsAny<AppDatabase>(),
-                It.IsAny<byte[]>(), It.IsAny<byte[]>()))
-            .Throws(new IOException("Disk full"));
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var configPath = @"C:\configs\extra.rfn";
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        orchestrator.PersistNewAppEntry(app, configPath);
-
-        // Assert: RemoveApp called on rollback since app was assigned to config
-        _appConfigService.Verify(s => s.RemoveApp(app.Id), Times.Once);
-    }
-
-    // ── License enforcement ────────────────────────────────────────────────
-
-    [Fact]
-    public void PersistNewAppEntry_LicenseLimitReached_ReturnsFalseWithoutAdding()
-    {
-        // Arrange
-        _licenseService.Setup(l => l.CanAddApp(It.IsAny<int>())).Returns(false);
-        _licenseService.Setup(l => l.GetRestrictionMessage(It.IsAny<EvaluationFeature>(), It.IsAny<int>()))
-            .Returns("License limit reached");
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        var result = orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert: rejected before adding — BeginInvokeOnUIThread dispatches the MessageBox
-        // (not executed synchronously in tests to avoid blocking on the dialog)
-        Assert.False(result);
-        Assert.DoesNotContain(app, _database.Apps);
-        _uiThreadInvoker.Verify(c => c.BeginInvoke(It.IsAny<Action>()), Times.Once);
-        _appConfigService.Verify(s => s.SaveConfigForApp(It.IsAny<string>(), It.IsAny<AppDatabase>(),
-            It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
-    }
-
-    // ── ManageShortcuts ────────────────────────────────────────────────────
-
-    [Fact]
-    public void PersistNewAppEntry_ManageShortcuts_SuccessPath_DoesNotCallRemoveBesideTarget()
-    {
-        // On the success path, RemoveBesideTargetShortcut must NOT be called —
-        // that method is only for rollback. The creation path calls CreateBesideTargetShortcut
-        // which is gated on File.Exists(launcherPath) and is not exercised in unit tests.
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
-        _credentialStore.Credentials.Add(new CredentialEntry { Sid = UserSid });
-        _sidNameCache.Setup(c => c.GetDisplayName(UserSid)).Returns("TestUser");
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        var result = orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert
-        Assert.True(result);
-        _besideTargetShortcutService.Verify(s => s.RemoveBesideTargetShortcut(app), Times.Never);
-    }
-
-    [Fact]
-    public void PersistNewAppEntry_ManageShortcuts_SaveConfigFails_RevokesShortcut()
-    {
-        // Arrange: save fails after ManageShortcuts path; rollback must call RemoveBesideTargetShortcut
-        _appConfigService
-            .Setup(s => s.SaveConfigForApp(It.IsAny<string>(), It.IsAny<AppDatabase>(),
-                It.IsAny<byte[]>(), It.IsAny<byte[]>()))
-            .Throws(new IOException("Disk full"));
-        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
-        var orchestrator = CreateOrchestrator();
-
-        // Act
-        var result = orchestrator.PersistNewAppEntry(app, configPath: null);
-
-        // Assert: failure + shortcut cleanup attempted during rollback
-        Assert.False(result);
-        _besideTargetShortcutService.Verify(s => s.RemoveBesideTargetShortcut(app), Times.Once);
-    }
 }

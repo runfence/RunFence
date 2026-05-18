@@ -66,7 +66,7 @@ public record AccountCreationDefaults(
             AllowLan: false,
             AllowLocalhost: false,
             IsEphemeral: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             DesktopSettingsPath: database.Settings.DefaultDesktopSettingsPath);
     }
 }

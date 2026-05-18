@@ -12,7 +12,7 @@ public class ProcessListService(ILoggingService log, IProcessJobManager processJ
     private const uint ProcessQueryInformation = 0x0400;
     private const uint ProcessVmRead = 0x0010;
 
-    public IReadOnlyList<ProcessInfo> GetProcessesForSid(string sid)
+    public IReadOnlyList<ProcessInfo> GetProcessesForSid(string sid, CancellationToken cancellationToken = default)
     {
         var result = new List<ProcessInfo>();
         int tokenInfoClass = ProcessNative.GetTokenInfoClass(sid);
@@ -24,6 +24,7 @@ public class ProcessListService(ILoggingService log, IProcessJobManager processJ
 
         foreach (var proc in Process.GetProcesses())
         {
+            cancellationToken.ThrowIfCancellationRequested();
             using (proc)
             {
                 if (proc.Id <= 4)
@@ -42,7 +43,7 @@ public class ProcessListService(ILoggingService log, IProcessJobManager processJ
         return result;
     }
 
-    public HashSet<string> GetSidsWithProcesses(IEnumerable<string> sids)
+    public HashSet<string> GetSidsWithProcesses(IEnumerable<string> sids, CancellationToken cancellationToken = default)
     {
         var sidSet = sids.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var found = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -74,6 +75,7 @@ public class ProcessListService(ILoggingService log, IProcessJobManager processJ
         {
             foreach (var proc in processes)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (proc.Id <= 4)
                     continue;
                 if (found.Count == sidSet.Count)
@@ -84,6 +86,9 @@ public class ProcessListService(ILoggingService log, IProcessJobManager processJ
                     continue;
                 try
                 {
+                    if (HasExited(hProcess))
+                        continue;
+
                     if (regularSids.Count > 0)
                     {
                         string? s = ProcessNative.GetTokenSid(hProcess, ProcessNative.TokenUser);
@@ -137,6 +142,9 @@ public class ProcessListService(ILoggingService log, IProcessJobManager processJ
         if (!string.Equals(ProcessNative.GetTokenSid(hLimited.DangerousGetHandle(), tokenInfoClass), sid, StringComparison.OrdinalIgnoreCase))
             return;
 
+        if (HasExited(hLimited.DangerousGetHandle()))
+            return;
+
         string? exePath;
         string? cmdLine = null;
 
@@ -152,7 +160,36 @@ public class ProcessListService(ILoggingService log, IProcessJobManager processJ
             exePath = GetExePath(hLimited.DangerousGetHandle());
         }
 
-        result.Add(new ProcessInfo(pid, exePath, cmdLine));
+        long? startTimeUtcTicks = null;
+        if (ProcessNative.GetProcessTimes(
+                hLimited.DangerousGetHandle(),
+                out var creationTime,
+                out _,
+                out _,
+                out _))
+        {
+            startTimeUtcTicks = DateTime.FromFileTimeUtc(creationTime.ToLong()).Ticks;
+        }
+
+        if (HasExited(hLimited.DangerousGetHandle()))
+            return;
+
+        result.Add(new ProcessInfo(pid, exePath, cmdLine, startTimeUtcTicks));
+    }
+
+    private static bool HasExited(IntPtr hProcess)
+    {
+        if (!ProcessNative.GetProcessTimes(
+                hProcess,
+                out _,
+                out var exitTime,
+                out _,
+                out _))
+        {
+            return false;
+        }
+
+        return exitTime.ToLong() != 0;
     }
 
     private static string? GetExePath(IntPtr hProcess)

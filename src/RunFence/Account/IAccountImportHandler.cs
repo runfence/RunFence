@@ -10,7 +10,5 @@ public interface IAccountImportHandler
     Task<string?> RunImportAsync(
         List<ImportAccount> accounts,
         CredentialStore credStore,
-        ProtectedBuffer pinKey,
-        IImportProgressSink sink,
-        AppDatabase? db = null);
+        IImportProgressSink sink);
 }

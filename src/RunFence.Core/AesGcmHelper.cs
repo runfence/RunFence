@@ -16,7 +16,7 @@ public static class AesGcmHelper
     /// Encrypts plaintext using AES-256-GCM.
     /// Returns nonce(12B) + tag(16B) + ciphertext. Random nonce via RandomNumberGenerator.
     /// </summary>
-    public static byte[] Encrypt(byte[] plaintext, byte[] key, byte[]? aad = null)
+    public static byte[] Encrypt(ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> key, ReadOnlySpan<byte> aad = default)
     {
         var nonce = RandomNumberGenerator.GetBytes(NonceSize);
         var ciphertext = new byte[plaintext.Length];
@@ -36,13 +36,13 @@ public static class AesGcmHelper
     /// Decrypts AES-256-GCM encrypted data (nonce(12B) + tag(16B) + ciphertext).
     /// Throws CryptographicException on tampering or wrong key.
     /// </summary>
-    public static byte[] Decrypt(byte[] encrypted, byte[] key, byte[]? aad = null)
+    public static byte[] Decrypt(ReadOnlySpan<byte> encrypted, ReadOnlySpan<byte> key, ReadOnlySpan<byte> aad = default)
     {
         if (encrypted.Length < NonceSize + TagSize)
             throw new CryptographicException("Encrypted data is too short.");
 
         var nonce = encrypted[..NonceSize];
-        var tag = encrypted[NonceSize..(NonceSize + TagSize)];
+        var tag = encrypted.Slice(NonceSize, TagSize);
         var ciphertext = encrypted[(NonceSize + TagSize)..];
         var plaintext = new byte[ciphertext.Length];
 

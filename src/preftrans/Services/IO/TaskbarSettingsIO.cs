@@ -207,18 +207,26 @@ public class TaskbarSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast, I
                 bool shouldPatch = !string.IsNullOrEmpty(sourceProfile) &&
                                    !string.IsNullOrEmpty(targetProfile) &&
                                    !string.Equals(sourceProfile, targetProfile, StringComparison.OrdinalIgnoreCase);
+                bool wroteShortcut = false;
                 foreach (var (fileName, content) in taskbar.PinnedShortcutFiles)
                 {
                     safe.Try(() =>
                     {
+                        if (!TryResolvePinnedShortcutDestinationPath(taskBarFolder, fileName, out var destinationPath))
+                        {
+                            Console.Error.WriteLine($"Warning: skipped invalid pinned shortcut name: {fileName}");
+                            return;
+                        }
+
                         var patched = shouldPatch
                             ? PatchProfilePath(content, sourceProfile!, targetProfile) ?? content
                             : content;
-                        File.WriteAllBytes(Path.Combine(taskBarFolder, fileName), patched);
+                        File.WriteAllBytes(destinationPath, patched);
+                        wroteShortcut = true;
                     }, "writing");
                 }
 
-                changed = true;
+                changed |= wroteShortcut;
             }
             else if (taskbar.PinnedShortcuts != null)
             {
@@ -227,7 +235,13 @@ public class TaskbarSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast, I
                     return;
                 foreach (var name in taskbar.PinnedShortcuts)
                 {
-                    if (!File.Exists(Path.Combine(taskBarFolder, name)))
+                    if (!TryResolvePinnedShortcutDestinationPath(taskBarFolder, name, out var destinationPath))
+                    {
+                        Console.Error.WriteLine($"Warning: skipped invalid pinned shortcut name: {name}");
+                        continue;
+                    }
+
+                    if (!File.Exists(destinationPath))
                         Console.Error.WriteLine($"Warning: pinned shortcut not found: {name}");
                 }
             }
@@ -325,6 +339,33 @@ public class TaskbarSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast, I
             return false;
         var text = Encoding.Unicode.GetString(data);
         return text.Contains(path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool TryResolvePinnedShortcutDestinationPath(string taskBarFolder, string importedName, out string destinationPath)
+    {
+        destinationPath = string.Empty;
+
+        var fileName = importedName.Trim();
+        if (fileName.Length == 0)
+            return false;
+        if (Path.IsPathRooted(fileName))
+            return false;
+        if (fileName.IndexOf(Path.DirectorySeparatorChar) >= 0 || fileName.IndexOf(Path.AltDirectorySeparatorChar) >= 0)
+            return false;
+        if (fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            return false;
+        if (!string.Equals(Path.GetExtension(fileName), ".lnk", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var fullTaskbarFolder = Path.GetFullPath(taskBarFolder)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var candidatePath = Path.GetFullPath(Path.Combine(fullTaskbarFolder, fileName));
+        var folderPrefix = fullTaskbarFolder + Path.DirectorySeparatorChar;
+        if (!candidatePath.StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        destinationPath = candidatePath;
+        return true;
     }
 
     void ISettingsIO.ReadInto(UserSettings s) => s.Taskbar = Read();

@@ -1,24 +1,45 @@
 using RunFence.Core;
 using RunFence.Core.Helpers;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Security;
 
 namespace RunFence.Account;
 
 public class CredentialDecryptionService(
-    ICredentialEncryptionService encryptionService,
-    ISidResolver sidResolver)
+    ICredentialEncryptionSpanService spanEncryptionService,
+    ISidResolver sidResolver,
+    IInteractiveUserSidResolver interactiveUserSidResolver)
     : ICredentialDecryptionService
 {
     public LaunchCredentials? DecryptAndResolve(
         string accountSid,
         CredentialStore credentialStore,
-        byte[] pinDerivedKey,
+        ReadOnlySpan<byte> pinDerivedKey,
+        IReadOnlyDictionary<string, string>? sidNames,
+        out CredentialLookupStatus status)
+        => DecryptAndResolveCore(accountSid, credentialStore, pinDerivedKey, sidNames, out status);
+
+    public CredentialLookupStatus TryDecryptCredential(
+        string accountSid,
+        CredentialStore credentialStore,
+        ReadOnlySpan<byte> pinDerivedKey,
+        out CredentialEntry? credEntry,
+        out ProtectedString? password)
+        => TryDecryptCredentialCore(accountSid, credentialStore, pinDerivedKey, out credEntry, out password);
+
+    public CredentialLookupStatus CheckCredential(string accountSid, CredentialStore credentialStore) =>
+        ResolvePreDecryptStatus(accountSid, credentialStore, out _) ?? CredentialLookupStatus.Success;
+
+    private LaunchCredentials? DecryptAndResolveCore(
+        string accountSid,
+        CredentialStore credentialStore,
+        ReadOnlySpan<byte> pinDerivedKey,
         IReadOnlyDictionary<string, string>? sidNames,
         out CredentialLookupStatus status)
     {
-        status = TryDecryptCredential(accountSid, credentialStore, pinDerivedKey,
+        status = TryDecryptCredentialCore(accountSid, credentialStore, pinDerivedKey,
             out var credEntry, out var password);
 
         if (status is CredentialLookupStatus.NotFound or CredentialLookupStatus.MissingPassword)
@@ -32,9 +53,8 @@ public class CredentialDecryptionService(
             _ => LaunchTokenSource.Credentials
         };
 
-        // For interactive user, try to decrypt stored password as fallback (explorer token is primary)
         if (status == CredentialLookupStatus.InteractiveUser && credEntry is { EncryptedPassword.Length: > 0 })
-            password = encryptionService.Decrypt(credEntry.EncryptedPassword, pinDerivedKey);
+            password = spanEncryptionService.Decrypt(credEntry.EncryptedPassword, pinDerivedKey);
 
         var (domain, username) = credEntry != null
             ? SidNameResolver.ResolveDomainAndUsername(credEntry, sidResolver, sidNames)
@@ -43,10 +63,10 @@ public class CredentialDecryptionService(
         return new LaunchCredentials(password, domain, username, tokenSource);
     }
 
-    public CredentialLookupStatus TryDecryptCredential(
+    private CredentialLookupStatus TryDecryptCredentialCore(
         string accountSid,
         CredentialStore credentialStore,
-        byte[] pinDerivedKey,
+        ReadOnlySpan<byte> pinDerivedKey,
         out CredentialEntry? credEntry,
         out ProtectedString? password)
     {
@@ -56,12 +76,9 @@ public class CredentialDecryptionService(
         if (preDecryptStatus != null)
             return preDecryptStatus.Value;
 
-        password = encryptionService.Decrypt(credEntry!.EncryptedPassword, pinDerivedKey);
+        password = spanEncryptionService.Decrypt(credEntry!.EncryptedPassword, pinDerivedKey);
         return CredentialLookupStatus.Success;
     }
-
-    public CredentialLookupStatus CheckCredential(string accountSid, CredentialStore credentialStore) =>
-        ResolvePreDecryptStatus(accountSid, credentialStore, out _) ?? CredentialLookupStatus.Success;
 
     /// <summary>
     /// Resolves the credential lookup status for all cases that do not require decryption.
@@ -71,6 +88,8 @@ public class CredentialDecryptionService(
     private CredentialLookupStatus? ResolvePreDecryptStatus(
         string accountSid, CredentialStore credentialStore, out CredentialEntry? credEntry)
     {
+        var interactiveSid = interactiveUserSidResolver.GetInteractiveUserSid();
+
         if (SidResolutionHelper.IsSystemSid(accountSid))
         {
             credEntry = null;
@@ -82,9 +101,8 @@ public class CredentialDecryptionService(
 
         if (credEntry == null)
         {
-            // No stored credential — check if the SID belongs to the interactive user.
+            // No stored credential - check if the SID belongs to the interactive user.
             // The explorer token is used for launch; no password is needed.
-            var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
             if (interactiveSid != null &&
                 SidComparer.SidEquals(accountSid, interactiveSid))
                 return CredentialLookupStatus.InteractiveUser;
@@ -95,7 +113,9 @@ public class CredentialDecryptionService(
         if (credEntry.IsCurrentAccount)
             return CredentialLookupStatus.CurrentAccount;
 
-        if (credEntry.IsInteractiveUser)
+        if (interactiveSid != null &&
+            !SidComparer.SidEquals(credEntry.Sid, SidResolutionHelper.GetCurrentUserSid()) &&
+            SidComparer.SidEquals(credEntry.Sid, interactiveSid))
             return CredentialLookupStatus.InteractiveUser;
 
         if (credEntry.EncryptedPassword.Length == 0)

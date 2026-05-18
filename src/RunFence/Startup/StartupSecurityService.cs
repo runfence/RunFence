@@ -1,75 +1,30 @@
-using System.Diagnostics;
 using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.Startup;
 
-public class StartupSecurityService(ILoggingService log) : IStartupSecurityService
+public class StartupSecurityService(
+    ILoggingService log,
+    StartupSecurityScannerRunner scannerRunner)
+    : IStartupSecurityService
 {
-    private const int ScannerTimeoutMs = 120_000;
-
     public List<StartupSecurityFinding> RunChecks(CancellationToken cancellationToken = default)
     {
-        var scannerPath = Path.Combine(AppContext.BaseDirectory, PathConstants.SecurityScannerExeName);
-        if (!File.Exists(scannerPath))
+        var runResult = scannerRunner.Run(cancellationToken);
+        if (!runResult.Started)
         {
-            log.Error($"Security scanner not found: {scannerPath}");
+            log.Error(runResult.FailureMessage ?? "Failed to start security scanner process.");
             return [];
         }
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = scannerPath,
-            UseShellExecute = false,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(psi);
-        if (process == null)
-        {
-            log.Error("Failed to start security scanner process.");
-            return [];
-        }
-
-        // Register cancellation to kill the process
-        using var reg = cancellationToken.Register(() =>
-        {
-            try
-            {
-                process.Kill();
-            }
-            catch
-            {
-            }
-        });
-
-        string? stderr = null;
-        var stderrTask = Task.Run(() => stderr = process.StandardError.ReadToEnd());
-        var stdoutTask = Task.Run(() => ParseFindings(process.StandardOutput));
-
-        if (!process.WaitForExit(ScannerTimeoutMs))
-        {
+        if (runResult.TimedOut)
             log.Warn("Security scanner timed out.");
-            try
-            {
-                process.Kill();
-            }
-            catch
-            {
-            }
-        }
-
-        // After exit or kill, streams reach EOF — tasks complete
-        stdoutTask.Wait(5000);
-        stderrTask.Wait(5000);
-
-        if (process.HasExited && process.ExitCode != 0)
-            log.Warn($"Security scanner exited with code {process.ExitCode}: {stderr}");
+        if (runResult.ExitCode is not null and not 0)
+            log.Warn($"Security scanner exited with code {runResult.ExitCode}: {runResult.StandardError}");
 
         cancellationToken.ThrowIfCancellationRequested();
-        return stdoutTask.IsCompletedSuccessfully ? stdoutTask.Result : [];
+        using var reader = new StringReader(runResult.StandardOutput);
+        return ParseFindings(reader);
     }
 
     public static List<StartupSecurityFinding> ParseFindings(TextReader reader)

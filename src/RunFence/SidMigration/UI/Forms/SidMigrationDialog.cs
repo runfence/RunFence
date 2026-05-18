@@ -1,547 +1,103 @@
-using RunFence.Account;
 using RunFence.Apps.UI;
-using RunFence.Core;
-using RunFence.Core.Models;
-using RunFence.Infrastructure;
+using RunFence.UI.Forms;
 
 namespace RunFence.SidMigration.UI.Forms;
 
-/// <remarks>Deps above threshold: 7 wizard steps share mutable state (<c>_rootPaths</c>, <c>_mappings</c>, <c>_sidsToDelete</c>, <c>_orphanedSids</c>, <c>_scanResults</c>, <c>_applyResult</c>) that flows step→step. Extracting steps into classes requires passing all shared state as parameters or a shared context object, creating the same coupling through a different mechanism. Each step is only 11-40 lines — too small to justify a separate class. Reviewed 2026-04-08.</remarks>
-public partial class SidMigrationDialog : Form
+public partial class SidMigrationDialog : ContextHelpForm
 {
-    private readonly SessionContext _session;
-    private readonly ISidMigrationService _sidMigrationService;
-    private readonly InAppMigrationHandler _inAppMigrationHandler;
-    private readonly ILocalUserProvider _localUserProvider;
-    private readonly ILoggingService _log;
-    private readonly IProfilePathResolver _profilePathResolver;
-    private readonly ISidNameCacheService _sidNameCache;
+    private readonly SidMigrationWorkflowController _workflowController;
+    private bool _workflowControllerReleased;
 
-    private int _currentStep;
-    private MigrationMappingStep? _mappingStep;
-    private SidMigrationPathStep? _pathStep;
-    private List<(string path, bool isChecked)>? _savedPathState;
-    private CancellationTokenSource? _cts;
-    private readonly OperationGuard _operationGuard = new();
-    private bool _goBackAfterOperationCancel;
+    public bool InAppMigrationApplied => _workflowController.InAppMigrationApplied;
 
-    // Data shared between steps
-    private List<string> _rootPaths = [];
-    private List<SidMigrationMapping> _mappings = [];
-    private List<string> _sidsToDelete = [];
-    private List<OrphanedSid> _orphanedSids = [];
-    private List<SidMigrationMatch> _scanResults = [];
-    private (long applied, long errors) _applyResult;
-
-    public bool InAppMigrationApplied { get; private set; }
-
-    public SidMigrationDialog(
-        SessionContext session,
-        ISidMigrationService sidMigrationService,
-        InAppMigrationHandler inAppMigrationHandler,
-        ILocalUserProvider localUserProvider,
-        ILoggingService log,
-        IProfilePathResolver profilePathResolver,
-        ISidNameCacheService sidNameCache)
+    public SidMigrationDialog(SidMigrationWorkflowController workflowController)
     {
-        _session = session;
-        _sidMigrationService = sidMigrationService;
-        _inAppMigrationHandler = inAppMigrationHandler;
-        _localUserProvider = localUserProvider;
-        _log = log;
-        _profilePathResolver = profilePathResolver;
-        _sidNameCache = sidNameCache;
+        _workflowController = workflowController;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
-        ShowStep(1);
+        Disposed += OnDialogDisposed;
+        _workflowController.ViewChanged += OnWorkflowViewChanged;
+        _workflowController.CloseRequested += OnWorkflowCloseRequested;
+        _workflowController.Initialize();
     }
 
-    private bool CanShowBack() => _currentStep > 1 && _currentStep != 6 && _currentStep != 7;
-
-    private void ShowStep(int step)
+    private void OnWorkflowViewChanged()
     {
-        _currentStep = step;
-        _stepPanel.Controls.Clear();
-        _nextButton.Enabled = true;
-        _nextButton.Visible = true;
-        UpdateSecondaryButton();
+        var view = _workflowController.CurrentView;
+        var stepControl = view.StepView.View;
+        _stepTitleLabel.Text = view.Title;
+        _nextButton.Text = view.NextText;
+        _nextButton.Enabled = view.NextEnabled;
+        _nextButton.Visible = view.NextVisible;
+        _secondaryButton.Text = view.SecondaryText;
+        _secondaryButton.Enabled = view.SecondaryEnabled;
+        CancelButton = view.SecondaryActsAsCancel ? _secondaryButton : null;
 
-        switch (step)
+        if (_stepPanel.Controls.Count != 1 ||
+            !ReferenceEquals(_stepPanel.Controls[0], stepControl))
         {
-            case 1:
-                ShowStep1_PathSelection();
-                break;
-            case 2:
-                ShowStep2_DiscoveryScan();
-                break;
-            case 3:
-                ShowStep3_MappingReview();
-                break;
-            case 4:
-                ShowStep4_DiskScan();
-                break;
-            case 5:
-                ShowStep5_DiskPreview();
-                break;
-            case 6:
-                ShowStep6_DiskApply();
-                break;
-            case 7:
-                ShowStep7_InAppMigration();
-                break;
-        }
-    }
-
-    // --- Shared progress step helpers ---
-
-    private (ProgressBar progressBar, Label statusLabel, CancellationToken ct) BeginProgressStep(
-        string statusText = "Scanning...", int? maxValue = null, bool showCancelButton = true)
-    {
-        _nextButton.Enabled = false;
-        _nextButton.Text = "Next";
-
-        var step = new MigrationProgressStep();
-        step.Dock = DockStyle.Top;
-        step.Configure(statusText, maxValue, showCancelButton);
-        _stepPanel.Controls.Add(step);
-        _stepPanel.Controls.SetChildIndex(step, 0);
-
-        _cts?.Dispose();
-        _cts = new CancellationTokenSource();
-        step.CancelButton.Click += (_, _) => _cts?.Cancel();
-
-        _operationGuard.Begin();
-        UpdateSecondaryButton();
-        return (step.ProgressBar, step.StatusLabel, _cts.Token);
-    }
-
-    private async Task RunGuardedAsync(Func<Task> operation, string errorLogPrefix, ProgressBar progressBar, Label statusLabel,
-        Action? onCompleted = null, Action? onCancel = null, bool resetProgressOnCancel = true)
-    {
-        var completed = false;
-        var canceled = false;
-        Exception? error = null;
-
-        try
-        {
-            await operation();
-            completed = true;
-        }
-        catch (OperationCanceledException)
-        {
-            canceled = true;
-        }
-        catch (Exception ex)
-        {
-            _log.Error($"{errorLogPrefix} failed", ex);
-            error = ex;
-        }
-        finally
-        {
-            _operationGuard.End();
-        }
-
-        if (IsDisposed)
-            return;
-
-        if (completed)
-        {
-            onCompleted?.Invoke();
-            return;
-        }
-
-        if (canceled)
-        {
-            if (_goBackAfterOperationCancel)
+            foreach (Control existingControl in _stepPanel.Controls.Cast<Control>().ToArray())
             {
-                _goBackAfterOperationCancel = false;
-                OnBackClick(this, EventArgs.Empty);
-                return;
+                _stepPanel.Controls.Remove(existingControl);
+                existingControl.Dispose();
             }
 
-            if (resetProgressOnCancel)
-            {
-                progressBar.Style = ProgressBarStyle.Continuous;
-                progressBar.Value = 0;
-            }
-
-            UpdateSecondaryButton();
-            onCancel?.Invoke();
-            return;
+            _stepPanel.Controls.Add(stepControl);
         }
 
-        if (error != null)
-        {
-            progressBar.Style = ProgressBarStyle.Continuous;
-            progressBar.Value = 0;
-            statusLabel.Text = $"Error: {error.Message}";
-            UpdateSecondaryButton();
-        }
+        _workflowController.HandleViewShown(this);
     }
 
-    // --- Step 1: Path Selection ---
-
-    private void ShowStep1_PathSelection()
-    {
-        var returningFromManual = _mappings.Count > 0;
-        _stepTitleLabel.Text = returningFromManual
-            ? "Step 1: Select Paths to Re-scan"
-            : "Step 1: Select Paths to Scan";
-        _nextButton.Text = returningFromManual ? "Start Scan" : "Discover";
-
-        _pathStep = new SidMigrationPathStep(showSkipButton: !returningFromManual)
-        {
-            Dock = DockStyle.Fill
-        };
-
-        if (_savedPathState != null)
-            _pathStep.RestoreState(_savedPathState);
-
-        _pathStep.SkipRequested += (_, _) =>
-        {
-            _rootPaths = _pathStep.CollectSelectedPaths();
-            _savedPathState = _pathStep.SavedState;
-            ShowStep(3);
-        };
-
-        _stepPanel.Controls.Add(_pathStep);
-    }
-
-    private void CollectRootPaths()
-    {
-        if (_pathStep == null)
-            return;
-        _rootPaths = _pathStep.CollectSelectedPaths();
-        _savedPathState = _pathStep.SavedState;
-    }
-
-    // --- Step 2: Discovery Scan ---
-
-    private void ShowStep2_DiscoveryScan()
-    {
-        _stepTitleLabel.Text = "Step 2: Discovering Orphaned SIDs";
-
-        var (progressBar, statusLabel, ct) = BeginProgressStep();
-        var progress = new Progress<(long scanned, long sidsFound)>(p =>
-        {
-            if (!IsDisposed)
-                statusLabel.Text = $"Scanned: {p.scanned:N0} items, Found: {p.sidsFound:N0} unique SIDs";
-        });
-
-        _ = RunGuardedAsync(async () =>
-        {
-            _orphanedSids = await _sidMigrationService.DiscoverOrphanedSidsAsync(
-                _rootPaths, progress, ct);
-        }, "Discovery scan", progressBar, statusLabel, onCompleted: () => ShowStep(3), onCancel: () =>
-        {
-            statusLabel.Text = _orphanedSids.Count > 0
-                ? $"Scan cancelled. Found {_orphanedSids.Count} orphaned SIDs so far."
-                : "Scan cancelled.";
-            _nextButton.Enabled = _orphanedSids.Count > 0;
-        });
-    }
-
-    // --- Step 3: Mapping Review ---
-
-    private void ShowStep3_MappingReview()
-    {
-        _stepTitleLabel.Text = "Step 3: Review SID Mappings";
-        _nextButton.Text = "Start Scan";
-        _nextButton.Enabled = false;
-        _secondaryButton.Enabled = false;
-
-        _mappingStep = new MigrationMappingStep(
-            _session, _sidMigrationService, _localUserProvider, _log, _orphanedSids, _profilePathResolver, _sidNameCache)
-        {
-            Dock = DockStyle.Fill
-        };
-        _stepPanel.Controls.Add(_mappingStep);
-
-        _mappingStep.BeginAsync(
-            onReady: () =>
-            {
-                _nextButton.Enabled = true;
-                UpdateSecondaryButton();
-            },
-            onFailed: () => UpdateSecondaryButton());
-    }
-
-    // --- Step 4: Disk Scan ---
-
-    private void ShowStep4_DiskScan()
-    {
-        _stepTitleLabel.Text = "Step 4: Scanning Disk";
-
-        var (progressBar, statusLabel, ct) = BeginProgressStep();
-        var progress = new Progress<(long scanned, long found)>(p =>
-        {
-            if (!IsDisposed)
-                statusLabel.Text = $"Scanned: {p.scanned:N0}, Found: {p.found:N0} matches";
-        });
-
-        _ = RunGuardedAsync(async () =>
-        {
-            _scanResults = await _sidMigrationService.ScanAsync(_rootPaths, _mappings, _sidsToDelete, progress, ct);
-        }, "Disk scan", progressBar, statusLabel, onCompleted: () => ShowStep(5), onCancel: () =>
-        {
-            statusLabel.Text = _scanResults.Count > 0
-                ? $"Scan cancelled. Found {_scanResults.Count:N0} items so far."
-                : "Scan cancelled.";
-            _nextButton.Enabled = _scanResults.Count > 0;
-        });
-    }
-
-    // --- Step 5: Disk Preview ---
-
-    private void ShowStep5_DiskPreview()
-    {
-        _stepTitleLabel.Text = "Step 5: Preview Changes";
-        _nextButton.Text = "Apply";
-        UpdateSecondaryButton();
-
-        var step = new SidMigrationPreviewStep(_scanResults) { Dock = DockStyle.Fill };
-        _stepPanel.Controls.Add(step);
-    }
-
-    // --- Step 6: Disk Apply ---
-
-    private void ShowStep6_DiskApply()
-    {
-        _stepTitleLabel.Text = "Step 6: Applying Changes";
-
-        var (progressBar, statusLabel, ct) = BeginProgressStep("Applying...", Math.Max(_scanResults.Count, 1),
-            showCancelButton: false);
-
-        var pathLabel = new Label
-        {
-            Dock = DockStyle.Top,
-            Padding = new Padding(12, 4, 12, 0),
-            AutoSize = false,
-            Height = 22,
-            ForeColor = Color.DarkGray,
-            Font = new Font(Font.FontFamily, 8f)
-        };
-        _stepPanel.Controls.Add(pathLabel);
-
-        var progress = new Progress<MigrationProgress>(p =>
-        {
-            if (!IsDisposed)
-            {
-                progressBar.Value = Math.Min((int)p.Applied, progressBar.Maximum);
-                statusLabel.Text = $"Applied: {p.Applied:N0} / {p.Total:N0}";
-                pathLabel.Text = p.CurrentPath;
-            }
-        });
-
-        _ = RunGuardedAsync(async () =>
-        {
-            _applyResult = await _sidMigrationService.ApplyAsync(_scanResults, _mappings, _sidsToDelete, progress, ct);
-        }, "Disk apply", progressBar, statusLabel, onCompleted: () =>
-        {
-            progressBar.Value = progressBar.Maximum;
-            statusLabel.Text = $"Done. Applied: {_applyResult.applied:N0}, Errors: {_applyResult.errors:N0}";
-            _nextButton.Enabled = true;
-            UpdateSecondaryButton();
-        }, onCancel: () => { statusLabel.Text = "Apply cancelled."; }, resetProgressOnCancel: false);
-    }
-
-    // --- Step 7: In-App Migration ---
-
-    private void ShowStep7_InAppMigration()
-    {
-        _stepTitleLabel.Text = "Step 7: In-App Data Migration";
-        _nextButton.Text = "Close";
-        UpdateSecondaryButton();
-
-        var referencedSids = CollectReferencedSids();
-        var filteredMappings = _mappings.Where(m => referencedSids.Contains(m.OldSid)).ToList();
-        var filteredDeletes = _sidsToDelete.Where(s => referencedSids.Contains(s)).ToList();
-
-        var step = new SidMigrationInAppStep(_inAppMigrationHandler, _session, filteredMappings, filteredDeletes, _profilePathResolver)
-        {
-            Dock = DockStyle.Fill
-        };
-        step.MigrationApplied += (_, _) => InAppMigrationApplied = true;
-        _stepPanel.Controls.Add(step);
-    }
-
-    private HashSet<string> CollectReferencedSids()
-    {
-        var sids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var db = _session.Database;
-        var store = _session.CredentialStore;
-
-        foreach (var app in db.Apps)
-        {
-            sids.Add(app.AccountSid);
-            app.AllowedIpcCallers?.ForEach(sid => sids.Add(sid));
-            app.AllowedAclEntries?.ForEach(a => sids.Add(a.Sid));
-        }
-
-        foreach (var account in db.Accounts)
-            sids.Add(account.Sid);
-        store.Credentials.ForEach(c => sids.Add(c.Sid));
-
-        sids.Remove("");
-        return sids;
-    }
-
-    // --- Navigation ---
-
-    private void OnBackClick(object? sender, EventArgs e)
-    {
-        switch (_currentStep)
-        {
-            case 3:
-                ShowStep(1);
-                break;
-            case 5:
-                ShowStep(3);
-                break;
-            default:
-                if (_currentStep > 1)
-                    ShowStep(_currentStep - 1);
-                break;
-        }
-    }
-
-    private void UpdateSecondaryButton(string? text = null)
-    {
-        _secondaryButton.Text = text ?? (CanShowBack() ? "Back" : "Cancel");
-        _secondaryButton.Enabled = true;
-        CancelButton = CanShowBack() ? null : _secondaryButton;
-    }
-
-    private void OnNextClick(object? sender, EventArgs e)
-    {
-        switch (_currentStep)
-        {
-            case 1:
-                CollectRootPaths();
-                if (_rootPaths.Count == 0)
-                {
-                    MessageBox.Show("Please select at least one path.", "No Paths", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                // If we already have manual mappings, skip discovery and go straight to disk scan
-                ShowStep(_mappings.Count > 0 ? 4 : 2);
-                break;
-
-            case 2:
-                ShowStep(3);
-                break;
-
-            case 3:
-                if (_mappingStep == null || !_mappingStep.TryCollectMappings(out _mappings))
-                    return;
-                _sidsToDelete = _mappingStep?.CollectDeleteSids() ?? [];
-                switch (_mappings.Count)
-                {
-                    case 0 when _sidsToDelete.Count == 0:
-                        MessageBox.Show("Please configure at least one action (Migrate or Delete).",
-                            "No Actions", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    case > 0 when _rootPaths.Count == 0:
-                        // No paths selected yet — redirect to path selection first
-                        ShowStep(1);
-                        return;
-                }
-
-                ShowStep(_mappings.Count > 0 ? 4 : 7);
-                break;
-
-            case 4:
-                ShowStep(5);
-                break;
-            case 5:
-                ShowStep(6);
-                break;
-            case 6:
-                ShowStep(7);
-                break;
-            case 7:
-                CloseWithMigrationResult();
-                break;
-        }
-    }
-
-    private void OnSecondaryButtonClick(object? sender, EventArgs e)
-    {
-        if (CanShowBack())
-        {
-            if (_operationGuard.IsInProgress)
-            {
-                _goBackAfterOperationCancel = true;
-                _cts?.Cancel();
-            }
-            else
-            {
-                OnBackClick(sender, e);
-            }
-
-            return;
-        }
-
-        if (_operationGuard.IsInProgress)
-        {
-            _goBackAfterOperationCancel = false;
-            _cts?.Cancel();
-            return;
-        }
-
-        CloseWithMigrationResult();
-    }
-
-    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
-    {
-        if (keyData != Keys.Escape)
-            return base.ProcessCmdKey(ref msg, keyData);
-
-        if (_operationGuard.IsInProgress)
-            _cts?.Cancel();
-        else
-            CloseWithMigrationResult();
-
-        return true;
-    }
-
-    private void CloseWithMigrationResult()
+    private void OnWorkflowCloseRequested()
     {
         Close();
     }
 
+    private void OnNextClick(object? sender, EventArgs e)
+    {
+        _workflowController.HandleNext(this);
+    }
+
+    private void OnSecondaryButtonClick(object? sender, EventArgs e)
+    {
+        _workflowController.HandleSecondary(this);
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape && _workflowController.HandleEscape(this))
+            return true;
+
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (e.CloseReason == CloseReason.UserClosing && _currentStep == 6)
-        {
-            // Disk apply is irreversible — block close entirely during step 6
-            // (whether the operation is still running or has completed).
-            // The user must proceed to step 7 (in-app migration) before the dialog
-            // can be closed, to ensure in-app data is kept consistent with disk changes.
-            e.Cancel = true;
-            if (_operationGuard.IsInProgress)
-                _cts?.Cancel();
-            else
-                MessageBox.Show(
-                    "Step 7 (In-App Migration) must be completed before closing.\n\n" +
-                    "Click \"Next\" to proceed to the in-app migration step, which updates RunFence's " +
-                    "internal data to match the disk changes applied in this step.",
-                    "Cannot Close", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        if (_operationGuard.IsInProgress && e.CloseReason == CloseReason.UserClosing)
-        {
-            e.Cancel = true;
-            _cts?.Cancel();
-            return;
-        }
-
-        if (e.CloseReason == CloseReason.UserClosing)
-            DialogResult = InAppMigrationApplied ? DialogResult.OK : DialogResult.Cancel;
-
-        _cts?.Dispose();
+        _workflowController.HandleFormClosing(this, e);
+        if (e.CloseReason == CloseReason.UserClosing && !e.Cancel)
+            DialogResult = _workflowController.GetCloseDialogResult();
         base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        ReleaseWorkflowController();
+        base.OnFormClosed(e);
+    }
+
+    private void ReleaseWorkflowController()
+    {
+        if (_workflowControllerReleased)
+            return;
+
+        _workflowController.ViewChanged -= OnWorkflowViewChanged;
+        _workflowController.CloseRequested -= OnWorkflowCloseRequested;
+        _workflowController.Dispose();
+        _workflowControllerReleased = true;
+    }
+
+    private void OnDialogDisposed(object? sender, EventArgs e)
+    {
+        ReleaseWorkflowController();
     }
 }

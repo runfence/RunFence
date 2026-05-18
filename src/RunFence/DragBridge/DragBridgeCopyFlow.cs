@@ -56,7 +56,7 @@ public class DragBridgeCopyFlow(
                 }
                 else if (data.FilePaths.Count > 0) // FileList = new drop
                 {
-                    capturedFileStore.SetCapturedFiles(data.FilePaths, ownerInfo.Sid.Value);
+                    capturedFileStore.SetCapturedFiles([..data.FilePaths], ownerInfo.Sid.Value, ownerInfo.AppContainerSid?.Value);
                     log.Info($"DragBridgeService: captured {data.FilePaths.Count} file(s) via drop.");
                 }
             }
@@ -83,6 +83,7 @@ public class DragBridgeCopyFlow(
         var pipeServer = processLauncher.CreatePipeServer(
             pipeName,
             ownerInfo.Sid,
+            ownerInfo.AppContainerSid,
             allowLowIntegrityClient: DragBridgeLaunchPolicy.RequiresLowIntegrityPipe(ownerInfo));
         bool success = false;
         try

@@ -2,7 +2,9 @@ using Moq;
 using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Persistence.UI;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -15,14 +17,16 @@ namespace RunFence.Tests;
 /// </summary>
 public class AppConfigServiceTests : IDisposable
 {
+    private readonly SessionContext _session;
     private readonly AppConfigService _service;
     private readonly AppConfigIndex _index;
-    private readonly GrantConfigTracker _grantTracker;
+    private readonly GrantIntentStoreProvider _grantIntentStoreProvider;
+    private readonly GrantIntentRepository _grantIntentRepository;
     private readonly HandlerMappingService _handlerMappings;
     private readonly Mock<IDatabaseService> _dbService;
     private readonly Mock<ILoggingService> _log;
     private readonly TempDirectory _tempDir;
-    private readonly byte[] _pinKey;
+    private readonly SecureSecret _pinKey;
     private readonly byte[] _argonSalt;
 
     public AppConfigServiceTests()
@@ -30,34 +34,73 @@ public class AppConfigServiceTests : IDisposable
         _log = new Mock<ILoggingService>();
         _dbService = new Mock<IDatabaseService>();
         _tempDir = new TempDirectory("RunFence_AppConfigTest");
-        _grantTracker = new GrantConfigTracker();
-        _index = new AppConfigIndex(_grantTracker);
+        _pinKey = TestSecretFactory.Create(32);
+        _session = new SessionContext
+{
+            Database = new AppDatabase(),
+            CredentialStore = new CredentialStore
+            {
+                ArgonSalt = new byte[32],
+                EncryptedCanary = [1]
+            },
+        }.WithOwnedPinDerivedKey(_pinKey);
+        var appIdValidator = new AppIdValidator();
+        var sessionProvider = new Mock<ISessionProvider>();
+        sessionProvider.Setup(provider => provider.GetSession()).Returns(_session);
+        var configSaveOrchestrator = new ConfigSaveOrchestrator(
+            sessionProvider.Object,
+            () => new InlineUiThreadInvoker(action => action()),
+            _dbService.Object,
+            new Mock<IAppConfigService>().Object,
+            new Mock<IHandlerMappingService>().Object);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        var mainStore = new MainGrantIntentStore(
+            sessionProvider.Object,
+            configSaveOrchestrator,
+            ownershipProjection);
+        _grantIntentStoreProvider = new GrantIntentStoreProvider(
+            mainStore,
+            configSaveOrchestrator,
+            ownershipProjection);
+        _grantIntentRepository = new GrantIntentRepository(_grantIntentStoreProvider);
+        _index = new AppConfigIndex(ownershipProjection, appIdValidator);
         _handlerMappings = new HandlerMappingService(_index);
-        _service = new AppConfigService(_log.Object, _index, _grantTracker, _handlerMappings, _dbService.Object,
-            new AppConfigSaveHelper(_grantTracker, _handlerMappings, _dbService.Object),
-            new AppEntryIdGenerator());
-        _pinKey = new byte[32];
-        new Random(42).NextBytes(_pinKey);
+        _service = new AppConfigService(
+            _log.Object,
+            _index,
+            ownershipProjection,
+            () => _grantIntentStoreProvider,
+            _handlerMappings,
+            _dbService.Object,
+            new AppConfigSaveHelper(() => _grantIntentStoreProvider, _handlerMappings, _dbService.Object),
+            new AppEntryIdGenerator(),
+            appIdValidator);
         _argonSalt = new byte[32];
         new Random(55).NextBytes(_argonSalt);
     }
 
-    public void Dispose() => _tempDir.Dispose();
+    public void Dispose()
+    {
+        _session.Dispose();
+        _pinKey.Dispose();
+        _tempDir.Dispose();
+    }
+
+    private void UseDatabase(AppDatabase database)
+        => _session.Database = database;
 
     private string CreateConfigFile(List<AppEntry>? apps = null,
         Dictionary<string, HandlerMappingEntry>? handlerMappings = null,
-        List<AppConfigAccountEntry>? accounts = null,
-        List<GrantedPathEntry>? sharedContainerTraverseGrants = null)
+        List<AppConfigAccountEntry>? accounts = null)
     {
         var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
         var config = new AppConfig
         {
             Apps = apps ?? [],
             HandlerMappings = handlerMappings,
-            Accounts = accounts,
-            SharedContainerTraverseGrants = sharedContainerTraverseGrants
+            Accounts = accounts
         };
-        _dbService.Setup(d => d.LoadAppConfig(path, _pinKey)).Returns(config);
+        _dbService.Setup(d => d.LoadAppConfigFromPath(path, _pinKey)).Returns(config);
         // Create a stub file so File.Exists checks pass
         File.WriteAllText(path, "stub");
         return path;
@@ -111,6 +154,30 @@ public class AppConfigServiceTests : IDisposable
     }
 
     [Fact]
+    public void CaptureRuntimeStateSnapshot_RestoreRuntimeStateSnapshot_RestoresMappingsLoadedPathsAndHandlerMappings()
+    {
+        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "TrackedApp" };
+        var path = CreateConfigFile(
+            [app],
+            new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["http"] = new(app.Id)
+            });
+        var database = new AppDatabase();
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+        var snapshot = _service.CaptureRuntimeStateSnapshot();
+
+        _handlerMappings.RenameAppIdInConfigMappings(path, app.Id, "renamed-app");
+        _service.RemoveApp(app.Id);
+        _service.UnloadConfig(path, database);
+        _service.RestoreRuntimeStateSnapshot(snapshot);
+
+        Assert.Equal(Path.GetFullPath(path), _service.GetConfigPath(app.Id));
+        Assert.Equal([Path.GetFullPath(path)], _service.GetLoadedConfigPaths());
+        Assert.Equal(app.Id, _handlerMappings.GetHandlerMappingsForConfig(path)!["http"].AppId);
+    }
+
+    [Fact]
     public void LoadAdditionalConfig_DuplicatePath_IgnoresDuplicateLoad()
     {
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
@@ -142,6 +209,59 @@ public class AppConfigServiceTests : IDisposable
 
         Assert.Throws<ArgumentException>(() =>
             _service.LoadAdditionalConfig(localPath, new AppDatabase(), _pinKey));
+    }
+
+    [Fact]
+    public void LoadAdditionalConfig_InvalidAppId_ThrowsInvalidAppIdException()
+    {
+        var path = CreateConfigFile([new AppEntry { Id = @"..\escape", Name = "Bad" }]);
+
+        var ex = Assert.Throws<InvalidAppIdException>(() =>
+            _service.LoadAdditionalConfig(path, new AppDatabase(), _pinKey));
+
+        Assert.Contains("invalid", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void LoadAdditionalConfig_InvalidHandlerMappingReference_ThrowsWithoutPartialMutation()
+    {
+        var path = CreateConfigFile(
+            apps: [new AppEntry { Id = "app-1", Name = "App" }],
+            handlerMappings: new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["http"] = new("missing-app")
+            });
+        var database = new AppDatabase();
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            _service.LoadAdditionalConfig(path, database, _pinKey));
+
+        Assert.Contains("unknown app ID", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(database.Apps);
+        Assert.False(_service.HasLoadedConfigs);
+    }
+
+    [Fact]
+    public void LoadAdditionalConfig_IdCollision_RenamesHandlerMappingAppId()
+    {
+        const string sharedId = "shared-id";
+        var existing = new AppEntry { Id = sharedId, Name = "Existing" };
+        var incoming = new AppEntry { Id = sharedId, Name = "Incoming" };
+        var path = CreateConfigFile(
+            apps: [incoming],
+            handlerMappings: new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["http"] = new(sharedId)
+            });
+        var database = new AppDatabase { Apps = [existing] };
+
+        var loaded = _service.LoadAdditionalConfig(path, database, _pinKey);
+        var loadedApp = Assert.Single(loaded);
+        var mappings = _handlerMappings.GetHandlerMappingsForConfig(path);
+
+        Assert.NotNull(mappings);
+        Assert.Equal(loadedApp.Id, mappings!["http"].AppId);
+        Assert.NotEqual(sharedId, loadedApp.Id);
     }
 
     // --- UnloadConfig ---
@@ -244,15 +364,16 @@ public class AppConfigServiceTests : IDisposable
         database.GetOrCreateAccount("S-1-5-21-4").DeleteAfterUtc = DateTime.UtcNow.AddDays(1);
         database.GetOrCreateAccount("S-1-5-21-7").PrivilegeLevel = PrivilegeLevel.LowIntegrity;
         database.GetOrCreateAccount("S-1-5-21-9").Grants.Add(grantEntry);
+        UseDatabase(database);
 
         var filtered = _index.FilterForMainConfig(database);
 
         Assert.NotSame(database.Settings, filtered.Settings); // Settings is cloned to prevent shared mutation
         Assert.Equal(database.Settings.LogVerbosity, filtered.Settings.LogVerbosity);
         Assert.Equal(database.LastPrefsFilePath, filtered.LastPrefsFilePath);
-        Assert.Same(database.SidNames, filtered.SidNames);
-        Assert.Same(database.AppContainers, filtered.AppContainers);
-        Assert.Same(database.AccountGroupSnapshots, filtered.AccountGroupSnapshots);
+        Assert.NotSame(database.SidNames, filtered.SidNames);
+        Assert.NotSame(database.AppContainers, filtered.AppContainers);
+        Assert.NotSame(database.AccountGroupSnapshots, filtered.AccountGroupSnapshots);
         // All accounts present (no additional config grants to filter out)
         Assert.Equal(database.Accounts.Count, filtered.Accounts.Count);
         // Non-grants flags are preserved
@@ -302,6 +423,71 @@ public class AppConfigServiceTests : IDisposable
         Assert.Equal(appId, exported.HandlerMappings[".xyz"].AppId);
     }
 
+    [Fact]
+    public void GetConfigForExport_MainConfig_PreservesAllApplicationPackagesTraverseEntriesInAccounts()
+    {
+        var grant = new GrantedPathEntry { Path = @"C:\shared-main", IsTraverseOnly = true };
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(grant);
+        UseDatabase(database);
+
+        var exported = _service.GetConfigForExport(null, database);
+
+        var account = Assert.Single(exported.Accounts!);
+        Assert.Equal(WellKnownSecuritySids.AllApplicationPackagesSid, account.Sid);
+        var traverse = Assert.Single(account.Grants);
+        Assert.Equal(@"C:\shared-main", traverse.Path);
+        Assert.True(traverse.IsTraverseOnly);
+    }
+
+    [Fact]
+    public void GetConfigForExport_MainConfig_AllApplicationPackagesGrant_StaysInAccounts()
+    {
+        var grant = new GrantedPathEntry
+        {
+            Path = @"C:\aap-main-grant",
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+        };
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(grant);
+        UseDatabase(database);
+
+        var exported = _service.GetConfigForExport(null, database);
+
+        var account = Assert.Single(exported.Accounts!);
+        Assert.Equal(WellKnownSecuritySids.AllApplicationPackagesSid, account.Sid);
+        Assert.Single(account.Grants);
+        Assert.Equal(@"C:\aap-main-grant", account.Grants[0].Path);
+        Assert.False(account.Grants[0].IsTraverseOnly);
+    }
+
+    [Fact]
+    public void GetConfigForExport_MainConfig_AllApplicationPackagesGrantAndTraverse_StayInAccounts()
+    {
+        var grant = new GrantedPathEntry
+        {
+            Path = @"C:\aap-main-grant",
+            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+        };
+        var traverse = new GrantedPathEntry
+        {
+            Path = @"C:\aap-main-traverse",
+            IsTraverseOnly = true
+        };
+        var database = new AppDatabase();
+        var account = database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid);
+        account.Grants.Add(grant);
+        account.Grants.Add(traverse);
+        UseDatabase(database);
+
+        var exported = _service.GetConfigForExport(null, database);
+
+        var exportedAccount = Assert.Single(exported.Accounts!);
+        Assert.Equal(2, exportedAccount.Grants.Count);
+        Assert.Contains(exportedAccount.Grants, entry => entry.Path == @"C:\aap-main-grant" && !entry.IsTraverseOnly);
+        Assert.Contains(exportedAccount.Grants, entry => entry.Path == @"C:\aap-main-traverse" && entry.IsTraverseOnly);
+    }
+
     // --- Grant tracking ---
 
     [Fact]
@@ -319,7 +505,7 @@ public class AppConfigServiceTests : IDisposable
         Assert.Single(grants);
         Assert.Equal(@"C:\foo", grants[0].Path);
         // The grant should be tracked as belonging to the additional config
-        Assert.Equal(Path.GetFullPath(path), _grantTracker.GetGrantConfigPath(sid, grantEntry));
+        Assert.Equal(Path.GetFullPath(path), GetGrantConfigPath(sid, grantEntry));
     }
 
     [Fact]
@@ -335,7 +521,7 @@ public class AppConfigServiceTests : IDisposable
 
         // Account entry removed (it became empty after grant was removed)
         Assert.Null(database.GetAccount(sid));
-        Assert.Null(_grantTracker.GetGrantConfigPath(sid, grantEntry));
+        Assert.Null(GetGrantConfigPath(sid, grantEntry));
     }
 
     [Fact]
@@ -347,6 +533,7 @@ public class AppConfigServiceTests : IDisposable
         var path = CreateConfigFile(accounts: [new AppConfigAccountEntry { Sid = sid, Grants = [additionalGrant] }]);
         var database = new AppDatabase();
         database.GetOrCreateAccount(sid).Grants.Add(mainGrant);
+        UseDatabase(database);
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
         var filtered = _index.FilterForMainConfig(database);
@@ -359,43 +546,142 @@ public class AppConfigServiceTests : IDisposable
     }
 
     [Fact]
-    public void LoadAdditionalConfig_MergesSharedContainerTraverseGrantsIntoDatabase()
+    public void LoadAdditionalConfig_MergesAllApplicationPackagesTraverseEntriesIntoDatabase()
     {
         var sharedEntry = new GrantedPathEntry { Path = @"C:\shared", IsTraverseOnly = true };
-        var path = CreateConfigFile(sharedContainerTraverseGrants: [sharedEntry]);
+        var path = CreateConfigFile(accounts:
+        [
+            new AppConfigAccountEntry
+            {
+                Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                Grants = [sharedEntry]
+            }
+        ]);
         var database = new AppDatabase();
 
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
-        Assert.Single(database.SharedContainerTraverseGrants);
-        Assert.Equal(@"C:\shared", database.SharedContainerTraverseGrants[0].Path);
-        Assert.Equal(Path.GetFullPath(path), _grantTracker.GetGrantConfigPath(
+        var account = Assert.Single(database.Accounts);
+        Assert.Equal(WellKnownSecuritySids.AllApplicationPackagesSid, account.Sid);
+        Assert.Equal(@"C:\shared", Assert.Single(account.Grants).Path);
+        Assert.Equal(Path.GetFullPath(path), GetGrantConfigPath(
             WellKnownSecuritySids.AllApplicationPackagesSid,
             sharedEntry));
     }
 
     [Fact]
-    public void UnloadConfig_RemovesSharedContainerTraverseGrantsFromDatabase()
+    public void UnloadConfig_RemovesAllApplicationPackagesTraverseEntriesFromDatabase()
     {
         var sharedEntry = new GrantedPathEntry { Path = @"C:\shared", IsTraverseOnly = true };
-        var path = CreateConfigFile(sharedContainerTraverseGrants: [sharedEntry]);
+        var path = CreateConfigFile(accounts:
+        [
+            new AppConfigAccountEntry
+            {
+                Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                Grants = [sharedEntry]
+            }
+        ]);
         var database = new AppDatabase();
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
         _service.UnloadConfig(path, database);
 
-        Assert.Empty(database.SharedContainerTraverseGrants);
-        Assert.Null(_grantTracker.GetGrantConfigPath(
+        Assert.Empty(database.GetAccount(WellKnownSecuritySids.AllApplicationPackagesSid)?.Grants ?? []);
+        Assert.Null(GetGrantConfigPath(
             WellKnownSecuritySids.AllApplicationPackagesSid,
             sharedEntry));
     }
 
     [Fact]
-    public void SaveConfigForApp_AdditionalConfig_IncludesSharedContainerTraverseGrants()
+    public void UnloadConfig_DuplicateGrantAcrossAdditionalConfigs_PreservesGrantUntilLastOwnerRemoved()
+    {
+        var sid = "S-1-5-21-1-1-1-1001";
+        var sharedGrant = new GrantedPathEntry { Path = @"C:\shared-grant" };
+        var path1 = CreateConfigFile(accounts: [new AppConfigAccountEntry { Sid = sid, Grants = [sharedGrant.Clone()] }]);
+        var path2 = CreateConfigFile(accounts: [new AppConfigAccountEntry { Sid = sid, Grants = [sharedGrant.Clone()] }]);
+        var database = new AppDatabase();
+        _service.LoadAdditionalConfig(path1, database, _pinKey);
+        _service.LoadAdditionalConfig(path2, database, _pinKey);
+
+        _service.UnloadConfig(path1, database);
+
+        var accountAfterFirstUnload = database.GetAccount(sid);
+        Assert.NotNull(accountAfterFirstUnload);
+        Assert.Single(accountAfterFirstUnload!.Grants);
+        Assert.Equal(Path.GetFullPath(path2), GetGrantConfigPath(sid, accountAfterFirstUnload.Grants[0]));
+
+        _service.UnloadConfig(path2, database);
+
+        Assert.Null(database.GetAccount(sid));
+    }
+
+    [Fact]
+    public void LoadAdditionalConfig_DuplicateMainGrant_PreservesMainOwnershipDuringFilterAndUnload()
+    {
+        var sid = "S-1-5-21-1-1-1-1001";
+        var sharedGrant = new GrantedPathEntry { Path = @"C:\shared-main-grant" };
+        var path = CreateConfigFile(accounts: [new AppConfigAccountEntry { Sid = sid, Grants = [sharedGrant.Clone()] }]);
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(sid).Grants.Add(sharedGrant.Clone());
+        UseDatabase(database);
+
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        var filteredWhileLoaded = _index.FilterForMainConfig(database);
+        var mainGrantsWhileLoaded = filteredWhileLoaded.GetAccount(sid)?.Grants;
+        Assert.NotNull(mainGrantsWhileLoaded);
+        Assert.Single(mainGrantsWhileLoaded!);
+        Assert.Equal(sharedGrant.Path, mainGrantsWhileLoaded[0].Path);
+
+        _service.UnloadConfig(path, database);
+
+        var remainingGrants = database.GetAccount(sid)?.Grants;
+        Assert.NotNull(remainingGrants);
+        Assert.Single(remainingGrants!);
+        Assert.Equal(sharedGrant.Path, remainingGrants[0].Path);
+    }
+
+    [Fact]
+    public void LoadAdditionalConfig_DuplicateMainSharedTraverseGrant_PreservesMainOwnershipDuringFilterAndUnload()
+    {
+        var sharedEntry = new GrantedPathEntry { Path = @"C:\shared-main-traverse", IsTraverseOnly = true };
+        var path = CreateConfigFile(accounts:
+        [
+            new AppConfigAccountEntry
+            {
+                Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                Grants = [sharedEntry.Clone()]
+            }
+        ]);
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(sharedEntry.Clone());
+        UseDatabase(database);
+
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        var filteredWhileLoaded = _index.FilterForMainConfig(database);
+        var filteredAccount = Assert.Single(filteredWhileLoaded.Accounts);
+        Assert.Equal(sharedEntry.Path, Assert.Single(filteredAccount.Grants).Path);
+
+        _service.UnloadConfig(path, database);
+
+        var remainingAccount = Assert.Single(database.Accounts);
+        Assert.Equal(sharedEntry.Path, Assert.Single(remainingAccount.Grants).Path);
+    }
+
+    [Fact]
+    public void SaveConfigForApp_AdditionalConfig_IncludesAllApplicationPackagesTraverseEntriesInAccounts()
     {
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
         var sharedEntry = new GrantedPathEntry { Path = @"C:\shared", IsTraverseOnly = true };
-        var path = CreateConfigFile([app], sharedContainerTraverseGrants: [sharedEntry]);
+        var path = CreateConfigFile([app], accounts:
+        [
+            new AppConfigAccountEntry
+            {
+                Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                Grants = [sharedEntry]
+            }
+        ]);
         var database = new AppDatabase();
         _service.LoadAdditionalConfig(path, database, _pinKey);
 
@@ -403,25 +689,92 @@ public class AppConfigServiceTests : IDisposable
 
         _dbService.Verify(d => d.SaveAppConfig(
             It.Is<AppConfig>(c =>
-                c.SharedContainerTraverseGrants != null &&
-                c.SharedContainerTraverseGrants.Single().Path == @"C:\shared"),
+                c.Accounts != null &&
+                c.Accounts.Count == 1 &&
+                c.Accounts[0].Sid == WellKnownSecuritySids.AllApplicationPackagesSid &&
+                c.Accounts[0].Grants.Single().Path == @"C:\shared" &&
+                c.Accounts[0].Grants.Single().IsTraverseOnly),
             Path.GetFullPath(path),
             _pinKey, _argonSalt), Times.Once);
     }
 
     [Fact]
-    public void AssignGrant_RemoveGrant_Tracking()
+    public void SaveConfigForApp_AdditionalConfig_AllApplicationPackagesGrant_StaysInAccounts()
     {
-        var sid = "S-1-5-21-1-1-1-1001";
-        var entry = new GrantedPathEntry { Path = @"C:\foo" };
-        var configPath = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
-        File.WriteAllText(configPath, "stub");
+        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
+        var path = CreateConfigFile([app], accounts:
+        [
+            new AppConfigAccountEntry
+            {
+                Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                Grants =
+                [
+                    new GrantedPathEntry
+                    {
+                        Path = @"C:\aap-extra-grant",
+                        SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+                    }
+                ]
+            }
+        ]);
+        var database = new AppDatabase();
+        _service.LoadAdditionalConfig(path, database, _pinKey);
 
-        _grantTracker.AssignGrant(sid, entry, configPath);
-        Assert.Equal(Path.GetFullPath(configPath), _grantTracker.GetGrantConfigPath(sid, entry));
+        _service.SaveConfigForApp(app.Id, database, _pinKey, _argonSalt);
 
-        _grantTracker.RemoveGrant(sid, entry);
-        Assert.Null(_grantTracker.GetGrantConfigPath(sid, entry));
+        _dbService.Verify(d => d.SaveAppConfig(
+            It.Is<AppConfig>(c =>
+                c.Accounts != null &&
+                c.Accounts.Count == 1 &&
+                c.Accounts[0].Sid == WellKnownSecuritySids.AllApplicationPackagesSid &&
+                c.Accounts[0].Grants.Count == 1 &&
+                c.Accounts[0].Grants[0].Path == @"C:\aap-extra-grant" &&
+                !c.Accounts[0].Grants[0].IsTraverseOnly),
+            Path.GetFullPath(path),
+            _pinKey, _argonSalt), Times.Once);
+    }
+
+    [Fact]
+    public void SaveConfigForApp_AdditionalConfig_AllApplicationPackagesGrant_DoesNotDuplicateSharedTraverseIntoAccounts()
+    {
+        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
+        var path = CreateConfigFile(
+            [app],
+            accounts:
+            [
+                new AppConfigAccountEntry
+                {
+                    Sid = WellKnownSecuritySids.AllApplicationPackagesSid,
+                    Grants =
+                    [
+                        new GrantedPathEntry
+                        {
+                            Path = @"C:\aap-extra-grant",
+                            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
+                        },
+                        new GrantedPathEntry
+                        {
+                            Path = @"C:\aap-extra-traverse",
+                            IsTraverseOnly = true
+                        }
+                    ]
+                }
+            ]);
+        var database = new AppDatabase();
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        _service.SaveConfigForApp(app.Id, database, _pinKey, _argonSalt);
+
+        _dbService.Verify(d => d.SaveAppConfig(
+            It.Is<AppConfig>(c =>
+                c.Accounts != null &&
+                c.Accounts.Count == 1 &&
+                c.Accounts[0].Sid == WellKnownSecuritySids.AllApplicationPackagesSid &&
+                c.Accounts[0].Grants.Count == 2 &&
+                c.Accounts[0].Grants.Any(grant => grant.Path == @"C:\aap-extra-grant" && !grant.IsTraverseOnly) &&
+                c.Accounts[0].Grants.Any(grant => grant.Path == @"C:\aap-extra-traverse" && grant.IsTraverseOnly)),
+            Path.GetFullPath(path),
+            _pinKey, _argonSalt), Times.Once);
     }
 
     // --- SaveConfigForApp ---
@@ -463,6 +816,37 @@ public class AppConfigServiceTests : IDisposable
     }
 
     [Fact]
+    public void SaveConfigForApp_AdditionalConfig_IncludesOnlySelectedStoreAccountGrants_WhenMainOwnershipAlsoExists()
+    {
+        const string sid = "S-1-5-21-1-1-1-4001";
+        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App" };
+        var sharedGrant = new GrantedPathEntry { Path = @"C:\shared" };
+        var additionalOnlyGrant = new GrantedPathEntry { Path = @"C:\additional-only" };
+        var mainOnlyGrant = new GrantedPathEntry { Path = @"C:\main-only" };
+        var path = CreateConfigFile(
+            [app],
+            accounts: [new AppConfigAccountEntry
+            {
+                Sid = sid,
+                Grants = [sharedGrant.Clone(), additionalOnlyGrant.Clone()]
+            }]);
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(sid).Grants.Add(sharedGrant.Clone());
+        database.GetOrCreateAccount(sid).Grants.Add(mainOnlyGrant);
+        _service.LoadAdditionalConfig(path, database, _pinKey);
+
+        _service.SaveConfigForApp(app.Id, database, _pinKey, _argonSalt);
+
+        _dbService.Verify(d => d.SaveAppConfig(
+            It.Is<AppConfig>(c =>
+                HasGrantPaths(c, sid, @"C:\additional-only", @"C:\shared") &&
+                !HasGrantPath(c, sid, @"C:\main-only")),
+            Path.GetFullPath(path),
+            _pinKey,
+            _argonSalt), Times.Once);
+    }
+
+    [Fact]
     public void SaveConfigForApp_MainConfig_CallsSaveConfig()
     {
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "MainApp" };
@@ -472,7 +856,7 @@ public class AppConfigServiceTests : IDisposable
 
         _dbService.Verify(d => d.SaveConfig(database, _pinKey, _argonSalt), Times.Once);
         _dbService.Verify(d => d.SaveAppConfig(
-                It.IsAny<AppConfig>(), It.IsAny<string>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()),
+                It.IsAny<AppConfig>(), It.IsAny<string>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()),
             Times.Never);
     }
 
@@ -494,6 +878,57 @@ public class AppConfigServiceTests : IDisposable
             It.IsAny<AppConfig>(), Path.GetFullPath(path1), _pinKey, _argonSalt), Times.Once);
         _dbService.Verify(d => d.SaveAppConfig(
             It.IsAny<AppConfig>(), Path.GetFullPath(path2), _pinKey, _argonSalt), Times.Once);
+    }
+
+    [Fact]
+    public void SaveAllConfigs_AdditionalConfigPayloads_UseOnlyEachConfigGrantStore()
+    {
+        const string sid = "S-1-5-21-1-1-1-4002";
+        var app1 = new AppEntry { Id = AppEntry.GenerateId(), Name = "App1" };
+        var app2 = new AppEntry { Id = AppEntry.GenerateId(), Name = "App2" };
+        var path1 = CreateConfigFile(
+            [app1],
+            accounts: [new AppConfigAccountEntry
+            {
+                Sid = sid,
+                Grants =
+                [
+                    new GrantedPathEntry { Path = @"C:\shared" },
+                    new GrantedPathEntry { Path = @"C:\path1-only" }
+                ]
+            }]);
+        var path2 = CreateConfigFile(
+            [app2],
+            accounts: [new AppConfigAccountEntry
+            {
+                Sid = sid,
+                Grants = [new GrantedPathEntry { Path = @"C:\path2-only" }]
+            }]);
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(sid).Grants.Add(new GrantedPathEntry { Path = @"C:\shared" });
+        database.GetOrCreateAccount(sid).Grants.Add(new GrantedPathEntry { Path = @"C:\main-only" });
+        _service.LoadAdditionalConfig(path1, database, _pinKey);
+        _service.LoadAdditionalConfig(path2, database, _pinKey);
+
+        var savedConfigs = new Dictionary<string, AppConfig>(StringComparer.OrdinalIgnoreCase);
+        _dbService.Setup(d => d.SaveAppConfig(
+                It.IsAny<AppConfig>(),
+                It.IsAny<string>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()))
+            .Callback<AppConfig, string, ISecureSecretSnapshotSource, byte[]>((config, configPath, _, _) =>
+                savedConfigs[configPath] = config);
+
+        _service.SaveAllConfigs(database, _pinKey, _argonSalt);
+
+        Assert.True(savedConfigs.ContainsKey(Path.GetFullPath(path1)));
+        Assert.True(savedConfigs.ContainsKey(Path.GetFullPath(path2)));
+        Assert.True(HasGrantPaths(savedConfigs[Path.GetFullPath(path1)], sid, @"C:\path1-only", @"C:\shared"));
+        Assert.False(HasGrantPath(savedConfigs[Path.GetFullPath(path1)], sid, @"C:\main-only"));
+        Assert.False(HasGrantPath(savedConfigs[Path.GetFullPath(path1)], sid, @"C:\path2-only"));
+        Assert.True(HasGrantPaths(savedConfigs[Path.GetFullPath(path2)], sid, @"C:\path2-only"));
+        Assert.False(HasGrantPath(savedConfigs[Path.GetFullPath(path2)], sid, @"C:\shared"));
+        Assert.False(HasGrantPath(savedConfigs[Path.GetFullPath(path2)], sid, @"C:\main-only"));
     }
 
     [Fact]
@@ -523,6 +958,28 @@ public class AppConfigServiceTests : IDisposable
             _pinKey, _argonSalt), Times.Once);
     }
 
+    [Fact]
+    public void SaveImportedConfig_InvalidAppId_ThrowsInvalidAppIdExceptionWithoutRewritingId()
+    {
+        var path = Path.Combine(_tempDir.Path, $"{Guid.NewGuid():N}.ramc");
+        var config = new AppConfig
+        {
+            Apps = [new AppEntry { Id = @"..\bad", Name = "Imported" }]
+        };
+
+        var ex = Assert.Throws<InvalidAppIdException>(() =>
+            _service.SaveImportedConfig(path, config, _pinKey, _argonSalt));
+
+        Assert.Equal(@"..\bad", config.Apps[0].Id);
+        Assert.Contains("invalid", ex.Message, StringComparison.OrdinalIgnoreCase);
+        _dbService.Verify(d => d.SaveAppConfig(
+                It.IsAny<AppConfig>(),
+                It.IsAny<string>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()),
+            Times.Never);
+    }
+
     // --- GetLoadedConfigPaths (ordered) ---
 
     // --- ReencryptAndSaveAll ---
@@ -540,8 +997,7 @@ public class AppConfigServiceTests : IDisposable
         _service.LoadAdditionalConfig(path1, database, _pinKey);
         _service.LoadAdditionalConfig(path2, database, _pinKey);
 
-        var newKey = new byte[32];
-        new Random(88).NextBytes(newKey);
+        using var newKey = TestSecretFactory.Create(32);
         var store = new CredentialStore
         {
             ArgonSalt = _argonSalt,
@@ -549,14 +1005,14 @@ public class AppConfigServiceTests : IDisposable
         };
 
         List<(string, AppConfig)>? capturedConfigs = null;
-        byte[]? capturedKey = null;
+        ISecureSecretSnapshotSource? capturedKey = null;
         _dbService
             .Setup(d => d.SaveCredentialStoreAndAllConfigs(
                 It.IsAny<CredentialStore>(),
                 It.IsAny<AppDatabase>(),
-                It.IsAny<byte[]>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
                 It.IsAny<List<(string, AppConfig)>>()))
-            .Callback<CredentialStore, AppDatabase, byte[], List<(string, AppConfig)>>(
+            .Callback<CredentialStore, AppDatabase, ISecureSecretSnapshotSource, List<(string, AppConfig)>>(
                 (_, _, key, configs) =>
                 {
                     capturedKey = key;
@@ -574,13 +1030,72 @@ public class AppConfigServiceTests : IDisposable
             It.IsAny<List<(string, AppConfig)>>()), Times.Once);
 
         Assert.NotNull(capturedKey);
-        Assert.Equal(newKey, capturedKey);
+        Assert.Same(newKey, capturedKey);
 
         // Both additional configs must be included
         Assert.NotNull(capturedConfigs);
         Assert.Equal(2, capturedConfigs!.Count);
         Assert.Contains(capturedConfigs, c => c.Item1 == Path.GetFullPath(path1));
         Assert.Contains(capturedConfigs, c => c.Item1 == Path.GetFullPath(path2));
+    }
+
+    [Fact]
+    public void ReencryptAndSaveAll_AdditionalConfigPayloads_UseOnlyEachConfigGrantStore()
+    {
+        const string sid = "S-1-5-21-1-1-1-4003";
+        var app1 = new AppEntry { Id = AppEntry.GenerateId(), Name = "App1" };
+        var app2 = new AppEntry { Id = AppEntry.GenerateId(), Name = "App2" };
+        var path1 = CreateConfigFile(
+            [app1],
+            accounts: [new AppConfigAccountEntry
+            {
+                Sid = sid,
+                Grants =
+                [
+                    new GrantedPathEntry { Path = @"C:\shared" },
+                    new GrantedPathEntry { Path = @"C:\path1-only" }
+                ]
+            }]);
+        var path2 = CreateConfigFile(
+            [app2],
+            accounts: [new AppConfigAccountEntry
+            {
+                Sid = sid,
+                Grants = [new GrantedPathEntry { Path = @"C:\path2-only" }]
+            }]);
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(sid).Grants.Add(new GrantedPathEntry { Path = @"C:\shared" });
+        database.GetOrCreateAccount(sid).Grants.Add(new GrantedPathEntry { Path = @"C:\main-only" });
+        _service.LoadAdditionalConfig(path1, database, _pinKey);
+        _service.LoadAdditionalConfig(path2, database, _pinKey);
+
+        var store = new CredentialStore
+        {
+            ArgonSalt = _argonSalt,
+            EncryptedCanary = [1, 2, 3]
+        };
+        using var newKey = TestSecretFactory.Create(32);
+        List<(string, AppConfig)>? capturedConfigs = null;
+        _dbService
+            .Setup(d => d.SaveCredentialStoreAndAllConfigs(
+                It.IsAny<CredentialStore>(),
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<List<(string, AppConfig)>>()))
+            .Callback<CredentialStore, AppDatabase, ISecureSecretSnapshotSource, List<(string, AppConfig)>>(
+                (_, _, _, configs) => capturedConfigs = configs);
+
+        _service.ReencryptAndSaveAll(store, database, newKey);
+
+        Assert.NotNull(capturedConfigs);
+        var path1Config = capturedConfigs!.Single(c => string.Equals(c.Item1, Path.GetFullPath(path1), StringComparison.OrdinalIgnoreCase)).Item2;
+        var path2Config = capturedConfigs.Single(c => string.Equals(c.Item1, Path.GetFullPath(path2), StringComparison.OrdinalIgnoreCase)).Item2;
+        Assert.True(HasGrantPaths(path1Config, sid, @"C:\path1-only", @"C:\shared"));
+        Assert.False(HasGrantPath(path1Config, sid, @"C:\main-only"));
+        Assert.False(HasGrantPath(path1Config, sid, @"C:\path2-only"));
+        Assert.True(HasGrantPaths(path2Config, sid, @"C:\path2-only"));
+        Assert.False(HasGrantPath(path2Config, sid, @"C:\shared"));
+        Assert.False(HasGrantPath(path2Config, sid, @"C:\main-only"));
     }
 
     [Fact]
@@ -593,17 +1108,16 @@ public class AppConfigServiceTests : IDisposable
             EncryptedCanary = [1, 2, 3]
         };
         var database = new AppDatabase();
-        var newKey = new byte[32];
-        new Random(77).NextBytes(newKey);
+        using var newKey = TestSecretFactory.Create(32);
 
         List<(string, AppConfig)>? capturedConfigs = null;
         _dbService
             .Setup(d => d.SaveCredentialStoreAndAllConfigs(
                 It.IsAny<CredentialStore>(),
                 It.IsAny<AppDatabase>(),
-                It.IsAny<byte[]>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
                 It.IsAny<List<(string, AppConfig)>>()))
-            .Callback<CredentialStore, AppDatabase, byte[], List<(string, AppConfig)>>(
+            .Callback<CredentialStore, AppDatabase, ISecureSecretSnapshotSource, List<(string, AppConfig)>>(
                 (_, _, _, configs) => capturedConfigs = configs);
 
         // Act
@@ -892,5 +1406,34 @@ public class AppConfigServiceTests : IDisposable
 
         var effective = _handlerMappings.GetEffectiveHandlerMappings(database);
         Assert.False(effective.ContainsKey("http"));
+    }
+
+    private string? GetGrantConfigPath(string sid, GrantedPathEntry entry)
+        => (entry.IsTraverseOnly
+                ? _grantIntentRepository.FindTraverse(sid, entry)
+                : _grantIntentRepository.FindGrant(sid, entry))
+            ?.Store.ConfigPath;
+
+    private static bool HasGrantPath(AppConfig config, string sid, string path)
+        => config.Accounts?.Any(account =>
+            string.Equals(account.Sid, sid, StringComparison.OrdinalIgnoreCase) &&
+            account.Grants.Any(grant =>
+                string.Equals(grant.Path, path, StringComparison.OrdinalIgnoreCase))) == true;
+
+    private static bool HasGrantPaths(AppConfig config, string sid, params string[] expectedPaths)
+    {
+        var account = config.Accounts?.SingleOrDefault(candidate =>
+            string.Equals(candidate.Sid, sid, StringComparison.OrdinalIgnoreCase));
+        if (account == null)
+            return false;
+
+        var actualPaths = account.Grants
+            .Select(grant => grant.Path)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var expected = expectedPaths
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return actualPaths.SequenceEqual(expected, StringComparer.OrdinalIgnoreCase);
     }
 }

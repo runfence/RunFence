@@ -18,11 +18,11 @@ public class ShortcutTargetResolver(IShortcutComHelper shortcutHelper)
     /// </summary>
     public ResolvedShortcut? TryResolveShortcut(string lnkPath, IReadOnlyList<AppEntry> apps)
     {
-        var info = shortcutHelper.GetShortcutTargetAndArgs(lnkPath);
-        if (string.IsNullOrEmpty(info.Target))
+        var info = shortcutHelper.GetShortcutDefinition(lnkPath);
+        if (string.IsNullOrEmpty(info.TargetPath))
             return null;
 
-        if (string.Equals(Path.GetFileName(info.Target), PathConstants.LauncherExeName, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(Path.GetFileName(info.TargetPath), PathConstants.LauncherExeName, StringComparison.OrdinalIgnoreCase))
         {
             string? appId = null;
             if (!string.IsNullOrEmpty(info.Arguments))
@@ -44,7 +44,7 @@ public class ShortcutTargetResolver(IShortcutComHelper shortcutHelper)
         }
 
         return new ResolvedShortcut(
-            info.Target,
+            info.TargetPath,
             string.IsNullOrEmpty(info.Arguments) ? null : info.Arguments,
             string.IsNullOrEmpty(info.WorkingDirectory) ? null : info.WorkingDirectory,
             new ShortcutContext(lnkPath, false, null));

@@ -9,22 +9,33 @@ namespace RunFence.Launch.Tokens;
 /// Handles ERROR_LOGON_TYPE_NOT_GRANTED by temporarily granting SeInteractiveLogonRight
 /// via <see cref="IInteractiveLogonHelper.RunWithLogonRetry{T}"/>.
 /// </summary>
-public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper logonHelper, IExplorerTokenProvider explorerTokenProvider, ISystemTokenProvider systemTokenProvider) : ILogonTokenProvider
+public class LogonTokenProvider(
+    ILoggingService log,
+    IInteractiveLogonHelper logonHelper,
+    IExplorerTokenProvider explorerTokenProvider,
+    ISystemTokenProvider systemTokenProvider) : ILogonTokenProvider
 {
     /// <summary>
     /// Acquires a logon token for the given credentials, or opens the current process token
     /// when <paramref name="password"/> is null (current-account launch).
     /// </summary>
-    public IntPtr AcquireLogonToken(ProtectedString? password, string? domain,
-        string? username, LaunchTokenSource tokenSource = LaunchTokenSource.Credentials)
+    public IntPtr AcquireLogonToken(
+        ProtectedString? password,
+        string? domain,
+        string? username,
+        LaunchTokenSource tokenSource = LaunchTokenSource.Credentials)
     {
         switch (tokenSource)
         {
             case LaunchTokenSource.CurrentProcess:
-                if (!ProcessNative.OpenProcessToken(ProcessNative.GetCurrentProcess(),
+                if (!ProcessNative.OpenProcessToken(
+                        ProcessNative.GetCurrentProcess(),
                         ProcessLaunchNative.TOKEN_DUPLICATE | ProcessLaunchNative.TOKEN_QUERY,
                         out var hProcessToken))
+                {
                     throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                }
+
                 return hProcessToken;
 
             case LaunchTokenSource.SystemAccount:
@@ -37,18 +48,15 @@ public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper log
                 }
                 catch when (password != null)
                 {
-                    // Explorer token failed but stored credentials are available — fall back to LogonUser
                     log.Warn("AcquireLogonToken: Explorer token unavailable, falling back to stored credentials.");
-                    var fallbackPtr = password.AllocUnicode();
-                    try
+                    IntPtr fallbackToken = IntPtr.Zero;
+                    password.UseUnicodeSnapshot(snapshot =>
                     {
-                        return logonHelper.RunWithLogonRetry(domain, username,
-                            () => LogonUserOrThrow(username!, domain, fallbackPtr));
-                    }
-                    finally
-                    {
-                        Marshal.ZeroFreeGlobalAllocUnicode(fallbackPtr);
-                    }
+                        IntPtr passwordPtr = snapshot.DangerousGetIntPtr();
+                        fallbackToken = logonHelper.RunWithLogonRetry(domain, username,
+                            () => LogonUserOrThrow(username!, domain, passwordPtr));
+                    });
+                    return fallbackToken;
                 }
 
             default:
@@ -56,16 +64,14 @@ public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper log
                 if (password == null)
                     throw new ArgumentException("Password is required for Credentials token source.", nameof(password));
 
-                var passwordPtr = password.AllocUnicode();
-                try
+                IntPtr token = IntPtr.Zero;
+                password.UseUnicodeSnapshot(snapshot =>
                 {
-                    return logonHelper.RunWithLogonRetry(domain, username,
+                    IntPtr passwordPtr = snapshot.DangerousGetIntPtr();
+                    token = logonHelper.RunWithLogonRetry(domain, username,
                         () => LogonUserOrThrow(username!, domain, passwordPtr));
-                }
-                finally
-                {
-                    Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
-                }
+                });
+                return token;
             }
         }
     }
@@ -74,14 +80,19 @@ public class LogonTokenProvider(ILoggingService log, IInteractiveLogonHelper log
     {
         if (TryLogonUser(username, domain, passwordPtr, out var hToken, out var error))
             return hToken;
+
         throw new System.ComponentModel.Win32Exception(error);
     }
 
-    private static bool TryLogonUser(string username, string? domain, IntPtr passwordPtr,
-        out IntPtr hToken, out int error)
+    private static bool TryLogonUser(string username, string? domain, IntPtr passwordPtr, out IntPtr hToken, out int error)
     {
-        if (ProcessLaunchNative.LogonUser(username, domain, passwordPtr,
-                ProcessLaunchNative.LOGON32_LOGON_INTERACTIVE, ProcessLaunchNative.LOGON32_PROVIDER_DEFAULT, out hToken))
+        if (ProcessLaunchNative.LogonUser(
+                username,
+                domain,
+                passwordPtr,
+                ProcessLaunchNative.LOGON32_LOGON_INTERACTIVE,
+                ProcessLaunchNative.LOGON32_PROVIDER_DEFAULT,
+                out hToken))
         {
             error = 0;
             return true;

@@ -1,52 +1,93 @@
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using System.Linq;
 
 namespace RunFence.Firewall;
 
 /// <summary>
 /// Applies an AllowInternet toggle for a single account by cloning its current firewall settings,
-/// setting the new value, persisting it via <see cref="FirewallAccountSettings.UpdateOrRemove"/>,
-/// and enforcing the rules via <see cref="IAccountFirewallSettingsApplier"/>.
-/// On <see cref="FirewallApplyPhase.AccountRules"/> failure, reverts the DB change and returns
-/// an error message. On <see cref="FirewallApplyPhase.GlobalIcmp"/> failure, returns a warning
-/// without rollback (rules were applied).
+/// setting the new value, and enforcing the rules via
+/// <see cref="IAccountFirewallSettingsApplier"/>.
+/// Blocking account-rule/WFP failures revert the in-memory settings and re-save when a blocking
+/// failure happened after persistence. Data-change notification is raised here after persisted
+/// or rollback state changes so callers do not need UI refresh coupling. Global ICMP enforcement
+/// failures are returned as warnings in <see cref="FirewallApplyResult.EnforcementEntries"/>
+/// and do not rollback the saved setting.
 /// </summary>
 public class AccountFirewallToggleService(
     IFirewallSettingsService firewallSettingsService,
     IAccountFirewallSettingsApplier firewallSettingsApplier,
+    ISessionSaver sessionSaver,
+    IDataChangeNotifier dataChangeNotifier,
     ILoggingService log) : IAccountFirewallToggle
 {
-    public string? SetAllowInternet(string sid, bool allow, FirewallAccountSettings? existing)
+    public SetAllowInternetResult SetAllowInternet(string sid, bool allow, FirewallAccountSettings? existing)
     {
         var settings = existing?.Clone() ?? new FirewallAccountSettings();
         var previousSettings = settings.Clone();
         settings.AllowInternet = allow;
 
         var (database, resolvedUsername) = firewallSettingsService.GetDatabaseAndUsername(sid);
-        FirewallAccountSettings.UpdateOrRemove(database, sid, settings);
-
-        var finalSettings = database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings();
-        try
+        var applyResult = firewallSettingsApplier.ApplyAccountFirewallSettings(
+            sid,
+            resolvedUsername,
+            previousSettings,
+            settings,
+            database,
+            sessionSaver.SaveConfig);
+        if (applyResult.HasBlockingFailure)
         {
-            firewallSettingsApplier.ApplyAccountFirewallSettings(
-                sid,
-                resolvedUsername,
-                previousSettings,
-                finalSettings,
-                database);
-            return null;
-        }
-        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.AccountRules)
-        {
-            log.Error($"Failed to apply firewall rules for {resolvedUsername}", ex);
+            var blockingFailure = applyResult.FirstBlockingFailure!;
+            string? rollbackSaveError = null;
             FirewallAccountSettings.UpdateOrRemove(database, sid, previousSettings);
-            return ex.CauseMessage;
+            if (applyResult.ConfigSaved)
+            {
+                try
+                {
+                    sessionSaver.SaveConfig();
+                }
+                catch (Exception ex)
+                {
+                    log.Error($"Failed to save firewall rollback for {resolvedUsername}", ex);
+                    rollbackSaveError = ex.Message;
+                }
+            }
+
+            log.Error(
+                $"Failed to apply firewall rules for {resolvedUsername}",
+                new InvalidOperationException(blockingFailure.Error));
+            if (rollbackSaveError != null)
+            {
+                dataChangeNotifier.NotifyDataChanged();
+                return new SetAllowInternetResult(
+                    $"{blockingFailure.Error}{Environment.NewLine}Firewall rollback save: {rollbackSaveError}");
+            }
+
+            dataChangeNotifier.NotifyDataChanged();
+            return new SetAllowInternetResult(blockingFailure.Error);
         }
-        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.GlobalIcmp)
+
+        var warningEntries = applyResult.EnforcementEntries
+            .Where(entry => entry.Status == FirewallEnforcementStatus.RetryScheduled)
+            .ToList();
+        if (warningEntries.Count > 0)
         {
-            log.Error($"Failed to enforce global ICMP after applying firewall rules for {resolvedUsername}", ex);
-            return ex.CauseMessage;
+            dataChangeNotifier.NotifyDataChanged();
+            return new SetAllowInternetResult(
+                string.Join(
+                    Environment.NewLine,
+                    warningEntries.Select(entry =>
+                        $"{entry.Layer}: {entry.Error ?? "enforcement retry scheduled"}")));
         }
+
+        NotifyIfConfigSaved(applyResult);
+        return new SetAllowInternetResult(null);
+    }
+
+    private void NotifyIfConfigSaved(FirewallApplyResult applyResult)
+    {
+        if (applyResult.ConfigSaved)
+            dataChangeNotifier.NotifyDataChanged();
     }
 }

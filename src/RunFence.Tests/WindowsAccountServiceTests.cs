@@ -22,14 +22,12 @@ public class WindowsAccountServiceTests
         _log = new Mock<ILoggingService>();
         _restrictions = new Mock<IAccountLoginRestrictionService>();
         _accountValidation = new Mock<IAccountValidationService>();
-        var sidResolver = new Mock<ISidResolver>();
         _localUserProvider = new Mock<ILocalUserProvider>();
         _localSamSidResolver = new Mock<ILocalSamSidResolver>();
         _localAccountProvisioning = new Mock<ILocalAccountProvisioningService>();
         _service = new WindowsAccountService(
             _log.Object, _accountValidation.Object,
-            _restrictions.Object, sidResolver.Object,
-            new Mock<IProfilePathResolver>().Object,
+            _restrictions.Object,
             _localUserProvider.Object,
             _localSamSidResolver.Object,
             _localAccountProvisioning.Object,
@@ -78,7 +76,7 @@ public class WindowsAccountServiceTests
             .Setup(v => v.ValidateNotCurrentAccount(sid, "delete"))
             .Throws(new InvalidOperationException("Cannot delete the current account."));
 
-        var ex = Assert.Throws<InvalidOperationException>(() => _service.DeleteUser(sid));
+        var ex = Assert.Throws<InvalidOperationException>(() => _service.DeleteSamAccount(sid));
         Assert.Contains("current account", ex.Message, StringComparison.OrdinalIgnoreCase);
         _accountValidation.Verify(v => v.ValidateNotCurrentAccount(sid, "delete"), Times.Once);
     }
@@ -91,7 +89,7 @@ public class WindowsAccountServiceTests
             .Setup(v => v.ValidateNotLastAdmin(sid, "delete"))
             .Throws(new InvalidOperationException("Cannot delete the last administrator account."));
 
-        var ex = Assert.Throws<InvalidOperationException>(() => _service.DeleteUser(sid));
+        var ex = Assert.Throws<InvalidOperationException>(() => _service.DeleteSamAccount(sid));
         Assert.Contains("administrator", ex.Message, StringComparison.OrdinalIgnoreCase);
         _accountValidation.Verify(v => v.ValidateNotLastAdmin(sid, "delete"), Times.Once);
     }
@@ -104,7 +102,7 @@ public class WindowsAccountServiceTests
             .Setup(v => v.ValidateNotInteractiveUser(sid, "delete"))
             .Throws(new InvalidOperationException("Cannot delete the currently logged-in account."));
 
-        var ex = Assert.Throws<InvalidOperationException>(() => _service.DeleteUser(sid));
+        var ex = Assert.Throws<InvalidOperationException>(() => _service.DeleteSamAccount(sid));
         Assert.Contains("logged-in", ex.Message, StringComparison.OrdinalIgnoreCase);
         _accountValidation.Verify(v => v.ValidateNotInteractiveUser(sid, "delete"), Times.Once);
     }
@@ -118,11 +116,22 @@ public class WindowsAccountServiceTests
             .Setup(p => p.DeleteLocalUserBySid(sid))
             .Throws(deletionFailure);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => _service.DeleteUser(sid));
+        var ex = Assert.Throws<InvalidOperationException>(() => _service.DeleteSamAccount(sid));
 
         Assert.Contains("Failed to delete account", ex.Message);
         Assert.Same(deletionFailure, ex.InnerException);
         _localAccountProvisioning.Verify(p => p.DeleteLocalUserBySid(sid), Times.Once);
+    }
+
+    [Fact]
+    public void DeleteUser_Success_DeletesOnlyLocalSamAccount()
+    {
+        var sid = "S-1-5-21-0-0-0-9999";
+
+        _service.DeleteSamAccount(sid);
+
+        _localAccountProvisioning.Verify(p => p.DeleteLocalUserBySid(sid), Times.Once);
+        _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Never);
     }
 
     // RenameAccount must always call IsAccountHidden exactly once before the rename attempt

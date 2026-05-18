@@ -38,6 +38,15 @@ public class AccountAclManagerLauncher(
         OpenAclManagerInternal(AclHelper.LowIntegritySid, isContainer: false, "Low Integrity", parent);
     }
 
+    public void OpenAppContainersAclManager(IWin32Window? parent)
+    {
+        OpenAclManagerInternal(
+            AclHelper.AllApplicationPackagesSid,
+            isContainer: false,
+            "App Containers",
+            parent);
+    }
+
     private void OpenAclManagerInternal(string sid, bool isContainer, string displayName, IWin32Window? parent)
     {
         using var owned = dialogFactory();

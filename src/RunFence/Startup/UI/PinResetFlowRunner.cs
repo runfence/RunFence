@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Persistence;
@@ -19,7 +18,7 @@ public class PinResetFlowRunner(
     : IPinResetFlowRunner
 {
     /// <inheritdoc/>
-    public (CredentialStore Store, byte[] Key)? RunResetFlow()
+    public PinResetResult? RunResetFlow()
     {
         // Defense-in-depth: this method shows interactive dialogs and must run inside a secure desktop
         // context (ISecureDesktopRunner.Run callback) to prevent UI spoofing attacks.
@@ -36,37 +35,47 @@ public class PinResetFlowRunner(
         if (confirm != DialogResult.Yes)
             return null;
 
-        CredentialStore? newStore = null;
-        byte[]? newKey = null;
+        PinResetResult? resetResult = null;
 
         using var setDlg = new PinDialog(PinDialogMode.Set);
         setDlg.ProcessingCallback = async (ProtectedString newPin, string? _) =>
         {
             try
             {
-                (newStore, newKey) = await Task.Run(() => pinService.ResetPin(newPin));
+                resetResult = await Task.Run(() => pinService.ResetPin(newPin));
 
                 var resetDb = new AppDatabase();
                 appInit.InitializeNewDatabase(resetDb);
-                appInit.EnsureCurrentAccountCredential(newStore);
-                databaseService.SaveCredentialStoreAndConfig(newStore, resetDb, newKey);
+                appInit.EnsureCurrentAccountCredential(resetResult.Store);
+                SecureSecret? key = null;
+                try
+                {
+                    key = resetResult.TakePinDerivedKey();
+                    databaseService.SaveCredentialStoreAndConfig(resetResult.Store, resetDb, key);
+                    resetResult = new PinResetResult(resetResult.Store, key);
+                    key = null;
+                }
+                finally
+                {
+                    key?.Dispose();
+                }
+
                 return null;
             }
             catch (Exception ex)
             {
-                if (newKey != null)
-                {
-                    CryptographicOperations.ZeroMemory(newKey);
-                    newKey = null;
-                }
-
+                resetResult?.Dispose();
+                resetResult = null;
                 return $"PIN reset failed: {ex.Message}";
             }
         };
 
         if (setDlg.ShowDialog() != DialogResult.OK)
+        {
+            resetResult?.Dispose();
             return null;
+        }
 
-        return (newStore!, newKey!);
+        return resetResult;
     }
 }

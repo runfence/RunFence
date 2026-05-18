@@ -3,7 +3,7 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Persistence.UI;
 
-public class ConfigManagementOrchestrator : IConfigManagementContext, IConfigAvailabilityChecker, IConfigManagementEventSource, IDisposable
+public class ConfigManagementOrchestrator : IConfigManagementContext, IAdditionalConfigLoadService, IConfigAvailabilityChecker, IConfigManagementEventSource, IDisposable
 {
     private readonly ISessionProvider _sessionProvider;
     private readonly ILoggingService _log;
@@ -54,10 +54,10 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IConfigAva
             _availabilityMonitor.AutoUnloadRequired += (_, unavailable) => AutoUnloadUnavailableConfigs(unavailable);
     }
 
-    public (bool success, string? errorMessage) LoadApps(string configPath)
+    public LoadAppsResult LoadApps(string configPath)
     {
         var result = _configLoadUnloadService.LoadApps(configPath);
-        if (result.success)
+        if (result.Succeeded)
         {
             DataRefreshRequested?.Invoke();
             TrayUpdateRequested?.Invoke();
@@ -69,6 +69,18 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IConfigAva
     public IReadOnlyList<string> GetLoadedConfigPaths()
         => _configLoadUnloadService.GetLoadedConfigPaths();
 
+    public LoadAppsResult LoadAppConfigBackup(string configPath)
+    {
+        var result = _configLoadUnloadService.LoadAppConfigBackup(configPath);
+        if (result.Succeeded)
+        {
+            DataRefreshRequested?.Invoke();
+            TrayUpdateRequested?.Invoke();
+            _configGrantPinHelper.PinAllGrantedFolders();
+        }
+
+        return result;
+    }
     public bool UnloadApps(string configPath)
     {
         var session = _sessionProvider.GetSession();
@@ -98,9 +110,6 @@ public class ConfigManagementOrchestrator : IConfigManagementContext, IConfigAva
 
     public CleanupAllAppsResult CleanupAllApps(bool isEnforcementInProgress, bool isOperationInProgress)
         => _shutdownCleanupService.CleanupAllApps(isEnforcementInProgress, isOperationInProgress);
-
-    public void TerminateEmptyJobKeepers()
-        => _shutdownCleanupService.TerminateEmptyJobKeepers();
 
     /// <summary>
     /// Sets the guard owner control used to disable UI during enforcement operations.

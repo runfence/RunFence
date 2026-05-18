@@ -5,13 +5,13 @@ using Timer = System.Windows.Forms.Timer;
 namespace RunFence.DragBridge;
 
 /// <summary>
-/// Unified DragBridge window: 64×64 DPI-aware drop target and drag source.
+/// Unified DragBridge window: 64x64 DPI-aware drop target and drag source.
 /// Green (down-arrow) = ready to receive dropped files.
 /// Blue (file/folder icon) = has files ready to drag to target app.
 /// Dropping captures files and immediately closes this window.
 /// Dragging delivers files and immediately closes this window; if files are unresolved
 /// (cross-user), sends a ResolveRequest and waits for the main app to resolve access
-/// — window stays open for retry. Dragging back onto self is a no-op.
+/// - window stays open for retry. Dragging back onto self is a no-op.
 /// Click without action = cancel. Auto-closes after 30 seconds of inactivity.
 /// </summary>
 public class DragBridgeWindow : Form
@@ -36,6 +36,7 @@ public class DragBridgeWindow : Form
     private Point _mouseDownPoint;
     private bool _isDragging; // true while DoDragDrop is executing
     private bool _droppedOnSelf; // set in OnDragDrop when a self-drop is detected
+    private bool _receiveStarted;
 
     public DragBridgeWindow(NamedPipeClientStream pipe, int cursorX, int cursorY, int runFencePid = 0, nint restoreHwnd = 0)
     {
@@ -71,40 +72,46 @@ public class DragBridgeWindow : Form
         _toolTip = new ToolTip { AutoPopDelay = 10_000, InitialDelay = 400 };
         UpdateTooltip();
 
-        _pipeClient = new DragBridgePipeClient(pipe, uiInvoker: this);
+        _pipeClient = new DragBridgePipeClient(pipe);
         _pipeClient.InitialFilesReceived += (files, resolved) =>
         {
-            _filePaths = files;
-            // Empty = drop mode (no files yet), pre-resolved = main app confirmed access.
-            // Otherwise start unresolved so the first drag triggers a resolve request.
-            _filesResolved = files.Count == 0 || resolved;
-            UpdateBackColor();
-            UpdateTooltip();
-            ResetAutoCloseTimer();
-            Invalidate();
+            TryPostToUi(() =>
+            {
+                _filePaths = files;
+                // Empty = drop mode (no files yet), pre-resolved = main app confirmed access.
+                // Otherwise start unresolved so the first drag triggers a resolve request.
+                _filesResolved = files.Count == 0 || resolved;
+                UpdateBackColor();
+                UpdateTooltip();
+                ResetAutoCloseTimer();
+                Invalidate();
+            });
         };
         _pipeClient.ResolveSucceeded += files =>
         {
-            _filePaths = files;
-            _filesResolved = true;
-            UpdateBackColor();
-            UpdateTooltip();
-            ResetAutoCloseTimer();
-            Invalidate();
+            TryPostToUi(() =>
+            {
+                _filePaths = files;
+                _filesResolved = true;
+                UpdateBackColor();
+                UpdateTooltip();
+                ResetAutoCloseTimer();
+                Invalidate();
+            });
         };
-        _pipeClient.ResolveCancelled += Close;
+        _pipeClient.ResolveCancelled += () => TryPostToUi(Close);
         _pipeClient.DropSent += files =>
         {
-            _filePaths = files;
-            _filesResolved = true; // dropped by window user — no resolution needed
-            UpdateBackColor();
-            UpdateTooltip();
-            Invalidate();
-            Close(); // close immediately after files are received
+            TryPostToUi(() =>
+            {
+                _filePaths = files;
+                _filesResolved = true; // dropped by window user - no resolution needed
+                UpdateBackColor();
+                UpdateTooltip();
+                Invalidate();
+            });
         };
-        _pipeClient.ResolvePendingCleared += () => _resolvePending = false;
-
-        _ = _pipeClient.ReceiveAndRunAsync();
+        _pipeClient.ResolvePendingCleared += () => TryPostToUi(() => _resolvePending = false);
     }
 
     protected override void OnLoad(EventArgs e)
@@ -123,6 +130,11 @@ public class DragBridgeWindow : Form
             WindowNative.SWP_NOMOVE | WindowNative.SWP_NOSIZE);
         WindowForegroundHelper.ForceToForeground(Handle);
         _topmostTimer.Start();
+        if (!_receiveStarted)
+        {
+            _receiveStarted = true;
+            _ = _pipeClient.ReceiveAndRunAsync();
+        }
     }
 
     // --- Drop handling ---
@@ -130,18 +142,26 @@ public class DragBridgeWindow : Form
     private void OnDragEnter(object? sender, DragEventArgs e)
         => e.Effect = e.Data?.GetDataPresent(DataFormats.FileDrop) == true ? DragDropEffects.Copy : DragDropEffects.None;
 
-    private void OnDragDrop(object? sender, DragEventArgs e)
+    private async void OnDragDrop(object? sender, DragEventArgs e)
     {
         if (e.Data?.GetData(DataFormats.FileDrop) is not string[] files || files.Length == 0)
             return;
         if (_isDragging)
         {
-            // Files were dragged from this window and dropped back onto it — ignore.
+            // Files were dragged from this window and dropped back onto it - ignore.
             _droppedOnSelf = true;
             return;
         }
 
-        _ = _pipeClient.SendDropAsync([.. files]);
+        var result = await _pipeClient.SendDropAsync([.. files]);
+        if (result.Succeeded)
+        {
+            Close();
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.ErrorMessage) && !IsDisposed && !Disposing)
+            MessageBox.Show(this, result.ErrorMessage, "DragBridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     // --- Mouse drag (send-only when has files; both buttons; resolution-aware) ---
@@ -187,7 +207,7 @@ public class DragBridgeWindow : Form
             return;
         }
 
-        // Files resolved — deliver
+        // Files resolved - deliver
         var dataObj = new DataObject(DataFormats.FileDrop, _filePaths.ToArray());
         _isDragging = true;
         DoDragDrop(dataObj, DragDropEffects.Copy);
@@ -231,6 +251,22 @@ public class DragBridgeWindow : Form
         _autoCloseTimer.Start();
     }
 
+    private bool TryPostToUi(Action action)
+    {
+        if (IsDisposed || Disposing || !IsHandleCreated)
+            return false;
+
+        try
+        {
+            BeginInvoke(action);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
     // --- Painting ---
 
     private void OnPaint(object? sender, PaintEventArgs e) =>
@@ -253,7 +289,7 @@ public class DragBridgeWindow : Form
     {
         base.OnFormClosing(e);
         // Restore focus before the window is destroyed. Must happen in OnFormClosing (not OnFormClosed)
-        // — by OnFormClosed, Windows has already transferred foreground and SetForegroundWindow is
+        // - by OnFormClosed, Windows has already transferred foreground and SetForegroundWindow is
         // silently ignored. Plain SetForegroundWindow works here because DragBridge is still the
         // foreground process at this point.
         // Use the WM_ACTIVATE-tracked window if available; fall back to the hotkey-time capture
@@ -271,14 +307,14 @@ public class DragBridgeWindow : Form
             case WM_MOUSEACTIVATE:
                 // Don't activate DragBridge when the user clicks it while another window is active.
                 // This keeps the current foreground window (e.g. the app the user just switched to)
-                // focused: _hasActiveFocus stays false → OnFormClosing skips SetForegroundWindow →
+                // focused: _hasActiveFocus stays false -> OnFormClosing skips SetForegroundWindow ->
                 // the OS leaves whatever window was active before the click still in the foreground.
                 m.Result = MA_NOACTIVATE;
                 return;
             case WM_ACTIVATE when (m.WParam.ToInt32() & 0xFFFF) != WA_INACTIVE:
             {
                 // Gaining focus: lParam is the handle of the window losing activation.
-                // Skip RunFence's own windows — they appear between the user's real target window
+                // Skip RunFence's own windows - they appear between the user's real target window
                 // and DragBridge when DragBridge is clicked (e.g. user briefly visited RunFence's
                 // main form before clicking DragBridge to close it). Keeping the last non-RunFence
                 // window ensures we restore the source/target the user was working with.

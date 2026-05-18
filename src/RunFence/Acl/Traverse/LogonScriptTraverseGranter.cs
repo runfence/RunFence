@@ -13,6 +13,7 @@ public class LogonScriptTraverseGranter(
     AncestorTraverseGranter traverseGranter,
     IAclPermissionService aclPermission,
     ILoggingService log)
+    : ILogonScriptTraverseGranter
 {
     /// <summary>
     /// Grants traverse access on <paramref name="scriptsDirPath"/> and all ancestors for <paramref name="sid"/>.

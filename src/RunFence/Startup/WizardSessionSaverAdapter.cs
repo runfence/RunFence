@@ -12,11 +12,16 @@ public class WizardSessionSaverAdapter(
     ISessionProvider sessionProvider,
     IDataChangeNotifier dataChangeNotifier) : IWizardSessionSaver
 {
-    public void SaveAndRefresh()
+    public void SaveConfig()
     {
         var session = sessionProvider.GetSession();
         persistenceHelper.SaveCredentialStoreAndConfig(
             session.CredentialStore, session.Database, session.PinDerivedKey);
+    }
+
+    public void SaveAndRefresh()
+    {
+        SaveConfig();
         dataChangeNotifier.NotifyDataChanged();
     }
 }

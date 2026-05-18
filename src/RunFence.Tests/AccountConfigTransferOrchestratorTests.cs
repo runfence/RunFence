@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Moq;
 using RunFence.Account;
 using RunFence.Core;
@@ -9,46 +10,27 @@ using Xunit;
 
 namespace RunFence.Tests;
 
-/// <summary>
-/// Tests for <see cref="AccountConfigTransferOrchestrator"/>.
-///
-/// Coverage gap: Most post-PIN-dialog behaviors cannot be unit-tested because the orchestrator
-/// constructs <see cref="RunFence.Startup.UI.Forms.PinDialog"/> directly (not injectable) and
-/// calls <see cref="System.Windows.Forms.Form.ShowDialog"/>, which blocks until the user
-/// interacts with the dialog. The variable <c>completed</c> in
-/// <see cref="AccountConfigTransferOrchestrator.RunAsync"/> is a local closure variable —
-/// the only way to advance it to <c>true</c> is to call the action passed to
-/// <see cref="IModalCoordinator.RunOnSecureDesktop"/>, which triggers the blocking
-/// <c>ShowDialog</c>. Not calling the action leaves <c>completed = false</c> and the method
-/// returns early. All post-PIN paths are therefore inaccessible in automated unit tests.
-///
-/// Note: account selection (GetAvailableAccounts) is now the caller's responsibility;
-/// RunAsync receives the pre-selected targetSid and targetDisplayName directly.
-///
-/// Scenarios not covered here (require integration or manual testing):
-/// - MigrateToAccount called with the correct store snapshot, SID, password, and key
-/// - Error logging and MessageBox when MigrateToAccount throws
-/// - DeleteCurrentAccountData + onExit invoked when user confirms post-migration
-/// - App continues running when user declines post-migration deletion
-/// </summary>
 public class AccountConfigTransferOrchestratorTests : IDisposable
 {
-    private readonly Mock<IPinService> _pinService = new();
-    private readonly Mock<IModalCoordinator> _modalCoordinator = new();
+    private const string TargetSid = "S-1-5-21-test-sid";
+
     private readonly Mock<IAccountConfigMigrationService> _migrationService = new();
     private readonly Mock<ILocalGroupMembershipService> _localGroupMembership = new();
     private readonly Mock<ISidNameCacheService> _sidNameCache = new();
-    private readonly Mock<ICredentialEncryptionService> _encryptionService = new();
+    private readonly ICredentialEncryptionSpanService _encryptionService = new CredentialEncryptionService(new NativeDpapiProtector());
     private readonly Mock<ILoggingService> _log = new();
 
-    private readonly ProtectedBuffer _pinKey;
+    private readonly StubSecureDesktopService _secureDesktopService = new();
+    private readonly StubPromptService _promptService = new();
+
+    private readonly SecureSecret _pinKey;
     private readonly SessionContext _session;
 
     public AccountConfigTransferOrchestratorTests()
     {
-        _pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        _pinKey = TestSecretFactory.Create(32);
         _session = new SessionContext
-        {
+{
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore
             {
@@ -56,40 +38,263 @@ public class AccountConfigTransferOrchestratorTests : IDisposable
                 EncryptedCanary = [1, 2, 3],
                 Credentials = []
             },
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(_pinKey);
     }
 
-    public void Dispose() => _pinKey.Dispose();
+    public void Dispose() => _session.Dispose();
 
     private AccountConfigTransferOrchestrator CreateOrchestrator() =>
-        new(_pinService.Object, _modalCoordinator.Object, _migrationService.Object,
-            _localGroupMembership.Object, _sidNameCache.Object, _encryptionService.Object,
+        new(
+            _secureDesktopService,
+            _promptService,
+            _migrationService.Object,
+            _localGroupMembership.Object,
+            _sidNameCache.Object,
+            _encryptionService,
             _log.Object);
 
-    // ── PIN verification cancelled ────────────────────────────────────────────
+    [Fact]
+    public async Task RunAsync_DoesNotMigrate_WhenAuthorizationIsCanceled()
+    {
+        _secureDesktopService.StoredCredentialResult = new AccountConfigTransferAuthorizationResult(
+            Completed: false,
+            CapturedPassword: null,
+            ReplacementStore: _session.CredentialStore);
+        _session.CredentialStore.Credentials.Add(new CredentialEntry
+        {
+            Sid = TargetSid,
+            EncryptedPassword = [1]
+        });
+
+        await CreateOrchestrator().RunAsync(_session, TargetSid, () => { });
+
+        _migrationService.Verify(m => m.MigrateToAccount(
+            It.IsAny<CredentialStore>(), It.IsAny<string>(), It.IsAny<ProtectedString>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
+    }
 
     [Fact]
-    public async Task RunAsync_ReturnsSilently_WhenPinVerificationCancelled()
+    public async Task RunAsync_StoredCredentialFlow_InvokesMigrationAndExitsAfterDelete()
     {
-        // Arrange: RunOnSecureDesktop does NOT invoke its action, so completed stays false
-        // and the orchestrator returns early.
-        _modalCoordinator.Setup(m => m.RunOnSecureDesktop(It.IsAny<Action>()));
+        using var decryptedPassword = CreatePassword("stored-secret");
+        var encryptedPassword = _session.PinDerivedKey.TransformSnapshot(key => _encryptionService.Encrypt(decryptedPassword, key));
+        _session.CredentialStore.Credentials.Add(new CredentialEntry
+        {
+            Id = Guid.NewGuid(),
+            Sid = TargetSid,
+            EncryptedPassword = encryptedPassword
+        });
+        _secureDesktopService.StoredCredentialResult = new AccountConfigTransferAuthorizationResult(
+            Completed: true,
+            CapturedPassword: null,
+            ReplacementStore: CredentialStoreCloneHelper.CloneStore(_session.CredentialStore));
+        _promptService.ConfirmDeleteCurrentDataResult = true;
 
-        var orchestrator = CreateOrchestrator();
+        string? migratedPassword = null;
+        _migrationService.Setup(m => m.MigrateToAccount(
+                It.IsAny<CredentialStore>(), TargetSid, It.IsAny<ProtectedString>(), It.IsAny<ISecureSecretSnapshotSource>()))
+            .Callback<CredentialStore, string, ProtectedString, ISecureSecretSnapshotSource>((_, _, password, _) =>
+                migratedPassword = ProtectedStringToString(password));
+
         var exitCalled = false;
+        await CreateOrchestrator().RunAsync(_session, TargetSid, () => exitCalled = true);
 
-        // Act
-        await orchestrator.RunAsync(_session, "S-1-5-21-test-sid", "Test Account", () => { exitCalled = true; });
+        Assert.Equal("stored-secret", migratedPassword);
+        Assert.True(exitCalled);
+        _migrationService.Verify(m => m.DeleteCurrentAccountData(), Times.Once);
+    }
 
-        // Assert: RunOnSecureDesktop was called exactly once (PIN always prompted)
-        _modalCoordinator.Verify(m => m.RunOnSecureDesktop(It.IsAny<Action>()), Times.Once);
+    [Fact]
+    public async Task RunAsync_TypedPasswordFlow_UsesCapturedPasswordAndKeepsCurrentData_WhenCleanupDeclined()
+    {
+        var capturedPassword = CreatePassword("typed-secret");
+        _secureDesktopService.TypedPasswordResult = new AccountConfigTransferAuthorizationResult(
+            Completed: true,
+            CapturedPassword: capturedPassword,
+            ReplacementStore: CredentialStoreCloneHelper.CloneStore(_session.CredentialStore));
+        _promptService.ConfirmDeleteCurrentDataResult = false;
 
-        // Assert: no migration, no exit after PIN cancellation
-        _migrationService.Verify(m => m.MigrateToAccount(
-            It.IsAny<CredentialStore>(), It.IsAny<string>(),
-            It.IsAny<ProtectedString>(), It.IsAny<byte[]>()), Times.Never);
-        _migrationService.Verify(m => m.DeleteCurrentAccountData(), Times.Never);
+        string? migratedPassword = null;
+        _migrationService.Setup(m => m.MigrateToAccount(
+                It.IsAny<CredentialStore>(), TargetSid, It.IsAny<ProtectedString>(), It.IsAny<ISecureSecretSnapshotSource>()))
+            .Callback<CredentialStore, string, ProtectedString, ISecureSecretSnapshotSource>((_, _, password, _) =>
+                migratedPassword = ProtectedStringToString(password));
+
+        var exitCalled = false;
+        await CreateOrchestrator().RunAsync(_session, TargetSid, () => exitCalled = true);
+
+        Assert.Equal("typed-secret", migratedPassword);
         Assert.False(exitCalled);
+        _migrationService.Verify(m => m.DeleteCurrentAccountData(), Times.Never);
+    }
+
+    [Fact]
+    public async Task RunAsync_ShortCircuitsWhenUserDeclinesOverwrite()
+    {
+        _secureDesktopService.TypedPasswordResult = new AccountConfigTransferAuthorizationResult(
+            Completed: true,
+            CapturedPassword: CreatePassword("typed-secret"),
+            ReplacementStore: CredentialStoreCloneHelper.CloneStore(_session.CredentialStore));
+        _migrationService.Setup(m => m.TargetHasExistingData(TargetSid)).Returns(true);
+        _promptService.ConfirmOverwriteExistingDataResult = false;
+
+        await CreateOrchestrator().RunAsync(_session, TargetSid, () => { });
+
+        Assert.Equal(1, _promptService.ConfirmOverwriteExistingDataCalls);
+        _migrationService.Verify(m => m.MigrateToAccount(
+            It.IsAny<CredentialStore>(), It.IsAny<string>(), It.IsAny<ProtectedString>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task RunAsync_ShowsPrompt_WhenMigrationThrows()
+    {
+        var failure = new InvalidOperationException("boom");
+        _secureDesktopService.TypedPasswordResult = new AccountConfigTransferAuthorizationResult(
+            Completed: true,
+            CapturedPassword: CreatePassword("typed-secret"),
+            ReplacementStore: CredentialStoreCloneHelper.CloneStore(_session.CredentialStore));
+        _migrationService.Setup(m => m.MigrateToAccount(
+                It.IsAny<CredentialStore>(), It.IsAny<string>(), It.IsAny<ProtectedString>(), It.IsAny<ISecureSecretSnapshotSource>()))
+            .Throws(failure);
+
+        await CreateOrchestrator().RunAsync(_session, TargetSid, () => { });
+
+        Assert.Same(failure, _promptService.LastMigrationFailure);
+        _migrationService.Verify(m => m.DeleteCurrentAccountData(), Times.Never);
+    }
+
+    [Fact]
+    public async Task RunAsync_CallsExitWhenCleanupFails()
+    {
+        var failure = new IOException("cleanup failed");
+        _secureDesktopService.TypedPasswordResult = new AccountConfigTransferAuthorizationResult(
+            Completed: true,
+            CapturedPassword: CreatePassword("typed-secret"),
+            ReplacementStore: CredentialStoreCloneHelper.CloneStore(_session.CredentialStore));
+        _promptService.ConfirmDeleteCurrentDataResult = true;
+        _migrationService.Setup(m => m.DeleteCurrentAccountData()).Throws(failure);
+
+        var exitCalled = false;
+        await CreateOrchestrator().RunAsync(_session, TargetSid, () => exitCalled = true);
+
+        Assert.True(exitCalled);
+        Assert.Same(failure, _promptService.LastCleanupFailure);
+    }
+
+    [Fact]
+    public async Task RunAsync_CopiesOnlyDetachedStoreSnapshotIntoMigrationCall()
+    {
+        var sourceStore = new CredentialStore
+        {
+            ArgonSalt = [1, 2, 3, 4],
+            EncryptedCanary = [5, 6, 7],
+            Credentials =
+            [
+                new CredentialEntry
+                {
+                    Id = Guid.NewGuid(),
+                    Sid = TargetSid,
+                    EncryptedPassword = [9, 10]
+                }
+            ]
+        };
+        _session.CredentialStore = sourceStore;
+        var replacementStore = CredentialStoreCloneHelper.CloneStore(sourceStore);
+        _secureDesktopService.StoredCredentialResult = new AccountConfigTransferAuthorizationResult(
+            Completed: true,
+            CapturedPassword: null,
+            ReplacementStore: replacementStore);
+        using var decryptedPassword = CreatePassword("stored-secret");
+        replacementStore.Credentials[0].EncryptedPassword = _session.PinDerivedKey.TransformSnapshot(
+            key => _encryptionService.Encrypt(decryptedPassword, key));
+        _promptService.ConfirmDeleteCurrentDataResult = false;
+        CredentialStore? migratedStore = null;
+        _migrationService.Setup(m => m.MigrateToAccount(
+                It.IsAny<CredentialStore>(), It.IsAny<string>(), It.IsAny<ProtectedString>(), It.IsAny<ISecureSecretSnapshotSource>()))
+            .Callback<CredentialStore, string, ProtectedString, ISecureSecretSnapshotSource>((store, _, _, _) => migratedStore = store);
+
+        await CreateOrchestrator().RunAsync(_session, TargetSid, () => { });
+
+        Assert.NotNull(migratedStore);
+        Assert.NotSame(sourceStore, migratedStore);
+        Assert.NotSame(sourceStore.Credentials, migratedStore!.Credentials);
+    }
+
+    [Fact]
+    public async Task RunAsync_CapturedDisposedCurrentKey_ShowsMigrationFailedInsteadOfThrowing()
+    {
+        using var decryptedPassword = CreatePassword("stored-secret");
+        var encryptedPassword = _session.PinDerivedKey.TransformSnapshot(
+            key => _encryptionService.Encrypt(decryptedPassword, key));
+        _session.CredentialStore.Credentials.Add(new CredentialEntry
+        {
+            Id = Guid.NewGuid(),
+            Sid = TargetSid,
+            EncryptedPassword = encryptedPassword
+        });
+        _secureDesktopService.StoredCredentialResult = new AccountConfigTransferAuthorizationResult(
+            Completed: true,
+            CapturedPassword: null,
+            ReplacementStore: CredentialStoreCloneHelper.CloneStore(_session.CredentialStore));
+        _secureDesktopService.BeforeReturn = () =>
+            _session.ReplacePinDerivedKey(new SecureSecret(32, data => data.Fill(9)));
+
+        var exception = await Record.ExceptionAsync(() => CreateOrchestrator().RunAsync(_session, TargetSid, () => { }));
+
+        Assert.Null(exception);
+        Assert.IsType<ObjectDisposedException>(_promptService.LastMigrationFailure);
+        _migrationService.Verify(m => m.MigrateToAccount(
+            It.IsAny<CredentialStore>(), It.IsAny<string>(), It.IsAny<ProtectedString>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
+    }
+
+    private static ProtectedString CreatePassword(string value) => new(value.AsSpan(), protect: false);
+
+    private static string ProtectedStringToString(ProtectedString password)
+    {
+        return password.UseUnicodeSnapshot(snapshot =>
+            Marshal.PtrToStringUni(snapshot.DangerousGetIntPtr(), snapshot.CharCount) ?? string.Empty);
+    }
+
+    private sealed class StubSecureDesktopService : IAccountConfigTransferSecureDesktopService
+    {
+        public AccountConfigTransferAuthorizationResult? StoredCredentialResult { get; set; }
+        public AccountConfigTransferAuthorizationResult? TypedPasswordResult { get; set; }
+        public Action? BeforeReturn { get; set; }
+
+        public AccountConfigTransferAuthorizationResult AuthorizeStoredCredentialTransfer(
+            CredentialStore clonedStore,
+            string targetAccountSid)
+        {
+            BeforeReturn?.Invoke();
+            return StoredCredentialResult ?? new AccountConfigTransferAuthorizationResult(true, null, clonedStore);
+        }
+
+        public AccountConfigTransferAuthorizationResult AuthorizeTypedPasswordTransfer(
+            CredentialStore clonedStore,
+            string targetAccountSid)
+        {
+            BeforeReturn?.Invoke();
+            return TypedPasswordResult ?? new AccountConfigTransferAuthorizationResult(true, null, clonedStore);
+        }
+    }
+
+    private sealed class StubPromptService : IAccountConfigTransferPromptService
+    {
+        public bool ConfirmOverwriteExistingDataResult { get; set; } = true;
+        public bool ConfirmDeleteCurrentDataResult { get; set; } = true;
+        public int ConfirmOverwriteExistingDataCalls { get; private set; }
+        public Exception? LastMigrationFailure { get; private set; }
+        public Exception? LastCleanupFailure { get; private set; }
+
+        public bool ConfirmOverwriteExistingData(string targetAccountSid)
+        {
+            ConfirmOverwriteExistingDataCalls++;
+            return ConfirmOverwriteExistingDataResult;
+        }
+
+        public void ShowMigrationFailed(string targetAccountSid, Exception error) => LastMigrationFailure = error;
+
+        public bool ConfirmDeleteCurrentData(string targetAccountSid) => ConfirmDeleteCurrentDataResult;
+
+        public void ShowCleanupFailed(string targetAccountSid, Exception error) => LastCleanupFailure = error;
     }
 }

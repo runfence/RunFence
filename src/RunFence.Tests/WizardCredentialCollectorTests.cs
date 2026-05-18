@@ -19,22 +19,22 @@ public class WizardCredentialCollectorTests
     private static SessionContext CreateSession(bool addCredentialForSid = false)
     {
         var session = new SessionContext
-        {
+{
             Database = new AppDatabase(),
-            CredentialStore = new CredentialStore()
-        };
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
         if (addCredentialForSid)
             session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = Sid });
         return session;
     }
 
-    private WizardCredentialCollector CreateCollector() =>
-        new(_secureDesktopRunner.Object, _credentialDialogRunner.Object);
+    private WizardCredentialCollector CreateCollector(SessionContext session) =>
+        new(_secureDesktopRunner.Object, _credentialDialogRunner.Object, new LambdaSessionProvider(() => session));
 
     [Fact]
-    public void CollectIfNeeded_NoExistingCredential_InvokesRunAndDialogRunner()
+    public void CollectCredentialForStep_NoExistingCredential_InvokesRunAndDialogRunner()
     {
-        var session = CreateSession();
+        using var session = CreateSession();
         var runnerError = new InvalidOperationException("Dialog unavailable in test");
 
         _secureDesktopRunner
@@ -47,10 +47,10 @@ public class WizardCredentialCollectorTests
                 session.Database.SidNames))
             .Throws(runnerError);
 
-        var collector = CreateCollector();
+        var collector = CreateCollector(session);
 
-        var ex = Assert.Throws<OperationCanceledException>(() =>
-            collector.CollectIfNeeded(Sid, session, _progress.Object));
+        var ex = Assert.Throws<WizardReportedException>(() =>
+            collector.CollectCredentialForStep(Sid, _progress.Object));
 
         _secureDesktopRunner.Verify(r => r.Run(It.IsAny<Action>()), Times.Once);
         _credentialDialogRunner.Verify(r => r.ShowCredentialDialog(
@@ -58,13 +58,14 @@ public class WizardCredentialCollectorTests
             session.Database.SidNames), Times.Once);
         _progress.Verify(p => p.ReportError(
             It.Is<string>(s => s.Contains("Dialog unavailable in test"))), Times.Once);
-        Assert.Same(runnerError, ex.InnerException);
+        var inner = Assert.IsType<InvalidOperationException>(ex.InnerException);
+        Assert.Same(runnerError, inner.InnerException);
     }
 
     [Fact]
-    public void CollectIfNeeded_DialogOk_ReturnsPasswordWithoutError()
+    public void CollectCredentialForStep_DialogOk_ReturnsPasswordWithoutError()
     {
-        var session = CreateSession();
+        using var session = CreateSession();
         var password = ProtectedString.FromChars("WizardPass1!".AsSpan());
 
         _secureDesktopRunner
@@ -77,9 +78,9 @@ public class WizardCredentialCollectorTests
                 session.Database.SidNames))
             .Returns(new CredentialDialogResult(true, password));
 
-        var collector = CreateCollector();
+        var collector = CreateCollector(session);
 
-        var result = collector.CollectIfNeeded(Sid, session, _progress.Object);
+        var result = collector.CollectCredentialForStep(Sid, _progress.Object);
 
         Assert.Same(password, result);
         _secureDesktopRunner.Verify(r => r.Run(It.IsAny<Action>()), Times.Once);
@@ -87,12 +88,12 @@ public class WizardCredentialCollectorTests
     }
 
     [Fact]
-    public void CollectIfNeeded_AlreadyHasCredential_ReturnsNull()
+    public void CollectCredentialForStep_AlreadyHasCredential_ReturnsNull()
     {
-        var session = CreateSession(addCredentialForSid: true);
-        var collector = CreateCollector();
+        using var session = CreateSession(addCredentialForSid: true);
+        var collector = CreateCollector(session);
 
-        var result = collector.CollectIfNeeded(Sid, session, _progress.Object);
+        var result = collector.CollectCredentialForStep(Sid, _progress.Object);
 
         Assert.Null(result);
         _secureDesktopRunner.Verify(r => r.Run(It.IsAny<Action>()), Times.Never);
@@ -103,63 +104,11 @@ public class WizardCredentialCollectorTests
     }
 
     [Fact]
-    public void CollectIfNeeded_CredentialExistsForDifferentSid_ProceedsToCollection()
+    public void CollectCredentialForStep_CredentialExistsForDifferentSid_ProceedsToCollection()
     {
-        var session = CreateSession();
+        using var session = CreateSession();
         session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = OtherSid });
 
-        _secureDesktopRunner.Setup(r => r.Run(It.IsAny<Action>()));
-
-        var collector = CreateCollector();
-
-        Assert.Throws<OperationCanceledException>(() =>
-            collector.CollectIfNeeded(Sid, session, _progress.Object));
-
-        _secureDesktopRunner.Verify(r => r.Run(It.IsAny<Action>()), Times.Once);
-    }
-
-    [Fact]
-    public void CollectIfNeeded_DialogException_ReportsErrorAndThrowsOperationCanceled()
-    {
-        var session = CreateSession();
-        var innerException = new InvalidOperationException("Secure desktop unavailable");
-        _secureDesktopRunner
-            .Setup(r => r.Run(It.IsAny<Action>()))
-            .Throws(innerException);
-
-        var collector = CreateCollector();
-
-        var ex = Assert.Throws<OperationCanceledException>(() =>
-            collector.CollectIfNeeded(Sid, session, _progress.Object));
-
-        _progress.Verify(p => p.ReportError(
-            It.Is<string>(s => s.Contains("Secure desktop unavailable"))), Times.Once);
-        Assert.Same(innerException, ex.InnerException);
-    }
-
-    [Fact]
-    public void CollectIfNeeded_NullPassword_ReportsErrorAndThrowsOperationCanceled()
-    {
-        var session = CreateSession();
-        _secureDesktopRunner
-            .Setup(r => r.Run(It.IsAny<Action>()));
-
-        var collector = CreateCollector();
-
-        var ex = Assert.Throws<OperationCanceledException>(() =>
-            collector.CollectIfNeeded(Sid, session, _progress.Object));
-
-        _progress.Verify(p => p.ReportError(
-            It.Is<string>(s => s.Contains("Password is required"))), Times.Once);
-        Assert.Null(ex.InnerException);
-
-        _secureDesktopRunner.Verify(r => r.Run(It.IsAny<Action>()), Times.Once);
-    }
-
-    [Fact]
-    public void CollectIfNeeded_DialogCancel_ReportsPasswordRequired()
-    {
-        var session = CreateSession();
         _secureDesktopRunner
             .Setup(r => r.Run(It.IsAny<Action>()))
             .Callback<Action>(action => action());
@@ -167,25 +116,125 @@ public class WizardCredentialCollectorTests
             .Setup(r => r.ShowCredentialDialog(It.IsAny<CredentialEntry>(), It.IsAny<IReadOnlyDictionary<string, string>>()))
             .Returns(new CredentialDialogResult(false, null));
 
-        var collector = CreateCollector();
+        var collector = CreateCollector(session);
 
         Assert.Throws<OperationCanceledException>(() =>
-            collector.CollectIfNeeded(Sid, session, _progress.Object));
+            collector.CollectCredentialForStep(Sid, _progress.Object));
+
+        _secureDesktopRunner.Verify(r => r.Run(It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void CollectCredentialForStep_DialogException_ReportsErrorAndThrowsWizardReportedException()
+    {
+        using var session = CreateSession();
+        var innerException = new InvalidOperationException("Secure desktop unavailable");
+        _secureDesktopRunner
+            .Setup(r => r.Run(It.IsAny<Action>()))
+            .Throws(innerException);
+
+        var collector = CreateCollector(session);
+
+        var ex = Assert.Throws<WizardReportedException>(() =>
+            collector.CollectCredentialForStep(Sid, _progress.Object));
+
+        _progress.Verify(p => p.ReportError(
+            It.Is<string>(s => s.Contains("Secure desktop unavailable"))), Times.Once);
+        var inner = Assert.IsType<InvalidOperationException>(ex.InnerException);
+        Assert.Same(innerException, inner.InnerException);
+    }
+
+    [Fact]
+    public void CollectCredentialForStep_AcceptedDialogWithoutPassword_ReportsErrorAndThrowsWizardReportedException()
+    {
+        using var session = CreateSession();
+        _secureDesktopRunner
+            .Setup(r => r.Run(It.IsAny<Action>()))
+            .Callback<Action>(action => action());
+        _credentialDialogRunner
+            .Setup(r => r.ShowCredentialDialog(It.IsAny<CredentialEntry>(), It.IsAny<IReadOnlyDictionary<string, string>>()))
+            .Returns(new CredentialDialogResult(true, null));
+
+        var collector = CreateCollector(session);
+
+        var ex = Assert.Throws<WizardReportedException>(() =>
+            collector.CollectCredentialForStep(Sid, _progress.Object));
+
+        _progress.Verify(p => p.ReportError(
+            It.Is<string>(s => s.Contains("did not return a password"))), Times.Once);
+        Assert.IsType<InvalidOperationException>(ex.InnerException);
+
+        _secureDesktopRunner.Verify(r => r.Run(It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void CollectCredentialForStep_SecureDesktopReturnsWithoutRunningDialog_ReportsErrorAndThrowsWizardReportedException()
+    {
+        using var session = CreateSession();
+        _secureDesktopRunner
+            .Setup(r => r.Run(It.IsAny<Action>()))
+            .Callback<Action>(_ => { });
+
+        var collector = CreateCollector(session);
+
+        var ex = Assert.Throws<WizardReportedException>(() =>
+            collector.CollectCredentialForStep(Sid, _progress.Object));
+
+        _progress.Verify(p => p.ReportError(
+            It.Is<string>(s => s.Contains("did not open"))), Times.Once);
+        Assert.IsType<InvalidOperationException>(ex.InnerException);
+        _credentialDialogRunner.Verify(r => r.ShowCredentialDialog(
+            It.IsAny<CredentialEntry>(),
+            It.IsAny<IReadOnlyDictionary<string, string>>()), Times.Never);
+    }
+
+    [Fact]
+    public void CollectCredentialForStep_DialogCancel_ReportsPasswordRequired()
+    {
+        using var session = CreateSession();
+        _secureDesktopRunner
+            .Setup(r => r.Run(It.IsAny<Action>()))
+            .Callback<Action>(action => action());
+        _credentialDialogRunner
+            .Setup(r => r.ShowCredentialDialog(It.IsAny<CredentialEntry>(), It.IsAny<IReadOnlyDictionary<string, string>>()))
+            .Returns(new CredentialDialogResult(false, null));
+
+        var collector = CreateCollector(session);
+
+        Assert.Throws<OperationCanceledException>(() =>
+            collector.CollectCredentialForStep(Sid, _progress.Object));
 
         _progress.Verify(p => p.ReportError(
             It.Is<string>(s => s.Contains("Password is required"))), Times.Once);
     }
 
     [Fact]
-    public void CollectIfNeeded_AlreadyHasCredential_SidCaseInsensitive_ReturnsNull()
+    public void CollectCredentialForStep_SecureDesktopCancellation_RethrowsOperationCanceled()
     {
-        var session = CreateSession();
+        using var session = CreateSession();
+        _secureDesktopRunner
+            .Setup(r => r.Run(It.IsAny<Action>()))
+            .Throws(new OperationCanceledException("Canceled on secure desktop."));
+
+        var collector = CreateCollector(session);
+
+        var ex = Assert.Throws<OperationCanceledException>(() =>
+            collector.CollectCredentialForStep(Sid, _progress.Object));
+
+        Assert.Equal("Canceled on secure desktop.", ex.Message);
+        _progress.Verify(p => p.ReportError(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void CollectCredentialForStep_AlreadyHasCredential_SidCaseInsensitive_ReturnsNull()
+    {
+        using var session = CreateSession();
         session.CredentialStore.Credentials.Add(
             new CredentialEntry { Sid = Sid.ToLowerInvariant() });
 
-        var collector = CreateCollector();
+        var collector = CreateCollector(session);
 
-        var result = collector.CollectIfNeeded(Sid.ToUpperInvariant(), session, _progress.Object);
+        var result = collector.CollectCredentialForStep(Sid.ToUpperInvariant(), _progress.Object);
 
         Assert.Null(result);
     }

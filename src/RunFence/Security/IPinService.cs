@@ -5,9 +5,10 @@ namespace RunFence.Security;
 
 public interface IPinService
 {
-    bool VerifyPin(ProtectedString pin, CredentialStore store, out byte[] pinDerivedKey);
-    bool VerifyDerivedKey(byte[] pinDerivedKey, CredentialStore store);
-    (CredentialStore store, byte[] newPinDerivedKey) ChangePin(byte[] oldPinDerivedKey, ProtectedString newPin, CredentialStore store);
-    (CredentialStore store, byte[] pinDerivedKey) ResetPin(ProtectedString newPin);
-    byte[] DeriveKey(ProtectedString pin, byte[] salt);
+    bool VerifyPin(ProtectedString pin, CredentialStore store);
+    PinVerificationResult VerifyPinForSession(ProtectedString pin, CredentialStore store);
+    bool VerifyDerivedKey(ReadOnlySpan<byte> pinDerivedKey, CredentialStore store);
+    PinKeyRotationResult ChangePin(ISecureSecretSnapshotSource oldPinDerivedKey, ProtectedString newPin, CredentialStore store);
+    PinResetResult ResetPin(ProtectedString newPin);
+    SecureSecret DeriveKeySecret(ProtectedString pin, byte[] salt);
 }

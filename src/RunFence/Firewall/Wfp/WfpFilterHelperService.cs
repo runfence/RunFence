@@ -14,7 +14,7 @@ public class WfpFilterHelperService(ILoggingService log) : IWfpFilterHelper
     {
         var rc = WfpNative.FwpmFilterDeleteByKey0(engineHandle, ref filterKey);
         if (rc != WfpNative.ERROR_SUCCESS && rc != WfpNative.FWP_E_FILTER_NOT_FOUND)
-            log.Warn($"{logPrefix}: FwpmFilterDeleteByKey0 failed (0x{rc:X8})");
+            throw new WfpFilterHelperException($"{logPrefix}: FwpmFilterDeleteByKey0 failed (0x{rc:X8})");
     }
 
     public void AddFilterWithSddl(
@@ -35,8 +35,8 @@ public class WfpFilterHelperService(ILoggingService log) : IWfpFilterHelper
             if (!WfpNative.ConvertStringSecurityDescriptorToSecurityDescriptor(
                     sddl, WfpNative.SDDL_REVISION_1, out sdPtr, out uint sdSize))
             {
-                log.Warn($"{logPrefix}: Failed to convert SDDL (error {Marshal.GetLastWin32Error()})");
-                return;
+                throw new WfpFilterHelperException(
+                    $"{logPrefix}: Failed to convert SDDL (error {Marshal.GetLastWin32Error()})");
             }
 
             var sdBlobPtr = WfpFilterStructHelper.CreateSdBlob(sdPtr, sdSize, marshalAllocs);
@@ -58,7 +58,12 @@ public class WfpFilterHelperService(ILoggingService log) : IWfpFilterHelper
 
             var addRc = WfpNative.FwpmFilterAdd0(engineHandle, filterPtr, IntPtr.Zero, out _);
             if (addRc != WfpNative.ERROR_SUCCESS)
-                log.Warn($"{logPrefix}: FwpmFilterAdd0 failed (0x{addRc:X8})");
+                throw new WfpFilterHelperException($"{logPrefix}: FwpmFilterAdd0 failed (0x{addRc:X8})");
+        }
+        catch (WfpFilterHelperException ex)
+        {
+            log.Warn(ex.Message);
+            throw;
         }
         finally
         {
@@ -104,7 +109,12 @@ public class WfpFilterHelperService(ILoggingService log) : IWfpFilterHelper
 
             var addRc = WfpNative.FwpmFilterAdd0(engineHandle, filterPtr, IntPtr.Zero, out _);
             if (addRc != WfpNative.ERROR_SUCCESS)
-                log.Warn($"{logPrefix}: FwpmFilterAdd0 failed (0x{addRc:X8})");
+                throw new WfpFilterHelperException($"{logPrefix}: FwpmFilterAdd0 failed (0x{addRc:X8})");
+        }
+        catch (WfpFilterHelperException ex)
+        {
+            log.Warn(ex.Message);
+            throw;
         }
         finally
         {

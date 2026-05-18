@@ -1,3 +1,4 @@
+using RunFence.Acl;
 using RunFence.Core.Models;
 
 namespace RunFence.Launch.Container;
@@ -18,27 +19,25 @@ public interface IAppContainerService : IAppContainerProfileService
     /// Grants the container SID COM launch and access permissions for the given AppID/CLSID.
     /// Modifies HKCR\AppID\{clsid} LaunchPermission and AccessPermission values.
     /// </summary>
-    void GrantComAccess(string containerSid, string clsid);
+    AppContainerComAccessResult GrantComAccess(string containerSid, string clsid);
 
     /// <summary>
     /// Revokes the container SID's COM launch and access permissions for the given AppID/CLSID.
     /// </summary>
-    void RevokeComAccess(string containerSid, string clsid);
+    AppContainerComAccessResult RevokeComAccess(string containerSid, string clsid);
 
     /// <summary>
     /// Grants traverse access on ancestor directories so the AppContainer can reach
     /// <paramref name="path"/> and tracks them in the database.
-    /// Returns <c>Modified = true</c> if a new path was added (caller should save config),
-    /// and <c>AppliedPaths</c> = the full list of ancestor directories visited (for
-    /// <see cref="GrantedPathEntry.AllAppliedPaths"/>).
+    /// Returns whether the tracked traverse state changed, plus the full list of ancestor
+    /// directories covered by the managed traverse entry.
     /// </summary>
     (bool Modified, List<string> AppliedPaths) EnsureTraverseAccess(AppContainerEntry entry, string path);
 
     /// <summary>
-    /// Removes traverse ACEs for the container SID from all directories tracked in
-    /// <c>database.AccountGrants[containerSid]</c> plus the container data folder.
-    /// Call before DeleteProfile to clean up lingering ACEs.
+    /// Removes tracked grant and traverse ACEs for the container SID and returns any
+    /// warning-grade persistence failures from completed cleanup.
     /// </summary>
-    void RevertTraverseAccess(AppContainerEntry entry, AppDatabase database);
+    GrantApplyResult RevertTraverseAccess(AppContainerEntry entry, AppDatabase database);
 
 }

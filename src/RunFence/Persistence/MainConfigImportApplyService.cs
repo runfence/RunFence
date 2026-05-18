@@ -6,33 +6,59 @@ namespace RunFence.Persistence;
 
 public class MainConfigImportApplyService(
     IAppConfigService appConfigService,
+    MainConfigImportRepairService repairService,
+    GrantIntentOwnershipProjectionService ownershipProjection,
     IGrantInspectionService grantInspection)
 {
-    public void Apply(
+    public void ApplyState(
         AppDatabase database,
         AppDatabase importedDb,
-        List<AppEntry> additionalApps,
+        MainConfigImportRepairPlan repairPlan,
         MainConfigImportPreservationSnapshot preservation,
         Dictionary<string, string?>? sidResolutions)
     {
-        ReplaceAppsAndSettings(database, importedDb, additionalApps);
+        ReplaceAppsAndSettings(database, importedDb, repairPlan.AdditionalApps);
+        repairService.ApplyAdditionalAppIdRepairs(repairPlan);
         ReplaceContainers(database, importedDb, preservation.OldContainers);
         ReplaceSidNames(database, importedDb, preservation.OldSidNames, sidResolutions);
-        ReplaceAccountsAndRespliceGrants(database, importedDb, preservation);
-        ReplaceSharedContainerTraverseGrants(database, importedDb, preservation);
+        ReplaceAccountsAndRestoreMainGrants(database, importedDb, preservation);
+        ownershipProjection.ReplaceMainOwnership(database.Accounts);
+        RespliceAdditionalConfigGrants(database, preservation.AdditionalGrants);
         ApplyCleanupAndDefaults(database);
+        foreach (var sid in repairPlan.OrphanedGrantSids.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!preservation.OldMainGrants.TryGetValue(sid, out var grants))
+                continue;
+
+            var account = database.GetOrCreateAccount(sid);
+            foreach (var grant in grants)
+            {
+                var clone = grant.Clone();
+                var identity = GrantIntentEntryIdentity.From(sid, clone);
+                if (account.Grants.Any(existing => GrantIntentEntryIdentity.From(sid, existing) == identity))
+                    continue;
+
+                account.Grants.Add(clone);
+                ownershipProjection.AddOwnership(configPath: null, sid, clone);
+            }
+        }
     }
+
+    public IReadOnlyList<string> ApplyOrphanedGrantRemovals(MainConfigImportRepairPlan repairPlan)
+        => repairService.ApplyOrphanedGrantRemovals(repairPlan);
 
     private void ReplaceAppsAndSettings(
         AppDatabase database,
         AppDatabase importedDb,
         List<AppEntry> additionalApps)
     {
+        var priorNagEligible = database.Settings.NagEligible;
         database.Apps.Clear();
         database.Apps.AddRange(importedDb.Apps);
         database.Apps.AddRange(additionalApps);
 
         database.Settings = importedDb.Settings ?? new AppSettings();
+        database.Settings.NagEligible = priorNagEligible || database.Settings.NagEligible;
         database.ShowSystemInRunAs = importedDb.ShowSystemInRunAs;
     }
 
@@ -84,7 +110,7 @@ public class MainConfigImportApplyService(
         }
     }
 
-    private void ReplaceAccountsAndRespliceGrants(
+    private void ReplaceAccountsAndRestoreMainGrants(
         AppDatabase database,
         AppDatabase importedDb,
         MainConfigImportPreservationSnapshot preservation)
@@ -101,7 +127,6 @@ public class MainConfigImportApplyService(
         }
 
         RestoreMainConfigGrants(database, preservation.OldMainGrants);
-        RespliceAdditionalConfigGrants(database, preservation.AdditionalGrants);
     }
 
     private void RestoreMainConfigGrants(
@@ -141,62 +166,12 @@ public class MainConfigImportApplyService(
             var account = database.GetOrCreateAccount(sid);
             foreach (var grant in grants)
             {
-                if (!account.Grants.Any(existingGrant =>
-                        string.Equals(existingGrant.Path, grant.Path, StringComparison.OrdinalIgnoreCase) &&
-                        existingGrant.IsDeny == grant.IsDeny &&
-                        existingGrant.IsTraverseOnly == grant.IsTraverseOnly))
+                var identity = GrantIntentEntryIdentity.From(sid, grant);
+                if (!account.Grants.Any(existingGrant => GrantIntentEntryIdentity.From(sid, existingGrant) == identity))
                 {
                     account.Grants.Add(grant);
                 }
             }
-        }
-    }
-
-    private void ReplaceSharedContainerTraverseGrants(
-        AppDatabase database,
-        AppDatabase importedDb,
-        MainConfigImportPreservationSnapshot preservation)
-    {
-        database.SharedContainerTraverseGrants.Clear();
-        foreach (var grant in importedDb.SharedContainerTraverseGrants.Select(g => g.Clone()))
-            AddSharedContainerTraverseGrantIfMissing(database, grant);
-
-        RestoreMainConfigSharedContainerTraverseGrants(database, preservation.OldMainSharedContainerTraverseGrants);
-        RespliceAdditionalSharedContainerTraverseGrants(database, preservation.AdditionalSharedContainerTraverseGrants);
-    }
-
-    private void RestoreMainConfigSharedContainerTraverseGrants(
-        AppDatabase database,
-        IEnumerable<GrantedPathEntry> oldMainSharedGrants)
-    {
-        foreach (var grant in oldMainSharedGrants)
-        {
-            if (grantInspection.CheckGrantStatus(
-                    grant.Path,
-                    WellKnownSecuritySids.AllApplicationPackagesSid,
-                    isDeny: false) != PathAclStatus.Available)
-                continue;
-
-            AddSharedContainerTraverseGrantIfMissing(database, grant);
-        }
-    }
-
-    private static void RespliceAdditionalSharedContainerTraverseGrants(
-        AppDatabase database,
-        IEnumerable<GrantedPathEntry> additionalSharedGrants)
-    {
-        foreach (var grant in additionalSharedGrants)
-            AddSharedContainerTraverseGrantIfMissing(database, grant);
-    }
-
-    private static void AddSharedContainerTraverseGrantIfMissing(AppDatabase database, GrantedPathEntry grant)
-    {
-        if (!database.SharedContainerTraverseGrants.Any(existingGrant =>
-                string.Equals(existingGrant.Path, grant.Path, StringComparison.OrdinalIgnoreCase) &&
-                existingGrant.IsDeny == grant.IsDeny &&
-                existingGrant.IsTraverseOnly == grant.IsTraverseOnly))
-        {
-            database.SharedContainerTraverseGrants.Add(grant);
         }
     }
 
@@ -207,4 +182,5 @@ public class MainConfigImportApplyService(
 
         WellKnownAccountDefaults.Apply(database);
     }
+
 }

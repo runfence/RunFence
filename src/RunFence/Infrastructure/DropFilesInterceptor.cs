@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace RunFence.Infrastructure;
 
 /// <summary>
@@ -7,8 +9,9 @@ namespace RunFence.Infrastructure;
 /// <item>The target control has <c>AllowDrop = false</c> (no RegisterDragDrop), so Explorer
 /// uses the old-style WM_DROPFILES path instead of OLE IDropTarget (which cannot transfer
 /// data across IL boundaries).</item>
-/// <item><see cref="WindowSecurityService"/> applies <c>ChangeWindowMessageFilterEx</c> for
-/// WM_DROPFILES on every HWND in the process, allowing the message from lower-IL senders.</item>
+/// <item><see cref="WindowNative.AllowDropFilesFromLowIL"/> applies the shell/OLE file-drop
+/// delivery-message filters on this specific drop-target HWND, allowing the message from
+/// lower-IL senders.</item>
 /// <item><see cref="ShellNative.DragAcceptFiles"/> sets WS_EX_ACCEPTFILES so the shell
 /// knows this window accepts file drops.</item>
 /// </list>
@@ -20,6 +23,8 @@ public sealed class DropFilesInterceptor : NativeWindow, IDisposable
     public DropFilesInterceptor(IntPtr hwnd, Action<string[]> onDrop)
     {
         _onDrop = onDrop;
+        if (!WindowNative.AllowDropFilesFromLowIL(hwnd))
+            Trace.TraceWarning($"DropFilesInterceptor: could not enable file-drop message filters for hwnd=0x{hwnd.ToInt64():X}.");
         ShellNative.DragAcceptFiles(hwnd, true);
         AssignHandle(hwnd);
     }

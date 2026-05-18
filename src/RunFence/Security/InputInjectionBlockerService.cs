@@ -5,15 +5,20 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Security;
 
-public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequiresInitialization, IDisposable
+public class InputInjectionBlockerService : IInputInjectionBlockerService, IDisposable
 {
-    private enum OverrideState { None, DisabledTemporarily, DisabledTimed }
+    private enum OverrideState
+    {
+        None,
+        DisabledTemporarily,
+        DisabledTimed
+    }
 
     private readonly ILoggingService _log;
     private readonly ILowLevelHookApi _hookApi;
     private readonly IForegroundWindowResolver _foregroundWindowResolver;
     private readonly IProcessOwnerSidReader _processOwnerSidReader;
-    private readonly IProcessImageNameReader _processImageNameReader;
+    private readonly IUiTimerFactory _timerFactory;
     private readonly WindowNative.LowLevelKeyboardProc _keyboardProc;
     private readonly WindowNative.LowLevelMouseProc _mouseProc;
 
@@ -21,8 +26,7 @@ public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequ
     private OverrideState _overrideState = OverrideState.None;
     private IntPtr _keyboardHook;
     private IntPtr _mouseHook;
-    private System.Windows.Forms.Timer? _timer;
-    private bool _initialized;
+    private IUiTimer? _timer;
     private HashSet<string> _exemptedSids = [];
 
     public bool IsEnabled => _configEnabled && _overrideState == OverrideState.None;
@@ -32,21 +36,15 @@ public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequ
         ILowLevelHookApi hookApi,
         IForegroundWindowResolver foregroundWindowResolver,
         IProcessOwnerSidReader processOwnerSidReader,
-        IProcessImageNameReader processImageNameReader)
+        IUiTimerFactory timerFactory)
     {
         _log = log;
         _hookApi = hookApi;
         _foregroundWindowResolver = foregroundWindowResolver;
         _processOwnerSidReader = processOwnerSidReader;
-        _processImageNameReader = processImageNameReader;
+        _timerFactory = timerFactory;
         _keyboardProc = KeyboardHookCallback;
         _mouseProc = MouseHookCallback;
-    }
-
-    public void Initialize()
-    {
-        _initialized = true;
-        UpdateHookState();
     }
 
     public void ApplyConfigSetting(bool blockInputInjection)
@@ -66,7 +64,8 @@ public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequ
     {
         StopAndDisposeTimer();
         _overrideState = OverrideState.DisabledTimed;
-        _timer = new System.Windows.Forms.Timer { Interval = (int)duration.TotalMilliseconds };
+        _timer = _timerFactory.Create();
+        _timer.Interval = (int)duration.TotalMilliseconds;
         _timer.Tick += (_, _) => ReEnable();
         _timer.Start();
         UpdateHookState();
@@ -83,22 +82,15 @@ public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequ
     {
         _exemptedSids = new HashSet<string>(sids, StringComparer.OrdinalIgnoreCase);
     }
-    
-    /// <summary>Returns true when the flags field of a hook struct indicates a lower-IL injection.</summary>
+
     public static bool IsLowerIlInjected(uint flags) => (flags & 0x02) != 0;
 
     private void UpdateHookState()
     {
-        if (!_initialized) return;
-
         if (IsEnabled)
-        {
             InstallMissingHooks();
-        }
         else
-        {
             UnhookInstalledHooks();
-        }
     }
 
     private void InstallMissingHooks()
@@ -141,11 +133,7 @@ public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequ
             if (IsLowerIlInjected(info.flags))
             {
                 var pid = GetForegroundWindowPid();
-                bool allow = false;
-                // we consider these keys safe,
-                // they can't be used to escape sandbox
-                // and they are often remapped via sendinput
-                // or can be used by accessibility tools
+                var allow = false;
                 switch (info.vkCode)
                 {
                     case (uint)Keys.MediaPlayPause:
@@ -171,14 +159,15 @@ public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequ
                 }
 
                 allow = allow || IsExemptedProcess(pid);
-                
-                if (allow) 
+
+                if (allow)
                     return _hookApi.CallNextHook(_keyboardHook, nCode, wParam, lParam);
-                
+
                 _log.Debug($"InputInjectionBlockerService: Blocked lower-IL keyboard injection. Key: {(Keys)info.vkCode} (0x{info.vkCode:X2})");
                 return new IntPtr(1);
             }
         }
+
         return _hookApi.CallNextHook(_keyboardHook, nCode, wParam, lParam);
     }
 
@@ -186,7 +175,9 @@ public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequ
 
     private bool IsExemptedProcess(uint pid)
     {
-        if (_exemptedSids.Count == 0 || pid == 0) return false;
+        if (_exemptedSids.Count == 0 || pid == 0)
+            return false;
+
         var sid = _processOwnerSidReader.TryGetProcessOwnerSid(pid);
         return sid != null && _exemptedSids.Contains(sid);
     }
@@ -198,23 +189,26 @@ public class InputInjectionBlockerService : IInputInjectionBlockerService, IRequ
             var info = Marshal.PtrToStructure<WindowNative.MSLLHOOKSTRUCT>(lParam);
             if (IsLowerIlInjected(info.flags))
             {
-                uint pid = GetForegroundWindowPid();
-                if (IsExemptedProcess(pid)) return _hookApi.CallNextHook(_mouseHook, nCode, wParam, lParam);
+                var pid = GetForegroundWindowPid();
+                if (IsExemptedProcess(pid))
+                    return _hookApi.CallNextHook(_mouseHook, nCode, wParam, lParam);
+
                 _log.Debug("InputInjectionBlockerService: Blocked lower-IL mouse injection.");
                 return new IntPtr(1);
             }
         }
+
         return _hookApi.CallNextHook(_mouseHook, nCode, wParam, lParam);
     }
 
     private void StopAndDisposeTimer()
     {
-        if (_timer != null)
-        {
-            _timer.Stop();
-            _timer.Dispose();
-            _timer = null;
-        }
+        if (_timer == null)
+            return;
+
+        _timer.Stop();
+        _timer.Dispose();
+        _timer = null;
     }
 
     public void Dispose()

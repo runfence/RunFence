@@ -2,6 +2,7 @@
 
 using System.ComponentModel;
 using RunFence.UI.Controls;
+using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI.Forms;
 
@@ -25,6 +26,9 @@ partial class HandlerMappingsDialog
     private ToolStripMenuItem _ctxEdit;
     private ToolStripMenuItem _ctxRemove;
     private Label _warningLabel;
+    private Panel _topRowHost;
+    private Panel _contextHelpHost;
+    private ContextHelpButton _contextHelpButton;
 
     private HandlerMappingsDialog() { InitializeComponent(); }
 
@@ -53,10 +57,14 @@ partial class HandlerMappingsDialog
         _ctxEdit = new ToolStripMenuItem();
         _ctxRemove = new ToolStripMenuItem();
         _warningLabel = new Label();
+        _topRowHost = new Panel();
+        _contextHelpHost = new Panel();
+        _contextHelpButton = new ContextHelpButton();
 
-        _toolbar.SuspendLayout();
+        _topRowHost.SuspendLayout();
         ((ISupportInitialize)_grid).BeginInit();
         _contextMenu.SuspendLayout();
+        _contextHelpHost.SuspendLayout();
         SuspendLayout();
 
         // Form
@@ -71,8 +79,10 @@ partial class HandlerMappingsDialog
         SizeChanged += OnDialogSizeChanged;
 
         // _toolbar
-        _toolbar.Dock = DockStyle.Top;
+        _toolbar.AutoSize = false;
+        _toolbar.Dock = DockStyle.Fill;
         _toolbar.GripStyle = ToolStripGripStyle.Hidden;
+        _toolbar.Height = 29;
         _toolbar.RenderMode = ToolStripRenderMode.System;
         _toolbar.ImageScalingSize = new Size(24, 24);
         _toolbar.Items.AddRange(new ToolStripItem[] { _addButton, _editButton, _removeButton, _reapplyButton, _openDefaultAppsButton });
@@ -163,15 +173,40 @@ partial class HandlerMappingsDialog
         _warningLabel.Text = "Many common associations will require logging on into account, opening Default Apps and applying RunFence.";
         _warningLabel.ForeColor = SystemColors.GrayText;
 
+        // _topRowHost
+        _topRowHost.BackColor = SystemColors.Control;
+        _topRowHost.Dock = DockStyle.Top;
+        _topRowHost.Height = 33;
+        _topRowHost.Padding = new Padding(0, 2, 0, 2);
+        _topRowHost.TabStop = false;
+
+        // _contextHelpHost
+        _contextHelpHost.BackColor = SystemColors.Control;
+        _contextHelpHost.Dock = DockStyle.Right;
+        _contextHelpHost.Padding = Padding.Empty;
+        _contextHelpHost.Size = new Size(29, 29);
+        _contextHelpHost.TabStop = false;
+
+        // _contextHelpButton
+        _contextHelpButton.AccessibleName = "Context help";
+        _contextHelpButton.Dock = DockStyle.Right;
+        _contextHelpButton.Name = "_contextHelpButton";
+        _contextHelpButton.Size = new Size(29, 29);
+        _contextHelpButton.TabStop = false;
+
+        _contextHelpHost.Controls.Add(_contextHelpButton);
+        _topRowHost.Controls.Add(_toolbar);
+        _topRowHost.Controls.Add(_contextHelpHost);
+
         // Add controls
         Controls.Add(_grid);
         Controls.Add(_warningLabel);
-        Controls.Add(_toolbar);
+        Controls.Add(_topRowHost);
 
-        _toolbar.ResumeLayout(false);
-        _toolbar.PerformLayout();
+        _topRowHost.ResumeLayout(false);
         ((ISupportInitialize)_grid).EndInit();
         _contextMenu.ResumeLayout(false);
+        _contextHelpHost.ResumeLayout(false);
         ResumeLayout(false);
         PerformLayout();
     }

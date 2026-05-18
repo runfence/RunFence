@@ -4,6 +4,9 @@ namespace RunFence.SecurityScanner;
 
 public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHelper aclCheck, PerUserScanner perUserScanner)
 {
+    private const int TaskActionExecute = 0;
+    private const string NetworkConfigurationOperatorsSid = "S-1-5-32-556";
+
     public void ScanTaskScheduler(ScanContext ctx)
     {
         try
@@ -21,10 +24,23 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
                     taskOwnerExcluded = taskExcluded;
                 }
 
-                foreach (var exePath in task.ExePaths)
+                foreach (var action in task.Actions)
                 {
-                    if (!string.IsNullOrEmpty(exePath))
-                        SecurityScanner.AddAutorunPath(ctx.Autorun, exePath, taskOwnerExcluded, StartupSecurityCategory.TaskScheduler);
+                    if (action.ActionType != TaskActionExecute || string.IsNullOrWhiteSpace(action.Path))
+                        continue;
+
+                    var command = CommandLineParser.ResolveCommand(action.Path, action.Arguments, action.WorkingDirectory);
+                    var context = new AutorunCommandContext(task.TaskPath, action.Arguments, action.WorkingDirectory, task.TaskPath);
+
+                    if (!string.IsNullOrWhiteSpace(command.ExecutablePath))
+                        SecurityScanner.AddAutorunPath(ctx.Autorun, command.ExecutablePath, taskOwnerExcluded,
+                            StartupSecurityCategory.TaskScheduler, context);
+
+                    if (!string.IsNullOrWhiteSpace(command.WrapperPayloadPath))
+                    {
+                        SecurityScanner.AddAutorunPath(ctx.Autorun, command.WrapperPayloadPath, taskOwnerExcluded,
+                            StartupSecurityCategory.TaskScheduler, context);
+                    }
                 }
             }
         }
@@ -121,13 +137,24 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
             {
                 try
                 {
-                    var security = dataAccess.GetServiceRegistryKeySecurity(svc.ServiceName);
-                    if (security != null)
+                    if (svc.ServiceKeySecurity != null)
                     {
-                        aclCheck.CheckRegistryKeyAcl(security, $@"HKLM\...\Services\{svc.ServiceName}",
+                        aclCheck.CheckRegistryKeyAcl(svc.ServiceKeySecurity, $@"HKLM\...\Services\{svc.ServiceName}",
                             ctx.AdminSids, SecurityScanner.ServiceRegistryWriteRightsMask,
                             StartupSecurityCategory.AutoStartService, ctx.Findings, ctx.Seen,
                             $@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\{svc.ServiceName}");
+                    }
+
+                    if (svc.ParametersKeySecurity != null)
+                    {
+                        var parametersExcluded = new HashSet<string>(ctx.AdminSids, StringComparer.OrdinalIgnoreCase)
+                        {
+                            NetworkConfigurationOperatorsSid
+                        };
+                        aclCheck.CheckRegistryKeyAcl(svc.ParametersKeySecurity, $@"HKLM\...\Services\{svc.ServiceName}\Parameters",
+                            parametersExcluded, SecurityScanner.ServiceRegistryWriteRightsMask,
+                            StartupSecurityCategory.AutoStartService, ctx.Findings, ctx.Seen,
+                            $@"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\{svc.ServiceName}\Parameters");
                     }
                 }
                 catch (Exception ex)

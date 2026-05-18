@@ -34,6 +34,7 @@ public partial class EnvVarsSection : UserControl
     /// </summary>
     public Dictionary<string, string>? GetItems()
     {
+        CommitPendingEdit();
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (DataGridViewRow row in _dataGrid.Rows)
         {
@@ -54,6 +55,7 @@ public partial class EnvVarsSection : UserControl
     /// </summary>
     public string? GetFirstDuplicateName()
     {
+        CommitPendingEdit();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         return (from DataGridViewRow row in _dataGrid.Rows
             where !row.IsNewRow
@@ -125,5 +127,18 @@ public partial class EnvVarsSection : UserControl
             return;
         if (e.KeyCode == Keys.Delete)
             OnRemoveClick(sender, e);
+    }
+
+    public void CommitPendingEdit()
+    {
+        if (_dataGrid.IsCurrentCellInEditMode)
+        {
+            _dataGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+            _dataGrid.EndEdit();
+        }
+        else
+        {
+            _dataGrid.EndEdit();
+        }
     }
 }

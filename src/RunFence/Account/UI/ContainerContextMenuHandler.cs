@@ -1,14 +1,26 @@
+using RunFence.Account.UI.AppContainer;
+
 namespace RunFence.Account.UI;
 
 /// <summary>
 /// Handles container-specific context menu actions (create, edit, delete container; copy/open profile;
 /// launch folder browser; copy SID) for the accounts grid.
 /// </summary>
-public class ContainerContextMenuHandler(AccountContainerOrchestrator containerHandler)
+public class ContainerContextMenuHandler
 {
     private DataGridView _grid = null!;
+    private readonly AccountContainerOrchestrator _containerHandler;
+    private readonly AppContainerProfileActions _profileActions;
 
     public event Action? DataChangedAndRefresh;
+
+    public ContainerContextMenuHandler(
+        AccountContainerOrchestrator containerHandler,
+        AppContainerProfileActions profileActions)
+    {
+        _containerHandler = containerHandler;
+        _profileActions = profileActions;
+    }
 
     public void Initialize(DataGridView grid)
     {
@@ -17,36 +29,36 @@ public class ContainerContextMenuHandler(AccountContainerOrchestrator containerH
 
     public void CreateContainer()
     {
-        containerHandler.CreateContainer(_grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
+        _containerHandler.CreateContainer(_grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
     }
 
     public async Task EditContainer(ContainerRow containerRow)
     {
-        await containerHandler.EditContainer(containerRow, _grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
+        await _containerHandler.EditContainer(containerRow, _grid.FindForm(), () => DataChangedAndRefresh?.Invoke());
     }
 
     public async Task DeleteContainer(ContainerRow containerRow)
     {
-        await containerHandler.DeleteContainer(containerRow, () => DataChangedAndRefresh?.Invoke());
+        await _containerHandler.DeleteContainer(containerRow, () => DataChangedAndRefresh?.Invoke());
     }
 
     public void CopyContainerProfilePath(ContainerRow containerRow)
     {
-        AccountContainerOrchestrator.CopyContainerProfilePath(containerRow);
+        _profileActions.CopyProfilePath(containerRow);
     }
 
     public void OpenContainerProfileFolder(ContainerRow containerRow)
     {
-        containerHandler.OpenContainerProfileFolder(containerRow);
+        _profileActions.OpenProfileFolder(containerRow);
     }
 
     public void OpenAclManager(ContainerRow containerRow)
     {
-        containerHandler.OpenAclManager(containerRow, _grid.FindForm());
+        _containerHandler.OpenAclManager(containerRow, _grid.FindForm());
     }
 
     public void OpenAclManager(AccountRow accountRow)
     {
-        containerHandler.OpenAclManager(accountRow, _grid.FindForm());
+        _containerHandler.OpenAclManager(accountRow, _grid.FindForm());
     }
 }

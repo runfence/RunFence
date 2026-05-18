@@ -1,3 +1,5 @@
+using RunFence.Account;
+
 namespace RunFence.Infrastructure;
 
 /// <summary>
@@ -6,9 +8,13 @@ namespace RunFence.Infrastructure;
 /// </summary>
 public interface IProcessTerminationService
 {
+    ProcessActionResult CloseProcess(int pid, long? expectedStartTimeUtcTicks, string expectedOwnerSid);
+
+    ProcessActionResult KillProcess(int pid, long? expectedStartTimeUtcTicks, string expectedOwnerSid);
+
     /// <summary>
     /// Terminates all processes owned by the specified SID.
     /// Returns the count of successfully killed and failed-to-kill processes.
     /// </summary>
-    (int Killed, int Failed) KillProcesses(string sid);
+    ProcessKillResult KillProcesses(string sid);
 }

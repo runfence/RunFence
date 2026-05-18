@@ -36,22 +36,22 @@ public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
             return AutoTypeResult.WindowUnavailable;
         }
 
-        var targetTitle = GetWindowTitle(targetHwnd);
-        var targetClass = GetWindowClass(targetHwnd);
-        var isConsole = IsConsoleLikeWindow(targetHwnd, targetClass);
-        var titleForLog = targetTitle.Length > 50 ? targetTitle[..50] + "…" : targetTitle;
+        string targetTitle = GetWindowTitle(targetHwnd);
+        string targetClass = GetWindowClass(targetHwnd);
+        bool isConsole = IsConsoleLikeWindow(targetHwnd, targetClass);
+        string titleForLog = targetTitle.Length > 50 ? targetTitle[..50] + "..." : targetTitle;
         log.Info($"TypeToWindow: target hwnd=0x{targetHwnd.ToInt64():X} class=\"{targetClass}\" title=\"{titleForLog}\" isConsole={isConsole}");
 
-        // Restore window if minimized — SetForegroundWindow alone only flashes the taskbar for iconic windows.
+        // Restore window if minimized - SetForegroundWindow alone only flashes the taskbar for iconic windows.
         if (WindowNative.IsIconic(targetHwnd))
             WindowNative.ShowWindow(targetHwnd, WindowNative.SW_RESTORE);
 
         // Attach the current foreground thread to RunFence's UI thread so SetForegroundWindow
         // succeeds even when RunFence lost the foreground lock (e.g. after a PIN or Hello dialog).
-        var foregroundHwnd = WindowNative.GetForegroundWindow();
-        var foregroundThread = WindowNative.GetWindowThreadProcessId(foregroundHwnd, IntPtr.Zero);
-        var currentThread = WindowNative.GetCurrentThreadId();
-        var targetThread = WindowNative.GetWindowThreadProcessId(targetHwnd, out uint targetPid);
+        IntPtr foregroundHwnd = WindowNative.GetForegroundWindow();
+        uint foregroundThread = WindowNative.GetWindowThreadProcessId(foregroundHwnd, IntPtr.Zero);
+        uint currentThread = WindowNative.GetCurrentThreadId();
+        uint targetThread = WindowNative.GetWindowThreadProcessId(targetHwnd, out uint targetPid);
 
         bool attached = foregroundThread != currentThread &&
                         WindowNative.AttachThreadInput(foregroundThread, currentThread, true);
@@ -72,11 +72,15 @@ public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
         else
             log.Info("TypeToWindow: SetForegroundWindow succeeded");
 
-        if (!focused && isConsole)
+        if (!focused)
+        {
+            log.Warn("TypeToWindow: refusing to type because target focus could not be established.");
             return AutoTypeResult.WindowUnavailable;
+        }
 
         Thread.Sleep(50);
 
+        IntPtr originalForegroundHwnd = WindowNative.GetForegroundWindow();
         IntPtr hwndFocus = targetHwnd;
         if (!isConsole)
         {
@@ -93,29 +97,35 @@ public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
             log.Info($"TypeToWindow: typing via SendInput to console hwnd=0x{hwndFocus.ToInt64():X}");
         }
 
-        var ptr = password.AllocUnicode();
-        try
+        if (!IsTargetFocusStable(targetHwnd, targetThread, hwndFocus, isConsole))
         {
-            for (int i = 0; i < password.Length; i++)
+            log.Info($"TypeToWindow: focus changed before typing started (foreground=0x{originalForegroundHwnd.ToInt64():X}, target=0x{targetHwnd.ToInt64():X}, focus=0x{hwndFocus.ToInt64():X})");
+            return AutoTypeResult.FocusChanged;
+        }
+
+        return password.UseUnicodeSnapshot(snapshot =>
+        {
+            IntPtr passwordPointer = snapshot.DangerousGetIntPtr();
+            for (int i = 0; i < snapshot.CharCount; i++)
             {
-                if (focused)
+                if (focused && !IsTargetFocusStable(targetHwnd, targetThread, hwndFocus, isConsole))
                 {
                     WindowNative.GetWindowThreadProcessId(WindowNative.GetForegroundWindow(), out uint fgPid);
-                    if (fgPid != targetPid)
-                    {
-                        log.Info($"TypeToWindow: focus changed after {i} chars (foreground pid={fgPid}, target pid={targetPid})");
-                        return AutoTypeResult.FocusChanged;
-                    }
+                    log.Info($"TypeToWindow: focus changed after {i} chars (foreground pid={fgPid}, target pid={targetPid})");
+                    return AutoTypeResult.FocusChanged;
                 }
 
-                var ch = (ushort)Marshal.ReadInt16(ptr, i * 2);
+                ushort ch = (ushort)Marshal.ReadInt16(passwordPointer, i * sizeof(char));
 
                 if (isConsole)
                 {
                     var inputs = new[]
                     {
                         new WindowNative.INPUT
-                            { type = WindowNative.InputKeyboard, ki = new WindowNative.KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = WindowNative.KeyeventfUnicode } },
+                        {
+                            type = WindowNative.InputKeyboard,
+                            ki = new WindowNative.KEYBDINPUT { wVk = 0, wScan = ch, dwFlags = WindowNative.KeyeventfUnicode }
+                        },
                         new WindowNative.INPUT
                         {
                             type = WindowNative.InputKeyboard,
@@ -140,11 +150,7 @@ public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
 
             log.Info("TypeToWindow: typed all chars successfully");
             return AutoTypeResult.Success;
-        }
-        finally
-        {
-            Marshal.ZeroFreeGlobalAllocUnicode(ptr);
-        }
+        });
     }
 
     private static string GetWindowClass(IntPtr hwnd)
@@ -176,7 +182,31 @@ public class PasswordAutoTyper(ILoggingService log) : IPasswordAutoTyper
         if (!ProcessNative.QueryFullProcessImageName(handle, 0, sb, ref size))
             return false;
 
-        var processName = Path.GetFileNameWithoutExtension(sb.ToString());
+        string processName = Path.GetFileNameWithoutExtension(sb.ToString());
         return processName.Contains("WindowsTerminal", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTargetFocusStable(IntPtr targetHwnd, uint targetThread, IntPtr expectedFocusHwnd, bool isConsole)
+    {
+        IntPtr foregroundHwnd = WindowNative.GetForegroundWindow();
+        if (foregroundHwnd != targetHwnd)
+            return false;
+
+        uint foregroundThread = WindowNative.GetWindowThreadProcessId(foregroundHwnd, IntPtr.Zero);
+        if (foregroundThread != targetThread)
+            return false;
+
+        if (isConsole)
+            return true;
+
+        var gui = new WindowNative.GUITHREADINFO
+        {
+            cbSize = Marshal.SizeOf<WindowNative.GUITHREADINFO>()
+        };
+        if (!WindowNative.GetGUIThreadInfo(targetThread, ref gui))
+            return false;
+
+        IntPtr currentFocus = gui.hwndFocus != IntPtr.Zero ? gui.hwndFocus : targetHwnd;
+        return currentFocus == expectedFocusHwnd;
     }
 }

@@ -18,7 +18,7 @@ public class LaunchAccessManagerTests
 
     private LaunchAccessManager CreateManager() => new(_pathGrantService.Object);
 
-    private void SetupEnsureAccess(string sid, GrantOperationResult result) =>
+    private void SetupEnsureAccess(string sid, GrantApplyResult result) =>
         _pathGrantService
             .Setup(s => s.EnsureAccess(sid, It.IsAny<string>(), It.IsAny<FileSystemRights>(),
                 It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
@@ -28,8 +28,8 @@ public class LaunchAccessManagerTests
     public void EnsureAccess_LowIntegrityAccount_CallsEnsureAccessForBothSids()
     {
         var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.LowIntegrity };
-        SetupEnsureAccess(AccountSid, new GrantOperationResult(false, false, false));
-        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantOperationResult(false, false, false));
+        SetupEnsureAccess(AccountSid, new GrantApplyResult());
+        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult());
 
         var manager = CreateManager();
         manager.EnsureAccess(identity, TestPath, TestRights, null, true);
@@ -42,8 +42,8 @@ public class LaunchAccessManagerTests
     public void EnsureAccess_LowIntegrityAccount_CombinesDatabaseModifiedFlags()
     {
         var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.LowIntegrity };
-        SetupEnsureAccess(AccountSid, new GrantOperationResult(false, false, false));
-        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantOperationResult(false, false, true));
+        SetupEnsureAccess(AccountSid, new GrantApplyResult());
+        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult(DatabaseModified: true));
 
         var manager = CreateManager();
         var result = manager.EnsureAccess(identity, TestPath, TestRights, null, true);
@@ -54,8 +54,8 @@ public class LaunchAccessManagerTests
     [Fact]
     public void EnsureAccess_BasicAccount_DoesNotCallLowIntegrityEnsureAccess()
     {
-        var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.Basic };
-        SetupEnsureAccess(AccountSid, new GrantOperationResult(false, false, false));
+        var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.Isolated };
+        SetupEnsureAccess(AccountSid, new GrantApplyResult());
 
         var manager = CreateManager();
         manager.EnsureAccess(identity, TestPath, TestRights, null, true);
@@ -72,7 +72,7 @@ public class LaunchAccessManagerTests
     {
         var entry = new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = ContainerSid };
         var identity = new AppContainerLaunchIdentity(entry);
-        SetupEnsureAccess(ContainerSid, new GrantOperationResult(false, false, false));
+        SetupEnsureAccess(ContainerSid, new GrantApplyResult());
 
         var manager = CreateManager();
         manager.EnsureAccess(identity, TestPath, TestRights, null, true);
@@ -85,21 +85,78 @@ public class LaunchAccessManagerTests
     }
 
     [Fact]
-    public void EnsureAccess_LowIntegrityAccount_PassesSameArgsToLowIlCall()
+    public void EnsureAccess_LowIntegrityAccount_DoesNotForwardConfirmToLowIlCall()
     {
         var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.LowIntegrity };
         Func<string, string, bool> confirm = (_, _) => true;
         const bool unelevated = false;
         const FileSystemRights rights = FileSystemRights.Read;
 
-        SetupEnsureAccess(AccountSid, new GrantOperationResult(false, false, false));
-        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantOperationResult(false, false, false));
+        SetupEnsureAccess(AccountSid, new GrantApplyResult());
+        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult());
 
         var manager = CreateManager();
         manager.EnsureAccess(identity, TestPath, rights, confirm, unelevated);
 
         _pathGrantService.Verify(
-            s => s.EnsureAccess(AclHelper.LowIntegritySid, TestPath, rights, confirm, unelevated),
+            s => s.EnsureAccess(AclHelper.LowIntegritySid, TestPath, rights, null, unelevated),
             Times.Once);
+    }
+
+    [Fact]
+    public void EnsureAccess_LowIntegrityAccount_ReportsDurableSaveWhenEveryModifiedGrantSaved()
+    {
+        var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.LowIntegrity };
+        SetupEnsureAccess(AccountSid, new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: true));
+        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult());
+
+        var manager = CreateManager();
+        var result = manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+
+        Assert.True(result.DurableSaveCompleted);
+    }
+
+    [Fact]
+    public void EnsureAccess_LowIntegrityAccount_DoesNotReportDurableSaveWhenAnyModifiedGrantIsUnsaved()
+    {
+        var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.LowIntegrity };
+        SetupEnsureAccess(AccountSid, new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: false));
+        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: true));
+
+        var manager = CreateManager();
+        var result = manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+
+        Assert.True(result.DatabaseModified);
+        Assert.False(result.DurableSaveCompleted);
+    }
+
+    [Fact]
+    public void EnsureAccess_LowIntegrityAccount_MergesRegularAndLowIntegrityWarnings()
+    {
+        var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.LowIntegrity };
+        var accountWarning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostGrantMutationSave,
+            TestPath,
+            null,
+            new InvalidOperationException("account save failed"));
+        var lowIntegrityWarning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostGrantMutationSave,
+            TestPath,
+            null,
+            new InvalidOperationException("low il save failed"));
+
+        SetupEnsureAccess(AccountSid, new GrantApplyResult(
+            DatabaseModified: true,
+            DurableSaveCompleted: false,
+            Warnings: [accountWarning]));
+        SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult(
+            DatabaseModified: true,
+            DurableSaveCompleted: false,
+            Warnings: [lowIntegrityWarning]));
+
+        var manager = CreateManager();
+        var result = manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+
+        Assert.Equal([accountWarning, lowIntegrityWarning], result.Warnings);
     }
 }

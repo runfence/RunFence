@@ -1,6 +1,7 @@
 using RunFence.Acl;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
+using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;

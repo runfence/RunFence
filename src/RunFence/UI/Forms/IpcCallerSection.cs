@@ -81,6 +81,11 @@ public partial class IpcCallerSection : UserControl
         _removeButton.Enabled = enabled && _listBox.SelectedIndex >= 0;
     }
 
+    public void RegisterContextHelp(ContextHelpForm host, string headingHelpText)
+    {
+        host.SetContextHelp(this, headingHelpText);
+    }
+
     private void OnSelectionChanged(object? sender, EventArgs e)
     {
         _removeButton.Enabled = _listBox.Enabled && _listBox.SelectedIndex >= 0;

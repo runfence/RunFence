@@ -1,3 +1,4 @@
+using RunFence.Apps.UI;
 using RunFence.UI;
 using RunFence.UI.Controls;
 
@@ -6,7 +7,18 @@ namespace RunFence.Apps.UI.Forms;
 /// <summary>
 /// Dialog for selecting interactive user associations to import as direct handler mappings.
 /// </summary>
-public class ImportAssociationsDialog : Form
+public interface IImportAssociationsDialog : IWin32Window, IDisposable
+{
+    bool HasUnresolvedSubmitFailure { get; }
+    IReadOnlyList<InteractiveAssociationEntry> SelectedEntries { get; }
+    void Initialize(
+        IReadOnlyList<InteractiveAssociationEntry> entries,
+        IReadOnlySet<string> existingKeys,
+        IHandlerMappingDialogPersistence persistence);
+    DialogResult ShowDialog(IWin32Window owner);
+}
+
+public class ImportAssociationsDialog : RunFence.UI.Forms.ContextHelpForm, IImportAssociationsDialog
 {
     private StyledDataGridView _grid = null!;
     private DataGridViewCheckBoxColumn _colCheck = null!;
@@ -18,9 +30,18 @@ public class ImportAssociationsDialog : Form
     private Button _deselectAllButton = null!;
     private IReadOnlyList<InteractiveAssociationEntry> _entries = [];
     private readonly GridSortHelper _sortHelper = new();
+    private readonly HandlerMappingDialogSubmissionCoordinator _submissionCoordinator;
+    private readonly IMessageBoxService _messageBoxService;
+    private IHandlerMappingDialogPersistence? _persistence;
 
-    public ImportAssociationsDialog()
+    public bool HasUnresolvedSubmitFailure { get; private set; }
+
+    public ImportAssociationsDialog(
+        HandlerMappingDialogSubmissionCoordinator submissionCoordinator,
+        IMessageBoxService messageBoxService)
     {
+        _submissionCoordinator = submissionCoordinator;
+        _messageBoxService = messageBoxService;
         BuildControls();
     }
 
@@ -69,8 +90,6 @@ public class ImportAssociationsDialog : Form
         _grid.CellContentClick += OnGridCellContentClick;
         _sortHelper.EnableThreeStateSorting(_grid, PopulateGrid);
 
-        // Button panel: left side has Select All/Deselect All, right side has OK/Cancel.
-        // Padding (0, 6, 6, 6) makes inner height 40 - 6 - 6 = 28px so Dock=Right buttons are 28px tall.
         var buttonPanel = new Panel
         {
             Dock = DockStyle.Bottom,
@@ -89,7 +108,7 @@ public class ImportAssociationsDialog : Form
         _okButton = new Button
         {
             Text = "Import",
-            DialogResult = DialogResult.OK,
+            DialogResult = DialogResult.None,
             Width = 80,
             Dock = DockStyle.Right,
             FlatStyle = FlatStyle.System
@@ -112,9 +131,8 @@ public class ImportAssociationsDialog : Form
 
         _selectAllButton.Click += (_, _) => SetAllChecked(true);
         _deselectAllButton.Click += (_, _) => SetAllChecked(false);
+        _okButton.Click += OnOkClick;
 
-        // Dock=Right buttons must be added before left-aligned buttons so they fill the right edge.
-        // First added = rightmost; cancel added first → rightmost, then ok to its left.
         buttonPanel.Controls.Add(_cancelButton);
         buttonPanel.Controls.Add(_okButton);
         buttonPanel.Controls.Add(_selectAllButton);
@@ -132,8 +150,13 @@ public class ImportAssociationsDialog : Form
     /// <summary>
     /// Populates the dialog with entries to choose from. Must be called before ShowDialog.
     /// </summary>
-    public void Initialize(IReadOnlyList<InteractiveAssociationEntry> entries, IReadOnlySet<string> existingKeys)
+    public void Initialize(
+        IReadOnlyList<InteractiveAssociationEntry> entries,
+        IReadOnlySet<string> existingKeys,
+        IHandlerMappingDialogPersistence persistence)
     {
+        _persistence = persistence ?? throw new ArgumentNullException(nameof(persistence));
+        HasUnresolvedSubmitFailure = false;
         _entries = entries.Where(e => !existingKeys.Contains(e.Key)).ToList();
         PopulateGrid();
     }
@@ -181,6 +204,73 @@ public class ImportAssociationsDialog : Form
                 }
             }
             return result;
+        }
+    }
+
+    private async void OnOkClick(object? sender, EventArgs e)
+    {
+        await HandleOkAsync();
+    }
+
+    private async Task HandleOkAsync()
+    {
+        if (IsDisposed || Disposing)
+            return;
+
+        HasUnresolvedSubmitFailure = false;
+        var persistence = _persistence
+            ?? throw new InvalidOperationException("Import associations dialog must be initialized before submission.");
+
+        try
+        {
+            Enabled = false;
+            var result = await _submissionCoordinator.SubmitImportAsync(
+                new ImportAssociationsDialogSubmitRequest(SelectedEntries),
+                persistence);
+            if (IsDisposed || Disposing)
+                return;
+
+            ApplySubmitResult(result);
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing)
+                Enabled = true;
+        }
+    }
+
+    private void ApplySubmitResult(HandlerMappingDialogSubmitResult result)
+    {
+        if (!string.IsNullOrWhiteSpace(result.ValidationMessage))
+        {
+            _messageBoxService.Show(this, result.ValidationMessage, "Invalid", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            _grid.Focus();
+            return;
+        }
+
+        HasUnresolvedSubmitFailure = result.HasUnresolvedFailure;
+
+        if (!string.IsNullOrWhiteSpace(result.UnresolvedFailureText))
+        {
+            _messageBoxService.Show(this, result.UnresolvedFailureText, "Save Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.UnexpectedErrorMessage))
+        {
+            _messageBoxService.Show(this, result.UnexpectedErrorMessage, "Save Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.WarningMessage))
+        {
+            _messageBoxService.Show(this, result.WarningMessage, "Handler Associations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        if (result.DialogResult == System.Windows.Forms.DialogResult.OK)
+        {
+            DialogResult = System.Windows.Forms.DialogResult.OK;
+            Close();
         }
     }
 }

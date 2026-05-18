@@ -83,7 +83,7 @@ public class StartMenuDiscoveryService(IProfilePathResolver profilePathResolver,
             string? target;
             try
             {
-                target = shortcutHelper.GetShortcutTargetAndArgs(lnkPath).Target;
+                target = shortcutHelper.GetShortcutDefinition(lnkPath).TargetPath;
             }
             catch
             {
@@ -187,7 +187,7 @@ public class StartMenuDiscoveryService(IProfilePathResolver profilePathResolver,
             {
                 try
                 {
-                    var target = shortcutHelper.GetShortcutTargetAndArgs(lnkPath).Target;
+                    var target = shortcutHelper.GetShortcutDefinition(lnkPath).TargetPath;
                     if (string.IsNullOrEmpty(target))
                         continue;
                     if (currentUserProfile != null)

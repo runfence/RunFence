@@ -9,7 +9,7 @@ namespace RunFence.Groups.UI;
 /// tracking the current group SID, committing changes on leave/close, and
 /// loading the description text after a group selection change.
 /// </summary>
-public class GroupDescriptionEditor(ILocalGroupMembershipService groupMembership, ILoggingService log)
+public class GroupDescriptionEditor(ILocalGroupMutationService groupMembership, ILoggingService log)
 {
     private TextBox _descriptionTextBox = null!;
     private string? _groupSid;

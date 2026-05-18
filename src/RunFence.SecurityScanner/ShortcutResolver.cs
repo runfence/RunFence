@@ -5,9 +5,9 @@ namespace RunFence.SecurityScanner;
 
 public class ShortcutResolver
 {
-    public string? ResolveShortcutTarget(string lnkPath)
+    public ShortcutTargetInfo? ResolveShortcutTarget(string lnkPath)
     {
-        string? result = null;
+        ShortcutTargetInfo? result = null;
         Exception? error = null;
         var thread = new Thread(() =>
         {
@@ -22,7 +22,10 @@ public class ShortcutResolver
                     dynamic shortcut = shell.CreateShortcut(lnkPath);
                     try
                     {
-                        result = shortcut.TargetPath as string;
+                        result = new ShortcutTargetInfo(
+                            shortcut.TargetPath as string,
+                            shortcut.Arguments as string,
+                            shortcut.WorkingDirectory as string);
                     }
                     finally
                     {

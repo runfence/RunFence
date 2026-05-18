@@ -7,12 +7,10 @@ namespace RunFence.DragBridge;
 /// Handles all named pipe communication for <see cref="DragBridgeWindow"/>:
 /// receiving the initial file list and resolve responses from the main app,
 /// and sending file drop and resolve request messages.
-/// Events are raised via <paramref name="uiInvoker"/> to marshal state updates onto the UI thread.
 /// Owns and disposes the pipe.
 /// </summary>
 public class DragBridgePipeClient(
-    NamedPipeClientStream? pipe,
-    Control uiInvoker) : IDisposable
+    NamedPipeClientStream? pipe) : IDisposable
 {
     public event Action<List<string>, bool>? InitialFilesReceived;
     public event Action<List<string>>? ResolveSucceeded;
@@ -30,55 +28,55 @@ public class DragBridgePipeClient(
         {
             var initial = await DragBridgeProtocol.ReadAsync(pipe!);
             var initialFiles = initial?.FilePaths ?? [];
-            if (!uiInvoker.IsDisposed)
-                uiInvoker.BeginInvoke(() => InitialFilesReceived?.Invoke(initialFiles, initial?.FilesResolved ?? false));
+            InitialFilesReceived?.Invoke(initialFiles, initial?.FilesResolved ?? false);
 
             while (true)
             {
                 var response = await DragBridgeProtocol.ReadAsync(pipe!);
                 if (response == null)
                     break;
-                if (!uiInvoker.IsDisposed)
-                    uiInvoker.BeginInvoke(() =>
-                    {
-                        ResolvePendingCleared?.Invoke();
-                        if (response.FilePaths.Count > 0)
-                            ResolveSucceeded?.Invoke(response.FilePaths);
-                        else
-                            ResolveCancelled?.Invoke();
-                    });
+
+                ResolvePendingCleared?.Invoke();
+                if (response.FilePaths.Count > 0)
+                    ResolveSucceeded?.Invoke(response.FilePaths);
+                else
+                    ResolveCancelled?.Invoke();
             }
         }
         catch (IOException)
         {
-        } // main app closed pipe — normal
+        } // main app closed pipe - normal
         catch (ObjectDisposedException)
         {
         }
         catch
         {
-            if (!uiInvoker.IsDisposed)
-                uiInvoker.BeginInvoke(() => ResolveCancelled?.Invoke());
+            ResolveCancelled?.Invoke();
         }
     }
 
     /// <summary>
     /// Sends a file list (drop event) to the main app and signals the window to update its state.
     /// </summary>
-    public async Task SendDropAsync(List<string> files)
+    public async Task<DragBridgeSendDropResult> SendDropAsync(List<string> files)
     {
+        if (pipe?.IsConnected != true)
+            return new DragBridgeSendDropResult(false, "Connection to RunFence was lost.");
+
         try
         {
-            if (pipe?.IsConnected == true)
-                await DragBridgeProtocol.WriteAsync(pipe,
-                    new DragBridgeData { FilePaths = files }); // MessageType=FileList (default)
+            await DragBridgeProtocol.WriteAsync(pipe,
+                new DragBridgeData { FilePaths = files }); // MessageType=FileList (default)
+            DropSent?.Invoke(files);
+            return new DragBridgeSendDropResult(true, null);
         }
-        catch
+        catch (Exception ex)
         {
+            var message = string.IsNullOrWhiteSpace(ex.Message)
+                ? "Failed to send dropped files to RunFence."
+                : $"Failed to send dropped files to RunFence. {ex.Message}";
+            return new DragBridgeSendDropResult(false, message);
         }
-
-        if (!uiInvoker.IsDisposed)
-            uiInvoker.BeginInvoke(() => DropSent?.Invoke(files));
     }
 
     /// <summary>
@@ -95,8 +93,7 @@ public class DragBridgePipeClient(
         }
         catch
         {
-            if (!uiInvoker.IsDisposed)
-                uiInvoker.BeginInvoke(() => ResolvePendingCleared?.Invoke());
+            ResolvePendingCleared?.Invoke();
         }
     }
 

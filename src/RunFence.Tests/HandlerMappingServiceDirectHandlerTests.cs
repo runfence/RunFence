@@ -1,6 +1,9 @@
 using Moq;
+using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Persistence.UI;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -11,7 +14,30 @@ public class HandlerMappingServiceDirectHandlerTests
 
     private static (HandlerMappingService service, AppConfigIndex index) MakeService()
     {
-        var index = new AppConfigIndex(new Mock<IGrantConfigTracker>().Object);
+        var session = new SessionContext
+        {
+            Database = new AppDatabase(),
+            CredentialStore = new CredentialStore
+            {
+                ArgonSalt = new byte[32],
+                EncryptedCanary = [1]
+            }
+        };
+        var sessionProvider = new Mock<ISessionProvider>();
+        sessionProvider.Setup(provider => provider.GetSession()).Returns(session);
+        var configSaveOrchestrator = new ConfigSaveOrchestrator(
+            sessionProvider.Object,
+            () => new InlineUiThreadInvoker(action => action()),
+            new Mock<IDatabaseService>().Object,
+            new Mock<IAppConfigService>().Object,
+            new Mock<IHandlerMappingService>().Object);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        var mainStore = new MainGrantIntentStore(
+            sessionProvider.Object,
+            configSaveOrchestrator,
+            ownershipProjection);
+        var provider = new GrantIntentStoreProvider(mainStore, configSaveOrchestrator, ownershipProjection);
+        var index = new AppConfigIndex(ownershipProjection, new AppIdValidator());
         return (new HandlerMappingService(index), index);
     }
 

@@ -20,6 +20,7 @@ public class SavedRightsComparerTests
         new(AllowExecute: execute, AllowWrite: write, AllowSpecial: special,
             DenyRead: RightCheckState.Unchecked, DenyExecute: RightCheckState.Unchecked,
             DenyWrite: RightCheckState.Unchecked, DenySpecial: RightCheckState.Unchecked,
+            TraverseOnlyAllow: RightCheckState.Unchecked, TraverseOnlyDeny: RightCheckState.Unchecked,
             IsAccountOwner: isAccountOwner, IsAdminOwner: false,
             DirectAllowAceCount: directAllowAceCount, DirectDenyAceCount: 0);
 
@@ -33,6 +34,7 @@ public class SavedRightsComparerTests
             AllowSpecial: RightCheckState.Unchecked,
             DenyRead: denyRead, DenyExecute: denyExecute,
             DenyWrite: RightCheckState.Checked, DenySpecial: RightCheckState.Checked,
+            TraverseOnlyAllow: RightCheckState.Unchecked, TraverseOnlyDeny: RightCheckState.Unchecked,
             IsAccountOwner: isAccountOwner, IsAdminOwner: isAdminOwner,
             DirectAllowAceCount: 0, DirectDenyAceCount: directDenyAceCount);
 

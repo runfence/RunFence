@@ -14,6 +14,7 @@ namespace RunFence.Startup;
 public class ShortcutEnforcementHelper(
     IShortcutService shortcutService,
     IBesideTargetShortcutService besideTargetShortcutService,
+    IIconService iconService,
     SidDisplayNameResolver displayNameResolver,
     IInteractiveUserSidResolver interactiveUserSidResolver,
     ILoggingService log)
@@ -25,22 +26,29 @@ public class ShortcutEnforcementHelper(
     /// <c>ManageShortcuts = true</c>. A null <paramref name="cache"/> indicates no shortcut scan
     /// was prepared (e.g. no apps need shortcuts or launcher is absent) and is a no-op.
     /// </summary>
-    public void EnforceShortcuts(AppDatabase database, ShortcutTraversalCache? cache)
+    public string? EnforceShortcuts(AppDatabase database, ShortcutTraversalCache? cache)
     {
         if (cache == null)
-            return;
+            return null;
 
         var launcherPath = LauncherPath;
         if (!File.Exists(launcherPath))
-            return;
+            return null;
 
         try
         {
             shortcutService.EnforceShortcuts(database.Apps, launcherPath, cache);
+            return null;
+        }
+        catch (ShortcutEnforcementException ex)
+        {
+            log.Warn($"Shortcut enforcement warning: {ex.Message}");
+            return ex.Message;
         }
         catch (Exception ex)
         {
             log.Error("Shortcut enforcement failed", ex);
+            return null;
         }
     }
 
@@ -70,7 +78,7 @@ public class ShortcutEnforcementHelper(
                     var username = displayNameResolver.ResolveUsername(effectiveSid, database.SidNames);
                     if (string.IsNullOrEmpty(username))
                         return null;
-                    var iconPath = Path.Combine(PathConstants.ProgramDataIconDir, $"{app.Id}.ico");
+                    var iconPath = iconService.GetIconPath(app.Id);
                     return (username, iconPath);
                 });
         }

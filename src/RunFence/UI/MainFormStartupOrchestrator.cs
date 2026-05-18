@@ -156,7 +156,23 @@ public class MainFormStartupOrchestrator(
             }
 
             if (!owner.IsDisposed)
-                MessageBox.Show("ACLs and shortcuts reapplied successfully.", "Reapply", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            {
+                var warningMessage = result.Warnings is { Count: > 0 }
+                    ? string.Join("\n\n", result.Warnings)
+                    : null;
+                if (warningMessage == null)
+                {
+                    MessageBox.Show("ACLs and shortcuts reapplied successfully.", "Reapply", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show(
+                        $"ACLs were reapplied, but shortcut enforcement reported warnings:\n\n{warningMessage}",
+                        "Reapply Warning",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
         }
         catch (Exception ex)
         {

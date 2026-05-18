@@ -1,4 +1,5 @@
 using System.Security.AccessControl;
+using System.Security.Principal;
 using Moq;
 using RunFence.Acl;
 using RunFence.Acl.Permissions;
@@ -39,10 +40,16 @@ public class GrantReconciliationServiceTests
     }
 
     private GrantReconciliationService BuildService(AppDatabase db, IInteractiveUserResolver? iuResolver = null)
+        => BuildService(db, iuResolver, null);
+
+    private GrantReconciliationService BuildService(
+        AppDatabase db,
+        IInteractiveUserResolver? iuResolver,
+        ITraverseAcl? traverseAcl)
     {
         var sidReconciler = new SidReconciler(
             _aclPermission.Object,
-            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, new Mock<ITraverseAcl>().Object,
+            () => new AncestorTraverseGranter(_log.Object, _aclPermission.Object, traverseAcl ?? new Mock<ITraverseAcl>().Object,
                 _pathInfo),
             _log.Object,
             iuResolver ?? new Mock<IInteractiveUserResolver>().Object,
@@ -56,6 +63,16 @@ public class GrantReconciliationServiceTests
     // _service uses an empty database; suitable for tests that don't depend on database state.
     // Stored as a readonly field so the same instance is reused throughout a single test.
     private readonly GrantReconciliationService _service;
+
+    private static SidReconciler.SidReconciliationResult FindSidResult(
+        GrantReconciliationService.ReconciliationResult result,
+        string sid)
+    {
+        var matches = result.SidResults
+            .Where(r => string.Equals(r.Sid, sid, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        return Assert.Single(matches);
+    }
 
     /// <summary>
     /// Creates an <see cref="AppDatabase"/> with <paramref name="sid"/> in <c>SidNames</c> and
@@ -210,13 +227,15 @@ public class GrantReconciliationServiceTests
     {
         var db = new AppDatabase();
         var service = BuildService(db);
-        var result = new GrantReconciliationService.ReconciliationResult(
-            UpdatedSnapshots: new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = GroupsWithUsers
-            },
-            NewTraverseEntries: new Dictionary<string, List<(string, List<string>)>>(StringComparer.OrdinalIgnoreCase),
-            RemovedTraversePaths: new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase));
+        var result = new GrantReconciliationService.ReconciliationResult([
+            new SidReconciler.SidReconciliationResult(
+                UserSid,
+                GroupsWithUsers,
+                true,
+                [],
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                null)
+        ]);
 
         service.ApplyReconciliationResult(result);
 
@@ -229,13 +248,15 @@ public class GrantReconciliationServiceTests
         var db = new AppDatabase();
         var service = BuildService(db);
         var appliedPaths = new List<string> { @"C:\Users", @"C:\" };
-        var result = new GrantReconciliationService.ReconciliationResult(
-            UpdatedSnapshots: new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase),
-            NewTraverseEntries: new Dictionary<string, List<(string, List<string>)>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = [(@"C:\Users", appliedPaths)]
-            },
-            RemovedTraversePaths: new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase));
+        var result = new GrantReconciliationService.ReconciliationResult([
+            new SidReconciler.SidReconciliationResult(
+                UserSid,
+                [],
+                true,
+                [(@"C:\Users", appliedPaths)],
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                null)
+        ]);
 
         service.ApplyReconciliationResult(result);
 
@@ -261,13 +282,15 @@ public class GrantReconciliationServiceTests
         ]);
         var service = BuildService(db);
 
-        var result = new GrantReconciliationService.ReconciliationResult(
-            UpdatedSnapshots: new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase),
-            NewTraverseEntries: new Dictionary<string, List<(string, List<string>)>>(StringComparer.OrdinalIgnoreCase),
-            RemovedTraversePaths: new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { traversePath }
-            });
+        var result = new GrantReconciliationService.ReconciliationResult([
+            new SidReconciler.SidReconciliationResult(
+                UserSid,
+                [],
+                true,
+                [],
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase) { traversePath },
+                null)
+        ]);
 
         service.ApplyReconciliationResult(result);
 
@@ -289,13 +312,15 @@ public class GrantReconciliationServiceTests
             new GrantedPathEntry { Path = path, IsTraverseOnly = false }); // full grant, not traverse
         var service = BuildService(db);
 
-        var result = new GrantReconciliationService.ReconciliationResult(
-            UpdatedSnapshots: new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase),
-            NewTraverseEntries: new Dictionary<string, List<(string, List<string>)>>(StringComparer.OrdinalIgnoreCase),
-            RemovedTraversePaths: new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase)
-            {
-                [UserSid] = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { path }
-            });
+        var result = new GrantReconciliationService.ReconciliationResult([
+            new SidReconciler.SidReconciliationResult(
+                UserSid,
+                [],
+                true,
+                [],
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase) { path },
+                null)
+        ]);
 
         service.ApplyReconciliationResult(result);
 
@@ -304,6 +329,28 @@ public class GrantReconciliationServiceTests
         Assert.NotNull(grants);
         Assert.Single(grants);
         Assert.False(grants[0].IsTraverseOnly);
+    }
+
+    [Fact]
+    public void ApplyReconciliationResult_FailedSid_DoesNotUpdateSnapshot()
+    {
+        const string invalidSid = "INVALID-SID";
+        var db = MakeDbWithSnapshot(invalidSid, "bad", [..DefaultGroups]);
+        var service = BuildService(db);
+        var result = new GrantReconciliationService.ReconciliationResult([
+            new SidReconciler.SidReconciliationResult(
+                invalidSid,
+                GroupsWithUsers,
+                false,
+                [],
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                "bad sid")
+        ]);
+
+        service.ApplyReconciliationResult(result);
+
+        Assert.Equal(DefaultGroups, db.AccountGroupSnapshots![invalidSid]);
+        _sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
     }
 
     // --- ReconcileChangedSids tests ---
@@ -322,11 +369,9 @@ public class GrantReconciliationServiceTests
         // Act
         var result = _service.ReconcileChangedSids(changedSids);
 
-        // Assert — snapshots updated for both SIDs even if filesystem reconciliation is skipped
-        Assert.True(result.UpdatedSnapshots.ContainsKey(UserSid));
-        Assert.Equal(GroupsWithUsers, result.UpdatedSnapshots[UserSid]);
-        Assert.True(result.UpdatedSnapshots.ContainsKey(userSid2));
-        Assert.Equal(DefaultGroups, result.UpdatedSnapshots[userSid2]);
+        // Assert — both SIDs have successful reconciliation results with updated groups
+        Assert.Equal(GroupsWithUsers, FindSidResult(result, UserSid).NewGroups);
+        Assert.Equal(DefaultGroups, FindSidResult(result, userSid2).NewGroups);
     }
 
     [Fact]
@@ -340,7 +385,7 @@ public class GrantReconciliationServiceTests
 
         var result = _service.ReconcileChangedSids(changedSids, accountGrants: null);
 
-        Assert.Empty(result.RemovedTraversePaths);
+        Assert.All(result.SidResults, r => Assert.Empty(r.RemovedTraversePaths));
     }
 
     [Fact]
@@ -351,11 +396,11 @@ public class GrantReconciliationServiceTests
         {
             (UserSid, GroupsWithUsers)
         };
-        var emptyGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
+        var emptyGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
 
         var result = _service.ReconcileChangedSids(changedSids, accountGrants: emptyGrants);
 
-        Assert.Empty(result.RemovedTraversePaths);
+        Assert.All(result.SidResults, r => Assert.Empty(r.RemovedTraversePaths));
     }
 
     [Fact]
@@ -364,9 +409,35 @@ public class GrantReconciliationServiceTests
         // Empty input → all result collections empty (no-op)
         var result = _service.ReconcileChangedSids([]);
 
-        Assert.Empty(result.UpdatedSnapshots);
-        Assert.Empty(result.NewTraverseEntries);
-        Assert.Empty(result.RemovedTraversePaths);
+        Assert.Empty(result.SidResults);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_InputSnapshotCanBeIndependentFromLiveDatabase()
+    {
+        var db = new AppDatabase();
+        var liveEntry = new GrantedPathEntry
+        {
+            Path = @"C:\CloneMe",
+            IsTraverseOnly = true,
+            AllAppliedPaths = [@"C:\CloneMe", @"C:\"],
+            SourceSids = [UserSid]
+        };
+        db.GetOrCreateAccount(UserSid).Grants.Add(liveEntry);
+
+        var snapshot = db.Accounts.ToDictionary(
+            account => account.Sid,
+            account => (IReadOnlyList<GrantedPathEntry>)account.Grants
+                .Select(entry => entry.Clone())
+                .ToArray(),
+            StringComparer.OrdinalIgnoreCase);
+        var snapEntry = Assert.Single(snapshot[UserSid]);
+
+        liveEntry.AllAppliedPaths!.Add(@"C:\Mutated");
+        liveEntry.SourceSids!.Add("S-1-5-21-mutated");
+
+        Assert.DoesNotContain(@"C:\Mutated", snapEntry.AllAppliedPaths ?? []);
+        Assert.DoesNotContain("S-1-5-21-mutated", snapEntry.SourceSids ?? []);
     }
 
     // --- ReconcileIfGroupsChanged tests ---
@@ -412,6 +483,21 @@ public class GrantReconciliationServiceTests
         Assert.Equal(GroupsWithUsers, db.AccountGroupSnapshots![UserSid]);
     }
 
+    [Fact]
+    public async Task ReconcileIfGroupsChanged_AllSidReconciliationsFail_ReturnsFalseAndLeavesSnapshotDirty()
+    {
+        const string invalidSid = "INVALID-SID";
+        _aclPermission.Setup(s => s.ResolveAccountGroupSids(invalidSid)).Returns(GroupsWithUsers);
+
+        var db = MakeDbWithSnapshot(invalidSid, "bad", [..DefaultGroups]);
+        var service = BuildService(db);
+
+        var changed = await service.ReconcileIfGroupsChanged();
+
+        Assert.False(changed);
+        Assert.Equal(DefaultGroups, db.AccountGroupSnapshots![invalidSid]);
+    }
+
     // --- Logon script / filesystem reconciliation path tests ---
 
     [Fact]
@@ -431,13 +517,14 @@ public class GrantReconciliationServiceTests
         {
             (UserSid, DefaultGroups)
         };
-        var emptyGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
+        var emptyGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
 
         // UserSid is a synthetic SID — no script file for it will exist on any real system
         var result = _service.ReconcileChangedSids(changedSids, emptyGrants);
 
-        Assert.True(result.UpdatedSnapshots.ContainsKey(UserSid));
-        Assert.Empty(result.RemovedTraversePaths);
+        var sidResult = FindSidResult(result, UserSid);
+        Assert.True(sidResult.Succeeded);
+        Assert.Empty(sidResult.RemovedTraversePaths);
     }
 
     [Fact]
@@ -467,9 +554,10 @@ public class GrantReconciliationServiceTests
         // Should not throw
         var result = _service.ReconcileChangedSids(changedSids);
 
-        // Snapshot updated for both entries regardless of per-SID failure
-        Assert.True(result.UpdatedSnapshots.ContainsKey("INVALID-SID-STRING"));
-        Assert.True(result.UpdatedSnapshots.ContainsKey(userSid2));
+        var invalidResult = FindSidResult(result, "INVALID-SID-STRING");
+        var validResult = FindSidResult(result, userSid2);
+        Assert.False(invalidResult.Succeeded);
+        Assert.True(validResult.Succeeded);
         // Warning must be logged for the invalid SID
         _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("INVALID-SID-STRING"))), Times.Once);
     }
@@ -489,16 +577,17 @@ public class GrantReconciliationServiceTests
         {
             (UserSid, GroupsWithUsers)
         };
-        var emptyGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
+        var emptyGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
 
         var result = _service.ReconcileChangedSids(changedSids, emptyGrants);
 
-        Assert.True(result.UpdatedSnapshots.ContainsKey(UserSid));
-        Assert.Equal(GroupsWithUsers, result.UpdatedSnapshots[UserSid]);
-        // Traverse already effective everywhere → no new ACEs added → NewTraverseEntries empty
-        Assert.Empty(result.NewTraverseEntries);
+        var sidResult = FindSidResult(result, UserSid);
+        Assert.True(sidResult.Succeeded);
+        Assert.Equal(GroupsWithUsers, sidResult.NewGroups);
+        // Traverse already effective everywhere → no new ACEs added
+        Assert.Empty(sidResult.NewTraverseEntries);
         // No traverse entries in AccountGrants for this SID → nothing to remove
-        Assert.Empty(result.RemovedTraversePaths);
+        Assert.Empty(sidResult.RemovedTraversePaths);
     }
 
     [Fact]
@@ -511,7 +600,7 @@ public class GrantReconciliationServiceTests
         var dragBridgeTempRoot = Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir);
         _pathInfo.AddDirectory(dragBridgeTempRoot);
 
-        var accountGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase)
+        var accountGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase)
         {
             [UserSid] =
             [
@@ -539,9 +628,142 @@ public class GrantReconciliationServiceTests
         var result = _service.ReconcileChangedSids(changedSids, accountGrants);
 
         // Assert: the traverse entry is marked for removal because groups now cover it
-        Assert.True(result.RemovedTraversePaths.ContainsKey(UserSid));
-        Assert.Contains(Path.GetFullPath(dragBridgeTempRoot), result.RemovedTraversePaths[UserSid],
+        var sidResult = FindSidResult(result, UserSid);
+        Assert.Contains(Path.GetFullPath(dragBridgeTempRoot), sidResult.RemovedTraversePaths,
             StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_GroupAllowButUserDeny_DoesNotRemoveTraverse()
+    {
+        var dragBridgeTempRoot = Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir);
+        var security = CreateDirectorySecurity(
+            allowSids: [(UserSid, TraverseRightsHelper.TraverseRights), ("S-1-1-0", TraverseRightsHelper.TraverseRights)],
+            denySids: [(UserSid, TraverseRightsHelper.TraverseRights)]);
+        _pathInfo.AddDirectory(dragBridgeTempRoot, security);
+
+        var accountGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase)
+        {
+            [UserSid] =
+            [
+                new GrantedPathEntry
+                {
+                    Path = dragBridgeTempRoot,
+                    IsTraverseOnly = true,
+                    AllAppliedPaths = [dragBridgeTempRoot]
+                }
+            ]
+        };
+
+        var changedSids = new List<(string Sid, List<string> NewGroups)>
+        {
+            (UserSid, GroupsWithUsers)
+        };
+
+        var result = _service.ReconcileChangedSids(changedSids, accountGrants);
+
+        Assert.Empty(FindSidResult(result, UserSid).RemovedTraversePaths);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_DirectNonTraverseAllow_RemovesRedundantTraverse()
+    {
+        var dragBridgeTempRoot = Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir);
+        var security = CreateDirectorySecurity(
+            allowSids:
+            [
+                (UserSid, TraverseRightsHelper.TraverseRights),
+                (UserSid, FileSystemRights.ReadAndExecute)
+            ]);
+        _pathInfo.AddDirectory(dragBridgeTempRoot, security);
+
+        var accountGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase)
+        {
+            [UserSid] =
+            [
+                new GrantedPathEntry
+                {
+                    Path = dragBridgeTempRoot,
+                    IsTraverseOnly = true,
+                    AllAppliedPaths = [dragBridgeTempRoot]
+                }
+            ]
+        };
+
+        var changedSids = new List<(string Sid, List<string> NewGroups)>
+        {
+            (UserSid, GroupsWithUsers)
+        };
+
+        var result = _service.ReconcileChangedSids(changedSids, accountGrants);
+
+        Assert.Contains(Path.GetFullPath(dragBridgeTempRoot), FindSidResult(result, UserSid).RemovedTraversePaths,
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_AddTraverseVerificationFailure_MarksSidFailed()
+    {
+        var appDir = Path.GetDirectoryName(PathConstants.UnlockCmdPath)!;
+        _pathInfo.AddDirectory(appDir, CreateDirectorySecurity());
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<FileSystemRights>()))
+            .Returns(false);
+
+        var iuResolver = new Mock<IInteractiveUserResolver>();
+        iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns(UserSid);
+        var service = BuildService(new AppDatabase(), iuResolver.Object);
+
+        var result = service.ReconcileChangedSids(
+            [(UserSid, DefaultGroups)],
+            new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase));
+
+        Assert.False(FindSidResult(result, UserSid).Succeeded);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_RemoveTraverseVerificationFailure_MarksSidFailed()
+    {
+        var dragBridgeTempRoot = Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir);
+        var security = CreateDirectorySecurity(
+            allowSids:
+            [
+                (UserSid, TraverseRightsHelper.TraverseRights),
+                ("S-1-1-0", TraverseRightsHelper.TraverseRights)
+            ]);
+        _pathInfo.AddDirectory(dragBridgeTempRoot, security);
+
+        var traverseAcl = new Mock<ITraverseAcl>();
+        traverseAcl
+            .Setup(a => a.HasExplicitTraverseAce(
+                dragBridgeTempRoot,
+                It.Is<SecurityIdentifier>(sid => sid.Value == UserSid)))
+            .Returns(true);
+        traverseAcl
+            .Setup(a => a.HasExplicitTraverseAceOrThrow(
+                dragBridgeTempRoot,
+                It.Is<SecurityIdentifier>(sid => sid.Value == UserSid)))
+            .Returns(true);
+
+        var service = BuildService(new AppDatabase(), null, traverseAcl.Object);
+        var accountGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase)
+        {
+            [UserSid] =
+            [
+                new GrantedPathEntry
+                {
+                    Path = dragBridgeTempRoot,
+                    IsTraverseOnly = true,
+                    AllAppliedPaths = [dragBridgeTempRoot]
+                }
+            ]
+        };
+
+        var result = service.ReconcileChangedSids([(UserSid, GroupsWithUsers)], accountGrants);
+
+        Assert.False(FindSidResult(result, UserSid).Succeeded);
     }
 
     [Fact]
@@ -551,31 +773,86 @@ public class GrantReconciliationServiceTests
         // direct ACE must be requested against a fake app directory. ITraverseAcl is mocked
         // (AddAllowAce is a no-op), so no real NTFS writes occur.
         var appDir = Path.GetDirectoryName(PathConstants.UnlockCmdPath)!;
-        _pathInfo.AddDirectory(appDir);
+        var security = CreateDirectorySecurity();
+        _pathInfo.AddDirectory(appDir, security);
         _aclPermission.Setup(a => a.HasEffectiveRights(
                 It.IsAny<FileSystemSecurity>(),
                 It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
                 It.IsAny<FileSystemRights>()))
-            .Returns(false);
+            .Returns<FileSystemSecurity, string, IReadOnlyList<string>, FileSystemRights>((fs, sid, _, rights) =>
+            {
+                var identity = new SecurityIdentifier(sid);
+                return fs.GetAccessRules(true, false, typeof(SecurityIdentifier))
+                    .OfType<FileSystemAccessRule>()
+                    .Any(rule =>
+                        rule.AccessControlType == AccessControlType.Allow &&
+                        rule.IdentityReference is SecurityIdentifier ruleSid &&
+                        ruleSid.Equals(identity) &&
+                        (rule.FileSystemRights & rights) == rights);
+            });
 
         var changedSids = new List<(string Sid, List<string> NewGroups)>
         {
             (UserSid, DefaultGroups)
         };
-        var emptyGrants = new Dictionary<string, List<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
+        var emptyGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase);
 
         var iuResolver = new Mock<IInteractiveUserResolver>();
         iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns(UserSid);
         var db = new AppDatabase();
-        var service = BuildService(db, iuResolver.Object);
+        var traverseAcl = new Mock<ITraverseAcl>();
+        traverseAcl
+            .Setup(a => a.AddAllowAce(
+                appDir,
+                It.Is<SecurityIdentifier>(sid => sid.Value == UserSid)))
+            .Callback<string, SecurityIdentifier>((_, sid) =>
+            {
+                security.AddAccessRule(new FileSystemAccessRule(
+                    sid,
+                    TraverseRightsHelper.TraverseRights,
+                    InheritanceFlags.None,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+            });
+        var service = BuildService(db, iuResolver.Object, traverseAcl.Object);
 
         // Act
         var result = service.ReconcileChangedSids(changedSids, emptyGrants);
 
         // Assert: NewTraverseEntries is populated because HasEffectiveRights=false and the fake
         // app directory exists, causing AncestorTraverseGranter to request ACEs.
-        Assert.True(result.UpdatedSnapshots.ContainsKey(UserSid));
-        Assert.True(result.NewTraverseEntries.ContainsKey(UserSid),
-            "NewTraverseEntries should be populated when HasEffectiveRights=false and app directory exists");
+        var sidResult = FindSidResult(result, UserSid);
+        Assert.True(sidResult.Succeeded);
+        Assert.NotEmpty(sidResult.NewTraverseEntries);
+    }
+
+    private static DirectorySecurity CreateDirectorySecurity(
+        IEnumerable<(string Sid, FileSystemRights Rights)>? allowSids = null,
+        IEnumerable<(string Sid, FileSystemRights Rights)>? denySids = null)
+    {
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+        foreach (var (sid, rights) in allowSids ?? [])
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(sid),
+                rights,
+                InheritanceFlags.None,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        }
+
+        foreach (var (sid, rights) in denySids ?? [])
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(sid),
+                rights,
+                InheritanceFlags.None,
+                PropagationFlags.None,
+                AccessControlType.Deny));
+        }
+
+        return security;
     }
 }

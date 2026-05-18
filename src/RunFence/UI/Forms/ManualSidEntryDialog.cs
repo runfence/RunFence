@@ -3,7 +3,7 @@ using RunFence.Apps.UI;
 
 namespace RunFence.UI.Forms;
 
-public partial class ManualSidEntryDialog : Form
+public partial class ManualSidEntryDialog : ContextHelpForm
 {
     public string? ResultSid { get; private set; }
 

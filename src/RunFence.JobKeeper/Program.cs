@@ -14,13 +14,18 @@ public static class Program
         var executablePathResolver = new JobKeeperExecutablePathResolver(
             launching.ExecutablePathResolver);
         var nativeProcessApi = new JobKeeperNativeProcessApi();
+        var childProcessRegistry = new JobKeeperChildProcessRegistry(nativeProcessApi);
         var childProcessLauncher = new JobKeeperChildProcessLauncher(
             executablePathResolver,
             new JobKeeperEnvironmentSnapshotReader(nativeProcessApi),
             new JobKeeperEnvironmentBlockFactory(),
-            nativeProcessApi);
+            nativeProcessApi,
+            childProcessRegistry);
         var requestHandler = new JobKeeperRequestHandler(childProcessLauncher);
-        new JobKeeperRunner(new JobKeeperPipeClientLoop(options, requestHandler)).Run();
+        var lifetimeController = new JobKeeperLifetimeController(
+            new EnvironmentTickCountClock(),
+            childProcessRegistry);
+        new JobKeeperRunner(new JobKeeperPipeClientLoop(options, requestHandler, lifetimeController)).Run();
     }
 
     private static JobKeeperStartupOptions? ParseOptions(string[] args)

@@ -118,7 +118,6 @@ public sealed class ClipboardPasteInterceptService : IRequiresInitialization, ID
         {
             _injectionInProgress = false;
             _log.Error($"ClipboardPasteInterceptService: Failed to schedule clipboard injection for pid {target.TargetProcessId}.", ex);
-            _syntheticInputSender.SendPaste(pasteKind);
         }
 
         return (IntPtr)1;
@@ -137,13 +136,18 @@ public sealed class ClipboardPasteInterceptService : IRequiresInitialization, ID
             }
 
             _log.Info($"ClipboardPasteInterceptService: Read {formats.Count} clipboard format(s): [{string.Join(", ", formats.Select(f => f.Format))}].");
-            _remoteProcessInjector.TryInjectClipboardData(target.TargetProcessId, target.HWnd, formats);
+            bool injected = _remoteProcessInjector.TryInjectClipboardData(target.TargetProcessId, target.HWnd, formats);
+            if (!injected)
+            {
+                _log.Warn($"ClipboardPasteInterceptService: Clipboard injection failed for pid {target.TargetProcessId} - suppressing synthetic paste replay.");
+                return;
+            }
+
             _syntheticInputSender.SendPaste(pasteKind);
         }
         catch (Exception ex)
         {
             _log.Error($"ClipboardPasteInterceptService: Unexpected error in HandlePaste for pid {target.TargetProcessId}.", ex);
-            _syntheticInputSender.SendPaste(pasteKind);
         }
         finally
         {

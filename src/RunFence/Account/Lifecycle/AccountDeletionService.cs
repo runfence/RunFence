@@ -21,14 +21,18 @@ public class AccountDeletionService(
     ILocalUserProvider localUserProvider,
     IDatabaseProvider databaseProvider) : IAccountDeletionService
 {
-    public void DeleteAccount(string sid, string username,
+    public async Task<AccountDeletionCleanupResult> DeleteAccountAsync(string sid, string username,
         CredentialStore credentialStore,
         bool removeApps = true)
     {
         var database = databaseProvider.GetDatabase();
-        var (success, error) = lifecycleManager.DeleteUser(sid);
-        if (!success)
-            throw new InvalidOperationException(error ?? $"Failed to delete account {sid}");
+        var deleteResult = lifecycleManager.DeleteSamAccount(sid);
+        if (!deleteResult.Succeeded)
+            throw new InvalidOperationException(deleteResult.ErrorMessage ?? $"Failed to delete account {sid}");
+
+        // After the SAM account is gone, profile deletion is warning-only cleanup. Await it here
+        // so callers do not return early while the deletion is still running in the background.
+        await TryDeleteProfileAsync(sid);
 
         // Intentionally after DeleteUser: lifting sandbox restrictions before deletion creates a security window where the account could execute unrestricted operations
         try
@@ -51,8 +55,12 @@ public class AccountDeletionService(
 
         credentialManager.RemoveCredentialsBySid(sid, credentialStore);
 
+        var cleanupWarnings = new List<string>();
         if (database.GetAccount(sid)?.Grants is { Count: > 0 })
-            pathGrantService.RemoveAll(sid, updateFileSystem: true);
+        {
+            var grantRemovalResult = pathGrantService.RemoveAll(sid);
+            cleanupWarnings.AddRange(grantRemovalResult.Warnings.Select(GrantApplyFailureFormatter.Format));
+        }
 
         // Revert filesystem ACEs before database cleanup (AllowedAclEntries must still be intact).
         var (appsExcludingDeleted, allowModeAppsToReapply) = RevertDeletedAccountAcls(sid, database, aclService);
@@ -70,8 +78,22 @@ public class AccountDeletionService(
 
         // Reapply allow-mode apps that lost the deleted SID entry, and recompute ancestor ACLs.
         ReapplyAndRecomputeAcls(appsExcludingDeleted, allowModeAppsToReapply, aclService);
-
         // AccountEntry (including ephemeral flag) is removed by CleanupSidFromAppData above.
+        return new AccountDeletionCleanupResult(cleanupWarnings);
+    }
+
+    private async Task TryDeleteProfileAsync(string sid)
+    {
+        try
+        {
+            var error = await lifecycleManager.DeleteProfileAsync(sid);
+            if (!string.IsNullOrEmpty(error))
+                log.Warn($"DeleteProfileAsync failed for {sid}: {error}");
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"DeleteProfileAsync failed for {sid}: {ex.Message}");
+        }
     }
 
     /// <summary>

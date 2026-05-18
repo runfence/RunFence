@@ -34,7 +34,7 @@ public class ContainerOrAccountStep : WizardStepPage
         var useContainer = _containerRadio.Checked;
         var privilegeLevel = !useContainer && _lowIntegrityCheckBox.Checked
             ? PrivilegeLevel.LowIntegrity
-            : PrivilegeLevel.Basic;
+            : PrivilegeLevel.Isolated;
         var isEphemeral = _ephemeralCheckBox.Checked;
         _setOptions(useContainer, privilegeLevel, isEphemeral);
     }

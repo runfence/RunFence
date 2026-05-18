@@ -69,16 +69,33 @@ public class StartupEnforcementRunner(
     /// Fixes AppEntry property inconsistencies on the live database. Must run on the UI thread
     /// before snapshotting, so that the fixes are visible in both the snapshot and the live database.
     /// </summary>
-    public void FixAppEntryDefaults()
+    public StartupAppEntryDefaultRepairResult FixAppEntryDefaults()
     {
         var database = sessionProvider.GetSession().Database;
+        var changedAppIds = new List<string>();
         foreach (var app in database.Apps)
         {
+            bool changed = false;
             if (app is { IsFolder: true, AclTarget: AclTarget.File })
+            {
                 app.AclTarget = AclTarget.Folder;
+                changed = true;
+            }
             if (app.AclMode == AclMode.Deny)
+            {
+                if (app.AllowedAclEntries != null)
+                    changed = true;
                 app.AllowedAclEntries = null;
+            }
+
+            if (changed && !string.IsNullOrEmpty(app.Id))
+                changedAppIds.Add(app.Id);
         }
+
+        return new StartupAppEntryDefaultRepairResult(
+            Changed: changedAppIds.Count > 0,
+            ChangedAppIds: changedAppIds,
+            Warnings: []);
     }
 
     /// <summary>
@@ -122,20 +139,17 @@ public class StartupEnforcementRunner(
         if (string.IsNullOrEmpty(unlockDir))
             return;
 
-        var result = pathGrantService.EnsureAccess(interactiveSid, unlockDir,
+        _ = pathGrantService.EnsureAccess(interactiveSid, unlockDir,
             FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
-        var lowIntegrityResult = pathGrantService.EnsureAccess(AclHelper.LowIntegritySid, unlockDir,
+        _ = pathGrantService.EnsureAccess(AclHelper.LowIntegritySid, unlockDir,
             FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
-        var allApplicationPackagesResult = pathGrantService.EnsureAccess(AclHelper.AllApplicationPackagesSid, unlockDir,
+        _ = pathGrantService.EnsureAccess(AclHelper.AllApplicationPackagesSid, unlockDir,
             FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
-        if (result.DatabaseModified || lowIntegrityResult.DatabaseModified ||
-            allApplicationPackagesResult.DatabaseModified)
-            sessionSaver.SaveConfig();
     }
 
     /// <summary>
     /// Triggers ephemeral account expiry processing. Must be called after background services Start().
     /// </summary>
-    public void ProcessExpiredAccounts()
-        => ephemeralAccountService.ProcessExpiredAccounts();
+    public Task ProcessExpiredAccountsAsync()
+        => ephemeralAccountService.ProcessExpiredAccountsAsync();
 }

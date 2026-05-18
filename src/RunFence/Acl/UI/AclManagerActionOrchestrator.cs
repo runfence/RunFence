@@ -18,11 +18,6 @@ public class AclManagerActionOrchestrator(
     IReparsePointPromptHelper reparsePointHelper,
     ISpecificContainerAceConflictDetector specificContainerAceConflictDetector)
 {
-    private const string SpecificContainerAceLowIntegrityConflictMessage =
-        "This path has an explicit AppContainer package SID ACE. Specific AppContainer ACEs conflict with ordinary Low Integrity access; remove the specific container ACE or replace it with ALL APPLICATION PACKAGES before adding this Low Integrity grant.";
-    private const string LowIntegrityAceSpecificContainerConflictMessage =
-        "This path has a Low Integrity ACE. Adding a specific AppContainer package SID ACE here will make ordinary Low Integrity access stop working; remove the Low Integrity grant or use ALL APPLICATION PACKAGES instead.";
-
     private string _sid = null!;
     private bool _isContainer;
     private IWin32Window _owner = null!;
@@ -65,7 +60,10 @@ public class AclManagerActionOrchestrator(
 
     /// <param name="targetConfigPath">Config path of the section the user dropped onto; null for main config.</param>
     /// <returns>First duplicate-path error encountered, or null if all paths added successfully.</returns>
-    public string? HandleShellDropOnGrants(string[] paths, string? targetConfigPath = null)
+    public string? HandleShellDropOnGrants(
+        string[] paths,
+        string? targetConfigPath = null,
+        bool hasExplicitTargetSection = false)
     {
         var regularPaths = paths.Where(p => !reparsePointHelper.IsReparsePoint(p)).ToList();
         var reparsePaths = paths.Where(p => reparsePointHelper.IsReparsePoint(p)).ToList();
@@ -77,14 +75,15 @@ public class AclManagerActionOrchestrator(
             bool? isDeny = PromptGrantMode(_owner);
             if (isDeny != null)
                 foreach (var path in regularPaths)
-                    firstError = AddGrantPathDirect(path, isDeny.Value, targetConfigPath) ?? firstError;
+                    firstError = AddGrantPathDirect(path, isDeny.Value, targetConfigPath, hasExplicitTargetSection) ?? firstError;
         }
 
         foreach (var path in reparsePaths)
         {
             // By design: reparse-point targets are always added as Allow (deny on symlink targets is unreliable)
             var pathsToAdd = reparsePointHelper.ResolveForAdd(path, _owner);
-            firstError = pathsToAdd.Aggregate(firstError, (current, p) => AddGrantPathDirect(p, isDeny: false, targetConfigPath) ?? current);
+            firstError = pathsToAdd.Aggregate(firstError, (current, p) =>
+                AddGrantPathDirect(p, isDeny: false, targetConfigPath, hasExplicitTargetSection) ?? current);
         }
 
         return firstError;
@@ -102,7 +101,8 @@ public class AclManagerActionOrchestrator(
             Caption = "Add Grant",
             Heading = "How would you like to add the dropped path(s)?",
             Buttons = { allowButton, denyButton, cancelButton },
-            DefaultButton = allowButton
+            DefaultButton = allowButton,
+            AllowCancel = true
         };
 
         var result = TaskDialog.ShowDialog(owner, page);
@@ -137,6 +137,7 @@ public class AclManagerActionOrchestrator(
         _pending.PendingUntrackGrants[key] = entry;
         // Discard any pending modification or config move — untrack supersedes them.
         // Also discard any config move re-keyed to the new mode by a prior mode switch.
+        _pending.PendingGrantFixes.Remove(key);
         if (_pending.PendingModifications.Remove(key, out var mod))
             _pending.PendingConfigMoves.Remove((entry.Path, mod.NewIsDeny));
         _pending.PendingConfigMoves.Remove(key);
@@ -178,6 +179,7 @@ public class AclManagerActionOrchestrator(
         _pending.PendingRemoves[key] = entry;
         // Discard any pending modification or config move — removal supersedes them.
         // Also discard any config move re-keyed to the new mode by a prior mode switch.
+        _pending.PendingGrantFixes.Remove(key);
         if (_pending.PendingModifications.Remove(key, out var mod))
             _pending.PendingConfigMoves.Remove((entry.Path, mod.NewIsDeny));
         _pending.PendingConfigMoves.Remove(key);
@@ -222,8 +224,13 @@ public class AclManagerActionOrchestrator(
     /// No NTFS or DB writes occur until Apply.
     /// Returns an error message string when the path is already in the list; null on success.
     /// </summary>
-    /// <param name="targetConfigPath">When non-null, records a pending config-section assignment for the new entry.</param>
-    public string? AddGrantPathDirect(string selectedPath, bool isDeny, string? targetConfigPath = null)
+    /// <param name="targetConfigPath">Target config section for an explicit section-targeted add; null represents Main Config when <paramref name="hasExplicitTargetSection"/> is true.</param>
+    /// <param name="hasExplicitTargetSection">True when the caller explicitly targeted a config section, including Main Config.</param>
+    public string? AddGrantPathDirect(
+        string selectedPath,
+        bool isDeny,
+        string? targetConfigPath = null,
+        bool hasExplicitTargetSection = false)
     {
         if (string.IsNullOrEmpty(selectedPath))
             return null;
@@ -236,15 +243,14 @@ public class AclManagerActionOrchestrator(
         // explicit ACE is already healthy; otherwise adding the path again means "fix it".
         if (_pending.IsPendingAdd(normalized, isDeny))
             return "This path is already in the list.";
-        if (TryQueueExistingGrantFix(database, normalized, isDeny))
+        if (TryQueueExistingGrantFix(database, normalized, isDeny, targetConfigPath, hasExplicitTargetSection))
             return null;
         if (ExistsCommittedGrant(database, normalized, isDeny))
             return "This path is already in the list.";
 
-        if (ShouldWarnLowIntegritySpecificContainerConflict(normalized, isDeny))
-            return SpecificContainerAceLowIntegrityConflictMessage;
-        if (ShouldWarnSpecificContainerLowIntegrityConflict(normalized, isDeny))
-            return LowIntegrityAceSpecificContainerConflictMessage;
+        var conflictMessage = AclConflictWarningHelper.GetConflictMessage(_sid, normalized, isDeny, specificContainerAceConflictDetector);
+        if (conflictMessage != null)
+            return conflictMessage;
 
         // 2. Opposite-mode check: if opposite mode exists, flip isDeny to match.
         if (_pending.IsPendingAdd(normalized, !isDeny) ||
@@ -254,14 +260,13 @@ public class AclManagerActionOrchestrator(
             // After flipping, re-check for same-mode duplicate with the new mode.
             if (_pending.IsPendingAdd(normalized, isDeny))
                 return "This path is already in the list.";
-            if (TryQueueExistingGrantFix(database, normalized, isDeny))
+            if (TryQueueExistingGrantFix(database, normalized, isDeny, targetConfigPath, hasExplicitTargetSection))
                 return null;
             if (ExistsCommittedGrant(database, normalized, isDeny))
                 return "This path is already in the list.";
-            if (ShouldWarnLowIntegritySpecificContainerConflict(normalized, isDeny))
-                return SpecificContainerAceLowIntegrityConflictMessage;
-            if (ShouldWarnSpecificContainerLowIntegrityConflict(normalized, isDeny))
-                return LowIntegrityAceSpecificContainerConflictMessage;
+            conflictMessage = AclConflictWarningHelper.GetConflictMessage(_sid, normalized, isDeny, specificContainerAceConflictDetector);
+            if (conflictMessage != null)
+                return conflictMessage;
         }
 
         // 3. If this path is queued for removal or untrack (same final mode), cancel it.
@@ -269,6 +274,15 @@ public class AclManagerActionOrchestrator(
         bool cancelledUntrack = !cancelledRemoval && _pending.PendingUntrackGrants.Remove((normalized, isDeny));
         if (cancelledRemoval || cancelledUntrack)
         {
+            var existingEntry = FindCommittedGrant(database, normalized, isDeny);
+            if (hasExplicitTargetSection &&
+                existingEntry != null &&
+                grantsHelper.TargetsDifferentConfigSection(existingEntry, targetConfigPath))
+            {
+                _pending.PendingConfigMoves[(normalized, isDeny)] =
+                    new PendingConfigMove(existingEntry, targetConfigPath);
+            }
+
             bool traverseRestored = false;
             if (!isDeny)
             {
@@ -310,8 +324,9 @@ public class AclManagerActionOrchestrator(
         _pending.PendingAdds[(normalized, isDeny)] = entry;
 
         // Record target config if the user dropped onto a specific config section.
-        if (targetConfigPath != null)
-            _pending.PendingConfigMoves[(normalized, isDeny)] = targetConfigPath;
+        if (hasExplicitTargetSection)
+            _pending.PendingConfigMoves[(normalized, isDeny)] =
+                new PendingConfigMove(entry, targetConfigPath);
 
         // 6. For allow grants: auto-add traverse entry for the grant path (folder grant) or its parent (file grant).
         bool traverseAdded = false;
@@ -328,7 +343,12 @@ public class AclManagerActionOrchestrator(
         return null;
     }
 
-    private bool TryQueueExistingGrantFix(AppDatabase database, string normalized, bool isDeny)
+    private bool TryQueueExistingGrantFix(
+        AppDatabase database,
+        string normalized,
+        bool isDeny,
+        string? targetConfigPath,
+        bool hasExplicitTargetSection)
     {
         var entry = FindCommittedGrant(database, normalized, isDeny);
         if (entry?.SavedRights == null)
@@ -343,15 +363,10 @@ public class AclManagerActionOrchestrator(
             return false;
 
         var key = (entry.Path, entry.IsDeny);
-        if (!_pending.PendingModifications.ContainsKey(key))
-        {
-            _pending.PendingModifications[key] = new PendingModification(
-                entry,
-                WasIsDeny: entry.IsDeny,
-                WasOwn: entry.SavedRights.Own,
-                NewIsDeny: entry.IsDeny,
-                NewRights: entry.SavedRights);
-        }
+        _pending.PendingGrantFixes[key] = entry;
+        if (hasExplicitTargetSection &&
+            grantsHelper.TargetsDifferentConfigSection(entry, targetConfigPath))
+            _pending.PendingConfigMoves[key] = new PendingConfigMove(entry, targetConfigPath);
 
         _gridRefresher.RefreshGrantsGrid();
         return true;
@@ -359,16 +374,6 @@ public class AclManagerActionOrchestrator(
 
     private bool ExistsCommittedGrant(AppDatabase database, string normalized, bool isDeny) =>
         FindCommittedGrant(database, normalized, isDeny) != null;
-
-    private bool ShouldWarnLowIntegritySpecificContainerConflict(string normalized, bool isDeny) =>
-        !isDeny &&
-        AclHelper.IsLowIntegritySid(_sid) &&
-        specificContainerAceConflictDetector.HasExplicitSpecificContainerAce(normalized);
-
-    private bool ShouldWarnSpecificContainerLowIntegrityConflict(string normalized, bool isDeny) =>
-        !isDeny &&
-        AclHelper.IsSpecificContainerSid(_sid) &&
-        specificContainerAceConflictDetector.HasLowIntegrityAce(normalized);
 
     private GrantedPathEntry? FindCommittedGrant(AppDatabase database, string normalized, bool isDeny)
     {

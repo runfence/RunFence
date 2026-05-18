@@ -39,15 +39,26 @@ public class AccountPasswordAccessHandler(
     public async Task CopyPasswordAsync(AccountRow accountRow)
     {
         var session = sessionProvider.GetSession();
+        var pinKeySource = session.PinDerivedKey;
         _guard.Begin(Parent);
         ProtectedString? password = null;
         try
         {
+            secureClipboard.ClearActiveSecretExposure();
             if (!await EnsurePinVerifiedAsync(session, session.CredentialStore))
+            {
+                secureClipboard.ClearActiveSecretExposure();
                 return;
+            }
 
-            using var copyScope = session.PinDerivedKey.Unprotect();
-            var status = credentialDecryption.TryDecryptCredential(accountRow.Sid, session.CredentialStore, copyScope.Data, out _, out password);
+            var decryptResult = pinKeySource.TransformSnapshot(key =>
+            {
+                var status = credentialDecryption.TryDecryptCredential(
+                    accountRow.Sid, session.CredentialStore, key, out _, out var decryptedPassword);
+                return (status, decryptedPassword);
+            });
+            password = decryptResult.decryptedPassword;
+            var status = decryptResult.status;
             if (status != CredentialLookupStatus.Success || password == null)
             {
                 _setStatus("No stored password found.");
@@ -60,6 +71,7 @@ public class AccountPasswordAccessHandler(
         }
         catch (Exception ex)
         {
+            secureClipboard.ClearActiveSecretExposure();
             log.Error($"Failed to copy password for {accountRow.Username}", ex);
             MessageBox.Show($"Failed to copy password: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -73,10 +85,12 @@ public class AccountPasswordAccessHandler(
     public async Task TypePasswordAsync(AccountRow accountRow, IntPtr previousHwnd)
     {
         var session = sessionProvider.GetSession();
+        var pinKeySource = session.PinDerivedKey;
         _guard.Begin(Parent);
         ProtectedString? password = null;
         try
         {
+            secureClipboard.ClearActiveSecretExposure();
             if (previousHwnd == IntPtr.Zero)
             {
                 MessageBox.Show("No previously active window found.", "Type Password",
@@ -87,8 +101,14 @@ public class AccountPasswordAccessHandler(
             if (!await EnsurePinVerifiedAsync(session, session.CredentialStore))
                 return;
 
-            using var typeScope = session.PinDerivedKey.Unprotect();
-            var status = credentialDecryption.TryDecryptCredential(accountRow.Sid, session.CredentialStore, typeScope.Data, out _, out password);
+            var decryptResult = pinKeySource.TransformSnapshot(key =>
+            {
+                var status = credentialDecryption.TryDecryptCredential(
+                    accountRow.Sid, session.CredentialStore, key, out _, out var decryptedPassword);
+                return (status, decryptedPassword);
+            });
+            password = decryptResult.decryptedPassword;
+            var status = decryptResult.status;
             if (status != CredentialLookupStatus.Success || password == null)
             {
                 _setStatus("No stored password found.");
@@ -118,6 +138,7 @@ public class AccountPasswordAccessHandler(
         finally
         {
             password?.Dispose();
+            secureClipboard.ClearActiveSecretExposure();
             _guard.End(Parent);
         }
     }
@@ -153,7 +174,7 @@ public class AccountPasswordAccessHandler(
         secureDesktop.Run(() =>
         {
             using var dlg = new PinDialog(PinDialogMode.Verify);
-            dlg.VerifyCallback = (ProtectedString pin) => pinService.VerifyPin(pin, store, out _);
+            dlg.VerifyCallback = (ProtectedString pin) => pinService.VerifyPin(pin, store);
             if (dlg.ShowDialog() == DialogResult.OK)
                 verified = true;
         });

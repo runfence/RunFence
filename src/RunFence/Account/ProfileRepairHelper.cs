@@ -12,7 +12,11 @@ namespace RunFence.Account;
 /// When this happens, the original registry key is moved to a <c>.bak</c> suffix and a new
 /// key pointing to the temporary profile is created.
 /// </summary>
-public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService log, NTTranslateApi ntTranslate) : IProfileRepairHelper
+public class ProfileRepairHelper(
+    IProfileRepairPrompt prompt,
+    IRunFenceRestartService runFenceRestartService,
+    ILoggingService log,
+    NTTranslateApi ntTranslate) : IProfileRepairHelper
 {
     private record CorruptedProfile(string Sid, string OriginalPath, string TempPath);
 
@@ -20,7 +24,7 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
     /// Wraps a launch action with automatic profile corruption detection and repair
     /// for the specified account SID.
     /// On launch failure: checks if the profile for <paramref name="accountSid"/> was corrupted,
-    /// prompts the user to repair, and optionally retries the launch.
+    /// prompts the user to repair, and optionally restarts RunFence after a successful repair.
     /// If no corruption is detected or <paramref name="accountSid"/> is null,
     /// the original exception is rethrown for normal handling.
     /// </summary>
@@ -63,10 +67,8 @@ public class ProfileRepairHelper(IProfileRepairPrompt prompt, ILoggingService lo
                 throw;
             }
 
-            if (prompt.ConfirmRetry())
-            {
-                return launchAction();
-            }
+            if (prompt.ConfirmRestartRunFence())
+                runFenceRestartService.Restart();
 
             throw new OperationCanceledException();
         }

@@ -2,8 +2,8 @@ namespace RunFence.Core.Models;
 
 public enum PrivilegeLevel
 {
-    Basic = 0,          // De-elevate if elevated: strip privileges, set medium integrity, assign restriction job. No-op if not elevated.
+    Isolated = 0,          // De-elevate if elevated: strip privileges, set medium integrity, assign restriction job. No-op if not elevated.
     HighestAllowed = 1, // Try to elevate via linked token if not already elevated; keep elevated if already elevated
     LowIntegrity = 2,   // De-elevate + set low integrity (elevated tokens); set low integrity only (non-elevated tokens)
-    AboveBasic = 3,     // Basic with better compatibility: same token manipulation as Basic but no restriction job.
+    Basic = 3,     // no restriction job
 }

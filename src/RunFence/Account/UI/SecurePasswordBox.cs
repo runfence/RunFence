@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.UI.Forms;
 
 namespace RunFence.Account.UI;
 
@@ -6,7 +7,7 @@ namespace RunFence.Account.UI;
 /// WinForms facade for secure password entry. The TextBox display is derived from an
 /// internal ProtectedString-backed edit buffer; the TextBox never receives plaintext while hidden.
 /// </summary>
-public sealed class SecurePasswordBox : IDisposable
+public sealed class SecurePasswordBox : IDisposable, IContextHelpSnapshotParticipant
 {
     internal const int WM_SETTEXT = 0x000C;
     internal const int EM_EMPTYUNDOBUFFER = 0x00CD;
@@ -18,6 +19,7 @@ public sealed class SecurePasswordBox : IDisposable
     private readonly SecurePasswordTextRenderer _renderer = new();
     private readonly ISecurePasswordClipboardService _clipboardService;
     private readonly SecurePasswordWndProcInterceptor _interceptor;
+    private readonly List<Control> _trackedAncestors = [];
     private bool _revealed;
     private bool _suppressInterception;
     private Button? _eyeButton;
@@ -25,6 +27,7 @@ public sealed class SecurePasswordBox : IDisposable
     private Image? _eyeSlashed;
     private bool _disposed;
     private Form? _cachedForm;
+    private ContextHelpForm? _contextHelpHost;
 
     public SecurePasswordBox(TextBox textBox)
         : this(textBox, new SecurePasswordClipboardService())
@@ -44,12 +47,10 @@ public sealed class SecurePasswordBox : IDisposable
 
         SendMessage(EM_EMPTYUNDOBUFFER, IntPtr.Zero, IntPtr.Zero);
 
-        if (_textBox.IsHandleCreated)
-            _cachedForm = _textBox.FindForm();
-        else
-            _textBox.HandleCreated += (_, _) => _cachedForm = _textBox.FindForm();
-
-        _textBox.Disposed += (_, _) => Dispose();
+        _textBox.HandleCreated += OnTextBoxHandleCreated;
+        _textBox.ParentChanged += OnTextBoxParentChanged;
+        _textBox.Disposed += OnTextBoxDisposed;
+        RefreshContextHelpSnapshotRegistration();
     }
 
     public ProtectedString GetPassword() => _editBuffer.GetPassword();
@@ -115,6 +116,12 @@ public sealed class SecurePasswordBox : IDisposable
             return;
         _disposed = true;
 
+        _textBox.HandleCreated -= OnTextBoxHandleCreated;
+        _textBox.ParentChanged -= OnTextBoxParentChanged;
+        _textBox.Disposed -= OnTextBoxDisposed;
+        ClearAncestorSubscriptions();
+        UnregisterContextHelpSnapshotParticipant();
+
         if (_revealed)
             PasswordEyeToggle.ApplyRevealAffinity(_cachedForm, false);
 
@@ -122,6 +129,12 @@ public sealed class SecurePasswordBox : IDisposable
         _interceptor.ReleaseHandle();
         _eyeOpen?.Dispose();
         _eyeSlashed?.Dispose();
+    }
+
+    void IContextHelpSnapshotParticipant.PrepareForContextHelpSnapshot()
+    {
+        if (_revealed)
+            SetRevealState(false);
     }
 
     internal SecurePasswordEditResult HandleChar(char ch) =>
@@ -172,6 +185,40 @@ public sealed class SecurePasswordBox : IDisposable
     internal SecurePasswordEditResult HandleUndo() =>
         _editBuffer.ApplyUndo(_textBox.SelectionStart, _textBox.SelectionLength);
 
+    internal bool HandleShortcutKey(Keys keyCode, Keys modifiers)
+    {
+        var normalizedModifiers = modifiers & (Keys.Control | Keys.Shift | Keys.Alt);
+        if ((normalizedModifiers & Keys.Alt) != 0)
+            return false;
+
+        if (keyCode == Keys.Delete && normalizedModifiers == Keys.Shift)
+        {
+            ApplyEditResult(HandleCut());
+            return true;
+        }
+
+        if (keyCode == Keys.Insert && normalizedModifiers == Keys.Control)
+        {
+            ApplyEditResult(HandleCopy());
+            return true;
+        }
+
+        if ((keyCode == Keys.Insert && normalizedModifiers == Keys.Shift) ||
+            (keyCode == Keys.V && normalizedModifiers == Keys.Control))
+        {
+            ApplyEditResult(HandlePaste());
+            return true;
+        }
+
+        if (keyCode == Keys.X && normalizedModifiers == Keys.Control)
+        {
+            ApplyEditResult(HandleCut());
+            return true;
+        }
+
+        return false;
+    }
+
     internal void ApplyEditResult(SecurePasswordEditResult result)
     {
         if (result.Changed)
@@ -184,14 +231,7 @@ public sealed class SecurePasswordBox : IDisposable
 
     private void ToggleReveal()
     {
-        _revealed = !_revealed;
-        _textBox.PasswordChar = _revealed ? '\0' : SecurePasswordTextRenderer.BulletChar;
-        RefreshDisplay(resetPendingSurrogate: false);
-
-        PasswordEyeToggle.ApplyRevealAffinity(_textBox, _revealed);
-
-        if (_eyeButton is not null)
-            _eyeButton.Image = _revealed ? _eyeSlashed : _eyeOpen;
+        SetRevealState(!_revealed);
     }
 
     private void RefreshDisplay(bool resetPendingSurrogate)
@@ -220,4 +260,78 @@ public sealed class SecurePasswordBox : IDisposable
     private void ApplyRightMargin(int margin) =>
         PasswordEyeToggleNative.SendMessage(_textBox.Handle, EM_SETMARGINS,
             (IntPtr)EC_RIGHTMARGIN, (IntPtr)(margin << 16));
+
+    private void SetRevealState(bool revealed)
+    {
+        if (_revealed == revealed)
+            return;
+
+        _revealed = revealed;
+        _textBox.PasswordChar = _revealed ? '\0' : SecurePasswordTextRenderer.BulletChar;
+        RefreshDisplay(resetPendingSurrogate: false);
+        PasswordEyeToggle.ApplyRevealAffinity(_textBox, _revealed);
+
+        if (_eyeButton is not null)
+            _eyeButton.Image = _revealed ? _eyeSlashed : _eyeOpen;
+    }
+
+    private void OnTextBoxHandleCreated(object? sender, EventArgs e)
+    {
+        RefreshContextHelpSnapshotRegistration();
+    }
+
+    private void OnTextBoxParentChanged(object? sender, EventArgs e)
+    {
+        RefreshContextHelpSnapshotRegistration();
+    }
+
+    private void OnTextBoxDisposed(object? sender, EventArgs e)
+    {
+        Dispose();
+    }
+
+    private void RefreshContextHelpSnapshotRegistration()
+    {
+        RefreshAncestorSubscriptions();
+
+        var currentForm = _textBox.FindForm();
+        _cachedForm = currentForm;
+
+        if (ReferenceEquals(_contextHelpHost, currentForm))
+            return;
+
+        UnregisterContextHelpSnapshotParticipant();
+        _contextHelpHost = currentForm as ContextHelpForm;
+        _contextHelpHost?.RegisterContextHelpSnapshotParticipant(this);
+    }
+
+    private void UnregisterContextHelpSnapshotParticipant()
+    {
+        _contextHelpHost?.UnregisterContextHelpSnapshotParticipant(this);
+        _contextHelpHost = null;
+    }
+
+    private void RefreshAncestorSubscriptions()
+    {
+        ClearAncestorSubscriptions();
+
+        for (Control? current = _textBox.Parent; current != null; current = current.Parent)
+        {
+            current.ParentChanged += OnAncestorParentChanged;
+            _trackedAncestors.Add(current);
+        }
+    }
+
+    private void ClearAncestorSubscriptions()
+    {
+        foreach (var ancestor in _trackedAncestors)
+            ancestor.ParentChanged -= OnAncestorParentChanged;
+
+        _trackedAncestors.Clear();
+    }
+
+    private void OnAncestorParentChanged(object? sender, EventArgs e)
+    {
+        RefreshContextHelpSnapshotRegistration();
+    }
 }

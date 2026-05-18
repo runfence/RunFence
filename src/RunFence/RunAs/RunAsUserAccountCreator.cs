@@ -1,5 +1,4 @@
-using RunFence.Account.UI.Forms;
-using RunFence.Acl.UI;
+using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -11,82 +10,105 @@ namespace RunFence.RunAs;
 /// Creates the account, persists credentials, and optionally prompts for permission grant.
 /// </summary>
 public class RunAsUserAccountCreator(
-    IAppStateProvider appState,
     IDataChangeNotifier dataChangeNotifier,
-    ILoggingService log,
-    RunAsCredentialCreator credentialCreator,
-    RunAsAccountSettingsApplier settingsApplier,
-    RunAsAccountCreationUI creationUi,
-    RunAsPermissionPromptHelper permissionPromptHelper,
-    RunAsDosProtection dosProtection,
+    SessionContext session,
+    RunAsCreatedAccountPersistenceCoordinator persistenceCoordinator,
+    RunAsCreatedAccountPostSetupService postSetupService,
+    IRunAsAccountCreationUI creationUi,
+    RunAsAccountCreationErrorPresenter errorPresenter,
     IModalCoordinator modalCoordinator) : IRunAsUserAccountCreator
 {
     /// <summary>
     /// Creates the account, encrypts the password, stores credentials, and optionally prompts
     /// for permission grant. Returns the new credential on success, or null if cancelled/failed.
     /// </summary>
-    public CredentialEntry? CreateNewAccount(string filePath, out AncestorPermissionResult? permissionGrant)
+    public async Task<RunAsCreatedAccountResult?> CreateNewAccountAsync(string filePath)
     {
-        permissionGrant = null;
-
         var createResult = creationUi.ShowCreateAccountDialog(filePath);
         if (createResult.WasCancelled)
-        {
-            dosProtection.RecordDecline();
             return null;
-        }
 
-        EditAccountDialog createDlg = createResult.Dialog!;
+        var createDlg = createResult.Dialog
+            ?? throw new InvalidOperationException("Missing create-account dialog result.");
         try
         {
-            CredentialEntry newCredential;
-            try
+            var persistenceRequest = new RunAsCreatedAccountPersistenceRequest
             {
-                newCredential = credentialCreator.PersistCredential(
-                    createDlg.CreatedPassword!, createDlg.CreatedSid!, createDlg.NewUsername!);
+                CreatedSid = createDlg.CreatedSid,
+                Username = createDlg.NewUsername,
+                CreatedPassword = createDlg.CreatedPassword,
+                CreatedRollbackState = createDlg.CreatedRollbackState,
+                CreatedAccountStatus = createDlg.CreatedAccountStatus,
+                CreatedAccountErrorMessage = createResult.ErrorMessage,
+                ScheduleEphemeralCleanupOnRollbackFailure = true
+            };
+            var postSetupRequest = new RunAsCreatedAccountPostSetupRequest
+            {
+                CreatedSid = createDlg.CreatedSid,
+                Username = createDlg.NewUsername,
+                FilePath = filePath,
+                Errors = [.. createDlg.Errors],
+                IsEphemeral = createDlg.IsEphemeral,
+                SelectedPrivilegeLevel = createDlg.SelectedPrivilegeLevel,
+                FirewallSettingsChanged = createDlg.FirewallSettingsChanged,
+                AllowInternet = createDlg.AllowInternet,
+                AllowLocalhost = createDlg.AllowLocalhost,
+                AllowLan = createDlg.AllowLan,
+                SettingsImportPath = createDlg.SettingsImportPath
+            };
+
+            var persistenceResult = await persistenceCoordinator.PersistOrRollbackAsync(
+                persistenceRequest,
+                session.CredentialStore,
+                session.Database);
+
+            switch (persistenceResult.Status)
+            {
+                case RunAsCreatedAccountPersistenceStatus.CleanupStateSaveFailed:
+                    errorPresenter.ShowCleanupStateSaveFailed(persistenceResult.ErrorMessage);
+                    return null;
+                case RunAsCreatedAccountPersistenceStatus.CredentialSaveRolledBack:
+                    errorPresenter.ShowCredentialSaveRolledBack(
+                        persistenceResult.ErrorMessage
+                        ?? throw new InvalidOperationException("Missing save error for rolled-back credential persistence."));
+                    return null;
+                case RunAsCreatedAccountPersistenceStatus.CredentialSaveRollbackFailed:
+                    errorPresenter.ShowCredentialSaveRollbackFailed(
+                        persistenceResult.ErrorMessage
+                        ?? throw new InvalidOperationException("Missing save error for failed credential rollback."),
+                        persistenceResult.RollbackErrorMessage
+                        ?? throw new InvalidOperationException("Missing rollback error for failed credential rollback."));
+                    return null;
+                case RunAsCreatedAccountPersistenceStatus.PrePersistenceRolledBack:
+                    errorPresenter.ShowPrePersistenceRolledBack(
+                        persistenceResult.ErrorMessage
+                        ?? throw new InvalidOperationException("Missing pre-persistence error for rolled-back account creation."));
+                    return null;
+                case RunAsCreatedAccountPersistenceStatus.PrePersistenceRollbackFailed:
+                    errorPresenter.ShowPrePersistenceRollbackFailed(
+                        persistenceResult.ErrorMessage
+                        ?? throw new InvalidOperationException("Missing pre-persistence error for failed account rollback."),
+                        persistenceResult.RollbackErrorMessage
+                        ?? throw new InvalidOperationException("Missing rollback error for failed pre-persistence rollback."));
+                    return null;
+                case RunAsCreatedAccountPersistenceStatus.Succeeded:
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unexpected persistence status: {persistenceResult.Status}.");
             }
-            catch (Exception saveEx)
+
+            var credential = persistenceResult.Credential
+                ?? throw new InvalidOperationException("Missing credential for successful RunAs account creation.");
+            var postSetupResult = await postSetupService.CompleteAsync(postSetupRequest, credential);
+            if (postSetupResult.WasCanceled)
             {
-                log.Error("RunAsUserAccountCreator: failed to save credential store — scheduling ephemeral cleanup", saveEx);
-                appState.Database.GetOrCreateAccount(createDlg.CreatedSid!).DeleteAfterUtc = DateTime.UtcNow.AddHours(1);
-                throw;
-            }
-
-            if (createDlg.IsEphemeral)
-                appState.Database.GetOrCreateAccount(createDlg.CreatedSid!).DeleteAfterUtc = DateTime.UtcNow.AddHours(24);
-
-            // Apply privilege level default and firewall DB settings
-            settingsApplier.ApplyLaunchDefaults(createDlg.CreatedSid!,
-                createDlg.SelectedPrivilegeLevel);
-
-            if (createDlg.FirewallSettingsChanged)
-                settingsApplier.ApplyFirewallDbSettings(createDlg.CreatedSid!,
-                    createDlg.AllowInternet, createDlg.AllowLocalhost, createDlg.AllowLan);
-
-            settingsApplier.RunPostCreationTasks(
-                createDlg.CreatedSid!, createDlg.NewUsername!,
-                createDlg.SettingsImportPath,
-                createDlg.FirewallSettingsChanged, createDlg.Errors);
-
-            // Permission check for the new account
-            try
-            {
-                permissionGrant = permissionPromptHelper.PromptIfNeeded(filePath, newCredential.Sid);
-            }
-            catch (OperationCanceledException)
-            {
+                dataChangeNotifier.NotifyDataChanged();
                 return null;
             }
 
-            if (createDlg.Errors.Count > 0)
-            {
-                var errorMsg = string.Join("\n", createDlg.Errors);
-                MessageBox.Show($"Account created with warnings:\n\n{errorMsg}",
-                    "RunFence", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-
+            errorPresenter.ShowPostSetupWarnings(postSetupResult.WarningMessages);
             dataChangeNotifier.NotifyDataChanged();
-            return newCredential;
+            return new RunAsCreatedAccountResult(credential, postSetupResult.PermissionGrant);
         }
         finally
         {

@@ -1,4 +1,4 @@
-# RunFence Source Available License
+# Elastic License 2.0
 
 **Licensor:** Vladyslav (https://github.com/runfence)
 

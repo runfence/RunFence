@@ -35,6 +35,8 @@ public sealed class ClipboardPasteTargetResolver(
 
         IntPtr ownerHwnd = clipboardFormatReader.GetClipboardOwnerWindow();
         uint ownerProcessId = windowProcessIdReader.GetWindowProcessId(ownerHwnd);
+        // Scope stays to the resolved foreground/concrete target only; this resolver intentionally
+        // validates local paste target matching and does not perform cross-process destination proof.
         if (ownerProcessId == (uint)targetProcessId)
         {
             log.Debug($"ClipboardPasteInterceptService: Paste on pid {targetProcessId} - clipboard owner is same process, native paste.");

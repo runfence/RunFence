@@ -1,7 +1,4 @@
-using System.ComponentModel;
-using System.Runtime.InteropServices;
 using RunFence.Core;
-using RunFence.Infrastructure;
 
 namespace RunFence.Launch.Tokens;
 
@@ -11,7 +8,10 @@ namespace RunFence.Launch.Tokens;
 /// GetTokenInformation(TOKEN_LINKED_TOKEN) to return a usable PRIMARY elevated token instead
 /// of a SecurityIdentification impersonation token.
 /// </summary>
-public class ElevatedLinkedTokenProvider(ILoggingService log) : IElevatedLinkedTokenProvider
+public class ElevatedLinkedTokenProvider(
+    ILoggingService log,
+    ISystemPrivilegeRunner systemPrivilegeRunner)
+    : IElevatedLinkedTokenProvider
 {
     /// <summary>
     /// Acquires the elevated linked token for <paramref name="hFilteredToken"/>.
@@ -30,57 +30,15 @@ public class ElevatedLinkedTokenProvider(ILoggingService log) : IElevatedLinkedT
     /// </exception>
     public IntPtr AcquireElevatedLinkedToken(IntPtr hFilteredToken)
     {
-        IntPtr hProcess = IntPtr.Zero;
-        IntPtr hSystemToken = IntPtr.Zero;
-        IntPtr hImpToken = IntPtr.Zero;
-
-        try
+        log.Debug("ElevatedLinkedTokenProvider: querying linked token under SYSTEM impersonation");
+        var hElevated = systemPrivilegeRunner.RunWithPrivileges([TokenPrivilegeHelper.SeTcbPrivilege], () =>
         {
-            hProcess = NativeTokenHelper.OpenWinlogonProcess();
-
-            log.Debug("ElevatedLinkedTokenProvider: opening SYSTEM token");
-            if (!ProcessNative.OpenProcessToken(hProcess,
-                    ProcessLaunchNative.TOKEN_DUPLICATE | ProcessLaunchNative.TOKEN_QUERY | ProcessLaunchNative.TOKEN_IMPERSONATE,
-                    out hSystemToken))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcessToken(winlogon) failed");
-
-            log.Debug("ElevatedLinkedTokenProvider: duplicating SYSTEM token as impersonation token");
-            if (!ProcessLaunchNative.DuplicateTokenEx(hSystemToken, ProcessLaunchNative.MAXIMUM_ALLOWED, IntPtr.Zero,
-                    (int)ProcessLaunchNative.SecurityImpersonationLevel.SecurityImpersonation,
-                    (int)ProcessLaunchNative.TokenType.TokenImpersonation, out hImpToken))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "DuplicateTokenEx(SYSTEM impersonation) failed");
-
-            log.Debug("ElevatedLinkedTokenProvider: enabling SeTcbPrivilege on impersonation token");
-            TokenPrivilegeHelper.EnablePrivilegeOnToken(hImpToken, TokenPrivilegeHelper.SeTcbPrivilege);
-
-            log.Debug("ElevatedLinkedTokenProvider: impersonating SYSTEM");
-            if (!ProcessNative.ImpersonateLoggedOnUser(hImpToken))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "ImpersonateLoggedOnUser(SYSTEM) failed");
-
-            IntPtr hElevated;
-            try
-            {
-                log.Debug("ElevatedLinkedTokenProvider: querying linked token under SYSTEM impersonation");
-                hElevated = LinkedTokenHelper.TryGetLinkedToken(hFilteredToken);
-                if (hElevated == IntPtr.Zero)
-                    throw new InvalidOperationException("Failed to acquire elevated linked token under SYSTEM impersonation");
-            }
-            finally
-            {
-                ProcessNative.RevertToSelf();
-            }
-
-            log.Debug("ElevatedLinkedTokenProvider: elevated linked token acquired");
-            return hElevated;
-        }
-        finally
-        {
-            if (hImpToken != IntPtr.Zero)
-                ProcessNative.CloseHandle(hImpToken);
-            if (hSystemToken != IntPtr.Zero)
-                ProcessNative.CloseHandle(hSystemToken);
-            if (hProcess != IntPtr.Zero)
-                ProcessNative.CloseHandle(hProcess);
-        }
+            var linkedToken = LinkedTokenHelper.TryGetLinkedToken(hFilteredToken);
+            if (linkedToken == IntPtr.Zero)
+                throw new InvalidOperationException("Failed to acquire elevated linked token under SYSTEM impersonation");
+            return linkedToken;
+        });
+        log.Debug("ElevatedLinkedTokenProvider: elevated linked token acquired");
+        return hElevated;
     }
 }

@@ -16,6 +16,7 @@ public class RunAsCredentialListPopulatorTests
 
     private readonly Mock<ISidResolver> _sidResolver = new();
     private readonly Mock<IProfilePathResolver> _profilePathResolver = new();
+    private readonly CredentialDisplayItemFactory _credentialDisplayItemFactory;
     private readonly Mock<ILocalUserProvider> _localUserProvider = new();
 
     public RunAsCredentialListPopulatorTests()
@@ -24,6 +25,7 @@ public class RunAsCredentialListPopulatorTests
         _sidResolver.Setup(r => r.TryResolveName(It.IsAny<string>())).Returns<string?>(sid => sid == SelectedSid ? "Selected User" : null);
         _profilePathResolver.Setup(r => r.TryResolveNameFromRegistry(It.IsAny<string>())).Returns((string?)null);
         _localUserProvider.Setup(p => p.GetLocalUserAccounts()).Returns([]);
+        _credentialDisplayItemFactory = new CredentialDisplayItemFactory(_sidResolver.Object, _profilePathResolver.Object);
     }
 
     [Fact]
@@ -49,7 +51,9 @@ public class RunAsCredentialListPopulatorTests
 
             populator.Repopulate();
 
-            var item = Assert.Single(listBox.Items.OfType<CredentialDisplayItem>());
+            var item = Assert.Single(
+                listBox.Items.OfType<CredentialDisplayItem>(),
+                di => string.Equals(di.Credential.Sid, SelectedSid, StringComparison.OrdinalIgnoreCase));
             Assert.Equal(SelectedSid, item.Credential.Sid);
             Assert.False(item.HasStoredCredential);
         });
@@ -82,15 +86,16 @@ public class RunAsCredentialListPopulatorTests
 
             populator.Repopulate();
 
-            var item = Assert.Single(listBox.Items.OfType<CredentialDisplayItem>());
+            var item = Assert.Single(
+                listBox.Items.OfType<CredentialDisplayItem>(),
+                di => string.Equals(di.Credential.Sid, SelectedSid, StringComparison.OrdinalIgnoreCase));
             Assert.Equal(SelectedSid, item.Credential.Sid);
             Assert.True(item.HasStoredCredential);
         });
     }
 
     private RunAsCredentialListPopulator CreatePopulator() => new(
-        _sidResolver.Object,
-        _profilePathResolver.Object,
+        _credentialDisplayItemFactory,
         _localUserProvider.Object,
         new CredentialFilterHelper(_sidResolver.Object));
 }

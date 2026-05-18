@@ -8,6 +8,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Tests.TestHelpers;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -35,56 +36,94 @@ public class PathGrantServiceIntegrationTests : IDisposable
     private readonly Mock<IAclPermissionService> _aclPermission = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly IPathGrantService _service;
+    private readonly TestGrantIntentStore _mainGrantStore = new();
+    private readonly AclIntegrationCleanupScope _cleanup = new();
 
     private static readonly IUiThreadInvoker SyncInvoker =
         new LambdaUiThreadInvoker(a => a(), a => a());
 
     public PathGrantServiceIntegrationTests()
     {
+        _cleanup.TrackTempPath(_tempDir.Path);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        _mainGrantStore.OwnershipProjectionService = ownershipProjection;
+        var storeProvider = new TestGrantIntentStoreProvider(_mainGrantStore, ownershipProjection);
+        var repository = new GrantIntentRepository(storeProvider);
         // Default: no group SIDs for TestSid. Individual tests may override HasEffectiveRights.
         _aclPermission.Setup(a => a.ResolveAccountGroupSids(TestSid)).Returns([]);
 
-        var acl = new AclAccessor();
+        var acl = AclAccessorFactory.Create();
         var pathInfo = new FileSystemPathInfo();
         var grantAceService = new GrantAceService(acl, pathInfo);
         var fileOwnerService = new FileOwnerService(_log.Object, pathInfo);
-        var pathExistenceService = new PathExistenceService(acl);
         var mandatoryLabelService = new MandatoryLabelService(_log.Object, pathInfo);
         var traverseAcl = new TraverseAcl();
         var ancestorGranter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object, traverseAcl, pathInfo);
         var iuResolver = new Mock<IInteractiveUserResolver>();
         iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
+        var traverseGrantOwnerResolver = new TraverseGrantOwnerResolver();
+        var traverseIntentStoreCoordinator = new TraverseIntentStoreCoordinator(() => repository, traverseGrantOwnerResolver);
 
-        var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => _database), SyncInvoker);
+        var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => _database), () => SyncInvoker);
         var grantCore = new GrantCoreOperations(grantAceService, fileOwnerService,
             dbAccessor, _log.Object, pathInfo);
         var traverseCore = new TraverseCoreOperations(traverseAcl,
-            ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, pathInfo);
+            ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, pathInfo, traverseGrantOwnerResolver);
         var containerIuSync = new ContainerInteractiveUserSync(grantCore, traverseCore,
-            iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, pathInfo);
+            traverseGrantOwnerResolver, iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, pathInfo);
+        var traverseGrantStateService = new TraverseGrantStateService(dbAccessor, pathInfo, traverseIntentStoreCoordinator);
         var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
             mandatoryLabelService, dbAccessor);
-        var syncService = new PathGrantSyncService(dbAccessor, grantAceService, _log.Object, pathInfo);
-        _service = new PathGrantService(grantCore, traverseCore, grantAceService,
-            fileOwnerService, pathExistenceService, mandatoryLabelService,
-            iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, lowIlSync, syncService,
-            pathInfo);
+        var syncService = new PathGrantSyncService(
+            dbAccessor,
+            grantAceService,
+            () => storeProvider,
+            () => repository,
+            _log.Object,
+            pathInfo,
+            traverseGrantOwnerResolver);
+        var fsOps = new GrantFileSystemOperations(grantCore, grantAceService,
+            fileOwnerService, mandatoryLabelService, dbAccessor);
+        var accessEnsurer = new GrantAccessEnsurer(_aclPermission.Object, dbAccessor,
+            acl, pathInfo, traverseCore, fsOps, iuResolver.Object, traverseGrantOwnerResolver, () => repository, () => _mainGrantStore, new GrantIntentStoreSaveService());
+        var grantIntentStoreSaveService = new GrantIntentStoreSaveService();
+        var traverseRestoreWorkflow = new TraverseRestoreWorkflow(
+            traverseCore,
+            dbAccessor,
+            containerIuSync,
+            pathInfo,
+            traverseAcl,
+            traverseGrantOwnerResolver,
+            traverseIntentStoreCoordinator,
+            traverseGrantStateService,
+            () => storeProvider,
+            grantIntentStoreSaveService);
+        _service = new PathGrantService(grantCore, traverseCore, dbAccessor,
+            containerIuSync, lowIlSync, syncService, mandatoryLabelService, fsOps, accessEnsurer, grantAceService, pathInfo,
+            acl, traverseGrantOwnerResolver, traverseIntentStoreCoordinator, traverseGrantStateService, () => storeProvider, () => repository, () => _mainGrantStore,
+            grantIntentStoreSaveService, traverseRestoreWorkflow);
     }
 
     public void Dispose()
     {
         // Clean up any NTFS ACEs written by tests, including traverse ACEs on ancestor directories
         // that outlive the temp directory itself (TempDirectory.Dispose only deletes the leaf dir).
-        try { _service.RemoveAll(TestSid, updateFileSystem: true); }
+        try
+        {
+            foreach (var entry in _mainGrantStore.GetEntries(TestSid).Where(entry => !entry.IsTraverseOnly))
+                _service.RemoveGrant(TestSid, entry.Path, entry.IsDeny);
+        }
+        catch { /* best-effort */ }
+        try { _service.RemoveAll(TestSid); }
         catch { /* best-effort: ancestor dirs may not be accessible */ }
-        _tempDir.Dispose();
+        _cleanup.Dispose();
     }
 
     // --- Helpers ---
 
     private bool HasExplicitAce(string path, bool isDeny)
     {
-        var security = new AclAccessor().GetSecurity(path);
+        var security = AclAccessorFactory.Create().GetSecurity(path);
         var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
         var sid = new SecurityIdentifier(TestSid);
         foreach (FileSystemAccessRule rule in rules)
@@ -98,6 +137,16 @@ public class PathGrantServiceIntegrationTests : IDisposable
                 return true;
         }
         return false;
+    }
+
+    private FileSystemAccessRule GetExplicitAce(string path, bool isDeny)
+    {
+        var security = AclAccessorFactory.Create().GetSecurity(path);
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
+        var sid = new SecurityIdentifier(TestSid);
+        return Assert.Single(rules.Cast<FileSystemAccessRule>(), rule =>
+            rule.IdentityReference.Equals(sid) &&
+            rule.AccessControlType == (isDeny ? AccessControlType.Deny : AccessControlType.Allow));
     }
 
     private bool HasTraverseAce(string path)
@@ -162,21 +211,25 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Arrange
         var file = Path.Combine(_tempDir.Path, "grant_allow.txt");
         File.WriteAllText(file, "test");
+        var expectedRights = new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false);
 
         // Act
         var result = _service.AddGrant(TestSid, file, isDeny: false,
-            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false));
+            expectedRights);
 
         // Assert: explicit allow ACE present on NTFS
         Assert.True(HasExplicitAce(file, isDeny: false),
             "Expected an explicit Allow ACE on the file after AddGrant");
+        var allowRule = GetExplicitAce(file, isDeny: false);
+        Assert.Equal(GrantRightsMapper.MapAllowRights(expectedRights, isFolder: false), allowRule.FileSystemRights);
+        Assert.Equal(AccessControlType.Allow, allowRule.AccessControlType);
 
         // Assert: DB entry recorded
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.NotNull(grants);
         Assert.Contains(grants, e => string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: false, IsTraverseOnly: false });
 
-        Assert.True(result.GrantAdded);
+        Assert.True(result.GrantApplied);
         Assert.True(result.DatabaseModified);
     }
 
@@ -186,14 +239,18 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Arrange
         var file = Path.Combine(_tempDir.Path, "grant_deny.txt");
         File.WriteAllText(file, "test");
+        var expectedRights = new SavedRightsState(Execute: false, Write: true, Read: false, Special: true, Own: false);
 
         // Act
         _service.AddGrant(TestSid, file, isDeny: true,
-            new SavedRightsState(Execute: false, Write: true, Read: false, Special: true, Own: false));
+            expectedRights);
 
         // Assert: explicit deny ACE present on NTFS
         Assert.True(HasExplicitAce(file, isDeny: true),
             "Expected an explicit Deny ACE on the file after AddGrant(isDeny=true)");
+        var denyRule = GetExplicitAce(file, isDeny: true);
+        Assert.Equal(GrantRightsMapper.MapDenyRights(expectedRights, isFolder: false), denyRule.FileSystemRights);
+        Assert.Equal(AccessControlType.Deny, denyRule.AccessControlType);
 
         // Assert: DB entry with IsDeny=true
         var grants = _database.GetAccount(TestSid)?.Grants;
@@ -224,11 +281,169 @@ public class PathGrantServiceIntegrationTests : IDisposable
         var entry = grants.First(e => e is { IsTraverseOnly: false, IsDeny: false });
         Assert.True(entry.SavedRights?.Execute);
 
-        Assert.False(result.GrantAdded); // no new DB entry
+        Assert.True(result.GrantApplied); // ACL was re-applied while updating the tracked grant
         Assert.True(result.DatabaseModified); // rights were updated
     }
 
     // --- RemoveGrant ---
+
+    [Fact]
+    public void PersistedAddGrant_Allow_WritesNtfsAceAndStoresIntent()
+    {
+        var file = Path.Combine(_tempDir.Path, "persisted_add_allow.txt");
+        File.WriteAllText(file, "test");
+
+        var result = _service.AddGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false),
+            confirm: null);
+
+        Assert.True(result.GrantApplied);
+        Assert.True(result.DatabaseModified);
+        Assert.True(result.DurableSaveCompleted);
+        Assert.True(HasExplicitAce(file, isDeny: false));
+        Assert.Contains(_mainGrantStore.GetEntries(TestSid),
+            entry => string.Equals(entry.Path, file, StringComparison.OrdinalIgnoreCase) &&
+                     entry is { IsDeny: false, IsTraverseOnly: false });
+    }
+
+    [Fact]
+    public void PersistedUpdateGrant_Allow_UpdatesStoredRightsAndLeavesAllowAce()
+    {
+        var file = Path.Combine(_tempDir.Path, "persisted_update_allow.txt");
+        File.WriteAllText(file, "test");
+        _service.AddGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false),
+            confirm: null);
+
+        var result = _service.UpdateGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: false),
+            confirm: null);
+
+        Assert.True(result.GrantApplied);
+        Assert.True(HasExplicitAce(file, isDeny: false));
+        var entry = Assert.Single(_mainGrantStore.GetEntries(TestSid));
+        Assert.True(entry.SavedRights?.Execute);
+    }
+
+    [Fact]
+    public void PersistedUpdateGrant_FinalSaveWarning_LeavesFilesystemInUpdatedState()
+    {
+        var file = Path.Combine(_tempDir.Path, "persisted_update_warning.txt");
+        File.WriteAllText(file, "test");
+        _service.AddGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: false),
+            confirm: null);
+        _mainGrantStore.SaveAction = () => throw new InvalidOperationException("save failed");
+
+        var result = _service.UpdateGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false),
+            confirm: null);
+
+        var warning = Assert.Single(result.Warnings);
+        Assert.True(result.GrantApplied);
+        Assert.True(result.DatabaseModified);
+        Assert.False(result.DurableSaveCompleted);
+        Assert.Equal(GrantApplyFailureStep.PostGrantMutationSave, warning.Step);
+        Assert.Equal(file, warning.Path);
+        Assert.Null(warning.ConfigPath);
+        Assert.Equal("save failed", warning.Cause.Message);
+        Assert.True(HasExplicitAce(file, isDeny: false));
+        var state = _service.ReadGrantState(file, TestSid, []);
+        Assert.Equal(RightCheckState.Unchecked, state.AllowExecute);
+        var entry = Assert.Single(_mainGrantStore.GetEntries(TestSid));
+        Assert.False(entry.SavedRights?.Execute);
+    }
+
+    [Fact]
+    public void PersistedSwitchGrantMode_ReplacesAllowAceWithDenyAceAndUpdatesStore()
+    {
+        var file = Path.Combine(_tempDir.Path, "persisted_switch_mode.txt");
+        File.WriteAllText(file, "test");
+        _service.AddGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false),
+            confirm: null);
+
+        var result = _service.SwitchGrantMode(
+            TestSid,
+            file,
+            newIsDeny: true,
+            new SavedRightsState(Execute: false, Write: true, Read: false, Special: true, Own: false),
+            confirm: () => true);
+
+        Assert.True(result.GrantApplied);
+        Assert.False(HasExplicitAce(file, isDeny: false));
+        Assert.True(HasExplicitAce(file, isDeny: true));
+        var entry = Assert.Single(_mainGrantStore.GetEntries(TestSid));
+        Assert.True(entry.IsDeny);
+    }
+
+    [Fact]
+    public void PersistedRemoveGrant_RemovesAceAndStoreEntry()
+    {
+        var file = Path.Combine(_tempDir.Path, "persisted_remove_allow.txt");
+        File.WriteAllText(file, "test");
+        _service.AddGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false),
+            confirm: null);
+        Assert.True(HasExplicitAce(file, isDeny: false));
+
+        var result = _service.RemoveGrant(TestSid, file, isDeny: false);
+
+        Assert.True(result.GrantApplied);
+        Assert.False(HasExplicitAce(file, isDeny: false));
+        Assert.DoesNotContain(_mainGrantStore.GetEntries(TestSid),
+            entry => string.Equals(entry.Path, file, StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void PersistedRemoveGrant_FinalSaveWarning_KeepsFilesystemRemovalState()
+    {
+        var file = Path.Combine(_tempDir.Path, "persisted_remove_warning.txt");
+        File.WriteAllText(file, "test");
+        _service.AddGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false),
+            confirm: null);
+        Assert.True(HasExplicitAce(file, isDeny: false));
+        _mainGrantStore.SaveAction = () => throw new InvalidOperationException("remove save failed");
+
+        var result = _service.RemoveGrant(TestSid, file, isDeny: false);
+
+        var warning = Assert.Single(result.Warnings);
+        Assert.True(result.GrantApplied);
+        Assert.True(result.DatabaseModified);
+        Assert.False(result.DurableSaveCompleted);
+        Assert.Equal(GrantApplyFailureStep.PostGrantRemoveSave, warning.Step);
+        Assert.Equal(file, warning.Path);
+        Assert.Null(warning.ConfigPath);
+        Assert.Equal("remove save failed", warning.Cause.Message);
+        Assert.False(HasExplicitAce(file, isDeny: false));
+        Assert.DoesNotContain(_mainGrantStore.GetEntries(TestSid),
+            entry => string.Equals(entry.Path, file, StringComparison.OrdinalIgnoreCase));
+    }
 
     [Fact]
     public void RemoveGrant_Allow_AceRemovedAndDbEntryRemoved()
@@ -241,10 +456,11 @@ public class PathGrantServiceIntegrationTests : IDisposable
         Assert.True(HasExplicitAce(file, isDeny: false));
 
         // Act
-        bool removed = _service.RemoveGrant(TestSid, file, isDeny: false, updateFileSystem: true);
+        var result = _service.RemoveGrant(TestSid, file, isDeny: false);
 
         // Assert: ACE removed from NTFS
-        Assert.True(removed);
+        Assert.True(result.DatabaseModified);
+        Assert.True(result.GrantApplied);
         Assert.False(HasExplicitAce(file, isDeny: false),
             "Expected allow ACE to be removed after RemoveGrant");
 
@@ -265,10 +481,11 @@ public class PathGrantServiceIntegrationTests : IDisposable
         Assert.True(HasExplicitAce(file, isDeny: true));
 
         // Act
-        bool removed = _service.RemoveGrant(TestSid, file, isDeny: true, updateFileSystem: true);
+        var result = _service.RemoveGrant(TestSid, file, isDeny: true);
 
         // Assert: deny ACE removed from NTFS
-        Assert.True(removed);
+        Assert.True(result.DatabaseModified);
+        Assert.True(result.GrantApplied);
         Assert.False(HasExplicitAce(file, isDeny: true),
             "Expected deny ACE to be removed after RemoveGrant(isDeny=true)");
     }
@@ -283,12 +500,13 @@ public class PathGrantServiceIntegrationTests : IDisposable
             new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false));
 
         // Act: DB-only remove (untrack without reverting NTFS)
-        bool removed = _service.RemoveGrant(TestSid, file, isDeny: false, updateFileSystem: false);
+        var result = _service.UntrackGrant(TestSid, file, isDeny: false);
 
         // Assert: ACE preserved on NTFS, DB entry gone
-        Assert.True(removed);
+        Assert.True(result.DatabaseModified);
+        Assert.False(result.GrantApplied);
         Assert.True(HasExplicitAce(file, isDeny: false),
-            "Expected NTFS ACE to be preserved when updateFileSystem=false");
+            "Expected NTFS ACE to be preserved when UntrackGrant is used");
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.DoesNotContain(grants ?? [], e =>
             string.Equals(e.Path, file, StringComparison.OrdinalIgnoreCase) && e is { IsDeny: false, IsTraverseOnly: false });
@@ -303,13 +521,14 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // ACE writes on non-owned ancestors (e.g. C:\) silently fail — only user-owned dirs succeed.
         var subDir = Path.Combine(_tempDir.Path, "traverse_target");
         Directory.CreateDirectory(subDir);
+        var effectiveCheckCount = 0;
         _aclPermission.Setup(a => a.HasEffectiveRights(
                 It.IsAny<FileSystemSecurity>(), It.IsAny<string>(),
                 It.IsAny<IReadOnlyList<string>>(), It.IsAny<FileSystemRights>()))
-            .Returns(false);
+            .Returns(() => ++effectiveCheckCount != 1);
 
         // Act
-        var (modified, visitedPaths) = _service.AddTraverse(TestSid, subDir);
+        var result = _service.AddTraverse(TestSid, subDir);
 
         // Assert: traverse ACE written on the target directory
         Assert.True(HasTraverseAce(subDir),
@@ -318,11 +537,11 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Assert: DB entry recorded as IsTraverseOnly
         var grants = _database.GetAccount(TestSid)?.Grants;
         Assert.NotNull(grants);
-        Assert.Contains(grants, e =>
+        var entry = Assert.Single(grants, e =>
             string.Equals(e.Path, subDir, StringComparison.OrdinalIgnoreCase) && e.IsTraverseOnly);
-
-        Assert.NotEmpty(visitedPaths);
-        Assert.True(modified);
+        Assert.NotEmpty(entry.AllAppliedPaths ?? []);
+        Assert.True(result.DatabaseModified);
+        Assert.True(result.TraverseApplied);
     }
 
     [Fact]
@@ -406,15 +625,145 @@ public class PathGrantServiceIntegrationTests : IDisposable
             .Returns(true);
 
         // Act
-        var (modified, visitedPaths) = _service.AddTraverse(TestSid, subDir);
+        var result = _service.AddTraverse(TestSid, subDir);
 
         // Assert: no traverse ACE written (already covered)
         Assert.False(HasTraverseAce(subDir),
             "No traverse ACE should be written when SID already has effective traverse rights");
         // All ancestor directories are still visited and returned for DB tracking
-        Assert.NotEmpty(visitedPaths);
+        var entry = Assert.Single(_database.GetAccount(TestSid)?.Grants ?? [],
+            grant => string.Equals(grant.Path, subDir, StringComparison.OrdinalIgnoreCase) && grant.IsTraverseOnly);
+        Assert.NotEmpty(entry.AllAppliedPaths ?? []);
         // DB entry was newly created (modified=true) even though no ACE was added
-        Assert.True(modified);
+        Assert.True(result.DatabaseModified);
+        Assert.False(result.TraverseApplied);
+    }
+
+    [Fact]
+    public void PersistedAddTraverse_WritesTraverseAceAndStoresCoverage()
+    {
+        var subDir = Path.Combine(_tempDir.Path, "persisted_traverse_target");
+        Directory.CreateDirectory(subDir);
+        var effectiveCheckCount = 0;
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<FileSystemRights>()))
+            .Returns(() => ++effectiveCheckCount != 1);
+
+        var result = _service.AddTraverse(TestSid, subDir, store: null);
+
+        Assert.True(result.DatabaseModified);
+        Assert.True(result.DurableSaveCompleted);
+        Assert.True(result.TraverseApplied);
+        Assert.True(HasTraverseAce(subDir));
+        var entry = Assert.Single(_mainGrantStore.GetEntries(TestSid));
+        Assert.Equal(subDir, entry.Path);
+        Assert.NotEmpty(entry.AllAppliedPaths!);
+        Assert.Contains(subDir, entry.AllAppliedPaths!);
+    }
+
+    [Fact]
+    public void PersistedAddTraverse_WhenAlreadyEffective_SavesWithoutAclApply()
+    {
+        var subDir = Path.Combine(_tempDir.Path, "persisted_traverse_effective");
+        Directory.CreateDirectory(subDir);
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<FileSystemRights>()))
+            .Returns(true);
+
+        var result = _service.AddTraverse(TestSid, subDir, store: null);
+
+        Assert.True(result.DatabaseModified);
+        Assert.True(result.DurableSaveCompleted);
+        Assert.False(result.TraverseApplied);
+        Assert.False(HasTraverseAce(subDir));
+        Assert.Single(_mainGrantStore.GetEntries(TestSid));
+    }
+
+    [Fact]
+    public void PersistedRemoveTraverse_RemovesAceAndStoreEntry()
+    {
+        var subDir = Path.Combine(_tempDir.Path, "persisted_traverse_remove");
+        Directory.CreateDirectory(subDir);
+        var effectiveCheckCount = 0;
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<FileSystemRights>()))
+            .Returns(() => ++effectiveCheckCount != 1);
+        _service.AddTraverse(TestSid, subDir, store: null);
+        Assert.True(HasTraverseAce(subDir));
+
+        var result = _service.RemoveTraverse(TestSid, subDir);
+
+        Assert.True(result.TraverseApplied);
+        Assert.True(result.DatabaseModified);
+        Assert.True(result.DurableSaveCompleted);
+        Assert.False(HasTraverseAce(subDir));
+        Assert.Empty(_mainGrantStore.GetEntries(TestSid));
+    }
+
+    [Fact]
+    public void RemoveAll_GrantCreatedUnderNestedDirectory_RemovesAncestorTraverseAces()
+    {
+        var parentDir = Path.Combine(_tempDir.Path, "nested");
+        Directory.CreateDirectory(parentDir);
+        var file = Path.Combine(parentDir, "child.txt");
+        File.WriteAllText(file, "test");
+        var effectiveCheckCount = 0;
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<FileSystemRights>()))
+            .Returns(() => ++effectiveCheckCount > 1);
+
+        _service.AddGrant(
+            TestSid,
+            file,
+            isDeny: false,
+            new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false));
+        Assert.True(HasTraverseAce(parentDir));
+
+        _service.RemoveAll(TestSid);
+
+        Assert.False(HasExplicitAce(file, isDeny: false));
+        Assert.False(HasTraverseAce(parentDir));
+    }
+
+    [Fact]
+    public void PersistedUntrackAndFixTraverse_PreserveAndRestoreAce()
+    {
+        var subDir = Path.Combine(_tempDir.Path, "persisted_traverse_fix");
+        Directory.CreateDirectory(subDir);
+        var effectiveCheckCount = 0;
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<FileSystemRights>()))
+            .Returns(() => ++effectiveCheckCount != 1);
+        _service.AddTraverse(TestSid, subDir, store: null);
+        Assert.True(HasTraverseAce(subDir));
+
+        var untrackResult = _service.UntrackTraverse(TestSid, subDir);
+
+        Assert.False(untrackResult.TraverseApplied);
+        Assert.True(untrackResult.DatabaseModified);
+        Assert.True(HasTraverseAce(subDir));
+
+        _mainGrantStore.AddEntry(TestSid, new GrantedPathEntry
+        {
+            Path = subDir,
+            IsTraverseOnly = true,
+            AllAppliedPaths = [subDir]
+        });
+        new TraverseAcl().RemoveTraverseOnlyAce(subDir, new SecurityIdentifier(TestSid));
+        Assert.False(HasTraverseAce(subDir));
+        effectiveCheckCount = 0;
+
+        var fixResult = _service.FixTraverseAcl(TestSid, subDir);
+
+        Assert.True(fixResult.TraverseApplied);
+        Assert.True(HasTraverseAce(subDir));
     }
 
     // --- UpdateFromPath ---
@@ -425,7 +774,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Arrange: write an allow ACE directly to the file (simulating an externally-applied grant)
         var file = Path.Combine(_tempDir.Path, "discover_allow.txt");
         File.WriteAllText(file, "test");
-        new AclAccessor().ApplyExplicitAce(file, TestSid, AccessControlType.Allow, GrantRightsMapper.ReadMask);
+        AclAccessorFactory.Create().ApplyExplicitAce(file, TestSid, AccessControlType.Allow, GrantRightsMapper.ReadMask);
 
         // Act
         bool modified = _service.UpdateFromPath(file, TestSid);
@@ -444,7 +793,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // Arrange: write a deny ACE directly to the file
         var file = Path.Combine(_tempDir.Path, "discover_deny.txt");
         File.WriteAllText(file, "test");
-        new AclAccessor().ApplyExplicitAce(file, TestSid, AccessControlType.Deny,
+        AclAccessorFactory.Create().ApplyExplicitAce(file, TestSid, AccessControlType.Deny,
             GrantRightsMapper.WriteFileMask | GrantRightsMapper.SpecialFileMask);
 
         // Act
@@ -606,3 +955,4 @@ public class PathGrantServiceIntegrationTests : IDisposable
         Assert.False(denyEntry.SavedRights?.Read == true, "Read should no longer be denied after granting Read access");
     }
 }
+

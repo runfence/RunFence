@@ -12,4 +12,13 @@ namespace RunFence.Acl.UI;
 /// <param name="WasOwn">The Own value at the time the entry was first tracked as a modification.</param>
 /// <param name="NewIsDeny">The desired IsDeny value to apply; equals entry.IsDeny for pure rights-only changes.</param>
 /// <param name="NewRights">The desired SavedRights to apply; null means no pending rights change (entry.SavedRights remains in effect).</param>
-public record PendingModification(GrantedPathEntry Entry, bool WasIsDeny, bool WasOwn, bool NewIsDeny, SavedRightsState? NewRights);
+/// <param name="WasRights">The persisted rights before the first pending modification was recorded.</param>
+/// <param name="WasPreviousSaclLabel">The persisted Low IL label snapshot before the first pending modification was recorded.</param>
+public record PendingModification(
+    GrantedPathEntry Entry,
+    bool WasIsDeny,
+    bool WasOwn,
+    bool NewIsDeny,
+    SavedRightsState? NewRights,
+    SavedRightsState? WasRights = null,
+    string? WasPreviousSaclLabel = null);

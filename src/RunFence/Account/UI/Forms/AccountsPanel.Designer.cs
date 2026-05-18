@@ -26,6 +26,7 @@ partial class AccountsPanel
     private ToolStripButton _aclManagerButton;
     private ToolStripButton _scanAclsButton;
     private ToolStripButton _lowIntegrityAclManagerButton;
+    private ToolStripButton _appContainersAclManagerButton;
     private ToolStripButton _firewallButton;
     private ToolStripButton _wizardButton;
     private ToolStripButton _runAsButton;
@@ -83,6 +84,7 @@ partial class AccountsPanel
         _aclManagerButton = new ToolStripButton();
         _scanAclsButton = new ToolStripButton();
         _lowIntegrityAclManagerButton = new ToolStripButton();
+        _appContainersAclManagerButton = new ToolStripButton();
         _firewallButton = new ToolStripButton();
         _wizardButton = new ToolStripButton();
         _runAsButton = new ToolStripButton();
@@ -184,6 +186,7 @@ partial class AccountsPanel
             _refreshButton, _wizardButton, _createUserButton, _createContainerButton, _addButton,
             _toolStripSep1, _openCmdButton, _openFolderBrowserButton, _aclManagerButton, _firewallButton, _toolStripSep2, _scanAclsButton,
             _lowIntegrityAclManagerButton,
+            _appContainersAclManagerButton,
             _runAsButton, _copyPasswordButton, _accountsButton, _deleteProfilesButton, _migrateSidsButton, _importButton
         });
 
@@ -231,6 +234,11 @@ partial class AccountsPanel
         _lowIntegrityAclManagerButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _lowIntegrityAclManagerButton.ToolTipText = "Low Integrity ACL Manager";
         _lowIntegrityAclManagerButton.Click += OnLowIntegrityAclManagerClick;
+
+        // _appContainersAclManagerButton
+        _appContainersAclManagerButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
+        _appContainersAclManagerButton.ToolTipText = "App Containers ACL Manager";
+        _appContainersAclManagerButton.Click += OnAppContainersAclManagerClick;
 
         // _firewallButton
         _firewallButton.DisplayStyle = ToolStripItemDisplayStyle.Image;

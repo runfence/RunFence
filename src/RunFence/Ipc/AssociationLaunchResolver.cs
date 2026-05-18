@@ -1,3 +1,5 @@
+using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Launch;
 using RunFence.Persistence;
@@ -5,10 +7,12 @@ using RunFence.Persistence;
 namespace RunFence.Ipc;
 
 public class AssociationLaunchResolver(
-    IHandlerMappingService handlerMappingService,
+    Func<IHandlerMappingService> handlerMappingService,
     IIpcCallerAuthorizer authorizer)
     : IAssociationLaunchResolver
 {
+    private IHandlerMappingService HandlerMappingService => handlerMappingService();
+
     public AssociationLaunchResolution Resolve(
         AppDatabase database,
         string association,
@@ -16,10 +20,23 @@ public class AssociationLaunchResolver(
         string? callerIdentity,
         string? callerSid,
         bool identityFromImpersonation)
-    {
-        var allMappings = handlerMappingService.GetAllHandlerMappings(database);
+        => Resolve(
+            database,
+            BuildRequest(association, arguments),
+            callerIdentity,
+            callerSid,
+            identityFromImpersonation);
 
-        if (!allMappings.TryGetValue(association, out var entries))
+    public AssociationLaunchResolution Resolve(
+        AppDatabase database,
+        AssociationLaunchRequest request,
+        string? callerIdentity,
+        string? callerSid,
+        bool identityFromImpersonation)
+    {
+        var allMappings = HandlerMappingService.GetAllHandlerMappings(database);
+
+        if (!allMappings.TryGetValue(request.AssociationKey, out var entries))
             return new AssociationLaunchResolution(AssociationLaunchResolutionStatus.UnknownAssociation);
 
         AppEntry? authorizedApp = null;
@@ -47,7 +64,7 @@ public class AssociationLaunchResolver(
 
             anyAuthorized = true;
 
-            if (!MatchesEffectivePrefixes(entry, candidate, arguments))
+            if (!MatchesEffectivePrefixes(entry, candidate, request.NormalizedTarget))
                 continue;
 
             if (authorizer.HasExplicitPerAppAuthorization(callerSid, candidate, database))
@@ -68,7 +85,16 @@ public class AssociationLaunchResolver(
             : new AssociationLaunchResolution(AssociationLaunchResolutionStatus.AccessDenied);
     }
 
-    private static bool MatchesEffectivePrefixes(HandlerMappingEntry entry, AppEntry app, string? arguments)
+    public static AssociationLaunchRequest BuildRequest(string associationKey, string? rawArgument)
+    {
+        var normalizedTarget = AssociationCommandHelper.ParseAssociationTarget(rawArgument);
+        return new AssociationLaunchRequest(
+            associationKey,
+            rawArgument,
+            normalizedTarget);
+    }
+
+    private static bool MatchesEffectivePrefixes(HandlerMappingEntry entry, AppEntry app, string? normalizedTarget)
     {
         List<string>? effective;
         if (entry.ReplacePrefixes)
@@ -84,33 +110,9 @@ public class AssociationLaunchResolver(
 
         if (effective is not { Count: > 0 })
             return true;
-        if (arguments == null)
+        if (normalizedTarget == null)
             return false;
-
-        string normalized;
-        if (arguments.Contains("://"))
-        {
-            if (!Uri.TryCreate(arguments, UriKind.Absolute, out var uri))
-                return false;
-            normalized = uri.AbsoluteUri;
-        }
-        else if (Path.IsPathRooted(arguments))
-        {
-            try
-            {
-                normalized = Path.GetFullPath(arguments);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-        else
-        {
-            normalized = arguments;
-        }
-
-        return effective.Any(p => MatchesPrefix(normalized, p));
+        return effective.Any(p => MatchesPrefix(normalizedTarget, p));
     }
 
     private static bool MatchesPrefix(string value, string prefix)

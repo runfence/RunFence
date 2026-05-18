@@ -1,5 +1,6 @@
 using Moq;
 using RunFence.Account.Lifecycle;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Launch.Container;
@@ -18,7 +19,8 @@ public class ContainerDeletionServiceTests
 
     public ContainerDeletionServiceTests()
     {
-        _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()));
+        _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()))
+            .Returns(new GrantApplyResult(DurableSaveCompleted: true));
         _containerService.Setup(s => s.DeleteProfile(It.IsAny<string>(), It.IsAny<bool>())).Returns(Task.CompletedTask);
         _sidCleanup.Setup(s => s.CleanupContainerFromAppData(
             It.IsAny<string>(), It.IsAny<string?>()));
@@ -31,17 +33,35 @@ public class ContainerDeletionServiceTests
 
     private static AppContainerEntry MakeEntry() => new() { Name = "rfn_test" };
 
-    // ── Grant cleanup ───────────────────────────────────────────────────────
-
     [Fact]
     public async Task DeleteContainer_CallsRevertTraverseAccess()
     {
-        // RevertTraverseAccess delegates to pathGrantService.RemoveAll internally via AppContainerService.
         var db = new AppDatabase();
 
-        await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
+        var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
         _containerService.Verify(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), db), Times.Once);
+        Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public async Task DeleteContainer_PassesSameEntryInstanceToRevertTraverseAccess()
+    {
+        var db = new AppDatabase();
+        var entry = new AppContainerEntry
+        {
+            Name = "rfn_test",
+            Sid = "S-1-15-2-99-1-2-3-4-5-6"
+        };
+        AppContainerEntry? captured = null;
+        _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()))
+            .Callback<AppContainerEntry, AppDatabase>((e, _) => captured = e)
+            .Returns(new GrantApplyResult(DurableSaveCompleted: true));
+
+        var result = await CreateService(db).DeleteContainer(entry, entry.Sid);
+
+        Assert.Same(entry, captured);
+        Assert.True(result.Succeeded);
     }
 
     [Fact]
@@ -49,10 +69,11 @@ public class ContainerDeletionServiceTests
     {
         var db = new AppDatabase();
 
-        await CreateService(db).DeleteContainer(MakeEntry(), containerSid: null);
+        var result = await CreateService(db).DeleteContainer(MakeEntry(), containerSid: null);
 
         _environmentSetup.Verify(s => s.TryRevokeVirtualStoreAccess(
             It.IsAny<string>(), It.IsAny<string>()), Times.Never);
+        Assert.True(result.Succeeded);
     }
 
     [Fact]
@@ -61,21 +82,21 @@ public class ContainerDeletionServiceTests
         const string containerSid = "S-1-15-2-99-1-2-3-4-5-6";
         var db = new AppDatabase();
 
-        await CreateService(db).DeleteContainer(MakeEntry(), containerSid);
+        var result = await CreateService(db).DeleteContainer(MakeEntry(), containerSid);
 
         _environmentSetup.Verify(s => s.TryRevokeVirtualStoreAccess(containerSid, It.IsAny<string>()), Times.Once);
+        Assert.True(result.Succeeded);
     }
 
-    // ── Pipeline ordering ──────────────────────────────────────────────────
-
     [Fact]
-    public async Task DeleteContainer_PipelineOrdering_RevertTraverseThenDeleteProfileThenCleanup()
+    public async Task DeleteContainer_PipelineOrdering_DeleteProfileThenRevertTraverseThenCleanup()
     {
         var db = new AppDatabase();
         var callOrder = new List<string>();
 
         _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()))
-            .Callback(() => callOrder.Add("RevertTraverseAccess"));
+            .Callback(() => callOrder.Add("RevertTraverseAccess"))
+            .Returns(new GrantApplyResult(DurableSaveCompleted: true));
         _containerService.Setup(s => s.DeleteProfile(It.IsAny<string>(), It.IsAny<bool>()))
             .Callback(() => callOrder.Add("DeleteProfile"))
             .Returns(Task.CompletedTask);
@@ -83,16 +104,17 @@ public class ContainerDeletionServiceTests
                 It.IsAny<string>(), It.IsAny<string?>()))
             .Callback(() => callOrder.Add("CleanupContainerFromAppData"));
 
-        await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
+        var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
         Assert.Equal(3, callOrder.Count);
-        Assert.Equal("RevertTraverseAccess", callOrder[0]);
-        Assert.Equal("DeleteProfile", callOrder[1]);
+        Assert.Equal("DeleteProfile", callOrder[0]);
+        Assert.Equal("RevertTraverseAccess", callOrder[1]);
         Assert.Equal("CleanupContainerFromAppData", callOrder[2]);
+        Assert.True(result.Succeeded);
     }
 
     [Fact]
-    public async Task DeleteContainer_RevertTraverseThrows_LogsWarningAndContinues()
+    public async Task DeleteContainer_RevertTraverseThrows_ReturnsFailedResult()
     {
         var db = new AppDatabase();
         _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()))
@@ -101,12 +123,13 @@ public class ContainerDeletionServiceTests
         var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
         _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("rfn_test"))), Times.Once);
-        _sidCleanup.Verify(s => s.CleanupContainerFromAppData(It.IsAny<string>(), It.IsAny<string?>()), Times.Once);
-        Assert.True(result);
+        _sidCleanup.Verify(s => s.CleanupContainerFromAppData(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
+        Assert.False(result.Succeeded);
+        Assert.Equal("ACL revert failed", result.ErrorMessage);
     }
 
     [Fact]
-    public async Task DeleteContainer_DeleteProfileFails_ReturnsFalse()
+    public async Task DeleteContainer_DeleteProfileFails_ReturnsFailedResult()
     {
         var db = new AppDatabase();
         _containerService.Setup(s => s.DeleteProfile(It.IsAny<string>(), It.IsAny<bool>()))
@@ -114,7 +137,32 @@ public class ContainerDeletionServiceTests
 
         var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
-        Assert.False(result);
+        Assert.False(result.Succeeded);
+        Assert.Equal("Profile deletion failed", result.ErrorMessage);
+        _containerService.Verify(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()), Times.Never);
+        _environmentSetup.Verify(s => s.TryRevokeVirtualStoreAccess(It.IsAny<string>(), It.IsAny<string>()), Times.Never);
         _sidCleanup.Verify(s => s.CleanupContainerFromAppData(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task DeleteContainer_RevertTraverseReturnsWarnings_ReturnsFormattedWarnings()
+    {
+        var db = new AppDatabase();
+        var warning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostRemoveAllSave,
+            @"C:\ContainerRoot",
+            null,
+            new InvalidOperationException("save failed"));
+        _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()))
+            .Returns(new GrantApplyResult(
+                DatabaseModified: true,
+                DurableSaveCompleted: false,
+                Warnings: [warning]));
+
+        var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
+
+        Assert.True(result.Succeeded);
+        Assert.Equal([GrantApplyFailureFormatter.Format(warning)], result.Warnings);
+        _sidCleanup.Verify(s => s.CleanupContainerFromAppData(It.IsAny<string>(), It.IsAny<string?>()), Times.Once);
     }
 }

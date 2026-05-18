@@ -23,11 +23,16 @@
 
     <ItemGroup>
         <ProjectReference Include="..\RunFence.Core\RunFence.Core.csproj"/>
+        <ProjectReference Include="..\RunFence.JobKeeper\RunFence.JobKeeper.csproj"/>
         <ProjectReference Include="..\RunFence.Launching\RunFence.Launching.csproj"/>
         <ProjectReference Include="..\RunFence\RunFence.csproj"/>
+        <ProjectReference Include="..\RunFence.Tests.Core\RunFence.Tests.Core.csproj"/>
         <ProjectReference Include="..\RunFence.Launcher\RunFence.Launcher.csproj"/>
         <ProjectReference Include="..\RunFence.DragBridge\RunFence.DragBridge.csproj"/>
+        <ProjectReference Include="..\RunFence.FolderBrowser\RunFence.FolderBrowser.csproj"/>
         <ProjectReference Include="..\RunFence.SecurityScanner\RunFence.SecurityScanner.csproj"/>
+        <ProjectReference Include="..\RunFence.ProfileKeeper\RunFence.ProfileKeeper.csproj"/>
+        <ProjectReference Include="..\preftrans\preftrans.csproj"/>
     </ItemGroup>
 
 </Project>

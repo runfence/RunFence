@@ -67,15 +67,19 @@ public class AclManagerMouseEventHandler(
     public void HandleGrantsFileDrop(string[] paths)
     {
         string? targetConfigPath = null;
+        bool hasExplicitTargetSection = false;
         if (appConfigService.HasLoadedConfigs)
         {
             var cursorClient = _controls.GrantsGrid.PointToClient(Cursor.Position);
             var hitTest = _controls.GrantsGrid.HitTest(cursorClient.X, cursorClient.Y);
             if (hitTest.RowIndex >= 0)
+            {
+                hasExplicitTargetSection = true;
                 targetConfigPath = AclManagerSectionHeader.GetSectionConfigPath(_controls.GrantsGrid, hitTest.RowIndex);
+            }
         }
 
-        var error = actionHandler.HandleShellDropOnGrants(paths, targetConfigPath);
+        var error = actionHandler.HandleShellDropOnGrants(paths, targetConfigPath, hasExplicitTargetSection);
         if (error != null)
             MessageBox.Show(error, "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
         _updateActionButtons();

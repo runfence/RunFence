@@ -10,8 +10,8 @@ public class LauncherIpcHelperTests
     public void ExistingGuiWaitsForIpcReadinessBeforeSendingMessage()
     {
         var ipcClient = new SequencedLauncherIpcClient(false, true);
-        var guiController = new FixedLauncherGuiController(isRunning: true, startResult: false);
-        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay());
+        var guiController = new FixedLauncherGuiController(LauncherGuiInstanceState.RunningInCurrentSession, startResult: false);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay(), new RecordingLauncherUserNotifier());
 
         var response = helper.SendWithAutoStart(new IpcMessage { Command = "probe" });
 
@@ -28,10 +28,12 @@ public class LauncherIpcHelperTests
         var ipcClient = new SequencedLauncherIpcClient(false, true);
         var guiController = new SequencedLauncherGuiController(
             startResult: true,
-            true,
-            false,
-            false);
-        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay());
+            LauncherGuiInstanceState.RunningInCurrentSession,
+            LauncherGuiInstanceState.NotRunning,
+            LauncherGuiInstanceState.NotRunning,
+            LauncherGuiInstanceState.RunningInCurrentSession,
+            LauncherGuiInstanceState.RunningInCurrentSession);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay(), new RecordingLauncherUserNotifier());
 
         var response = helper.SendWithAutoStart(new IpcMessage { Command = "probe" });
 
@@ -46,8 +48,12 @@ public class LauncherIpcHelperTests
     public void ClosedGuiRunAsStartupRequestsStartupUnlockGrant()
     {
         var ipcClient = new SequencedLauncherIpcClient(true);
-        var guiController = new FixedLauncherGuiController(isRunning: false, startResult: true);
-        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay());
+        var guiController = new SequencedLauncherGuiController(
+            startResult: true,
+            LauncherGuiInstanceState.NotRunning,
+            LauncherGuiInstanceState.RunningInCurrentSession,
+            LauncherGuiInstanceState.RunningInCurrentSession);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay(), new RecordingLauncherUserNotifier());
 
         var response = helper.SendWithAutoStart(new IpcMessage
         {
@@ -64,8 +70,12 @@ public class LauncherIpcHelperTests
     public void ClosedGuiNonRunAsStartupDoesNotRequestStartupUnlockGrant()
     {
         var ipcClient = new SequencedLauncherIpcClient(true);
-        var guiController = new FixedLauncherGuiController(isRunning: false, startResult: true);
-        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay());
+        var guiController = new SequencedLauncherGuiController(
+            startResult: true,
+            LauncherGuiInstanceState.NotRunning,
+            LauncherGuiInstanceState.RunningInCurrentSession,
+            LauncherGuiInstanceState.RunningInCurrentSession);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay(), new RecordingLauncherUserNotifier());
 
         var response = helper.SendWithAutoStart(new IpcMessage
         {
@@ -76,6 +86,47 @@ public class LauncherIpcHelperTests
         Assert.NotNull(response);
         Assert.True(response.Success);
         Assert.False(guiController.LastGrantStartupRunAsUnlock);
+    }
+
+    [Fact]
+    public void DifferentSessionGuiStartsNewGuiInsteadOfWaitingForIpc()
+    {
+        var ipcClient = new SequencedLauncherIpcClient(true);
+        var guiController = new SequencedLauncherGuiController(
+            startResult: true,
+            LauncherGuiInstanceState.RunningInDifferentSession,
+            LauncherGuiInstanceState.RunningInCurrentSession,
+            LauncherGuiInstanceState.RunningInCurrentSession);
+        var helper = new LauncherIpcHelper(ipcClient, guiController, new NoOpLauncherWaitDelay(), new RecordingLauncherUserNotifier());
+
+        var response = helper.SendWithAutoStart(new IpcMessage { Command = "probe" });
+
+        Assert.NotNull(response);
+        Assert.True(response.Success);
+        Assert.Equal(1, ipcClient.PingCount);
+        Assert.Equal(1, ipcClient.SendCount);
+        Assert.Equal(1, guiController.StartCount);
+    }
+
+    [Fact]
+    public void DifferentSessionGuiWaitsForCurrentSessionOwnershipBeforePingingIpc()
+    {
+        var ipcClient = new SequencedLauncherIpcClient(true);
+        var guiController = new SequencedLauncherGuiController(
+            startResult: true,
+            LauncherGuiInstanceState.RunningInDifferentSession,
+            LauncherGuiInstanceState.RunningInDifferentSession,
+            LauncherGuiInstanceState.RunningInCurrentSession,
+            LauncherGuiInstanceState.RunningInCurrentSession);
+        var waitDelay = new RecordingLauncherWaitDelay();
+        var helper = new LauncherIpcHelper(ipcClient, guiController, waitDelay, new RecordingLauncherUserNotifier());
+
+        var response = helper.SendWithAutoStart(new IpcMessage { Command = "probe" });
+
+        Assert.NotNull(response);
+        Assert.True(response.Success);
+        Assert.Equal(1, ipcClient.PingCount);
+        Assert.Equal([500], waitDelay.Delays);
     }
 
     private sealed class SequencedLauncherIpcClient(params bool[] pingResults) : ILauncherIpcClient
@@ -100,12 +151,12 @@ public class LauncherIpcHelperTests
         }
     }
 
-    private sealed class FixedLauncherGuiController(bool isRunning, bool startResult) : ILauncherGuiController
+    private sealed class FixedLauncherGuiController(LauncherGuiInstanceState guiState, bool startResult) : ILauncherGuiController
     {
         public int StartCount { get; private set; }
         public bool LastGrantStartupRunAsUnlock { get; private set; }
 
-        public bool IsGuiRunning() => isRunning;
+        public LauncherGuiInstanceState GetGuiState() => guiState;
 
         public bool StartGui(bool grantStartupRunAsUnlock)
         {
@@ -115,22 +166,26 @@ public class LauncherIpcHelperTests
         }
     }
 
-    private sealed class SequencedLauncherGuiController(bool startResult, params bool[] runningResults) : ILauncherGuiController
+    private sealed class SequencedLauncherGuiController(
+        bool startResult,
+        params LauncherGuiInstanceState[] guiStates) : ILauncherGuiController
     {
-        private int _runningIndex;
+        private int _stateIndex;
 
         public int StartCount { get; private set; }
+        public bool LastGrantStartupRunAsUnlock { get; private set; }
 
-        public bool IsGuiRunning()
+        public LauncherGuiInstanceState GetGuiState()
         {
-            if (_runningIndex >= runningResults.Length)
-                return runningResults[^1];
-            return runningResults[_runningIndex++];
+            if (_stateIndex >= guiStates.Length)
+                return guiStates[^1];
+            return guiStates[_stateIndex++];
         }
 
         public bool StartGui(bool grantStartupRunAsUnlock)
         {
             StartCount++;
+            LastGrantStartupRunAsUnlock = grantStartupRunAsUnlock;
             return startResult;
         }
     }
@@ -139,6 +194,32 @@ public class LauncherIpcHelperTests
     {
         public void Sleep(int milliseconds)
         {
+        }
+    }
+
+    private sealed class RecordingLauncherWaitDelay : ILauncherWaitDelay
+    {
+        public List<int> Delays { get; } = [];
+
+        public void Sleep(int milliseconds)
+        {
+            Delays.Add(milliseconds);
+        }
+    }
+
+    private sealed class RecordingLauncherUserNotifier : ILauncherUserNotifier
+    {
+        public List<string> Errors { get; } = [];
+        public List<string> Warnings { get; } = [];
+
+        public void ShowError(string message)
+        {
+            Errors.Add(message);
+        }
+
+        public void ShowWarning(string message)
+        {
+            Warnings.Add(message);
         }
     }
 }

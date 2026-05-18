@@ -18,16 +18,20 @@ public class TemplatePickerStep : WizardStepPage
     private static readonly Color PrerequisiteBorderColor = Color.FromArgb(0xD4, 0x7A, 0x00);
     private static readonly Color PrerequisiteBackColor = Color.FromArgb(0xFF, 0xFB, 0xF2);
 
+    private readonly Label _introLabel;
+    private readonly Label _loadingLabel;
+    private readonly Label _noticeLabel;
     private readonly FlowLayoutPanel _flowPanel;
     private readonly List<TemplateCard> _cards = [];
     private TemplateCard? _selectedCard;
+    private bool _isLoading;
 
     /// <summary>The currently selected template, or <c>null</c> if none is selected.</summary>
     public IWizardTemplate? SelectedTemplate => _selectedCard?.Template;
 
-    public TemplatePickerStep(IReadOnlyList<IWizardTemplate> templates)
+    public TemplatePickerStep(IReadOnlyList<IWizardTemplate> templates, bool isLoading)
     {
-        var introLabel = new Label
+        _introLabel = new Label
         {
             Text = "Choose a setup template to get started:",
             Dock = DockStyle.Top,
@@ -38,23 +42,28 @@ public class TemplatePickerStep : WizardStepPage
             Padding = new Padding(0, 4, 0, 4)
         };
 
-        bool hasPrerequisite = templates.Any(t => t.IsPrerequisite);
-        Label? noticeLabel = null;
-        if (hasPrerequisite)
+        _loadingLabel = new Label
         {
-            noticeLabel = new Label
-            {
-                Text = "\u26A0\uFE0F It is recommended to run \u2018Prepare System\u2019 first \u2014 " +
-                       "other templates work best when data drives have already been secured with restricted ACLs.",
-                AutoSize = false,
-                Font = new Font("Segoe UI", 9f),
-                ForeColor = Color.FromArgb(0x7A, 0x50, 0x00),
-                BackColor = Color.FromArgb(0xFF, 0xF3, 0xCD),
-                Dock = DockStyle.Top,
-                Padding = new Padding(8, 5, 8, 5)
-            };
-            TrackWrappingLabel(noticeLabel);
-        }
+            Text = "Loading templates...",
+            AutoSize = false,
+            Font = new Font("Segoe UI", 9f),
+            ForeColor = Color.FromArgb(0x44, 0x44, 0x44),
+            Dock = DockStyle.Top,
+            Padding = new Padding(0, 8, 0, 8)
+        };
+        TrackWrappingLabel(_loadingLabel);
+
+        _noticeLabel = new Label
+        {
+            AutoSize = false,
+            Font = new Font("Segoe UI", 9f),
+            ForeColor = Color.FromArgb(0x7A, 0x50, 0x00),
+            BackColor = Color.FromArgb(0xFF, 0xF3, 0xCD),
+            Dock = DockStyle.Top,
+            Padding = new Padding(8, 5, 8, 5),
+            Visible = false
+        };
+        TrackWrappingLabel(_noticeLabel);
 
         _flowPanel = new FlowLayoutPanel
         {
@@ -67,26 +76,16 @@ public class TemplatePickerStep : WizardStepPage
         };
         _flowPanel.ClientSizeChanged += (_, _) => UpdateCardWidths();
 
-        foreach (var template in templates)
-        {
-            var card = new TemplateCard(template);
-            card.Margin = Padding.Empty;
-            card.CardSelected += OnCardSelected;
-            card.CardDoubleClicked += OnCardDoubleClicked;
-            _cards.Add(card);
-            _flowPanel.Controls.Add(card);
-        }
-
-        // Spacer so the last card's bottom border is fully visible when scrolled to the end.
-        _flowPanel.Controls.Add(new Panel { Height = 8, Margin = Padding.Empty, BackColor = Color.White });
-
         // Add controls: Fill first, then Top items (last added = topmost in DockStyle.Top stack).
         Controls.Add(_flowPanel);
-        if (noticeLabel != null)
-            Controls.Add(noticeLabel);
-        Controls.Add(introLabel);
+        Controls.Add(_noticeLabel);
+        Controls.Add(_loadingLabel);
+        Controls.Add(_introLabel);
 
         BackColor = Color.White;
+
+        SetTemplates(templates);
+        SetLoading(isLoading);
     }
 
     protected override void OnResize(EventArgs e)
@@ -105,7 +104,46 @@ public class TemplatePickerStep : WizardStepPage
             card.Width = cardWidth;
     }
 
-    public override bool CanProceed => _selectedCard != null;
+    public override bool CanProceed => !_isLoading && _selectedCard != null;
+
+    public void SetTemplates(IReadOnlyList<IWizardTemplate> templates)
+    {
+        _selectedCard = null;
+
+        foreach (var card in _cards)
+            card.Dispose();
+
+        _cards.Clear();
+        _flowPanel.Controls.Clear();
+
+        foreach (var template in templates)
+        {
+            var card = new TemplateCard(template);
+            card.Margin = Padding.Empty;
+            card.CardSelected += OnCardSelected;
+            card.CardDoubleClicked += OnCardDoubleClicked;
+            _cards.Add(card);
+            _flowPanel.Controls.Add(card);
+        }
+
+        if (_cards.Count > 0)
+        {
+            // Spacer so the last card's bottom border is fully visible when scrolled to the end.
+            _flowPanel.Controls.Add(new Panel { Height = 8, Margin = Padding.Empty, BackColor = Color.White });
+        }
+
+        UpdatePrerequisiteNotice(templates);
+        UpdateCardWidths();
+        NotifyCanProceedChanged();
+    }
+
+    public void SetLoading(bool isLoading)
+    {
+        _isLoading = isLoading;
+        _loadingLabel.Visible = isLoading;
+        _flowPanel.Visible = _cards.Count > 0 || !isLoading;
+        NotifyCanProceedChanged();
+    }
 
     private void OnCardSelected(TemplateCard card)
     {
@@ -128,12 +166,28 @@ public class TemplatePickerStep : WizardStepPage
 
     public override string StepTitle => "Choose a Template";
 
-    public override string? Validate() =>
-        _selectedCard == null ? "Please select a template to continue." : null;
+    public override string? Validate()
+    {
+        if (_isLoading)
+            return "Please wait for templates to finish loading.";
+
+        return _selectedCard == null ? "Please select a template to continue." : null;
+    }
 
     public override void Collect()
     {
         /* SelectedTemplate property carries the selection */
+    }
+
+    private void UpdatePrerequisiteNotice(IReadOnlyList<IWizardTemplate> templates)
+    {
+        bool hasPrerequisite = templates.Any(t => t.IsPrerequisite);
+        _noticeLabel.Visible = hasPrerequisite;
+        if (!hasPrerequisite)
+            return;
+
+        _noticeLabel.Text = "\u26A0\uFE0F It is recommended to run \u2018Prepare System\u2019 first \u2014 " +
+                            "other templates work best when data drives have already been secured with restricted ACLs.";
     }
 
     // -----------------------------------------------------------------------------------------

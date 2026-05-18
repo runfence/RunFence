@@ -206,7 +206,8 @@ public class AclService(
         =>
         TryModifyContainerSid(containerName, targetPath, "grant", sid =>
         {
-            pathGrantService.EnsureAccess(sid, targetPath, FileSystemRights.ReadAndExecute, confirm: null);
+            var result = pathGrantService.EnsureAccess(sid, targetPath, FileSystemRights.ReadAndExecute, confirm: null);
+            LogGrantWarnings("grant", containerName, targetPath, result.Warnings);
             log.Info($"Granted AppContainer SID '{sid}' ReadAndExecute on '{targetPath}'");
         });
 
@@ -214,7 +215,8 @@ public class AclService(
         =>
         TryModifyContainerSid(containerName, targetPath, "revoke", sid =>
         {
-            pathGrantService.RemoveGrant(sid, targetPath, isDeny: false, updateFileSystem: true);
+            var result = pathGrantService.RemoveGrant(sid, targetPath, isDeny: false);
+            LogGrantWarnings("revoke", containerName, targetPath, result.Warnings);
             log.Info($"Revoked AppContainer SID '{sid}' from '{targetPath}'");
         });
 
@@ -229,7 +231,7 @@ public class AclService(
     {
         try
         {
-            var containerSid = ResolveContainerSid(containerName);
+            var containerSid = containerLookup.ResolveContainerSid(containerName);
             if (containerSid == null)
             {
                 log.Warn($"AppContainer SID not resolved for '{containerName}' — skipping {actionName} on '{targetPath}'");
@@ -248,6 +250,17 @@ public class AclService(
         }
     }
 
-    private string? ResolveContainerSid(string containerName)
-        => containerLookup.ResolveContainerSid(containerName);
+    private void LogGrantWarnings(
+        string actionName,
+        string containerName,
+        string targetPath,
+        IReadOnlyList<GrantApplyWarning> warnings)
+    {
+        foreach (var warning in warnings)
+        {
+            log.Warn(
+                $"AppContainer SID {actionName} warning for '{containerName}' on '{targetPath}': " +
+                GrantApplyFailureFormatter.Format(warning));
+        }
+    }
 }

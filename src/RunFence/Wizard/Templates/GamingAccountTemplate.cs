@@ -27,13 +27,12 @@ public class GamingAccountTemplate(
     WizardAccountSetupHelperFactory setupHelperFactory,
     WizardFolderGrantHelper folderGrantHelper,
     SessionContext session,
-    WizardLicenseChecker licenseChecker,
-    IWindowsAccountService windowsAccountService,
+    GamingExistingAccountPreparationService existingAccountPreparationService,
+    IWindowsAccountQueryService windowsAccountQueryService,
     WizardAccountPickerStepFactory pickerStepFactory,
-    IAccountCredentialManager credentialManager,
+    WizardCredentialCollector credentialCollector,
     IShortcutDiscoveryService discoveryService,
-    IShortcutIconHelper iconHelper,
-    GamingLogonBlockHelper logonBlockHelper)
+    IShortcutIconHelper iconHelper)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -106,7 +105,7 @@ public class GamingAccountTemplate(
             {
                 if (!_data.IsExistingAccount || string.IsNullOrEmpty(_data.ExistingAccountSid))
                     return Task.CompletedTask;
-                var pw = pickerStepFactory.CreateCredentialCollector().CollectIfNeeded(_data.ExistingAccountSid, session, progress);
+                var pw = credentialCollector.CollectCredentialForStep(_data.ExistingAccountSid, progress);
                 if (pw != null) _data.CollectedPassword = pw;
                 return Task.CompletedTask;
             });
@@ -130,10 +129,6 @@ public class GamingAccountTemplate(
             return;
         }
 
-        if (_data.GameLaunchers.Count > 0 &&
-            !licenseChecker.CheckCanAddApps(session, _data.GameLaunchers.Count, progress))
-            return;
-
         progress.ReportStatus($"Creating account '{_data.Username}'...");
 
         var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
@@ -152,7 +147,7 @@ public class GamingAccountTemplate(
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
             IsEphemeral: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             FirewallSettings: new FirewallAccountSettings { AllowLan = false, AllowLocalhost = false },
             DesktopSettingsPath: defaults.DesktopSettingsPath,
             InstallPackages: null,
@@ -195,32 +190,12 @@ public class GamingAccountTemplate(
         }
 
         var sid = _data.ExistingAccountSid;
-
-        var resolvedName = session.Database.SidNames.GetValueOrDefault(sid) ?? pickerStepFactory.TryResolveName(sid) ?? sid;
-        var username = SidNameResolver.ExtractUsername(resolvedName);
-        logonBlockHelper.CheckAndPromptLogonUnblock(sid, username, null, progress);
-
-        // Pre-flight: only count launchers without an existing app entry for this account
-        var existingExePaths = session.Database.Apps
-            .Where(a => string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase))
-            .Select(a => a.ExePath)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var newLauncherCount = _data.GameLaunchers
-            .Count(p => !string.IsNullOrEmpty(p) && !existingExePaths.Contains(p));
-
-        bool willAddCredential = _data.CollectedPassword != null;
-        if (!licenseChecker.CheckCanAddCredential(session, progress, willAddCredential))
+        if (!existingAccountPreparationService.Prepare(
+                session,
+                sid,
+                _data.CollectedPassword,
+                progress))
             return;
-        if (newLauncherCount > 0 && !licenseChecker.CheckCanAddApps(session, newLauncherCount, progress))
-            return;
-
-        if (_data.CollectedPassword != null)
-        {
-            var (success, _, error) = credentialManager.AddNewCredential(
-                sid, _data.CollectedPassword, session.CredentialStore, session.PinDerivedKey);
-            if (!success && error != null)
-                progress.ReportError($"Credential: {error}");
-        }
 
         var gameFolders = _data.GameFolders;
         var gameLaunchers = _data.GameLaunchers;
@@ -254,7 +229,7 @@ public class GamingAccountTemplate(
         string? profilePath = null;
         try
         {
-            profilePath = windowsAccountService.GetProfilePath(sid);
+            profilePath = windowsAccountQueryService.GetProfilePath(sid).ProfilePath;
         }
         catch
         {

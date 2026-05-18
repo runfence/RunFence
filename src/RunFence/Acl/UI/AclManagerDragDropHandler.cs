@@ -1,4 +1,5 @@
 using RunFence.Acl.UI.Forms;
+using RunFence.Acl.Traverse;
 using RunFence.Core.Models;
 using RunFence.Persistence;
 
@@ -10,7 +11,10 @@ namespace RunFence.Acl.UI;
 /// tracking (no OLE DoDragDrop) so the grids can have AllowDrop=false and receive
 /// cross-IL shell file drops via WM_DROPFILES.
 /// </summary>
-public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
+public class AclManagerDragDropHandler(
+    IGrantIntentRepository grantIntentRepository,
+    IGrantIntentStoreProvider grantIntentStoreProvider,
+    ITraverseGrantOwnerResolver traverseGrantOwnerResolver)
 {
     private string _sid = null!;
     private AclManagerPendingChanges _pending = null!;
@@ -81,7 +85,7 @@ public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
             return false;
 
         var (targetConfigPath, _) = GetSectionForGrid(grid, hitTest.RowIndex);
-        if (string.Equals(targetConfigPath, GetEffectiveConfigPath(draggedEntry), StringComparison.OrdinalIgnoreCase))
+        if (ReferenceEquals(GetTargetStore(targetConfigPath), GetEffectiveStore(draggedEntry)))
             return false;
 
         if (!draggedEntry.IsTraverseOnly)
@@ -89,13 +93,13 @@ public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
             var normalizedPath = Path.GetFullPath(draggedEntry.Path);
             var configMoveKey = (normalizedPath, _pending.GetEffectiveIsDeny(draggedEntry));
             var removeKey = (normalizedPath, draggedEntry.IsDeny);
-            _pending.PendingConfigMoves[configMoveKey] = targetConfigPath;
+            _pending.PendingConfigMoves[configMoveKey] = new PendingConfigMove(draggedEntry, targetConfigPath);
             _pending.PendingRemoves.Remove(removeKey);
         }
         else
         {
             var path = Path.GetFullPath(draggedEntry.Path);
-            _pending.PendingTraverseConfigMoves[path] = targetConfigPath;
+            _pending.PendingTraverseConfigMoves[path] = new PendingConfigMove(draggedEntry, targetConfigPath);
             _pending.PendingTraverseRemoves.Remove(path);
         }
 
@@ -112,7 +116,7 @@ public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
         }
 
         var (targetConfigPath, headerRow) = GetSectionForGrid(grid, hitTest.RowIndex);
-        if (headerRow == null || string.Equals(targetConfigPath, GetEffectiveConfigPath(_draggingEntry!), StringComparison.OrdinalIgnoreCase))
+        if (headerRow == null || ReferenceEquals(GetTargetStore(targetConfigPath), GetEffectiveStore(_draggingEntry!)))
         {
             ClearDropHighlight();
             return;
@@ -140,8 +144,32 @@ public class AclManagerDragDropHandler(IGrantConfigTracker grantConfigTracker)
         headerRow.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0xA0, 0xB5, 0xE5);
     }
 
-    private string? GetEffectiveConfigPath(GrantedPathEntry entry) =>
-        _pending.GetEffectiveConfigPath(entry, grantConfigTracker, _sid);
+    private IGrantIntentStore GetEffectiveStore(GrantedPathEntry entry)
+    {
+        if (!entry.IsTraverseOnly)
+        {
+            var key = (Path.GetFullPath(entry.Path), _pending.GetEffectiveIsDeny(entry));
+            if (_pending.PendingConfigMoves.TryGetValue(key, out var pendingMove))
+                return GetTargetStore(pendingMove.TargetConfigPath);
+
+            return grantIntentRepository.FindGrant(_sid, entry)?.Store ?? grantIntentStoreProvider.MainStore;
+        }
+
+        var normalizedPath = Path.GetFullPath(entry.Path);
+        if (_pending.PendingTraverseConfigMoves.TryGetValue(normalizedPath, out var pendingTraverseMove))
+            return GetTargetStore(pendingTraverseMove.TargetConfigPath);
+
+        return grantIntentRepository.FindTraverse(GetTraverseLookupSid(entry), entry)?.Store
+               ?? grantIntentStoreProvider.MainStore;
+    }
+
+    private string GetTraverseLookupSid(GrantedPathEntry entry)
+        => entry.IsTraverseOnly
+            ? traverseGrantOwnerResolver.ResolveStorageOwnerSid(_sid)
+            : _sid;
+
+    private IGrantIntentStore GetTargetStore(string? configPath)
+        => grantIntentStoreProvider.ResolveStore(configPath);
 
     private static (string? ConfigPath, DataGridViewRow? HeaderRow) GetSectionForGrid(DataGridView grid, int rowIndex)
     {

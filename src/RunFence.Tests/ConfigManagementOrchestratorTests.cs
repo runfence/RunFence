@@ -31,30 +31,37 @@ public class ConfigManagementOrchestratorTests : IDisposable
     private readonly Mock<IContextMenuService> _contextMenuService = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<ILicenseService> _licenseService = new();
+    private readonly Mock<ILoadedGoodBackupStore> _loadedGoodBackupStore = new();
     private readonly Mock<IAppHandlerRegistrationService> _handlerRegistrationService = new();
     private readonly Mock<IHandlerMappingService> _handlerMappingService = new();
     private readonly Mock<IAssociationAutoSetService> _associationAutoSetService = new();
     private readonly Mock<IFolderHandlerService> _folderHandlerService = new();
     private readonly Mock<IFirewallCleanupService> _firewallCleanupService = new();
+    private readonly Mock<IGrantIntentStoreProvider> _grantIntentStoreProvider = new();
     private readonly List<IReadOnlyList<string>> _shortcutConflicts = [];
 
     private readonly AppDatabase _database = new();
-    private readonly ProtectedBuffer _pinKey;
+    private readonly SecureSecret _pinKey;
     private readonly ConfigManagementOrchestrator _handler;
 
     private const string ConfigPath = @"C:\extra.ramc";
 
     public ConfigManagementOrchestratorTests()
     {
-        _pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        _pinKey = TestSecretFactory.Create(32);
         _shortcutDiscovery.Setup(d => d.CreateTraversalCache()).Returns(() => new ShortcutTraversalCache([]));
         _shortcutDiscovery.Setup(d => d.CreateTraversalCacheIfNeeded(It.IsAny<IEnumerable<AppEntry>>())).Returns(() => new ShortcutTraversalCache([]));
+        _databaseService.Setup(s => s.TryGetAppConfigSaltFromPath(ConfigPath)).Returns((byte[]?)null);
+        _loadedGoodBackupStore.Setup(s => s.GetBackupPath(ConfigPath)).Returns(ConfigPath + ".lastgood");
+        string? ignoredBackupWarning = null;
+        _loadedGoodBackupStore
+            .Setup(s => s.TryPreserveCurrentFile(ConfigPath, out ignoredBackupWarning))
+            .Returns(true);
         var session = new SessionContext
-        {
+{
             Database = _database,
-            CredentialStore = new CredentialStore(),
-            PinDerivedKey = _pinKey
-        };
+            CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
+        }.WithOwnedPinDerivedKey(_pinKey);
 
         _handlerMappingService
             .Setup(s => s.GetEffectiveHandlerMappings(It.IsAny<AppDatabase>()))
@@ -243,20 +250,26 @@ public class ConfigManagementOrchestratorTests : IDisposable
     public void LoadApps_RestrictAcl_PassesAllAppsUnionToApplyAcl()
     {
         // Arrange: main-database has an existing app; a new app is loaded from a config file.
-        // LoadAdditionalConfig adds the loaded app to database.Apps (production behavior),
+        // ApplyAdditionalConfig adds the loaded app to database.Apps (production behavior),
         // so ApplyAcl receives the full union via database.Apps.
         var mainApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "MainApp", ExePath = @"C:\Main\main.exe" };
         _database.Apps.Add(mainApp);
 
         var configApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "ConfigApp", ExePath = @"C:\Config\app.exe", RestrictAcl = true };
 
-        // Mimic production: LoadAdditionalConfig adds the app to database.Apps as a side effect
         _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
         _appConfigService
-            .Setup(s => s.LoadAdditionalConfig(ConfigPath, _database, It.IsAny<byte[]>()))
-            .Callback<string, AppDatabase, byte[]>((_, db, _) => db.Apps.Add(configApp))
+            .Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(CreateLoadData([configApp]));
+        _appConfigService
+            .Setup(s => s.ApplyAdditionalConfig(It.IsAny<AdditionalConfigLoadData>(), _database))
+            .Callback<AdditionalConfigLoadData, AppDatabase>((data, db) =>
+            {
+                foreach (var app in data.Apps)
+                    db.Apps.Add(app);
+            })
             .Returns([configApp]);
-        _appConfigService.Setup(s => s.SaveConfigAtPath(ConfigPath, _database, It.IsAny<byte[]>(), It.IsAny<byte[]>()));
+        _appConfigService.Setup(s => s.SaveConfigAtPath(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()));
 
         IReadOnlyList<AppEntry>? capturedAllApps = null;
         _aclService.Setup(s => s.ApplyAcl(configApp, It.IsAny<IReadOnlyList<AppEntry>>()))
@@ -290,6 +303,22 @@ public class ConfigManagementOrchestratorTests : IDisposable
         Assert.False(loadedApp.ManageShortcuts);
         Assert.Single(_shortcutConflicts);
         Assert.Contains("Loaded", _shortcutConflicts[0]);
+    }
+
+    [Fact]
+    public void LoadApps_ManageShortcutsConflictWithinLoadedConfig_DisablesLaterLoadedApp()
+    {
+        var firstLoadedApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "First", ExePath = @"C:\App\app.exe", ManageShortcuts = true };
+        var secondLoadedApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "Second", ExePath = @"C:\App\app.exe", ManageShortcuts = true };
+        SetupLoad([firstLoadedApp, secondLoadedApp]);
+
+        var (success, _) = _handler.LoadApps(ConfigPath);
+
+        Assert.True(success);
+        Assert.True(firstLoadedApp.ManageShortcuts);
+        Assert.False(secondLoadedApp.ManageShortcuts);
+        Assert.Single(_shortcutConflicts);
+        Assert.Contains("Second", _shortcutConflicts[0]);
     }
 
     [Fact]
@@ -382,21 +411,21 @@ public class ConfigManagementOrchestratorTests : IDisposable
     }
 
     [Fact]
-    public void LoadApps_EnforcementThrows_RollsBackAndUnloadsConfig()
+    public void LoadApps_EnforcementThrows_ReturnsSuccessWithWarningAndKeepsLoadedApps()
     {
-        // Arrange: RecomputeAllAncestorAcls (outside per-app catch) throws after apps were loaded
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App", ExePath = @"C:\App\app.exe" };
         SetupLoad([app]);
         _aclService.Setup(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()))
             .Throws(new NullReferenceException("simulated failure"));
 
         // Act
-        var (success, errorMessage) = _handler.LoadApps(ConfigPath);
+        var result = _handler.LoadApps(ConfigPath);
 
-        // Assert: load fails and config is rolled back
-        Assert.False(success);
-        Assert.NotNull(errorMessage);
-        _appConfigService.Verify(s => s.UnloadConfig(ConfigPath, _database), Times.Once);
+        Assert.True(result.Succeeded);
+        Assert.Contains(app, _database.Apps);
+        Assert.NotNull(result.Warnings);
+        Assert.Contains(result.Warnings!, warning => warning.Contains("enforcement failed", StringComparison.OrdinalIgnoreCase));
+        _appConfigService.Verify(s => s.UnloadConfig(ConfigPath, _database), Times.Never);
     }
 
     // --- LoadApps: evaluation limit ---
@@ -411,9 +440,8 @@ public class ConfigManagementOrchestratorTests : IDisposable
         var newApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "Extra", ExePath = @"C:\App\extra.exe" };
         _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
         _appConfigService
-            .Setup(s => s.LoadAdditionalConfig(ConfigPath, _database, It.IsAny<byte[]>()))
-            .Callback<string, AppDatabase, byte[]>((_, db, _) => db.Apps.Add(newApp))
-            .Returns([newApp]);
+            .Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(CreateLoadData([newApp]));
 
         var licenseService = new Mock<ILicenseService>();
         licenseService
@@ -428,11 +456,11 @@ public class ConfigManagementOrchestratorTests : IDisposable
         // Act
         var (success, errorMessage) = handler.LoadApps(ConfigPath);
 
-        // Assert: load blocked, config rolled back
+        // Assert: load blocked before live mutation
         Assert.False(success);
         Assert.NotNull(errorMessage);
         Assert.Contains("Cannot load config", errorMessage);
-        _appConfigService.Verify(s => s.UnloadConfig(ConfigPath, _database), Times.Once);
+        _appConfigService.Verify(s => s.UnloadConfig(ConfigPath, _database), Times.Never);
     }
 
     [Fact]
@@ -445,10 +473,17 @@ public class ConfigManagementOrchestratorTests : IDisposable
         var newApp = new AppEntry { Id = AppEntry.GenerateId(), Name = "Extra", ExePath = @"C:\App\extra.exe" };
         _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
         _appConfigService
-            .Setup(s => s.LoadAdditionalConfig(ConfigPath, _database, It.IsAny<byte[]>()))
-            .Callback<string, AppDatabase, byte[]>((_, db, _) => db.Apps.Add(newApp))
+            .Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(CreateLoadData([newApp]));
+        _appConfigService
+            .Setup(s => s.ApplyAdditionalConfig(It.IsAny<AdditionalConfigLoadData>(), _database))
+            .Callback<AdditionalConfigLoadData, AppDatabase>((data, db) =>
+            {
+                foreach (var app in data.Apps)
+                    db.Apps.Add(app);
+            })
             .Returns([newApp]);
-        _appConfigService.Setup(s => s.SaveConfigAtPath(ConfigPath, _database, It.IsAny<byte[]>(), It.IsAny<byte[]>()));
+        _appConfigService.Setup(s => s.SaveConfigAtPath(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()));
 
         var licenseService = new Mock<ILicenseService>();
         licenseService
@@ -473,10 +508,10 @@ public class ConfigManagementOrchestratorTests : IDisposable
     [Fact]
     public void LoadApps_CryptographicExceptionDuringLoad_RollsBackAndReturnsError()
     {
-        // Arrange: LoadAdditionalConfig throws CryptographicException (wrong PIN for config file)
+        // Arrange: ReadAdditionalConfig throws CryptographicException (wrong PIN for config file)
         _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
         _appConfigService
-            .Setup(s => s.LoadAdditionalConfig(ConfigPath, _database, It.IsAny<byte[]>()))
+            .Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
             .Throws(new System.Security.Cryptography.CryptographicException("Wrong PIN"));
 
         // Act
@@ -488,6 +523,33 @@ public class ConfigManagementOrchestratorTests : IDisposable
         Assert.Contains("Wrong PIN", errorMessage);
         // No rollback needed since loadedApps was never set (exception before assignment)
         _appConfigService.Verify(s => s.UnloadConfig(It.IsAny<string>(), It.IsAny<AppDatabase>()), Times.Never);
+    }
+
+    [Fact]
+    public void LoadApps_CryptographicExceptionWithBackup_ReturnsBackupAvailable()
+    {
+        _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
+        _loadedGoodBackupStore.Setup(s => s.Exists(ConfigPath)).Returns(true);
+        _appConfigService
+            .Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Throws(new System.Security.Cryptography.CryptographicException("Wrong PIN"));
+
+        var result = _handler.LoadApps(ConfigPath);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.BackupAvailable);
+        Assert.Contains("Wrong PIN", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void LoadAppConfigBackup_UsesRequestedConfigBackupPath()
+    {
+        _loadedGoodBackupStore.Setup(s => s.GetBackupPath(ConfigPath))
+            .Returns(Path.Combine(Path.GetDirectoryName(ConfigPath)!, "extra.ramc.lastgood"));
+
+        _handler.LoadAppConfigBackup(ConfigPath);
+
+        _loadedGoodBackupStore.Verify(s => s.GetBackupPath(ConfigPath), Times.Once);
     }
 
     // --- LoadApps: save after successful load ---
@@ -505,7 +567,130 @@ public class ConfigManagementOrchestratorTests : IDisposable
         // Assert: config saved to the loaded path so re-encryption is applied
         Assert.True(success);
         _appConfigService.Verify(s => s.SaveConfigAtPath(
-            ConfigPath, _database, It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Once);
+            ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Once);
+    }
+
+    [Fact]
+    public void LoadApps_NonIoSaveFailure_DoesNotRollbackLoadedAppsAndReturnsWarning()
+    {
+        var app = new AppEntry
+        {
+            Id = AppEntry.GenerateId(),
+            Name = "App",
+            ExePath = @"C:\App\app.exe",
+            RestrictAcl = true
+        };
+        _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
+        _appConfigService
+            .Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(CreateLoadData([app]));
+        _appConfigService
+            .Setup(s => s.ApplyAdditionalConfig(It.IsAny<AdditionalConfigLoadData>(), _database))
+            .Callback<AdditionalConfigLoadData, AppDatabase>((data, db) =>
+            {
+                foreach (var loadedApp in data.Apps)
+                    db.Apps.Add(loadedApp);
+            })
+            .Returns([app]);
+        _appConfigService
+            .Setup(s => s.SaveConfigAtPath(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Throws(new InvalidOperationException("save exploded"));
+
+        var result = _handler.LoadApps(ConfigPath);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains(app, _database.Apps);
+        Assert.NotNull(result.Warnings);
+        Assert.Contains(result.Warnings!, warning => warning.Contains("save exploded", StringComparison.Ordinal));
+        _appConfigService.Verify(s => s.UnloadConfig(ConfigPath, _database), Times.Never);
+        _aclService.Verify(s => s.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
+        _aclService.Verify(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
+        _handlerRegistrationService.Verify(
+            s => s.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()),
+            Times.Never);
+        _associationAutoSetService.Verify(s => s.AutoSetForAllUsers(), Times.Never);
+    }
+
+    [Fact]
+    public void LoadApps_UnauthorizedSaveFailure_DoesNotRollbackLoadedAppsAndReturnsWarning()
+    {
+        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App", ExePath = @"C:\App\app.exe" };
+        _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
+        _appConfigService
+            .Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(CreateLoadData([app]));
+        _appConfigService
+            .Setup(s => s.ApplyAdditionalConfig(It.IsAny<AdditionalConfigLoadData>(), _database))
+            .Callback<AdditionalConfigLoadData, AppDatabase>((data, db) =>
+            {
+                foreach (var loadedApp in data.Apps)
+                    db.Apps.Add(loadedApp);
+            })
+            .Returns([app]);
+        _appConfigService
+            .Setup(s => s.SaveConfigAtPath(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Throws(new UnauthorizedAccessException("Access is denied."));
+
+        var result = _handler.LoadApps(ConfigPath);
+
+        Assert.True(result.Succeeded);
+        Assert.Contains(app, _database.Apps);
+        Assert.NotNull(result.Warnings);
+        Assert.Contains(result.Warnings!, warning => warning.Contains("Access is denied.", StringComparison.Ordinal));
+        _appConfigService.Verify(s => s.UnloadConfig(ConfigPath, _database), Times.Never);
+    }
+
+    [Fact]
+    public void LoadApps_EnforcementRunsOutsidePinUnprotectScope()
+    {
+        var app = new AppEntry
+        {
+            Id = AppEntry.GenerateId(),
+            Name = "App",
+            ExePath = @"C:\App\app.exe",
+            RestrictAcl = true
+        };
+
+        SetupLoad([app]);
+        _aclService.Setup(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Callback(() =>
+            {
+                _pinKey.UseSnapshot(data => Assert.False(data.IsEmpty));
+            });
+
+        var result = _handler.LoadApps(ConfigPath);
+
+        Assert.True(result.Succeeded);
+        Assert.Null(result.Warnings);
+    }
+
+    [Fact]
+    public void LoadApps_ApplyAdditionalConfigThrowsAfterPartialMutation_RollsBackLoadedData()
+    {
+        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App", ExePath = @"C:\App\app.exe" };
+        _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
+        _appConfigService
+            .Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(CreateLoadData([app]));
+        _appConfigService
+            .Setup(s => s.ApplyAdditionalConfig(It.IsAny<AdditionalConfigLoadData>(), _database))
+            .Callback<AdditionalConfigLoadData, AppDatabase>((data, db) =>
+            {
+                foreach (var loadedApp in data.Apps)
+                    db.Apps.Add(loadedApp);
+            })
+            .Throws(new InvalidOperationException("commit failed"));
+        _appConfigService
+            .Setup(s => s.UnloadConfig(ConfigPath, _database))
+            .Callback(() => _database.Apps.Remove(app))
+            .Returns([app]);
+
+        var result = _handler.LoadApps(ConfigPath);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("commit failed", result.ErrorMessage);
+        Assert.DoesNotContain(app, _database.Apps);
+        _appConfigService.Verify(s => s.UnloadConfig(ConfigPath, _database), Times.Once);
     }
 
     // --- LoadApps: credentials argon salt copied into re-saved config ---
@@ -521,20 +706,27 @@ public class ConfigManagementOrchestratorTests : IDisposable
         new Random(7).NextBytes(specificSalt);
 
         var session = new SessionContext
-        {
+{
             Database = _database,
             CredentialStore = new CredentialStore { ArgonSalt = specificSalt },
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(_pinKey);
 
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App", ExePath = @"C:\App\app.exe" };
         _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
-        _appConfigService.Setup(s => s.LoadAdditionalConfig(ConfigPath, session.Database, It.IsAny<byte[]>()))
+        _appConfigService.Setup(s => s.ReadAdditionalConfig(ConfigPath, session.Database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(CreateLoadData([app]));
+        _appConfigService
+            .Setup(s => s.ApplyAdditionalConfig(It.IsAny<AdditionalConfigLoadData>(), session.Database))
+            .Callback<AdditionalConfigLoadData, AppDatabase>((data, db) =>
+            {
+                foreach (var loadedApp in data.Apps)
+                    db.Apps.Add(loadedApp);
+            })
             .Returns([app]);
         byte[]? capturedSalt = null;
         _appConfigService.Setup(s => s.SaveConfigAtPath(
-                ConfigPath, session.Database, It.IsAny<byte[]>(), It.IsAny<byte[]>()))
-            .Callback<string, AppDatabase, byte[], byte[]>((_, _, _, salt) => capturedSalt = salt);
+                ConfigPath, session.Database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Callback<string, AppDatabase, ISecureSecretSnapshotSource, byte[]>((_, _, _, salt) => capturedSalt = salt);
 
         using var handler = BuildHandler(session);
 
@@ -554,11 +746,10 @@ public class ConfigManagementOrchestratorTests : IDisposable
         // are used here to verify the full delegation chain: CleanupAllApps must reach
         // IFirewallCleanupService.RemoveAll without calling ACL or shortcut enforce services.
         var session = new SessionContext
-        {
+{
             Database = _database,
-            CredentialStore = new CredentialStore(),
-            PinDerivedKey = _pinKey
-        };
+            CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
+        }.WithOwnedPinDerivedKey(_pinKey);
         var sessionProvider = new SessionProvider();
         sessionProvider.SetSession(session);
         var enforcementHelper = new AppEntryEnforcementHelper(
@@ -585,9 +776,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
             _handlerRegistrationService.Object,
             _associationAutoSetService.Object,
             _folderHandlerService.Object,
-            _firewallCleanupService.Object,
-            new Mock<IJobKeeperService>().Object,
-            new Mock<IProcessJobManager>().Object);
+            _firewallCleanupService.Object);
 
         var result = shutdownCleanupService.CleanupAllApps(isEnforcementInProgress: false, isOperationInProgress: false);
 
@@ -606,7 +795,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
         // Arrange: file has a different salt than the credential store
         var fileSalt = new byte[32];
         fileSalt[0] = 0xFF; // differs from the all-zero CredentialStore.ArgonSalt
-        _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns(fileSalt);
+        _databaseService.Setup(s => s.TryGetAppConfigSaltFromPath(ConfigPath)).Returns(fileSalt);
 
         var secureDesktop = new Mock<ISecureDesktopRunner>();
         // Do NOT call action — simulates PIN dialog cancel
@@ -614,11 +803,10 @@ public class ConfigManagementOrchestratorTests : IDisposable
 
         using var handler = BuildHandler(
             new SessionContext
-            {
+{
                 Database = _database,
-                CredentialStore = new CredentialStore(),
-                PinDerivedKey = _pinKey
-            },
+                CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
+            }.WithOwnedPinDerivedKey(_pinKey),
             secureDesktop: secureDesktop.Object);
 
         // Act: salt mismatch → secure desktop PIN prompt → cancelled → Cancelled result
@@ -628,8 +816,8 @@ public class ConfigManagementOrchestratorTests : IDisposable
         Assert.False(success);
         Assert.Equal("Cancelled.", errorMessage);
         secureDesktop.Verify(s => s.Run(It.IsAny<Action>()), Times.Once);
-        _appConfigService.Verify(s => s.LoadAdditionalConfig(It.IsAny<string>(), It.IsAny<AppDatabase>(),
-            It.IsAny<byte[]>()), Times.Never);
+        _appConfigService.Verify(s => s.ReadAdditionalConfig(It.IsAny<string>(), It.IsAny<AppDatabase>(),
+            It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
     private ConfigManagementOrchestrator BuildHandler(
@@ -648,23 +836,21 @@ public class ConfigManagementOrchestratorTests : IDisposable
             sessionProvider, _aclService.Object, _iconService.Object,
             _log.Object, enforcementHelper, _shortcutDiscovery.Object);
         var mismatchKeyResolver = new ConfigMismatchKeyResolver(
-            sessionProvider, _pinService.Object, _databaseService.Object,
-            secureDesktop ?? new SecureDesktopHelper(_log.Object), new OperationGuard());
+            sessionProvider, _databaseService.Object, new ConfigMismatchPinVerifier(_pinService.Object),
+            secureDesktop ?? new SecureDesktopHelper(_log.Object, new Mock<ISecureDesktopNative>().Object), new OperationGuard());
         var handlerSyncHelper = new HandlerSyncHelper(sessionProvider,
             _handlerRegistrationService.Object, _handlerMappingService.Object,
             _associationAutoSetService.Object);
         var configGrantPinHelper = new ConfigGrantPinHelper(new Mock<IQuickAccessPinService>().Object);
         var configLoadUnloadService = new ConfigLoadUnloadService(
             sessionProvider, _appConfigService.Object,
-            _log.Object, licenseService ?? _licenseService.Object, enforcementHandler,
-            mismatchKeyResolver, handlerSyncHelper, _handlerMappingService.Object);
+            _log.Object, licenseService ?? _licenseService.Object, _loadedGoodBackupStore.Object, enforcementHandler,
+            mismatchKeyResolver, handlerSyncHelper, _handlerMappingService.Object, _databaseService.Object);
         var shutdownCleanupService = new ShutdownCleanupService(
             enforcementHandler, sessionProvider, _log.Object,
             _contextMenuService.Object, _handlerRegistrationService.Object,
             _associationAutoSetService.Object, _folderHandlerService.Object,
-            _firewallCleanupService.Object,
-            new Mock<IJobKeeperService>().Object,
-            new Mock<IProcessJobManager>().Object);
+            _firewallCleanupService.Object);
         return new ConfigManagementOrchestrator(
             sessionProvider, _log.Object,
             configLoadUnloadService, configGrantPinHelper, shutdownCleanupService);
@@ -673,11 +859,10 @@ public class ConfigManagementOrchestratorTests : IDisposable
     private ConfigManagementOrchestrator BuildHandlerWithLicense(ILicenseService licenseService)
     {
         var session = new SessionContext
-        {
+{
             Database = _database,
-            CredentialStore = new CredentialStore(),
-            PinDerivedKey = _pinKey
-        };
+            CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
+        }.WithOwnedPinDerivedKey(_pinKey);
         return BuildHandler(session, licenseService: licenseService);
     }
 
@@ -685,13 +870,29 @@ public class ConfigManagementOrchestratorTests : IDisposable
     {
         // Returning null salt means no mismatch (no PIN dialog needed)
         _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
-        _appConfigService.Setup(s => s.LoadAdditionalConfig(ConfigPath, _database, It.IsAny<byte[]>()))
+        _appConfigService.Setup(s => s.ReadAdditionalConfig(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>()))
+            .Returns(CreateLoadData(apps));
+        _appConfigService
+            .Setup(s => s.ApplyAdditionalConfig(It.IsAny<AdditionalConfigLoadData>(), _database))
+            .Callback<AdditionalConfigLoadData, AppDatabase>((data, db) =>
+            {
+                foreach (var app in data.Apps)
+                    db.Apps.Add(app);
+            })
             .Returns(apps);
-        _appConfigService.Setup(s => s.SaveConfigAtPath(ConfigPath, _database, It.IsAny<byte[]>(), It.IsAny<byte[]>()));
+        _appConfigService.Setup(s => s.SaveConfigAtPath(ConfigPath, _database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()));
     }
 
     private void SetupUnload(List<AppEntry> apps)
     {
         _appConfigService.Setup(s => s.UnloadConfig(ConfigPath, _database)).Returns(apps);
     }
+
+    private static AdditionalConfigLoadData CreateLoadData(List<AppEntry> apps)
+        => new(
+            ConfigPath,
+            apps,
+            [],
+            new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase),
+            SkipCommit: false);
 }

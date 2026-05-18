@@ -9,6 +9,10 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <InternalsVisibleTo Include="RunFence.Tests"/>
+    </ItemGroup>
+
+    <ItemGroup>
         <ProjectReference Include="..\RunFence.Core\RunFence.Core.csproj"/>
         <ProjectReference Include="..\RunFence.Launching\RunFence.Launching.csproj"/>
     </ItemGroup>

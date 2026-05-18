@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Moq;
 using RunFence.Account;
+using RunFence.Account.UI;
 using RunFence.Core;
 using RunFence.Core.Ipc;
 using RunFence.Core.Models;
@@ -10,6 +11,7 @@ using RunFence.Launch;
 using RunFence.Persistence;
 using RunFence.Persistence.UI;
 using RunFence.RunAs;
+using RunFence.UI;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -26,6 +28,7 @@ public class IpcMessageHandlerTests
     private readonly Mock<ILoggingService> _log;
     private readonly Mock<IIdleMonitorService> _idleMonitor;
     private readonly Mock<ISidNameCacheService> _sidNameCache = new();
+    private readonly Mock<ITrayBalloonService> _trayBalloon = new();
     private readonly IpcMessageHandler _handler;
     private readonly AppDatabase _database;
 
@@ -48,6 +51,13 @@ public class IpcMessageHandlerTests
         _showWindowRequestHandler.Setup(c => c.RequestShowWindow());
 
         _orchestrator = new Mock<IAppEntryLauncher>();
+        _orchestrator
+            .Setup(o => o.Launch(
+                It.IsAny<AppEntry>(),
+                It.IsAny<string?>(),
+                It.IsAny<string?>(),
+                It.IsAny<Func<string, string, bool>?>()))
+            .Returns(() => new LaunchExecutionResult(LaunchExecutionStatus.ProcessStarted, null));
         _log = new Mock<ILoggingService>();
         _idleMonitor = new Mock<IIdleMonitorService>();
 
@@ -71,10 +81,15 @@ public class IpcMessageHandlerTests
             _appState.Object, _appLock.Object, ipcUiInvoker,
             _elevatedUnlockRequestHandler.Object, _operationUnlockRequestHandler.Object,
             _showWindowRequestHandler.Object, _log.Object);
+        var launchFeedbackPresenter = new LaunchFeedbackPresenter(
+            _log.Object,
+            new Mock<IAccountMessageBoxService>().Object,
+            new MockTrayWarningSink(_trayBalloon.Object),
+            new SystemClock());
         var launchHandler = new IpcLaunchHandler(
             _appState.Object, _appLock.Object, ipcUiInvoker,
-            _orchestrator.Object, authorizer, _sidNameCache.Object, _log.Object,
-            resolvedIdleMonitor, null!, runAsFlowHandler);
+            _orchestrator.Object, authorizer, _sidNameCache.Object,
+            resolvedIdleMonitor, launchFeedbackPresenter, runAsFlowHandler);
         var openFolderHandler = new IpcOpenFolderHandler(
             _appLock.Object, ipcUiInvoker,
             null, _log.Object, new ShellFolderOpener());
@@ -311,37 +326,34 @@ public class IpcMessageHandlerTests
     }
 
     [Fact]
-    public void Unlock_Admin_WaitsForAsyncUnlockCompletion()
+    public async Task Unlock_Admin_WaitsForAsyncUnlockCompletion()
     {
-        using var started = new ManualResetEventSlim();
-        using var completed = new ManualResetEventSlim();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var unlockCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _elevatedUnlockRequestHandler
             .Setup(c => c.HandleElevatedUnlockRequestAsync())
             .Returns(() =>
             {
-                started.Set();
+                started.TrySetResult();
                 return unlockCompletion.Task;
             });
 
         IpcResponse? result = null;
-        var thread = new Thread(() =>
+        var handlerTask = Task.Run(() =>
         {
             result = _handler.HandleIpcMessage(
                 new IpcMessage { Command = IpcCommands.Unlock },
                 new IpcCallerContext(@"DOMAIN\Admin", SidResolutionHelper.GetCurrentUserSid(), true, true));
-            completed.Set();
+            completed.TrySetResult();
         });
 
-        thread.Start();
-
-        Assert.True(started.Wait(1000));
-        Assert.False(completed.Wait(100));
-
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.False(completed.Task.IsCompleted, "Unlock should block until completion task resolves.");
         unlockCompletion.SetResult(true);
+        await completed.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await handlerTask.WaitAsync(TimeSpan.FromSeconds(1));
 
-        Assert.True(completed.Wait(1000));
-        Assert.True(thread.Join(1000));
         Assert.NotNull(result);
         Assert.True(result!.Success);
     }
@@ -522,6 +534,25 @@ public class IpcMessageHandlerTests
         Assert.Equal("Run As not available.", result.ErrorMessage);
     }
 
+    [Fact]
+    public void Launch_PathBasedAppId_DelegatesToRunAsFlow()
+    {
+        var runAsFlowHandler = new Mock<IRunAsFlowHandler>();
+        var expected = new IpcResponse { Success = true };
+        runAsFlowHandler
+            .Setup(h => h.HandleRunAs(It.IsAny<IpcMessage>(), It.IsAny<IpcCallerContext>()))
+            .Returns(expected);
+        var handler = CreateHandler(runAsFlowHandler: runAsFlowHandler.Object);
+        var message = new IpcMessage { Command = IpcCommands.Launch, AppId = @"C:\Apps\test.exe" };
+        var context = new IpcCallerContext(@"DOMAIN\User", null, false, true);
+
+        var result = handler.HandleIpcMessage(message, context);
+
+        Assert.Same(expected, result);
+        runAsFlowHandler.Verify(h => h.HandleRunAs(message, context), Times.Once);
+        _trayBalloon.Verify(t => t.ShowWarning(It.IsAny<string>()), Times.Never);
+    }
+
     // --- Null config context returns "not available" (T7b) ---
 
     [Theory]
@@ -628,7 +659,7 @@ public class IpcMessageHandlerTests
         var configContext = new Mock<IConfigManagementContext>();
         _appLock.Setup(c => c.IsLocked).Returns(false);
         configContext.Setup(c => c.LoadApps(@"C:\test.ramc"))
-            .Returns((false, "Decryption failed."));
+            .Returns(new LoadAppsResult(false, "Decryption failed."));
         var handler = CreateHandlerWithConfig(configContext);
 
         var message = new IpcMessage
@@ -668,7 +699,7 @@ public class IpcMessageHandlerTests
         var configContext = new Mock<IConfigManagementContext>();
         _appLock.Setup(c => c.IsLocked).Returns(false);
         configContext.Setup(c => c.LoadApps(@"C:\test.ramc"))
-            .Returns((true, null));
+            .Returns(new LoadAppsResult(true, null));
         var handler = CreateHandlerWithConfig(configContext);
 
         var message = new IpcMessage
@@ -707,14 +738,18 @@ public class IpcMessageHandlerTests
 
     private IpcAssociationHandler CreateAssociationHandler(
         Mock<IIpcCallerAuthorizer> authorizer,
-        Mock<IHandlerMappingService> handlerMappingService)
+        Mock<IHandlerMappingService> handlerMappingService,
+        IClock? clock = null)
     {
-        var associationLaunchResolver = new AssociationLaunchResolver(handlerMappingService.Object, authorizer.Object);
+        var associationLaunchResolver = new AssociationLaunchResolver(() => handlerMappingService.Object, authorizer.Object);
         return new IpcAssociationHandler(
             _appState.Object,
             _appLock.Object,
             new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object),
-            _orchestrator.Object, associationLaunchResolver, _sidNameCache.Object,
+            _orchestrator.Object,
+            associationLaunchResolver,
+            new AssociationAccessDeniedNotifier(_trayBalloon.Object, clock ?? new SystemClock()),
+            _sidNameCache.Object,
             _log.Object, _idleMonitor.Object);
     }
 
@@ -762,6 +797,7 @@ public class IpcMessageHandlerTests
         var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
 
         Assert.False(result.Success);
+        Assert.Equal(IpcErrorCode.AppNotFound, result.ErrorCode);
     }
 
     [Fact]
@@ -821,7 +857,39 @@ public class IpcMessageHandlerTests
         Assert.False(result.Success);
         Assert.Equal("Access denied.", result.ErrorMessage);
         Assert.Equal(IpcErrorCode.AccessDenied, result.ErrorCode);
+        _trayBalloon.Verify(t => t.ShowWarning("RunFence blocked an association request because IPC access was denied."), Times.Once);
         _orchestrator.Verify(o => o.Launch(It.IsAny<AppEntry>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<string?>()), Times.Never);
+    }
+
+    [Fact]
+    public void HandleAssociation_UnauthorizedCaller_ShowsAtMostFiveWarningsPerFiveMinutes()
+    {
+        var app = new AppEntry { Id = "browser01", Name = "RunFence Browser" };
+        _database.Apps.Add(app);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), app, _database, It.IsAny<bool>()))
+            .Returns(false);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>> { ["https"] = [new HandlerMappingEntry("browser01")] });
+
+        var clock = new ManualClock(new DateTime(2026, 5, 3, 0, 0, 0, DateTimeKind.Utc));
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService, clock);
+        var msg = new IpcMessage { Command = IpcCommands.HandleAssociation, Association = "https" };
+
+        for (var i = 0; i < 6; i++)
+            handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\Attacker", null, false, true));
+
+        _trayBalloon.Verify(t => t.ShowWarning("RunFence blocked an association request because IPC access was denied."), Times.Exactly(5));
+
+        clock.Advance(TimeSpan.FromMinutes(5));
+
+        handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\Attacker", null, false, true));
+
+        _trayBalloon.Verify(t => t.ShowWarning("RunFence blocked an association request because IPC access was denied."), Times.Exactly(6));
     }
 
     [Fact]
@@ -938,7 +1006,8 @@ public class IpcMessageHandlerTests
             _appLock.Object,
             new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object),
             _orchestrator.Object,
-            new AssociationLaunchResolver(handlerMappingService.Object, authorizer.Object),
+            new AssociationLaunchResolver(() => handlerMappingService.Object, authorizer.Object),
+            new AssociationAccessDeniedNotifier(_trayBalloon.Object, new SystemClock()),
             _sidNameCache.Object,
             _log.Object,
             idleMonitor.Object);
@@ -1038,6 +1107,38 @@ public class IpcMessageHandlerTests
         Assert.False(result.Success);
         Assert.Equal("Launch failed: InvalidOperationException", result.ErrorMessage);
         _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
+    }
+
+    [Fact]
+    public void HandleAssociation_MaintenanceWarning_ReturnsSuccessWithWarningMessage()
+    {
+        var app = new AppEntry { Id = "browser01", Name = "RunFence Browser" };
+        _database.Apps.Add(app);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), app, _database, It.IsAny<bool>()))
+            .Returns(true);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>> { ["https"] = [new HandlerMappingEntry("browser01")] });
+
+        _orchestrator
+            .Setup(o => o.Launch(app, It.IsAny<string?>(), It.IsAny<string?>(),
+                It.IsAny<Func<string, string, bool>?>(), It.IsAny<string?>()))
+            .Returns(new LaunchExecutionResult(
+                LaunchExecutionStatus.ProcessStartedWithMaintenanceWarnings,
+                null,
+                ["post-launch maintenance failed"]));
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage { Command = IpcCommands.HandleAssociation, Association = "https" };
+
+        var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        Assert.True(result.Success);
+        Assert.Contains("post-launch maintenance failed", result.WarningMessage, StringComparison.Ordinal);
     }
 
     // --- Path prefix filtering tests ---
@@ -1442,5 +1543,17 @@ public class IpcMessageHandlerTests
 
         Assert.False(result.Success);
         Assert.Contains("not available", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class ManualClock(DateTime utcNow) : IClock
+    {
+        public DateTime UtcNow { get; private set; } = utcNow;
+
+        public void Advance(TimeSpan delta) => UtcNow = UtcNow.Add(delta);
+    }
+
+    private sealed class MockTrayWarningSink(ITrayBalloonService trayBalloonService) : ITrayWarningSink
+    {
+        public void ShowWarning(string text) => trayBalloonService.ShowWarning(text);
     }
 }

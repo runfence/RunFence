@@ -1,4 +1,5 @@
 using System.Security.Principal;
+using RunFence.Core.Models;
 
 namespace RunFence.DragBridge;
 
@@ -11,10 +12,12 @@ public interface IDragBridgePasteHandler
 {
     Task<DragBridgeResolveResult> ResolveFileAccessAsync(
         SecurityIdentifier targetSid,
+        SecurityIdentifier? targetContainerSid,
         List<string> filePaths,
         string sourceSid,
-        IReadOnlyDictionary<string, string>? sidNames,
+        string? sourceContainerSid,
+        AppDatabase? database,
         CancellationToken ct);
 
-    bool NeedsAccessResolution(SecurityIdentifier targetSid, IReadOnlyList<string> filePaths);
+    bool NeedsAccessResolution(SecurityIdentifier targetSid, SecurityIdentifier? targetContainerSid, IReadOnlyList<string> filePaths);
 }

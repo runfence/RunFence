@@ -3,7 +3,7 @@ using RunFence.Core.Models;
 
 namespace RunFence.Apps.UI.Forms;
 
-public partial class AppDiscoveryDialog : Form
+public partial class AppDiscoveryDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly List<DiscoveredApp> _allApps;
     private readonly IShortcutIconHelper _iconHelper;

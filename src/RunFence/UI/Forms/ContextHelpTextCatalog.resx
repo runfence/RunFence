@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="AclManager_Grants" xml:space="preserve"><value>Set up disk access rules
+Drag files here</value></data>
+  <data name="AclManager_Traverse" xml:space="preserve"><value>Set up traverse-only access
+This tab is managed automatically</value></data>
+  <data name="Account_AppContainersAclManager" xml:space="preserve"><value>Open the shared ALL APPLICATION PACKAGES ACL Manager used by AppContainers. Individual AppContainers do not keep their own traverse-only ACL list. Shared traverse is used instead because package-specific traverse ACEs on the same path conflict with Low Integrity compatibility.</value></data>
+  <data name="Account_BgAutorunRestriction" xml:space="preserve"><value>Allows the account to be used for services or scheduled tasks</value></data>
+  <data name="Account_DesktopSettingsImport" xml:space="preserve"><value>Imports Explorer, Start Menu, and other user-interface preferences</value></data>
+  <data name="Account_Groups" xml:space="preserve"><value>For restricted accounts not used for logon, it is recommended to uncheck the Users group. This affects only logon-time checks; apps launched under that account still retain Users group effective rights.</value></data>
+  <data name="Account_LogonRestriction" xml:space="preserve"><value>Allows this account to be shown on the Windows logon screen for interactive logon. Disabling this also installs a logon script that blocks logon by manually typing the user name.</value></data>
+  <data name="Account_NetworkLoginRestriction" xml:space="preserve"><value>Enables this account to connect to this computer via RDP or SMB. This does not automatically add it to RDP users; you must configure that manually.</value></data>
+  <data name="App_EnvironmentVariables" xml:space="preserve"><value>Adds or overrides variables in this account's environment</value></data>
+  <data name="App_HandlerMappings" xml:space="preserve"><value>Map file extensions and URL protocols to apps. The settings apply to all known accounts on a best-effort basis. Some mappings work only after you select RunFence in Default Apps. These mappings do not apply if the target user does not have launch access configured in the Options tab (or an override list in the app).</value></data>
+  <data name="App_PathPrefixes" xml:space="preserve"><value>Only paths/URLs starting with these prefixes will be opened using this app. If empty, filtering is disabled. Add/Replace mode specifies how these prefixes are combined with app-level prefixes.</value></data>
+  <data name="AppContainer_ComAccess" xml:space="preserve"><value>Allow specific COM objects (CLSIDs) inside the container when needed for compatibility. Each allowed entry is effectively an intentional sandbox escape and should be tightly controlled.</value></data>
+  <data name="AppEdit_Acl_DeniedRights" xml:space="preserve"><value>Choose the inherited rights to strip in deny mode in addition to Read and execute.</value></data>
+  <data name="AppEdit_Acl_ModeAllow" xml:space="preserve"><value>Replace inherited rights with explicit allow rules</value></data>
+  <data name="AppEdit_Acl_ModeDeny" xml:space="preserve"><value>Deny other known accounts from using the app. This prevents accidental launching of an untrusted app under a non-isolated account.</value></data>
+  <data name="AppEdit_ExtraConfigStore" xml:space="preserve"><value>Pick which encrypted settings file owns this launch entry. Go to the Options tab to configure separate stores for alternate app sets you do not want shown in RunFence until loaded explicitly.</value></data>
+  <data name="AppEdit_LauncherAccessOverride" xml:space="preserve"><value>Replaces values specified in the Options tab. Only listed accounts can launch the app (including through the associations mechanism)</value></data>
+  <data name="EphemeralIdentity" xml:space="preserve"><value>Mark this identity for automatic cleanup, usually after around 24 hours. This is intended for short-lived sessions, risky testing, or temporary sandboxes where long-term state should not persist. If the account or container still has launched apps after 24 hours, cleanup is postponed for another 24 hours each time.</value></data>
+  <data name="ExtraConfig_InlineSummary" xml:space="preserve"><value>The primary configuration file is always loaded and shown. Additional files can be loaded on request, letting you keep separate app and permission sets organized without polluting the main workspace.</value></data>
+  <data name="Firewall_InternetAllowlist" xml:space="preserve"><value>Define remote destinations that remain reachable while Internet is blocked. Supports IPs, CIDR ranges, and domains. Domain rules depend on DNS resolution performed periodically in the background by RunFence.</value></data>
+  <data name="Firewall_LocalhostAllowlist" xml:space="preserve"><value>Allow these local ports when localhost traffic is blocked</value></data>
+  <data name="Firewall_ScopeLoopbackFilter" xml:space="preserve"><value>When ephemeral ports 49152-65535 are whitelisted, they are periodically scanned and ports opened under other Windows accounts are blocked. This works for ranges but not for individual ports in the whitelist.</value></data>
+  <data name="Launcher_LauncherAccessGlobal" xml:space="preserve"><value>When this list is non-empty, only listed accounts can launch configured apps (including through the associations mechanism)</value></data>
+  <data name="Launch_Arguments" xml:space="preserve"><value>If the app should receive the opened item at a specific position, place %1 there; if omitted, forwarded file/URL arguments are appended after the specified text.</value></data>
+  <data name="Launch_PrivilegeLevel" xml:space="preserve"><value>Highest Allowed - elevate if possible
+Basic - remove admin privileges and set medium integrity
+Isolated - run in restricted job
+Low Integrity - de-elevate and set low integrity level + run in restricted job</value></data>
+  <data name="Options_DesktopSettingsTransfer" xml:space="preserve"><value>Save Explorer, Start Menu, and other preference data so that it can be imported into another account</value></data>
+  <data name="Options_DragBridge" xml:space="preserve"><value>Enable cross-account drag and drop using a hotkey for controlled file transfer between accounts</value></data>
+  <data name="Options_FirewallIcmp" xml:space="preserve"><value>ICMP tunneling can potentially be used to escape Internet restrictions. It is not possible to block it per account, so the only option is to block it globally when Internet blocking is configured for at least one account.</value></data>
+  <data name="Options_FolderBrowser" xml:space="preserve"><value>Explorer can't be launched under another account, so a custom folder browser is used. You can specify a path to your preferred explorer alternative, for example, Total Commander. The %1 placeholder is replaced with the folder path being opened.</value></data>
+  <data name="RunAs_Shortcut" xml:space="preserve"><value>Update the selected shortcut so future launches use the configured app</value></data>
+</root>

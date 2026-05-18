@@ -3,7 +3,7 @@ using RunFence.Core.Models;
 
 namespace RunFence.Licensing.UI.Forms;
 
-public partial class LicenseActivationDialog : Form
+public partial class LicenseActivationDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly ILicenseService _licenseService;
 
@@ -38,6 +38,8 @@ public partial class LicenseActivationDialog : Form
             LicenseActivationResult.WrongVersion => "This license key was issued for a different version of RunFence.",
             LicenseActivationResult.WrongMachine => "This license key is registered to a different machine. " +
                                                     "Keys are machine-specific. Contact support if you need to transfer your license.",
+            LicenseActivationResult.MachineIdentityUnavailable => "Machine identity is unavailable on this system. Licensing cannot be activated until machine identity is available.",
+            LicenseActivationResult.PersistenceFailed => "License validated, but saving activation failed. Check file permissions and try again.",
             LicenseActivationResult.Expired => "This license key has expired. Please purchase a renewal.",
             LicenseActivationResult.Malformed => "The license key format is invalid. Please copy the full key exactly as received.",
             _ => "License activation failed. Please try again."

@@ -1,22 +1,17 @@
-using RunFence.Core;
-using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 
 namespace RunFence.Licensing;
 
-public class EvaluationLimitHelper(IEvaluationLimitPrompt prompt, ILicenseService licenseService) : IEvaluationLimitHelper
+public class EvaluationLimitHelper(
+    IEvaluationLimitPrompt prompt,
+    ILicenseService licenseService,
+    IEvaluationCredentialCounter credentialCounter) : IEvaluationLimitHelper
 {
-    public int CountCredentialsExcludingCurrent(IEnumerable<CredentialEntry> credentials)
-    {
-        var currentSid = SidResolutionHelper.GetCurrentUserSid();
-        return credentials.Count(c => !SidComparer.SidEquals(c.Sid, currentSid));
-    }
-
     /// <inheritdoc/>
     public bool CheckCredentialLimit(List<CredentialEntry> credentials,
         IWin32Window? owner = null, string? extraMessage = null)
     {
-        var credCount = CountCredentialsExcludingCurrent(credentials);
+        var credCount = credentialCounter.CountCredentialsExcludingCurrent(credentials);
         if (licenseService.CanAddCredential(credCount))
             return true;
 

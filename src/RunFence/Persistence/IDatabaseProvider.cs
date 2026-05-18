@@ -10,11 +10,3 @@ public interface IDatabaseProvider
 {
     AppDatabase GetDatabase();
 }
-
-/// <summary>
-/// Lightweight lambda-based <see cref="IDatabaseProvider"/> implementation.
-/// </summary>
-public sealed class LambdaDatabaseProvider(Func<AppDatabase> getDatabase) : IDatabaseProvider
-{
-    public AppDatabase GetDatabase() => getDatabase();
-}

@@ -1,10 +1,8 @@
 using RunFence.Account;
-using RunFence.Account.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Security;
-using RunFence.Startup.UI.Forms;
 
 namespace RunFence.Startup.UI;
 
@@ -13,12 +11,12 @@ namespace RunFence.Startup.UI;
 /// re-encryption of credentials, file copy, and optional deletion of current account data.
 /// </summary>
 public class AccountConfigTransferOrchestrator(
-    IPinService pinService,
-    IModalCoordinator modalCoordinator,
+    IAccountConfigTransferSecureDesktopService secureDesktopService,
+    IAccountConfigTransferPromptService promptService,
     IAccountConfigMigrationService migrationService,
     ILocalGroupMembershipService localGroupMembership,
     ISidNameCacheService sidNameCache,
-    ICredentialEncryptionService encryptionService,
+    ICredentialEncryptionSpanService encryptionService,
     ILoggingService log)
 {
     /// <summary>
@@ -43,115 +41,85 @@ public class AccountConfigTransferOrchestrator(
     /// Must be called on the UI thread.
     /// <paramref name="onExit"/> is invoked after successful migration and user confirmation to exit.
     /// </summary>
-    public async Task RunAsync(SessionContext session, string targetSid, string targetDisplayName, Action onExit)
+    public async Task RunAsync(
+        SessionContext session,
+        string targetSid,
+        Action onExit)
     {
-        using var pinnedKey = PinnedKeyBuffer.FromProtected(session.PinDerivedKey);
-
         var storeCopy = CredentialStoreCloneHelper.CloneStore(session.CredentialStore);
+        var currentKey = session.PinDerivedKey;
 
         bool hasStoredCred = storeCopy.Credentials.Any(c =>
             string.Equals(c.Sid, targetSid, StringComparison.OrdinalIgnoreCase)
             && c.EncryptedPassword.Length > 0);
 
-        bool completed = false;
-        ProtectedString? capturedPassword = null;
+        var authorizationResult = hasStoredCred
+            ? secureDesktopService.AuthorizeStoredCredentialTransfer(storeCopy, targetSid)
+            : secureDesktopService.AuthorizeTypedPasswordTransfer(storeCopy, targetSid);
 
-        modalCoordinator.RunOnSecureDesktop(() =>
-        {
-            using var pinDlg = new PinDialog(PinDialogMode.Verify,
-                promptMessage: "Confirm your PIN to authorize account migration.");
-            pinDlg.VerifyCallback = (ProtectedString pin) => pinService.VerifyPin(pin, storeCopy, out _);
-            if (pinDlg.ShowDialog() != DialogResult.OK)
-                return;
+        storeCopy = authorizationResult.ReplacementStore;
+        ProtectedString? capturedPassword = authorizationResult.CapturedPassword;
 
-            if (!hasStoredCred)
-            {
-                using var pwDlg = new PasswordInputDialog(targetDisplayName);
-                pwDlg.TopMost = true;
-                if (pwDlg.ShowDialog() != DialogResult.OK)
-                    return;
-                capturedPassword = pwDlg.Password;
-            }
-
-            completed = true;
-        });
-
-        if (!completed)
-        {
-            capturedPassword?.Dispose();
+        if (!authorizationResult.Completed)
             return;
-        }
 
         ProtectedString? targetPassword = null;
         try
         {
-            if (hasStoredCred)
-            {
-                var storedCred = storeCopy.Credentials.First(c =>
-                    string.Equals(c.Sid, targetSid, StringComparison.OrdinalIgnoreCase));
-                targetPassword = encryptionService.Decrypt(storedCred.EncryptedPassword, pinnedKey.Data);
-            }
-            else
-            {
-                targetPassword = capturedPassword;
-                capturedPassword = null;
-            }
-
-            if (migrationService.TargetHasExistingData(targetSid))
-            {
-                var overwriteResult = MessageBox.Show(
-                    $"{targetDisplayName} already has RunFence data. Replace it?",
-                    "Overwrite Existing Data?",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning);
-                if (overwriteResult != DialogResult.Yes)
-                    return;
-            }
-
-            var prevCursor = Cursor.Current;
-            Cursor.Current = Cursors.WaitCursor;
             try
             {
-                await Task.Run(() => migrationService.MigrateToAccount(
-                    storeCopy, targetSid, targetPassword!, pinnedKey.Data));
+                if (hasStoredCred)
+                {
+                    var storedCred = storeCopy.Credentials.First(c =>
+                        string.Equals(c.Sid, targetSid, StringComparison.OrdinalIgnoreCase));
+                    targetPassword = currentKey.TransformSnapshot(
+                        key => encryptionService.Decrypt(storedCred.EncryptedPassword, key));
+                }
+                else
+                {
+                    targetPassword = capturedPassword;
+                    capturedPassword = null;
+                }
+
+                if (migrationService.TargetHasExistingData(targetSid) &&
+                    !promptService.ConfirmOverwriteExistingData(targetSid))
+                    return;
+
+                var prevCursor = Cursor.Current;
+                Cursor.Current = Cursors.WaitCursor;
+                try
+                {
+                    await Task.Run(() => migrationService.MigrateToAccount(
+                        storeCopy, targetSid, targetPassword!, currentKey));
+                }
+                finally
+                {
+                    Cursor.Current = prevCursor;
+                }
             }
             catch (Exception ex)
             {
                 log.Error("Account migration failed", ex);
-                MessageBox.Show(
-                    $"Migration failed: {ex.Message}",
-                    "Migration Failed",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                promptService.ShowMigrationFailed(targetSid, ex);
                 return;
             }
-            finally
+
+            if (!promptService.ConfirmDeleteCurrentData(targetSid))
+                return;
+
+            try
             {
-                Cursor.Current = prevCursor;
+                migrationService.DeleteCurrentAccountData();
+            }
+            catch (Exception ex)
+            {
+                log.Error("Failed to delete current account data after migration", ex);
+                promptService.ShowCleanupFailed(targetSid, ex);
+                onExit();
+                return;
             }
 
-            var deleteResult = MessageBox.Show(
-                $"Migration to {targetDisplayName} complete.\n\nDelete current account's RunFence data (config, credentials, license) and exit?",
-                "Migration Complete",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Question);
-            if (deleteResult == DialogResult.Yes)
-            {
-                try
-                {
-                    migrationService.DeleteCurrentAccountData();
-                }
-                catch (Exception ex)
-                {
-                    log.Error("Failed to delete current account data after migration", ex);
-                    MessageBox.Show(
-                        $"Migration succeeded but could not delete current data: {ex.Message}\n\nYou may delete the files manually.",
-                        "Cleanup Failed",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                }
-                onExit();
-            }
+            onExit();
         }
         finally
         {
@@ -159,5 +127,4 @@ public class AccountConfigTransferOrchestrator(
             capturedPassword?.Dispose();
         }
     }
-
 }

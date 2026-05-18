@@ -16,7 +16,8 @@ public class DeferredStartupRunner(
     StartupFeatureActivator featureActivator,
     StartupEnforcementRunner enforcementRunner,
     ISessionProvider sessionProvider,
-    PackageInstallService packageInstallService,
+    ISessionSaver sessionSaver,
+    IPackageInstallService packageInstallService,
     StartupOptions startupOptions,
     ILoggingService log)
 {
@@ -32,7 +33,24 @@ public class DeferredStartupRunner(
         // Both methods must run before CreateSnapshot because CreateSnapshot does a shallow copy
         // — their changes must be visible to both the snapshot and the live database.
         enforcementRunner.RefreshContainerSidsIfUserChanged();
-        enforcementRunner.FixAppEntryDefaults();
+        var repairResult = enforcementRunner.FixAppEntryDefaults();
+        if (repairResult.Changed)
+        {
+            try
+            {
+                sessionSaver.SaveConfig();
+            }
+            catch (Exception ex)
+            {
+                log.Error("Deferred startup AppEntry repair save failed", ex);
+                MessageBox.Show(
+                    $"RunFence repaired invalid application defaults at startup, but saving those repairs failed:\n\n{ex.Message}",
+                    "RunFence - Startup Repair Warning",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+        }
         var snapshot = sessionProvider.GetSession().Database.CreateSnapshot();
 
         // Stream 1: fire-and-forget stale folder handler cleanup (registry enumeration/deletion)
@@ -69,7 +87,7 @@ public class DeferredStartupRunner(
                     {
                         await enforcementRunner.ApplyEnforcementResult(result);
                         await enforcementRunner.ProcessExpiredContainersAtStartup();
-                        enforcementRunner.ProcessExpiredAccounts();
+                        await enforcementRunner.ProcessExpiredAccountsAsync();
                         enforcementRunner.GrantUnlockDirAccess();
                     }
                     catch (Exception ex)

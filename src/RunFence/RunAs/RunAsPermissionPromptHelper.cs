@@ -9,7 +9,7 @@ namespace RunFence.RunAs;
 /// checks whether the new account needs access, collects grantable ancestors,
 /// and shows the ancestor permission dialog.
 /// </summary>
-public class RunAsPermissionPromptHelper(IAclPermissionService aclPermission)
+public class RunAsPermissionPromptHelper(IAclPermissionService aclPermission) : IRunAsPermissionPromptHelper
 {
     /// <summary>
     /// Checks whether <paramref name="accountSid"/> needs access to <paramref name="filePath"/>

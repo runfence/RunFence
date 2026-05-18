@@ -1,5 +1,6 @@
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 
 namespace RunFence.Account;
@@ -13,48 +14,48 @@ public class SessionPersistenceHelper(
     ICredentialRepository credentialRepository,
     IConfigRepository configRepository,
     ISidNameCacheService sidNameCache,
+    Func<IUiThreadInvoker> uiThreadInvokerFactory,
     ILoggingService log)
 {
     public void SaveCredentialStoreAndConfig(
-        CredentialStore credStore, AppDatabase database, ProtectedBuffer pinKey)
-    {
-        using var scope = pinKey.Unprotect();
-        credentialRepository.SaveCredentialStoreAndConfig(credStore, database, scope.Data);
-    }
+        CredentialStore credStore, AppDatabase database, ISecureSecretSnapshotSource pinKey)
+        => uiThreadInvokerFactory().Invoke(() =>
+            credentialRepository.SaveCredentialStoreAndConfig(credStore, database, pinKey));
 
-    public void SaveConfig(AppDatabase database, ProtectedBuffer pinKey, byte[] argonSalt)
-    {
-        using var scope = pinKey.Unprotect();
-        configRepository.SaveConfig(database, scope.Data, argonSalt);
-    }
+    public void SaveConfig(AppDatabase database, ISecureSecretSnapshotSource pinKey, byte[] argonSalt)
+        => uiThreadInvokerFactory().Invoke(() => SaveConfigCore(database, pinKey, argonSalt));
 
     /// <summary>
-    /// Detects and applies stale name updates from pre-resolved SID→name mappings.
-    /// Updates AppDatabase.SidNames (config only — not credential store).
-    /// Returns true if any names were updated (and saved).
+    /// Detects and applies stale name updates from pre-resolved SID-to-name mappings.
+    /// Updates AppDatabase.SidNames (config only, not credential store).
+    /// Returns true if any names were updated and saved.
     /// </summary>
     public bool ApplyStaleNameUpdates(
         Dictionary<string, string?> resolutions,
-        AppDatabase database, ProtectedBuffer pinKey, byte[] argonSalt)
-    {
-        bool changed = false;
-        foreach (var (sid, name) in resolutions)
+        AppDatabase database, ISecureSecretSnapshotSource pinKey, byte[] argonSalt)
+        => uiThreadInvokerFactory().Invoke(() =>
         {
-            if (string.IsNullOrEmpty(sid) || name == null)
-                continue;
-
-            if (!database.SidNames.TryGetValue(sid, out var existing) ||
-                !string.Equals(existing, name, StringComparison.OrdinalIgnoreCase))
+            bool changed = false;
+            foreach (var (sid, name) in resolutions)
             {
-                log.Info($"Stale name detected: '{existing}' -> '{name}' for SID {sid}");
-                sidNameCache.UpdateName(sid, name);
-                changed = true;
+                if (string.IsNullOrEmpty(sid) || name == null)
+                    continue;
+
+                if (!database.SidNames.TryGetValue(sid, out var existing) ||
+                    !string.Equals(existing, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    log.Info($"Stale name detected: '{existing}' -> '{name}' for SID {sid}");
+                    sidNameCache.UpdateName(sid, name);
+                    changed = true;
+                }
             }
-        }
 
-        if (changed)
-            SaveConfig(database, pinKey, argonSalt);
+            if (changed)
+                SaveConfigCore(database, pinKey, argonSalt);
 
-        return changed;
-    }
+            return changed;
+        });
+
+    private void SaveConfigCore(AppDatabase database, ISecureSecretSnapshotSource pinKey, byte[] argonSalt)
+        => configRepository.SaveConfig(database, pinKey, argonSalt);
 }

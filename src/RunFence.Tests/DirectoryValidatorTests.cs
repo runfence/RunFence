@@ -210,6 +210,56 @@ public class DirectoryValidatorTests : IDisposable
         }
     }
 
+    [Fact]
+    public void ValidateAndHold_JunctionToPrefixedUncTarget_ReturnsInvalidWithUncBranchMessage()
+    {
+        var junction = Path.Combine(_tempDir.Path, "unc-prefix-junction");
+        JunctionHelper.CreateJunctionWithRawSubstituteName(junction, @"\\?\UNC\server\share");
+
+        try
+        {
+            using var handle = _validator.ValidateAndHold(junction, CallerSid);
+
+            Assert.False(handle.IsValid);
+            Assert.NotNull(handle.Error);
+            Assert.Contains("UNC paths are not supported", handle.Error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            RemoveJunction(junction);
+        }
+    }
+
+    [Fact]
+    public void ValidateAndHold_RawRelativeReparseTarget_ReturnsInvalid()
+    {
+        var junction = Path.Combine(_tempDir.Path, "relative-junction");
+        JunctionHelper.CreateJunctionWithRawSubstituteName(junction, @"relative-target");
+
+        try
+        {
+            using var handle = _validator.ValidateAndHold(junction, CallerSid);
+
+            Assert.False(handle.IsValid);
+            Assert.Contains("Relative", handle.Error ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            RemoveJunction(junction);
+        }
+    }
+
+    [Fact]
+    public void ValidateAndHold_DriveRoot_RemainsAccepted()
+    {
+        var driveRoot = Path.GetPathRoot(_tempDir.Path)!;
+
+        using var handle = _validator.ValidateAndHold(driveRoot, CallerSid);
+
+        Assert.True(handle.IsValid, handle.Error);
+        Assert.Equal(driveRoot.TrimEnd(Path.DirectorySeparatorChar), handle.CanonicalPath!.TrimEnd(Path.DirectorySeparatorChar), ignoreCase: true);
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     private static void RemoveJunction(string junctionPath)

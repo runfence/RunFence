@@ -40,7 +40,7 @@ public class AclModeServiceTests : IDisposable
 
     public AclModeServiceTests()
     {
-        var aclAccessor = new AclAccessor();
+        var aclAccessor = AclAccessorFactory.Create();
         _allowService = new AclAllowModeService(_log.Object, _localUserProvider.Object, aclAccessor);
         _denyService = new AclDenyModeService(
             _log.Object, _localUserProvider.Object, new ContainerLookupHelper(_databaseProvider.Object),
@@ -494,3 +494,4 @@ public class AclModeServiceTests : IDisposable
             .ToList();
     }
 }
+

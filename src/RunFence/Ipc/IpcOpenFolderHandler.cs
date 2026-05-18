@@ -14,6 +14,8 @@ public class IpcOpenFolderHandler(
     ILoggingService log,
     IShellFolderOpener shellFolderOpener)
 {
+    private static readonly TimeSpan SuccessfulOpenLeaseDuration = TimeSpan.FromSeconds(5);
+
     public IpcResponse HandleOpenFolder(IpcMessage message, string? callerIdentity, string? callerSid)
     {
         if (string.IsNullOrEmpty(message.Arguments))
@@ -81,17 +83,23 @@ public class IpcOpenFolderHandler(
             return shellResult ?? new IpcResponse { Success = false, ErrorMessage = "Internal error." };
         }
 
-        // Hold the directory handle for 5 seconds on a background thread while Explorer reads the path,
+        // Hold the directory handle for 5 seconds on a background task while Explorer reads the path,
         // preventing deletion/rename/swap after the ShellExecuteEx call returns. Return the IPC response
         // immediately so the pipe is free for other callers.
-        _ = Task.Run(() =>
-        {
-            using (validation)
-            {
-                Thread.Sleep(5000);
-            }
-        });
+        _ = ReleaseValidationLeaseAsync(validation);
 
         return new IpcResponse { Success = true };
+    }
+
+    private async Task ReleaseValidationLeaseAsync(DirectoryValidationHandle validation)
+    {
+        try
+        {
+            await Task.Delay(SuccessfulOpenLeaseDuration).ConfigureAwait(false);
+        }
+        finally
+        {
+            validation.Dispose();
+        }
     }
 }

@@ -1,6 +1,6 @@
 namespace RunFence.Account.UI.Forms;
 
-public partial class AccountCreationProgressForm : Form
+public partial class AccountCreationProgressForm : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly CancellationTokenSource _cts = new();
 

@@ -64,8 +64,8 @@ public interface IWizardTemplate
 
     /// <summary>
     /// Optionally pre-warms caches or performs async IO needed by <see cref="IsAvailable"/> or
-    /// <see cref="CreateSteps"/>. Called concurrently for all templates before the wizard dialog
-    /// is constructed so that availability checks never block the UI thread.
+    /// <see cref="CreateSteps"/>. Called concurrently while the wizard picker is open so the
+    /// selection UI can appear immediately without letting template advancement outrun warm-up.
     /// Default: no-op.
     /// </summary>
     Task WarmCacheAsync() => Task.CompletedTask;

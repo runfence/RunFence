@@ -6,7 +6,4 @@ public interface IJobKeeperRegistry
     void Register(string sid, bool isLow, JobKeeperState state);
     bool TryGet(string sid, bool isLow, out JobKeeperState state);
     void RemoveAndDispose(string sid, bool isLow, JobKeeperState? expectedState = null);
-    JobKeeperState? Take(string sid, bool isLow);
-    IReadOnlyList<JobKeeperEntry> GetAll();
-    IReadOnlyList<JobKeeperState> TakeAll();
 }

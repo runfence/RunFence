@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using RunFence.Core;
 
 namespace RunFence.Account.UI;
@@ -31,16 +30,7 @@ internal sealed class SecurePasswordEditBuffer : IDisposable
         if (value is null || value.Length == 0)
             return;
 
-        var ptr = value.AllocUnicode();
-        try
-        {
-            for (int i = 0; i < value.Length; i++)
-                _password.AppendChar((char)Marshal.ReadInt16(ptr, i * 2));
-        }
-        finally
-        {
-            Marshal.ZeroFreeGlobalAllocUnicode(ptr);
-        }
+        value.UseUtf16BytesSnapshot(_password.SetFromUtf16Bytes);
     }
 
     public void Clear()

@@ -35,8 +35,7 @@ public class AccountPickerStep : WizardStepPage
     private readonly ILocalGroupMembershipService _groupMembership;
     private readonly ILocalUserProvider _localUserProvider;
     private readonly List<CredentialEntry> _credentials;
-    private readonly ISidResolver _sidResolver;
-    private readonly IProfilePathResolver _profilePathResolver;
+    private readonly CredentialDisplayItemFactory _credentialDisplayItemFactory;
     private readonly CredentialFilterHelper _credentialFilterHelper;
     private readonly IReadOnlyDictionary<string, string> _sidNames;
     private readonly Func<bool, IReadOnlyList<WizardStepPage>>? _followingStepsFactory;
@@ -52,11 +51,12 @@ public class AccountPickerStep : WizardStepPage
     private ListBox _accountListBox = null!;
     private bool? _lastIsCreate; // null = followingStepsFactory not yet invoked
     private bool _isLoading;
+    private int _populationVersion;
+    private CancellationTokenSource? _populateCts;
 
     /// <param name="setSelection">Receives (sid, isCreate) on <see cref="Collect"/>. sid is null when "Create new account" is chosen.</param>
     /// <param name="groupMembership">Service for querying local group membership.</param>
     /// <param name="localUserProvider">Service for listing local user accounts.</param>
-    /// <param name="sidResolver">Service for resolving SID display names.</param>
     /// <param name="options">Non-DI data parameters for this step instance.</param>
     /// <param name="followingStepsFactory">
     /// Called when the user switches between "Create new account" and an existing account.
@@ -71,8 +71,7 @@ public class AccountPickerStep : WizardStepPage
         Action<string?, bool> setSelection,
         ILocalGroupMembershipService groupMembership,
         ILocalUserProvider localUserProvider,
-        ISidResolver sidResolver,
-        IProfilePathResolver profilePathResolver,
+        CredentialDisplayItemFactory credentialDisplayItemFactory,
         CredentialFilterHelper credentialFilterHelper,
         AccountPickerStepOptions options,
         Func<bool, IReadOnlyList<WizardStepPage>>? followingStepsFactory = null,
@@ -82,8 +81,7 @@ public class AccountPickerStep : WizardStepPage
         _groupMembership = groupMembership;
         _localUserProvider = localUserProvider;
         _credentials = options.Credentials;
-        _sidResolver = sidResolver;
-        _profilePathResolver = profilePathResolver;
+        _credentialDisplayItemFactory = credentialDisplayItemFactory;
         _credentialFilterHelper = credentialFilterHelper;
         _sidNames = options.SidNames;
         _groupSid = options.GroupSid;
@@ -102,7 +100,13 @@ public class AccountPickerStep : WizardStepPage
     public override string StepTitle => _stepTitle;
     public override bool CanProceed => !_isLoading;
 
-    public override void OnActivated() => _ = PopulateList();
+    public override void OnActivated()
+    {
+        if (!TryBeginPopulate(out var version, out var token))
+            return;
+
+        _ = PopulateListAsync(version, token);
+    }
 
     public override string? Validate()
     {
@@ -119,6 +123,9 @@ public class AccountPickerStep : WizardStepPage
 
     public override void Collect()
     {
+        if (_isLoading)
+            return;
+
         var isCreate = _accountListBox.SelectedItem is CreateAccountItem;
         string? sid = isCreate ? null : (_accountListBox.SelectedItem as CredentialDisplayItem)?.Credential.Sid;
         if (string.IsNullOrEmpty(sid) && !isCreate)
@@ -171,76 +178,138 @@ public class AccountPickerStep : WizardStepPage
         ResumeLayout(false);
     }
 
-    private async Task PopulateList()
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _populateCts?.Cancel();
+            _populateCts?.Dispose();
+            _populateCts = null;
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private bool TryBeginPopulate(out int version, out CancellationToken token)
+    {
+        version = 0;
+        token = default;
+
+        if (IsDisposed || Disposing)
+            return false;
+
+        _populateCts?.Cancel();
+        _populateCts?.Dispose();
+        _populateCts = new CancellationTokenSource();
+        token = _populateCts.Token;
+        version = unchecked(++_populationVersion);
+
+        if (_accountListBox.Items.Count == 0)
+            _accountListBox.Items.Add("Loading accounts...");
+
+        _isLoading = true;
+        NotifyCanProceedChanged();
+        return true;
+    }
+
+    private async Task PopulateListAsync(int version, CancellationToken cancellationToken)
     {
         string? selectedSid = (_accountListBox.SelectedItem as CredentialDisplayItem)?.Credential.Sid;
         bool selectedCreate = _accountListBox.SelectedItem is CreateAccountItem;
 
-        if (_accountListBox.Items.Count == 0)
-        {
-            _isLoading = true;
-            NotifyCanProceedChanged();
-            _accountListBox.Items.Add("Loading accounts...");
-        }
-
-        var membersTask = Task.Run(() => _groupMembership.GetMembersOfGroup(_groupSid));
+        var membersTask = Task.Run(() => _groupMembership.GetMembersOfGroup(_groupSid), cancellationToken);
         var adminsTask = _excludeAdmins
-            ? Task.Run(() => _groupMembership.GetMembersOfGroup(GroupFilterHelper.AdministratorsSid))
+            ? Task.Run(() => _groupMembership.GetMembersOfGroup(GroupFilterHelper.AdministratorsSid), cancellationToken)
             : Task.FromResult<List<LocalUserAccount>>([]);
 
-        try { await Task.WhenAll(membersTask, adminsTask); } catch { }
-
-        _accountListBox.Items.Clear();
-
-        // Null means enumeration failed — skip the filter rather than showing nothing.
-        HashSet<string>? localUserSids = null;
         try
-        {
-            var localUsers = _localUserProvider.GetLocalUserAccounts();
-            if (localUsers.Count > 0)
-                localUserSids = localUsers.Select(u => u.Sid).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        }
-        catch
-        {
-        }
-
-        HashSet<string> memberSids;
-        try
-        {
-            memberSids = membersTask.Result
-                .Where(u => localUserSids == null || localUserSids.Contains(u.Sid))
-                .Select(u => u.Sid)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        }
-        catch
-        {
-            memberSids = [];
-        }
-
-        if (_excludeAdmins)
         {
             try
             {
-                var adminSids = adminsTask.Result
-                    .Select(u => u.Sid)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                memberSids.ExceptWith(adminSids);
+                await Task.WhenAll(membersTask, adminsTask);
             }
             catch
             {
             }
-        }
 
+            if (!IsPopulateCurrent(version, cancellationToken))
+                return;
+
+            HashSet<string>? localUserSids = null;
+            try
+            {
+                var localUsers = _localUserProvider.GetLocalUserAccounts();
+                if (localUsers.Count > 0)
+                    localUserSids = localUsers.Select(u => u.Sid).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+            catch
+            {
+            }
+
+            HashSet<string> memberSids;
+            try
+            {
+                memberSids = membersTask.Result
+                    .Where(u => localUserSids == null || localUserSids.Contains(u.Sid))
+                    .Select(u => u.Sid)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                memberSids = [];
+            }
+
+            if (_excludeAdmins)
+            {
+                try
+                {
+                    var adminSids = adminsTask.Result
+                        .Select(u => u.Sid)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    memberSids.ExceptWith(adminSids);
+                }
+                catch
+                {
+                }
+            }
+
+            var items = BuildAccountItems(memberSids);
+            if (!IsPopulateCurrent(version, cancellationToken))
+                return;
+
+            _accountListBox.Items.Clear();
+            foreach (var item in items)
+                _accountListBox.Items.Add(item);
+
+            _isLoading = false;
+            NotifyCanProceedChanged();
+
+            if (TryRestoreSelection(selectedSid, selectedCreate || _defaultToCreateNew))
+                return;
+        }
+        finally
+        {
+            if (IsPopulateCurrent(version, cancellationToken))
+            {
+                _isLoading = false;
+                if (!IsDisposed && !Disposing)
+                    NotifyCanProceedChanged();
+            }
+        }
+    }
+
+    private List<object> BuildAccountItems(HashSet<string> memberSids)
+    {
+        var items = new List<object>();
         var representedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         var resolvable = _credentialFilterHelper.FilterResolvableCredentials(_credentials, _sidNames);
         foreach (var cred in resolvable)
         {
-            if (string.IsNullOrEmpty(cred.Sid))
+            if (string.IsNullOrEmpty(cred.Sid) || !memberSids.Contains(cred.Sid))
                 continue;
-            if (!memberSids.Contains(cred.Sid))
-                continue;
-            _accountListBox.Items.Add(new CredentialDisplayItem(cred, _sidResolver, _profilePathResolver, _sidNames));
+
+            items.Add(_credentialDisplayItemFactory.Create(cred, _sidNames));
             representedSids.Add(cred.Sid);
         }
 
@@ -248,19 +317,18 @@ public class AccountPickerStep : WizardStepPage
         {
             if (representedSids.Contains(memberSid))
                 continue;
+
             var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = memberSid };
-            _accountListBox.Items.Add(new CredentialDisplayItem(transient, _sidResolver, _profilePathResolver, _sidNames, hasStoredCredential: false));
+            items.Add(_credentialDisplayItemFactory.Create(transient, _sidNames, hasStoredCredential: false));
             representedSids.Add(memberSid);
         }
 
-        _accountListBox.Items.Add(new CreateAccountItem());
+        items.Add(new CreateAccountItem());
+        return items;
+    }
 
-        if (_isLoading)
-        {
-            _isLoading = false;
-            NotifyCanProceedChanged();
-        }
-
+    private bool TryRestoreSelection(string? selectedSid, bool preferCreate)
+    {
         if (selectedSid != null)
         {
             for (int i = 0; i < _accountListBox.Items.Count; i++)
@@ -269,23 +337,31 @@ public class AccountPickerStep : WizardStepPage
                     string.Equals(di.Credential.Sid, selectedSid, StringComparison.OrdinalIgnoreCase))
                 {
                     _accountListBox.SelectedIndex = i;
-                    return;
+                    return true;
                 }
             }
         }
 
-        if (selectedCreate || _defaultToCreateNew)
+        if (!preferCreate)
+            return false;
+
+        for (int i = 0; i < _accountListBox.Items.Count; i++)
         {
-            for (int i = 0; i < _accountListBox.Items.Count; i++)
+            if (_accountListBox.Items[i] is CreateAccountItem)
             {
-                if (_accountListBox.Items[i] is CreateAccountItem)
-                {
-                    _accountListBox.SelectedIndex = i;
-                    return;
-                }
+                _accountListBox.SelectedIndex = i;
+                return true;
             }
         }
+
+        return false;
     }
+
+    private bool IsPopulateCurrent(int version, CancellationToken cancellationToken)
+        => !cancellationToken.IsCancellationRequested
+           && version == _populationVersion
+           && !IsDisposed
+           && !Disposing;
 
     private void OnSelectionChanged(object? sender, EventArgs e)
     {

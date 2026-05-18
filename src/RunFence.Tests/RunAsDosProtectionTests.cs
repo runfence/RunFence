@@ -1,12 +1,29 @@
+using Moq;
+using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Persistence;
 using RunFence.RunAs;
+using RunFence.RunAs.UI.Forms;
+using RunFence.Security;
+using RunFence.Startup.UI;
 using Xunit;
 
 namespace RunFence.Tests;
 
-public class RunAsDosProtectionTests
+public class RunAsDosProtectionTests : IDisposable
 {
     private long _currentTimestamp;
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
+    private readonly List<SessionContext> _sessions = [];
+
+    public void Dispose()
+    {
+        foreach (var session in _sessions)
+            session.Dispose();
+
+        _pinKey.Dispose();
+    }
 
     private RunAsDosProtection CreateProtection()
     {
@@ -21,6 +38,42 @@ public class RunAsDosProtectionTests
     {
         public long GetTimestamp() => getTimestamp();
         public double GetElapsedSeconds(long startTimestamp, long endTimestamp) => getElapsedSeconds(startTimestamp, endTimestamp);
+    }
+
+    private RunAsDialogPresenter CreatePresenter(
+        RunAsDosProtection dosProtection,
+        Mock<IAppLockControl> appLock)
+    {
+        var database = new AppDatabase();
+        var session = new SessionContext
+{
+            Database = database,
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(_pinKey);
+        _sessions.Add(session);
+
+        var appState = new Mock<IAppStateProvider>();
+        appState.Setup(a => a.Database).Returns(database);
+
+        return new RunAsDialogPresenter(
+            new Mock<IModalCoordinator>().Object,
+            new RunAsPermissionChecker(new Mock<RunFence.Acl.Permissions.IAclPermissionService>().Object),
+            new RunAsCredentialPersister(
+                appState.Object,
+                session,
+                new ByteArrayCredentialEncryptionSpanAdapter(new Mock<IByteArrayCredentialEncryptionService>().Object),
+                new Mock<IDatabaseService>().Object,
+                new Mock<ILoggingService>().Object),
+            appState.Object,
+            appLock.Object,
+            new Mock<IStartupUnlockGrant>().Object,
+            session,
+            new RunAsPostDialogRouter(
+                new Mock<IRunAsUserAccountCreator>().Object,
+                new Mock<IRunAsContainerCreator>().Object,
+                new Mock<RunFence.Licensing.IEvaluationLimitHelper>().Object,
+                dosProtection),
+            () => null!);
     }
 
     [Fact]
@@ -138,5 +191,39 @@ public class RunAsDosProtectionTests
         // Reset and verify unblocked
         dos.Reset();
         Assert.False(dos.IsBlocked());
+    }
+
+    [Theory]
+    [InlineData(OperationUnlockResult.Declined, true)]
+    [InlineData(OperationUnlockResult.Failed, true)]
+    [InlineData(OperationUnlockResult.Unavailable, false)]
+    public async Task RunAsUnlockOutcome_CountsOnlyDeclineAndAuthFailure(
+        OperationUnlockResult unlockResult,
+        bool shouldBlockAfterFourAttempts)
+    {
+        var dos = CreateProtection();
+        var appLock = new Mock<IAppLockControl>();
+        appLock.SetupGet(l => l.IsLocked).Returns(true);
+        appLock.Setup(l => l.TryUnlockForOperationWithResultAsync(It.IsAny<bool>()))
+            .ReturnsAsync(unlockResult);
+
+        var presenter = CreatePresenter(dos, appLock);
+
+        for (var i = 0; i < 4; i++)
+        {
+            _currentTimestamp = i;
+            var result = await presenter.ShowRunAsDialogAsync(
+                @"C:\tools\app.exe",
+                arguments: null,
+                shortcutContext: null,
+                initialAccountSid: null,
+                isAdmin: false,
+                setUnlockedForRunAs: _ => { },
+                useSecureDesktop: false);
+            Assert.Null(result);
+        }
+
+        _currentTimestamp = 5;
+        Assert.Equal(shouldBlockAfterFourAttempts, dos.IsBlocked());
     }
 }

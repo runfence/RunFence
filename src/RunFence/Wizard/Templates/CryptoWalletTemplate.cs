@@ -82,7 +82,7 @@ internal class CryptoWalletTemplate(
         var setupOptions = new WizardSetupOptions(
             StoreCredential: true,
             IsEphemeral: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             FirewallSettings: null,
             DesktopSettingsPath: defaults.DesktopSettingsPath,
             InstallPackages: null,

@@ -4,9 +4,6 @@ using RunFence.Core.Models;
 
 namespace RunFence.Infrastructure;
 
-/// <summary>Snapshot of a registered job keeper process.</summary>
-public record struct JobKeeperEntry(string Sid, bool IsLow, int Pid);
-
 public interface IJobKeeperService
 {
     /// <summary>True if a live (pipe-connected) job keeper exists for this SID and IL.</summary>
@@ -34,19 +31,4 @@ public interface IJobKeeperService
 
     /// <summary>Removes the cached keeper state (pipe is already broken or process is dead).</summary>
     void RemoveJobKeeper(string sid, bool isLow);
-
-    /// <summary>Returns a snapshot of all currently registered keepers.</summary>
-    IReadOnlyList<JobKeeperEntry> GetAllKeepers();
-
-    /// <summary>
-    /// Terminates the keeper process for <paramref name="sid"/> / <paramref name="isLow"/>,
-    /// closing its pipe and removing it from the registry.
-    /// </summary>
-    void TerminateJobKeeper(string sid, bool isLow);
-
-    /// <summary>
-    /// Terminates all registered keeper processes, closing their pipes and clearing the registry.
-    /// </summary>
-    void TerminateAllJobKeepers();
-
 }

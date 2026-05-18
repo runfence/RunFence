@@ -1,4 +1,7 @@
+using Moq;
+using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Startup;
 using Xunit;
 
@@ -260,5 +263,168 @@ public class StartupSecurityServiceTests
         var f2 = new StartupSecurityFinding(StartupSecurityCategory.DiskRootAcl, "C:\\", "S-1-5-21-1", "User", "FullControl");
 
         Assert.NotEqual(f1.ComputeKey(), f2.ComputeKey());
+    }
+
+    [Fact]
+    public void RunChecks_Timeout_LogsWarningAndReturnsNoFindings()
+    {
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_StartupSecurityService");
+        var service = CreateService(log.Object, tempDir.Path, new ProcessExecutionResult(
+            Started: true,
+            ExitCode: null,
+            TimedOut: true,
+            StandardOutput: string.Empty,
+            StandardError: string.Empty,
+            FailureMessage: null));
+
+        var findings = service.RunChecks();
+
+        Assert.Empty(findings);
+        log.Verify(l => l.Warn("Security scanner timed out."), Times.Once);
+    }
+
+    [Fact]
+    public void RunChecks_Cancellation_PropagatesOperationCanceled()
+    {
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_StartupSecurityService");
+        var processExecutionService = new Mock<IProcessExecutionService>(MockBehavior.Strict);
+        processExecutionService
+            .Setup(s => s.Run(It.IsAny<ProcessExecutionRequest>()))
+            .Throws(new OperationCanceledException());
+        var service = CreateService(log.Object, tempDir.Path, processExecutionService.Object);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => service.RunChecks(cts.Token));
+    }
+
+    [Fact]
+    public void RunChecks_NonZeroExit_LogsWarningAndStillParsesStdout()
+    {
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_StartupSecurityService");
+        var service = CreateService(log.Object, tempDir.Path, new ProcessExecutionResult(
+            Started: true,
+            ExitCode: 17,
+            TimedOut: false,
+            StandardOutput: "StartupFolder\tC:\\Path\tS-1-5-21-1\tUser\tWriteData\n",
+            StandardError: "scanner failed",
+            FailureMessage: null));
+
+        var findings = service.RunChecks();
+
+        var finding = Assert.Single(findings);
+        Assert.Equal(StartupSecurityCategory.StartupFolder, finding.Category);
+        log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("exited with code 17: scanner failed"))), Times.Once);
+    }
+
+    [Fact]
+    public void RunChecks_StderrWithZeroExit_DoesNotLogExitWarning()
+    {
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_StartupSecurityService");
+        var service = CreateService(log.Object, tempDir.Path, new ProcessExecutionResult(
+            Started: true,
+            ExitCode: 0,
+            TimedOut: false,
+            StandardOutput: string.Empty,
+            StandardError: "warning text",
+            FailureMessage: null));
+
+        var findings = service.RunChecks();
+
+        Assert.Empty(findings);
+        log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("exited with code"))), Times.Never);
+    }
+
+    [Fact]
+    public void RunChecks_ParseOnlyFlow_ReturnsParsedFindings()
+    {
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_StartupSecurityService");
+        var stdout = string.Join('\n',
+            "StartupFolder\tC:\\ProgramData\\Startup\tS-1-5-21-123\tPC\\User1\tWriteData\tC:\\ProgramData\\Startup",
+            "RegistryRunKey\tHKLM\\...\\Run\tS-1-5-21-456\tPC\\User2\tSetValue\tHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+            string.Empty);
+        var service = CreateService(log.Object, tempDir.Path, new ProcessExecutionResult(
+            Started: true,
+            ExitCode: 0,
+            TimedOut: false,
+            StandardOutput: stdout,
+            StandardError: string.Empty,
+            FailureMessage: null));
+
+        var findings = service.RunChecks();
+
+        Assert.Equal(2, findings.Count);
+        Assert.Equal(@"C:\ProgramData\Startup", findings[0].NavigationTarget);
+        Assert.Equal(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", findings[1].NavigationTarget);
+    }
+
+    [Fact]
+    public void RunChecks_MissingScannerExecutable_LogsErrorAndReturnsNoFindings()
+    {
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_StartupSecurityService");
+        var missingScannerPath = Path.Combine(tempDir.Path, "missing-scanner.exe");
+        var service = CreateService(log.Object, missingScannerPath, Mock.Of<IProcessExecutionService>());
+
+        var findings = service.RunChecks();
+
+        Assert.Empty(findings);
+        log.Verify(l => l.Error(It.Is<string>(message => message.Contains("Security scanner not found:", StringComparison.Ordinal))), Times.Once);
+    }
+
+    [Fact]
+    public void RunChecks_ProcessStartFailure_LogsErrorAndReturnsNoFindings()
+    {
+        var log = new Mock<ILoggingService>();
+        using var tempDir = new TempDirectory("RunFence_StartupSecurityService");
+        var service = CreateService(log.Object, tempDir.Path, new ProcessExecutionResult(
+            Started: false,
+            ExitCode: null,
+            TimedOut: false,
+            StandardOutput: string.Empty,
+            StandardError: string.Empty,
+            FailureMessage: "denied"));
+
+        var findings = service.RunChecks();
+
+        Assert.Empty(findings);
+        log.Verify(l => l.Error("Failed to start security scanner process: denied"), Times.Once);
+    }
+
+    private static StartupSecurityService CreateService(
+        ILoggingService log,
+        string scannerDirectoryPath,
+        ProcessExecutionResult runResult)
+    {
+        var processExecutionService = new Mock<IProcessExecutionService>(MockBehavior.Strict);
+        processExecutionService
+            .Setup(s => s.Run(It.IsAny<ProcessExecutionRequest>()))
+            .Returns(runResult);
+        return CreateService(log, scannerDirectoryPath, processExecutionService.Object);
+    }
+
+    private static StartupSecurityService CreateService(
+        ILoggingService log,
+        string scannerDirectoryPath,
+        IProcessExecutionService processExecutionService)
+    {
+        var scannerPath = scannerDirectoryPath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            ? scannerDirectoryPath
+            : CreateScannerFile(scannerDirectoryPath);
+        return new StartupSecurityService(
+            log,
+            new StartupSecurityScannerRunner(processExecutionService, scannerPath));
+    }
+
+    private static string CreateScannerFile(string scannerDirectoryPath)
+    {
+        var scannerPath = Path.Combine(scannerDirectoryPath, "RunFence.SecurityScanner.exe");
+        File.WriteAllBytes(scannerPath, []);
+        return scannerPath;
     }
 }

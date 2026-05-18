@@ -19,51 +19,47 @@ public class WizardAccountSetupHelperTests : IDisposable
 
     private readonly Mock<IAccountCredentialManager> _credentialManager = new();
     private readonly Mock<ILocalUserProvider> _localUserProvider = new();
-    private readonly Mock<IProfilePathResolver> _profilePathResolver = new();
     private readonly Mock<ISidNameCacheService> _sidNameCache = new();
     private readonly Mock<ISettingsTransferService> _settingsTransferService = new();
     private readonly Mock<IAccountFirewallSettingsApplier> _firewallSettingsApplier = new();
-    private readonly Mock<ILaunchFacade> _facade = new();
-    private readonly Mock<ILoggingService> _log = new();
+    private readonly Mock<IPackageInstallService> _packageInstallService = new();
     private readonly Mock<IWizardProgressReporter> _progress = new();
+    private readonly Mock<IWizardSessionSaver> _sessionSaver = new();
 
-    private readonly List<ProtectedBuffer> _pinKeys = new();
+    private readonly List<SessionContext> _sessions = new();
     private readonly List<ProtectedString> _secureStrings = new();
 
     private SessionContext CreateSession()
     {
-        var pinKey = new ProtectedBuffer(new byte[32], protect: false);
-        _pinKeys.Add(pinKey);
-        return new SessionContext
-        {
+        var pinKey = TestSecretFactory.Create(32);
+        var session = new SessionContext
+{
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-            PinDerivedKey = pinKey
-        };
+        }.WithOwnedPinDerivedKey(pinKey);
+        _sessions.Add(session);
+        return session;
     }
 
     public void Dispose()
     {
-        foreach (var key in _pinKeys)
-            key.Dispose();
+        foreach (var session in _sessions)
+            session.Dispose();
         foreach (var ss in _secureStrings)
             ss.Dispose();
     }
 
-    private PackageInstallService CreatePackageInstallService() =>
-        new(_facade.Object, new AccountToolResolver(_profilePathResolver.Object), _log.Object);
-
     private WizardAccountSetupHelper CreateHelper(SessionContext session) =>
         new(_credentialManager.Object, _localUserProvider.Object, _sidNameCache.Object,
             _settingsTransferService.Object,
-            new FirewallApplyHelper(_firewallSettingsApplier.Object, new DynamicPortRangeChecker(_log.Object, new Mock<IUserConfirmationService>().Object), _log.Object),
-            CreatePackageInstallService(), session);
+            new FirewallApplyHelper(_firewallSettingsApplier.Object, new DynamicPortRangeChecker(Mock.Of<ILoggingService>(), new Mock<IUserConfirmationService>().Object, new StandardNetshCommandRunner()), Mock.Of<ILoggingService>()),
+            _packageInstallService.Object, _sessionSaver.Object, session);
 
     private WizardAccountSetupHelper.SetupRequest MakeRequest(
         bool storeCredential = false,
         FirewallAccountSettings? firewallSettings = null,
         List<InstallablePackage>? installPackages = null,
-        PrivilegeLevel privilegeLevel = PrivilegeLevel.Basic,
+        PrivilegeLevel privilegeLevel = PrivilegeLevel.Isolated,
         bool trayTerminal = false)
     {
         var pw = new ProtectedString();
@@ -80,7 +76,8 @@ public class WizardAccountSetupHelperTests : IDisposable
             FirewallSettings: firewallSettings,
             DesktopSettingsPath: null,
             InstallPackages: installPackages,
-            TrayTerminal: trayTerminal);
+            TrayTerminal: trayTerminal,
+            WaitForInstallPackages: false);
     }
 
     // --- Credential storage ---
@@ -98,7 +95,7 @@ public class WizardAccountSetupHelperTests : IDisposable
 
         _credentialManager.Verify(c => c.StoreCreatedUserCredential(
                 It.IsAny<string>(), It.IsAny<ProtectedString>(),
-                It.IsAny<CredentialStore>(), It.IsAny<ProtectedBuffer>()),
+                It.IsAny<CredentialStore>(), It.IsAny<ISecureSecretSnapshotSource>()),
             storeCredential ? Times.Once() : Times.Never());
     }
 
@@ -107,18 +104,19 @@ public class WizardAccountSetupHelperTests : IDisposable
     [Fact]
     public async Task SetupAsync_InstallsPackagesBeforeFirewallBlock_WhenInternetBlockedAndPackagesSet()
     {
-        // Arrange: firewall blocks internet, packages are set, credential entry is in the store.
-        // PackageInstallService.InstallPackages calls ILaunchFacade.LaunchFile (powershell.exe).
-        // IAccountFirewallSettingsApplier.ApplyAccountFirewallSettingsAsync is called afterward.
-        // We track call order to verify packages come before firewall.
         var session = CreateSession();
         var credEntry = new CredentialEntry { Sid = TestSid };
         session.CredentialStore.Credentials.Add(credEntry);
 
         var callOrder = new List<string>();
-        _facade
-            .Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()))
-            .Callback(() => callOrder.Add("install"));
+        _packageInstallService
+            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
+            .Callback(() => callOrder.Add("install"))
+            .Returns([]);
+        _packageInstallService
+            .Setup(s => s.WaitForInstallCompletionAsync(TestSid, null, _progress.Object.CancellationToken))
+            .Callback(() => callOrder.Add("wait"))
+            .Returns(Task.CompletedTask);
         _firewallSettingsApplier
             .Setup(f => f.ApplyAccountFirewallSettingsAsync(
                 It.IsAny<string>(),
@@ -126,7 +124,8 @@ public class WizardAccountSetupHelperTests : IDisposable
                 It.IsAny<FirewallAccountSettings?>(),
                 It.IsAny<FirewallAccountSettings>(),
                 It.IsAny<AppDatabase>(),
-                It.IsAny<CancellationToken>()))
+                saveAction: It.IsAny<Action?>(),
+                cancellationToken: It.IsAny<CancellationToken>()))
             .Callback(() => callOrder.Add("firewall"))
             .ReturnsAsync(SuccessfulFirewallApply());
 
@@ -140,11 +139,121 @@ public class WizardAccountSetupHelperTests : IDisposable
 
         await helper.SetupAsync(request, _progress.Object);
 
-        // Both steps should have run, with packages before firewall
         Assert.Contains("install", callOrder);
+        Assert.Contains("wait", callOrder);
         Assert.Contains("firewall", callOrder);
         Assert.True(callOrder.IndexOf("install") < callOrder.IndexOf("firewall"),
             "Packages should be installed before firewall rules are applied.");
+        Assert.True(callOrder.IndexOf("wait") < callOrder.IndexOf("firewall"),
+            "Package wait should complete before firewall rules are applied.");
+    }
+
+    [Fact]
+    public async Task SetupAsync_InstallPackagesMaintenanceWarning_ReportsProgressWarning_WhenInternetBlocked()
+    {
+        var session = CreateSession();
+        session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = TestSid });
+        _packageInstallService
+            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
+            .Returns(["post-launch maintenance failed"]);
+        _packageInstallService
+            .Setup(s => s.WaitForInstallCompletionAsync(TestSid, null, _progress.Object.CancellationToken))
+            .Returns(Task.CompletedTask);
+        _firewallSettingsApplier
+            .Setup(f => f.ApplyAccountFirewallSettingsAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<FirewallAccountSettings?>(),
+                It.IsAny<FirewallAccountSettings>(),
+                It.IsAny<AppDatabase>(),
+                saveAction: It.IsAny<Action?>(),
+                cancellationToken: It.IsAny<CancellationToken>()))
+            .ReturnsAsync(SuccessfulFirewallApply());
+
+        var helper = CreateHelper(session);
+        var request = MakeRequest(
+            firewallSettings: new FirewallAccountSettings { AllowInternet = false },
+            installPackages: [new InstallablePackage("TestPkg", "Write-Host 'test'")]);
+
+        await helper.SetupAsync(request, _progress.Object);
+
+        _progress.Verify(p => p.ReportWarning(It.Is<string>(s =>
+            s.Contains("The package installer started") &&
+            s.Contains("post-launch maintenance failed"))), Times.Once);
+        _progress.Verify(p => p.ReportError(It.Is<string>(s => s.Contains("post-launch maintenance failed"))), Times.Never);
+    }
+
+    [Fact]
+    public async Task SetupAsync_InstallPackagesMaintenanceWarning_ReportsProgressWarning_WhenInternetNotBlocked()
+    {
+        var session = CreateSession();
+        session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = TestSid });
+        _packageInstallService
+            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
+            .Returns(["post-launch maintenance failed"]);
+
+        var helper = CreateHelper(session);
+        var request = MakeRequest(
+            firewallSettings: new FirewallAccountSettings { AllowInternet = true },
+            installPackages: [new InstallablePackage("TestPkg", "Write-Host 'test'")]);
+
+        await helper.SetupAsync(request, _progress.Object);
+
+        _progress.Verify(p => p.ReportWarning(It.Is<string>(s =>
+            s.Contains("The package installer started") &&
+            s.Contains("post-launch maintenance failed"))), Times.Once);
+        _progress.Verify(p => p.ReportError(It.Is<string>(s => s.Contains("post-launch maintenance failed"))), Times.Never);
+    }
+
+    [Fact]
+    public async Task SetupAsync_WaitForInstallPackages_WaitsEvenWhenInternetIsNotBlocked()
+    {
+        var session = CreateSession();
+        session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = TestSid });
+
+        var callOrder = new List<string>();
+        _packageInstallService
+            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
+            .Callback(() => callOrder.Add("install"))
+            .Returns([]);
+        _packageInstallService
+            .Setup(s => s.WaitForInstallCompletionAsync(TestSid, null, _progress.Object.CancellationToken))
+            .Callback(() => callOrder.Add("wait"))
+            .Returns(Task.CompletedTask);
+        _firewallSettingsApplier
+            .Setup(f => f.ApplyAccountFirewallSettingsAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<FirewallAccountSettings?>(),
+                It.IsAny<FirewallAccountSettings>(),
+                It.IsAny<AppDatabase>(),
+                saveAction: It.IsAny<Action?>(),
+                cancellationToken: It.IsAny<CancellationToken>()))
+            .Callback(() => callOrder.Add("firewall"))
+            .ReturnsAsync(SuccessfulFirewallApply());
+
+        var helper = CreateHelper(session);
+        var request = new WizardAccountSetupHelper.SetupRequest(
+            Sid: TestSid,
+            Username: "testuser",
+            Password: ProtectedString.FromChars("P".AsSpan()),
+            StoreCredential: false,
+            IsEphemeral: false,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
+            FirewallSettings: new FirewallAccountSettings { AllowInternet = true },
+            DesktopSettingsPath: null,
+            InstallPackages: [new InstallablePackage("TestPkg", "Write-Host 'test'")],
+            TrayTerminal: false,
+            WaitForInstallPackages: true);
+
+        _secureStrings.Add(request.Password);
+
+        await helper.SetupAsync(request, _progress.Object);
+
+        Assert.Contains("install", callOrder);
+        Assert.Contains("wait", callOrder);
+        Assert.DoesNotContain("firewall", callOrder);
+        _progress.Verify(p => p.ReportStatus("Installing packages..."), Times.Once);
     }
 
     // --- Ephemeral account setup ---
@@ -164,11 +273,12 @@ public class WizardAccountSetupHelperTests : IDisposable
             Password: pw,
             StoreCredential: false,
             IsEphemeral: true,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             FirewallSettings: null,
             DesktopSettingsPath: null,
             InstallPackages: null,
-            TrayTerminal: false);
+            TrayTerminal: false,
+            WaitForInstallPackages: false);
 
         var before = DateTime.UtcNow;
         await helper.SetupAsync(request, _progress.Object);
@@ -199,7 +309,7 @@ public class WizardAccountSetupHelperTests : IDisposable
     // --- PrivilegeLevel ---
 
     [Theory]
-    [InlineData(PrivilegeLevel.Basic)]
+    [InlineData(PrivilegeLevel.Isolated)]
     [InlineData(PrivilegeLevel.HighestAllowed)]
     [InlineData(PrivilegeLevel.LowIntegrity)]
     public async Task SetupAsync_PrivilegeLevel_SetsPrivilegeLevelOnEntry(PrivilegeLevel privilegeLevel)
@@ -276,11 +386,12 @@ public class WizardAccountSetupHelperTests : IDisposable
                 Password: pw,
                 StoreCredential: false,
                 IsEphemeral: false,
-                PrivilegeLevel: PrivilegeLevel.Basic,
+                PrivilegeLevel: PrivilegeLevel.Isolated,
                 FirewallSettings: firewallSettings,
                 DesktopSettingsPath: tempFile,
                 InstallPackages: null,
-                TrayTerminal: false);
+                TrayTerminal: false,
+                WaitForInstallPackages: false);
 
             var helper = CreateHelper(session);
 
@@ -295,7 +406,8 @@ public class WizardAccountSetupHelperTests : IDisposable
                 null,
                 It.IsAny<FirewallAccountSettings>(),
                 It.IsAny<AppDatabase>(),
-                It.IsAny<CancellationToken>()), Times.Once);
+                saveAction: It.IsAny<Action?>(),
+                cancellationToken: It.IsAny<CancellationToken>()), Times.Once);
         }
         finally
         {
@@ -321,9 +433,10 @@ public class WizardAccountSetupHelperTests : IDisposable
                 null,
                 It.IsAny<FirewallAccountSettings>(),
                 It.IsAny<AppDatabase>(),
-                It.IsAny<CancellationToken>()))
-            .Callback<string, string, FirewallAccountSettings?, FirewallAccountSettings, AppDatabase, CancellationToken>(
-                (_, _, _, settings, database, _) =>
+                saveAction: It.IsAny<Action?>(),
+                cancellationToken: It.IsAny<CancellationToken>()))
+            .Callback<string, string, FirewallAccountSettings?, FirewallAccountSettings, AppDatabase, Action?, CancellationToken>(
+                (_, _, _, settings, database, _, _) =>
                 {
                     capturedSettings = settings;
                     capturedDatabase = database;
@@ -359,7 +472,8 @@ public class WizardAccountSetupHelperTests : IDisposable
                 null,
                 It.IsAny<FirewallAccountSettings>(),
                 It.IsAny<AppDatabase>(),
-                It.IsAny<CancellationToken>()))
+                saveAction: It.IsAny<Action?>(),
+                cancellationToken: It.IsAny<CancellationToken>()))
             .ThrowsAsync(new FirewallApplyException(
                 failingPhase,
                 TestSid,
@@ -382,8 +496,38 @@ public class WizardAccountSetupHelperTests : IDisposable
         _progress.Verify(p => p.ReportError(expectedError), Times.Once);
     }
 
+    [Fact]
+    public async Task InstallPackagesAndWaitAsync_InstallPackagesMaintenanceWarning_ReportsProgressWarning()
+    {
+        var session = CreateSession();
+        session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = TestSid });
+        _packageInstallService
+            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
+            .Returns(["post-launch maintenance failed"]);
+        _packageInstallService
+            .Setup(s => s.WaitForInstallCompletionAsync(TestSid, It.IsAny<TimeSpan?>(), _progress.Object.CancellationToken))
+            .Returns(Task.CompletedTask);
+        var helper = CreateHelper(session);
+
+        await helper.InstallPackagesAndWaitAsync(
+            [new InstallablePackage("TestPkg", "Write-Host 'test'")],
+            TestSid,
+            TimeSpan.FromSeconds(1),
+            _progress.Object);
+
+        _progress.Verify(p => p.ReportWarning(It.Is<string>(s =>
+            s.Contains("The package installer started") &&
+            s.Contains("post-launch maintenance failed"))), Times.Once);
+        _progress.Verify(p => p.ReportError(It.Is<string>(s => s.Contains("post-launch maintenance failed"))), Times.Never);
+    }
+
     private static FirewallApplyResult SuccessfulFirewallApply() => new(
-        AccountRulesApplied: true,
-        GlobalIcmpApplied: true,
-        PendingDomains: []);
+        ConfigSaved: true,
+        PendingDomains: [],
+        EnforcementEntries:
+        [
+            new FirewallEnforcementEntry(FirewallEnforcementLayer.AccountRules, FirewallEnforcementStatus.Succeeded),
+            new FirewallEnforcementEntry(FirewallEnforcementLayer.WfpFilters, FirewallEnforcementStatus.Succeeded),
+            new FirewallEnforcementEntry(FirewallEnforcementLayer.GlobalIcmp, FirewallEnforcementStatus.Succeeded)
+        ]);
 }

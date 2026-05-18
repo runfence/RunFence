@@ -16,8 +16,11 @@ public class AccountDeletionOrchestrator(
     OperationGuard operationGuard,
     ISidResolver sidResolver,
     IProfilePathResolver profilePathResolver,
+    AccountDeletionPreflightService deletionPreflightService,
     IAccountDeletionService accountDeletion,
-    ILocalUserProvider localUserProvider)
+    ITrayBalloonService trayBalloon,
+    ILocalUserProvider localUserProvider,
+    IAccountMessageBoxService messageBoxService)
 {
     /// <summary>Raised when the panel should save the session and refresh the grid.</summary>
     public event Action<Guid?, int>? SaveAndRefreshRequested;
@@ -37,10 +40,14 @@ public class AccountDeletionOrchestrator(
             || string.Equals(accountRow.Sid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase);
         if (isCurrentAccount || SidResolutionHelper.IsInteractiveUserSid(accountRow.Sid))
         {
-            MessageBox.Show(isCurrentAccount
+            messageBoxService.Show(
+                null,
+                isCurrentAccount
                     ? "The current account cannot be deleted."
                     : "The interactive user account cannot be deleted.",
-                "Info", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "Info",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
             return;
         }
 
@@ -48,18 +55,31 @@ public class AccountDeletionOrchestrator(
         OperationStarted?.Invoke();
         try
         {
-            var validationError = await lifecycleManager.ValidateDeleteAsync(accountRow.Sid);
-            if (validationError != null)
-            {
-                MessageBox.Show(validationError, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-
             var session = sessionProvider.GetSession();
             var displayName = accountRow.Credential != null
                 ? SidNameResolver.GetDisplayName(accountRow.Credential, sidResolver, session.Database.SidNames, profilePathResolver)
                 : accountRow.Username;
+            var canContinue = await deletionPreflightService.EnsureNoBlockingProcessesAsync(
+                new AccountDeletionPreflightRequest(
+                    accountRow.Sid,
+                    displayName,
+                    accountRow.IsUnavailable,
+                    SidResolutionHelper.IsSystemSid(accountRow.Sid)));
+            if (!canContinue)
+                return;
 
+            var deleteValidation = await lifecycleManager.ValidateDeleteAsync(accountRow.Sid);
+
+            if (deleteValidation.ErrorMessage != null)
+            {
+                messageBoxService.Show(
+                    null,
+                    deleteValidation.ErrorMessage,
+                    "Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
             var usedBy = session.Database.Apps.Where(a =>
                 string.Equals(a.AccountSid, accountRow.Sid, StringComparison.OrdinalIgnoreCase)).Select(a => a.Name).ToList();
 
@@ -72,29 +92,32 @@ public class AccountDeletionOrchestrator(
                 confirmMessage += $"This credential is used by: {string.Join(", ", usedBy)}\nThose apps will fail to launch.\n\n";
             confirmMessage += "This cannot be undone.";
 
-            var confirm = MessageBox.Show(confirmMessage,
-                "Confirm Delete Account", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            var confirm = messageBoxService.Show(
+                null,
+                confirmMessage,
+                "Confirm Delete Account",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
 
             if (confirm != DialogResult.Yes)
                 return;
 
             try
             {
-                accountDeletion.DeleteAccount(accountRow.Sid, accountRow.Username,
+                var deleteResult = await accountDeletion.DeleteAccountAsync(accountRow.Sid, accountRow.Username,
                     session.CredentialStore, removeApps: false);
+                foreach (var warning in deleteResult.Warnings)
+                    trayBalloon.ShowWarning(warning);
             }
             catch (InvalidOperationException ex)
             {
-                MessageBox.Show($"Failed to delete account: {ex.Message}",
-                    "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                messageBoxService.Show(
+                    null,
+                    $"Failed to delete account: {ex.Message}",
+                    "Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
                 return;
-            }
-
-            var profileError = await lifecycleManager.DeleteProfileAsync(accountRow.Sid);
-            if (profileError != null)
-            {
-                MessageBox.Show($"Account deleted, but failed to delete profile folder:\n{profileError}",
-                    "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
 
             localUserProvider.InvalidateCache();

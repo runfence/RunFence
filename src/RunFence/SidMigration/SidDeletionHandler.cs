@@ -26,6 +26,9 @@ public class SidDeletionHandler(
         ShortcutTraversalCache shortcutCache,
         List<string> messages)
     {
+        // Delete-only SID cleanup is intentionally best-effort: external ACL/shortcut/profile/firewall/grant
+        // cleanup is attempted and failures are reported, but the in-memory SID-deleted state remains active
+        // without writing separate retry records for partial cleanup.
         foreach (var sid in sidsToDelete)
         {
             var affectedApps = snapshot.Apps
@@ -92,7 +95,9 @@ public class SidDeletionHandler(
             {
                 try
                 {
-                    pathGrantService.RemoveAll(sid, updateFileSystem: true);
+                    var result = pathGrantService.RemoveAll(sid);
+                    foreach (var warning in result.Warnings)
+                        log.Warn($"Grant cleanup warning for SID '{sid}': {GrantApplyFailureFormatter.Format(warning)}");
                 }
                 catch (Exception ex)
                 {

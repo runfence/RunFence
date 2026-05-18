@@ -2,15 +2,18 @@ namespace RunFence.PrefTrans;
 
 public static class SettingsImportHelper
 {
-    /// <summary>
-    /// Async version — runs Import on a background thread. Grant tracking is handled internally by EnsureAccess.
-    /// </summary>
-    public static async Task<(string? error, bool hadGrants)> ImportAsync(
-        string settingsPath, string accountSid,
+    public static async Task<SettingsImportResult> ImportAsync(
+        string settingsPath,
+        string accountSid,
         ISettingsTransferService settingsTransferService)
     {
-        var result = await Task.Run(() =>
-            settingsTransferService.Import(settingsPath, accountSid));
-        return (result.Success ? null : result.Message, result.DatabaseModified);
+        var result = await Task.Run(() => settingsTransferService.Import(settingsPath, accountSid));
+        if (result.Success)
+            return new SettingsImportResult(SettingsImportStatus.Succeeded, 1, 0, [], [], [], result.DatabaseModified);
+
+        var status = result.Message.Contains("declined", StringComparison.OrdinalIgnoreCase)
+            ? SettingsImportStatus.Canceled
+            : SettingsImportStatus.Failed;
+        return new SettingsImportResult(status, 0, 0, [], [], [result.Message], result.DatabaseModified);
     }
 }

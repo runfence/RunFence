@@ -11,4 +11,11 @@ public interface IAssociationLaunchResolver
         string? callerIdentity,
         string? callerSid,
         bool identityFromImpersonation);
+
+    AssociationLaunchResolution Resolve(
+        AppDatabase database,
+        AssociationLaunchRequest request,
+        string? callerIdentity,
+        string? callerSid,
+        bool identityFromImpersonation);
 }

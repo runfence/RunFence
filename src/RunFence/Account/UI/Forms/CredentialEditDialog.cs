@@ -7,7 +7,7 @@ using RunFence.UI;
 
 namespace RunFence.Account.UI.Forms;
 
-public partial class CredentialEditDialog : Form
+public partial class CredentialEditDialog : RunFence.UI.Forms.ContextHelpForm
 {
     public string Username => _usernameComboBox.Text.Trim();
     public ProtectedString? Password { get; private set; }
@@ -22,7 +22,7 @@ public partial class CredentialEditDialog : Form
     private bool _isEditMode;
     private IReadOnlyDictionary<string, string>? _sidNames;
     private IReadOnlyCollection<string>? _existingSids;
-    private readonly IWindowsAccountService _accountService;
+    private readonly IAccountPasswordService _accountService;
     private readonly SidDisplayNameResolver _displayNameResolver;
     private readonly ISidEntryHelper _sidEntryHelper;
     private SecurePasswordBox _passwordSecure = null!;
@@ -30,7 +30,7 @@ public partial class CredentialEditDialog : Form
     public CredentialEditDialog(
         SidDisplayNameResolver displayNameResolver,
         ISidEntryHelper sidEntryHelper,
-        IWindowsAccountService accountService)
+        IAccountPasswordService accountService)
     {
         _accountService = accountService;
         _displayNameResolver = displayNameResolver;
@@ -220,10 +220,10 @@ public partial class CredentialEditDialog : Form
         if (!isCurrentAccount && Sid != null)
         {
             var validationResult = _accountService.ValidatePassword(Sid, pwd, _usernameComboBox.Text.Trim());
-            if (validationResult != null)
+            if (validationResult.Status != AccountPasswordStatus.Succeeded)
             {
                 pwd.Dispose();
-                _statusLabel.Text = validationResult;
+                _statusLabel.Text = validationResult.Error ?? "Credential validation failed.";
                 return;
             }
         }

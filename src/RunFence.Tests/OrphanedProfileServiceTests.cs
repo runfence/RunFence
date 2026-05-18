@@ -18,10 +18,14 @@ public class OrphanedProfileServiceTests : IDisposable
 
     private TestOrphanedProfileService CreateService(
         IEnumerable<(string Sid, string ProfilePath)>? registryEntries = null,
-        IEnumerable<string>? aliveAccounts = null) =>
+        IEnumerable<string>? aliveAccounts = null,
+        IProfileSizeCalculator? profileSizeCalculator = null,
+        Action<string>? removeMovedProfileDirectory = null) =>
         new(_log.Object, _usersDir.Path,
             registryEntries ?? [],
-            new HashSet<string>(aliveAccounts ?? [], StringComparer.OrdinalIgnoreCase));
+            new HashSet<string>(aliveAccounts ?? [], StringComparer.OrdinalIgnoreCase),
+            profileSizeCalculator,
+            removeMovedProfileDirectory);
 
     // --- GetOrphanedProfiles: Case A (no registry entry) ---
 
@@ -193,6 +197,23 @@ public class OrphanedProfileServiceTests : IDisposable
             result.Select(p => p.ProfilePath).ToList());
     }
 
+    [Fact]
+    public void GetProfileSizeBytes_UsesInjectedCalculator()
+    {
+        var expectedSize = 12345L;
+        var calculator = new Mock<IProfileSizeCalculator>(MockBehavior.Strict);
+        calculator
+            .Setup(x => x.CalculateSizeBytes(@"C:\Users\TestUser", null, CancellationToken.None))
+            .Returns(expectedSize);
+
+        var service = CreateService(profileSizeCalculator: calculator.Object);
+
+        var sizeBytes = service.GetProfileSizeBytes(@"C:\Users\TestUser", progress: null, CancellationToken.None);
+
+        Assert.Equal(expectedSize, sizeBytes);
+        calculator.VerifyAll();
+    }
+
     // --- DeleteProfiles tests ---
 
     [Fact]
@@ -252,6 +273,26 @@ public class OrphanedProfileServiceTests : IDisposable
         Assert.Empty(failed);
         Assert.False(Directory.Exists(dir));
         // Registry deletion is a best-effort no-op in tests (registry not writable in test environment)
+    }
+
+    [Fact]
+    public void DeleteProfiles_MovesRenamedDirectoryBeforeRemovingIt()
+    {
+        var dir = Path.Combine(_usersDir.Path, "UserToRecycle");
+        Directory.CreateDirectory(dir);
+        string? removedPath = null;
+        var service = CreateService(removeMovedProfileDirectory: path =>
+        {
+            removedPath = path;
+            DeleteMovedDirectoryForTest(path);
+        });
+
+        var (deleted, failed) = service.DeleteProfiles([new OrphanedProfile(null, dir)]);
+
+        Assert.Single(deleted);
+        Assert.Empty(failed);
+        Assert.Equal(dir + ".deleted", removedPath, StringComparer.OrdinalIgnoreCase);
+        Assert.False(Directory.Exists(dir));
     }
 
     [Fact]
@@ -361,13 +402,62 @@ public class OrphanedProfileServiceTests : IDisposable
         ILoggingService log,
         string usersDir,
         IEnumerable<(string Sid, string ProfilePath)> entries,
-        HashSet<string> aliveAccounts)
-        : OrphanedProfileService(log, new NTTranslateApi(log), new GroupPolicyScriptHelper(new LogonScriptIniManager(), log), usersDir)
+        HashSet<string> aliveAccounts,
+        IProfileSizeCalculator? profileSizeCalculator = null,
+        Action<string>? removeMovedProfileDirectory = null)
+        : OrphanedProfileService(
+            log,
+            new NTTranslateApi(log),
+            new GroupPolicyScriptHelper(new LogonScriptIniManager(), log),
+            profileSizeCalculator ?? new ProfileSizeCalculator(),
+            new TestProfileDirectoryRemovalService(removeMovedProfileDirectory),
+            usersDir)
     {
         private readonly List<(string Sid, string ProfilePath)> _entries = entries.ToList();
 
         protected override IEnumerable<(string Sid, string ProfilePath)> GetProfileRegistryEntries() => _entries;
 
         protected override bool AccountExists(string sidString) => aliveAccounts.Contains(sidString);
+    }
+
+    private sealed class TestProfileDirectoryRemovalService(Action<string>? removeMovedProfileDirectory) : IProfileDirectoryRemovalService
+    {
+        public void RemoveMovedProfileDirectory(string path)
+            => (removeMovedProfileDirectory ?? DeleteMovedDirectoryForTest)(path);
+    }
+
+    private static void DeleteMovedDirectoryForTest(string path)
+    {
+        var attrs = File.GetAttributes(path);
+        if ((attrs & FileAttributes.ReparsePoint) != 0)
+        {
+            if ((attrs & (FileAttributes.ReadOnly | FileAttributes.System)) != 0)
+                File.SetAttributes(path, attrs & ~(FileAttributes.ReadOnly | FileAttributes.System));
+
+            if ((attrs & FileAttributes.Directory) != 0)
+                Directory.Delete(path);
+            else
+                File.Delete(path);
+
+            return;
+        }
+
+        if ((attrs & FileAttributes.Directory) != 0)
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(path))
+                DeleteMovedDirectoryForTest(entry);
+
+            if ((attrs & (FileAttributes.ReadOnly | FileAttributes.System)) != 0)
+                File.SetAttributes(path, FileAttributes.Normal);
+
+            Directory.Delete(path);
+        }
+        else
+        {
+            if ((attrs & (FileAttributes.ReadOnly | FileAttributes.System)) != 0)
+                File.SetAttributes(path, FileAttributes.Normal);
+
+            File.Delete(path);
+        }
     }
 }

@@ -59,20 +59,16 @@ public class GrantedPathEntry
     public SavedRightsState? SavedRights { get; set; }
 
     /// <summary>
-    /// When set, this interactive-user grant was created by <c>ContainerInteractiveUserSync</c>
-    /// to mirror a container grant. Only entries with a matching <c>OwnerContainerSid</c>
-    /// (or null for legacy entries) are revoked when the container's grant is removed.
-    /// This prevents <c>ContainerInteractiveUserSync</c> from revoking user-added IU grants
-    /// that happen to overlap with a container's path.
+    /// Legacy single-source marker for interactive-user grants mirrored from AppContainer paths.
+    /// New code uses <see cref="SourceSids"/> instead so shared paths can track multiple sources.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? OwnerContainerSid { get; set; }
 
     /// <summary>
-    /// Source account SIDs that triggered this Low IL grant. Auto-populated in PathGrantService
-    /// when a new grant to S-1-16-4096 is created, by scanning existing non-Low-IL account grants
-    /// to the same path. Null = manually added via ACL Manager (no auto-cleanup).
-    /// Only populated on grants to S-1-16-4096.
+    /// Source account/container SIDs that auto-manage this entry. Used for Low IL grants,
+    /// shared AppContainer traverse entries, and interactive-user mirror entries for
+    /// AppContainer paths. Null = user-managed/manual entry (no auto-cleanup).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? SourceSids { get; set; }

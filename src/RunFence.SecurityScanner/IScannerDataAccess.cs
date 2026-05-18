@@ -34,7 +34,7 @@ public interface IFileSystemDataAccess
     FileSecurity GetFileSecurity(string path);
     string[] GetFilesInFolder(string folderPath);
     IEnumerable<string> GetDriveRoots();
-    string? ResolveShortcutTarget(string lnkPath);
+    ShortcutTargetInfo? ResolveShortcutTarget(string lnkPath);
     void LogError(string message);
 }
 
@@ -63,7 +63,6 @@ public interface IWinlogonRegistryAccess
 /// </summary>
 public interface IServiceRegistryAccess
 {
-    RegistrySecurity? GetServiceRegistryKeySecurity(string serviceName);
     List<ServiceInfo> GetAutoStartServices();
 }
 
@@ -74,9 +73,7 @@ public interface IIfeoRegistryAccess
 {
     RegistrySecurity? GetIfeoRegistryKeySecurity();
     RegistrySecurity? GetIfeoWow6432RegistryKeySecurity();
-    List<string> GetIfeoSubkeyNames();
-    string? GetIfeoDebuggerPath(string exeName);
-    string? GetIfeoVerifierDlls(string exeName);
+    List<IfeoSubkeyInfo> GetIfeoSubkeys();
 }
 
 /// <summary>

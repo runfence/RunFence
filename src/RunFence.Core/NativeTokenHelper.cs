@@ -15,9 +15,46 @@ public static class NativeTokenHelper
 
     private const int TOKEN_QUERY = 0x0008;
     private const int TOKEN_USER = 1;
+    private const int TOKEN_APPCONTAINER_SID = 31;
     private const int TOKEN_INTEGRITY_LEVEL = 25;
     private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const uint PROCESS_QUERY_INFORMATION = 0x0400;
+
+    /// <summary>
+    /// Returns processes with the given name from the current Windows session only.
+    /// Caller owns the returned <see cref="Process"/> instances and must dispose them.
+    /// </summary>
+    public static IReadOnlyList<Process> GetProcessesByNameInCurrentSession(string processName)
+    {
+        var currentSessionId = Process.GetCurrentProcess().SessionId;
+        var matches = new List<Process>();
+
+        foreach (var process in Process.GetProcesses())
+        {
+            var keep = false;
+            try
+            {
+                if (process.SessionId != currentSessionId)
+                    continue;
+                if (!string.Equals(process.ProcessName, processName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                matches.Add(process);
+                keep = true;
+            }
+            catch
+            {
+                // Skip inaccessible processes.
+            }
+            finally
+            {
+                if (!keep)
+                    process.Dispose();
+            }
+        }
+
+        return matches;
+    }
 
     /// <summary>
     /// Returns the SID of the interactive user in the current session by inspecting
@@ -27,16 +64,13 @@ public static class NativeTokenHelper
     {
         try
         {
-            var currentSessionId = Process.GetCurrentProcess().SessionId;
-            var explorers = Process.GetProcessesByName("explorer");
+            var explorers = GetProcessesByNameInCurrentSession("explorer");
             try
             {
                 foreach (var proc in explorers)
                 {
                     try
                     {
-                        if (proc.SessionId != currentSessionId)
-                            continue;
                         var sid = TryGetProcessOwnerSid(proc.Handle);
                         if (sid != null)
                             return sid;
@@ -113,6 +147,21 @@ public static class NativeTokenHelper
         }
     }
 
+    public static SecurityIdentifier? TryGetProcessAppContainerSid(uint processId)
+    {
+        var handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+        if (handle == IntPtr.Zero)
+            return null;
+        try
+        {
+            return TryGetTokenSid(handle, TOKEN_APPCONTAINER_SID);
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
     /// <summary>
     /// Returns the integrity level RID of the specified process (e.g. <see cref="MandatoryLevelLow"/>,
     /// <see cref="MandatoryLevelMedium"/>, <see cref="MandatoryLevelHigh"/>).
@@ -171,23 +220,27 @@ public static class NativeTokenHelper
     }
 
     public static SecurityIdentifier? TryGetProcessOwnerSid(IntPtr processHandle)
+        => TryGetTokenSid(processHandle, TOKEN_USER);
+
+    private static SecurityIdentifier? TryGetTokenSid(IntPtr processHandle, int tokenInformationClass)
     {
         if (!OpenProcessToken(processHandle, TOKEN_QUERY, out var tokenHandle))
             return null;
 
         try
         {
-            GetTokenInformation(tokenHandle, TOKEN_USER, IntPtr.Zero, 0, out var needed);
+            GetTokenInformation(tokenHandle, tokenInformationClass, IntPtr.Zero, 0, out var needed);
             if (needed <= 0)
                 return null;
 
             var buffer = Marshal.AllocHGlobal(needed);
             try
             {
-                if (GetTokenInformation(tokenHandle, TOKEN_USER, buffer, needed, out _))
+                if (GetTokenInformation(tokenHandle, tokenInformationClass, buffer, needed, out _))
                 {
                     var sidPtr = Marshal.ReadIntPtr(buffer);
-                    return new SecurityIdentifier(sidPtr);
+                    if (sidPtr != IntPtr.Zero)
+                        return new SecurityIdentifier(sidPtr);
                 }
             }
             finally

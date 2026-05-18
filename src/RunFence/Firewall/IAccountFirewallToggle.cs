@@ -10,6 +10,8 @@ public interface IAccountFirewallToggle
     /// failure, reverts the DB settings and returns an error message. On <see cref="FirewallApplyPhase.GlobalIcmp"/>
     /// failure, returns a warning message without rolling back.
     /// </summary>
-    /// <returns>An error/warning message, or null on success.</returns>
-    string? SetAllowInternet(string sid, bool allow, FirewallAccountSettings? existing);
+    /// <returns>The user-visible message, if any.</returns>
+    SetAllowInternetResult SetAllowInternet(string sid, bool allow, FirewallAccountSettings? existing);
 }
+
+public record SetAllowInternetResult(string? Message);

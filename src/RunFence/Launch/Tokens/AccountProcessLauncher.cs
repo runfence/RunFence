@@ -9,7 +9,11 @@ namespace RunFence.Launch.Tokens;
 /// All fields on <see cref="AccountLaunchIdentity"/> must be fully resolved before calling:
 /// <c>Credentials</c> and <c>PrivilegeLevel</c> must be non-null.
 /// </summary>
-public class AccountProcessLauncher(ILoggingService log, ICreateProcessLauncherHelper createProcessLauncherHelper, IInteractiveLogonHelper logonHelper, ILogonTokenProvider logonTokenProvider) : IAccountProcessLauncher
+public class AccountProcessLauncher(
+    ILoggingService log,
+    ICreateProcessLauncherHelper createProcessLauncherHelper,
+    IInteractiveLogonHelper logonHelper,
+    ILogonTokenProvider logonTokenProvider) : IAccountProcessLauncher
 {
     public ProcessInfo Launch(ProcessLaunchTarget target, AccountLaunchIdentity identity)
     {
@@ -48,43 +52,25 @@ public class AccountProcessLauncher(ILoggingService log, ICreateProcessLauncherH
 
     private ProcessInfo LaunchWithCredentials(ProcessLaunchTarget psi, AccountLaunchIdentity identity)
     {
-        IntPtr hBootstrapToken = IntPtr.Zero;
+        IntPtr hProfileKeeperToken = IntPtr.Zero;
         var credentials = identity.Credentials!.Value;
 
-        log.Info("LaunchWithCredentials: AcquireBootstrapToken");
+        log.Info("LaunchWithCredentials: AcquireProfileKeeperToken");
         try
         {
-            // Bootstrap path: start a simple process under the same credentials,
-            // grab its token, then run the same token pipeline on that token.
-            // Elevation for UAC-split admins is handled inside LaunchUsingAcquiredToken via
+            // ProfileKeeper path: start a long-lived same-credentials helper with
+            // CreateProcessWithLogonW(LOGON_WITH_PROFILE), duplicate its token, then
+            // launch the real target through the existing token pipeline.
+            // Elevation for UAC-split admins is still handled inside LaunchUsingAcquiredToken via
             // ElevatedLinkedTokenProvider (SYSTEM impersonation to get the linked primary token).
-            (hBootstrapToken, var pi) = logonHelper.RunWithLogonRetry(credentials.Domain, credentials.Username,
-                () => createProcessLauncherHelper.AcquireBootstrapToken(identity));
-            try
-            {
-                return createProcessLauncherHelper.LaunchUsingAcquiredToken(hBootstrapToken, psi, identity);
-            }
-            finally
-            {
-                log.Info("LaunchWithCredentials: TerminateProcess temp");
-                try
-                {
-                    ProcessLaunchNative.TerminateProcess(pi.hProcess, 0);
-                }
-                catch
-                {
-                }
-
-                if (pi.hThread != IntPtr.Zero)
-                    ProcessNative.CloseHandle(pi.hThread);
-                if (pi.hProcess != IntPtr.Zero)
-                    ProcessNative.CloseHandle(pi.hProcess);
-            }
+            hProfileKeeperToken = logonHelper.RunWithLogonRetry(credentials.Domain, credentials.Username,
+                () => createProcessLauncherHelper.AcquireProfileKeeperToken(identity));
+            return createProcessLauncherHelper.LaunchUsingAcquiredToken(hProfileKeeperToken, psi, identity);
         }
         finally
         {
-            if (hBootstrapToken != IntPtr.Zero)
-                ProcessNative.CloseHandle(hBootstrapToken);
+            if (hProfileKeeperToken != IntPtr.Zero)
+                ProcessNative.CloseHandle(hProfileKeeperToken);
         }
     }
 }

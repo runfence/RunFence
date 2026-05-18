@@ -1,4 +1,5 @@
 using RunFence.Account.UI;
+using RunFence.Acl;
 using RunFence.Core.Models;
 using RunFence.Firewall.UI;
 using RunFence.Firewall.UI.Forms;
@@ -13,10 +14,11 @@ namespace RunFence.Wizard.Templates;
 /// post-wizard action that opens the allowlist and blocked-connections dialogs.
 /// </summary>
 public class AiAgentFirewallOrchestrator(
-    FirewallApplyHelper firewallApplyHelper,
-    FirewallDialogFactory dialogFactory,
+    IFirewallApplyHelper firewallApplyHelper,
+    IFirewallDialogFactory dialogFactory,
     IDatabaseProvider databaseProvider,
     ILaunchFacade launchFacade,
+    ILaunchFeedbackPresenter launchFeedbackPresenter,
     AccountToolResolver accountToolResolver)
 {
     /// <summary>
@@ -31,7 +33,6 @@ public class AiAgentFirewallOrchestrator(
     {
         var database = databaseProvider.GetDatabase();
         var previousSettings = (database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings()).Clone();
-        FirewallAccountSettings.UpdateOrRemove(database, sid, settings);
         progress.ReportStatus("Applying firewall rules...");
         await firewallApplyHelper.ApplyWithRollbackAsync(
             sid: sid,
@@ -56,6 +57,7 @@ public class AiAgentFirewallOrchestrator(
     public Action<IWin32Window>? BuildPostWizardAction(
         string sid,
         string username,
+        bool internetRestrictedInWizard,
         SessionContext session,
         IWizardSessionSaver sessionSaver,
         string? toolPath)
@@ -70,25 +72,48 @@ public class AiAgentFirewallOrchestrator(
             {
                 if (!string.IsNullOrEmpty(toolPath))
                 {
-                    launchFacade.LaunchFile(new ProcessLaunchTarget(toolPath), new AccountLaunchIdentity(sid), permissionPrompt: (_, _) => true);
+                    using var launch = launchFacade.LaunchFile(new ProcessLaunchTarget(toolPath), new AccountLaunchIdentity(sid), permissionPrompt: (_, _) => true);
+                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The AI tool", LaunchFeedbackSource.InteractiveUi)
+                    {
+                        Owner = owner,
+                        SummaryName = Path.GetFileName(toolPath)
+                    });
                 }
                 else
                 {
                     var terminalExe = accountToolResolver.ResolveTerminalExe(sid);
                     var profilePath = accountToolResolver.GetProfileRoot(sid);
                     var isWt = !terminalExe.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
-                    launchFacade.LaunchFile(
+                    using var launch = launchFacade.LaunchFile(
                         new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath),
-                        new AccountLaunchIdentity(sid) { PrivilegeLevel = isWt ? PrivilegeLevel.AboveBasic : null },
+                        new AccountLaunchIdentity(sid) { PrivilegeLevel = isWt ? PrivilegeLevel.Basic : null },
                         permissionPrompt: (_, _) => true);
+                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The terminal", LaunchFeedbackSource.InteractiveUi)
+                    {
+                        Owner = owner,
+                        SummaryName = Path.GetFileName(terminalExe)
+                    });
                 }
             }
             catch (OperationCanceledException) { }
+            catch (GrantOperationException ex)
+            {
+                launchFeedbackPresenter.ShowGrantFailure(ex, new LaunchFeedbackContext(toolPath ?? "The terminal", LaunchFeedbackSource.InteractiveUi)
+                {
+                    Owner = owner,
+                    SummaryName = toolPath != null ? Path.GetFileName(toolPath) : "terminal",
+                    FailureCaption = "RunFence",
+                    FailureIcon = MessageBoxIcon.Warning
+                });
+            }
             catch (Exception ex)
             {
                 MessageBox.Show(owner, $"Failed to launch: {ex.Message}", "RunFence",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+
+            if (!internetRestrictedInWizard)
+                return;
 
             var currentSettings = session.Database.GetAccount(sid)?.Firewall
                                   ?? new FirewallAccountSettings();
@@ -106,18 +131,17 @@ public class AiAgentFirewallOrchestrator(
             {
                 allowlistDlg.Applied += (_, args) =>
                 {
-                    var existing = session.Database.GetAccount(sid)?.Firewall
-                                   ?? new FirewallAccountSettings();
+                    var existing = session.Database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings();
                     var previousSettings = existing.Clone();
-                    existing.AllowInternet = allowlistDlg.AllowInternet;
-                    existing.AllowLan = allowlistDlg.AllowLan;
-                    existing.AllowLocalhost = allowlistDlg.AllowLocalhost;
-                    existing.LocalhostPortExemptions = allowlistDlg.AllowedLocalhostPorts.ToList();
-                    existing.FilterEphemeralLoopback = allowlistDlg.FilterEphemeralLoopback;
-                    existing.Allowlist = allowlistDlg.Result;
-                    FirewallAccountSettings.UpdateOrRemove(session.Database, sid, existing);
-                    sessionSaver.SaveAndRefresh();
-                    var finalSettings = session.Database.GetAccount(sid)?.Firewall ?? new FirewallAccountSettings();
+                    var finalSettings = new FirewallAccountSettings
+                    {
+                        AllowInternet = allowlistDlg.AllowInternet,
+                        AllowLan = allowlistDlg.AllowLan,
+                        AllowLocalhost = allowlistDlg.AllowLocalhost,
+                        LocalhostPortExemptions = allowlistDlg.AllowedLocalhostPorts.ToList(),
+                        FilterEphemeralLoopback = allowlistDlg.FilterEphemeralLoopback,
+                        Allowlist = allowlistDlg.Result
+                    };
                     bool rolledBack = firewallApplyHelper.ApplyWithRollback(
                         owner: owner,
                         sid: sid,

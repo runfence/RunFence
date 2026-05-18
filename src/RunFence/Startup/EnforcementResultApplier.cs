@@ -1,10 +1,13 @@
+using RunFence.Acl;
 using RunFence.Acl.Traverse;
 using RunFence.Core.Models;
 using RunFence.Launch.Container;
 
 namespace RunFence.Startup;
 
-public class EnforcementResultApplier(IAppContainerService appContainerService)
+public class EnforcementResultApplier(
+    IAppContainerService appContainerService,
+    ITraverseGrantOwnerResolver traverseGrantOwnerResolver)
 {
     public (bool TimestampsChanged, bool TraverseRetracked) ApplyToDatabase(
         EnforcementResult result, AppDatabase database)
@@ -22,8 +25,12 @@ public class EnforcementResultApplier(IAppContainerService appContainerService)
                 ? container.Sid
                 : appContainerService.GetSid(container.Name);
             if (string.IsNullOrEmpty(containerSid)) continue;
-            var traversePaths = database.SharedContainerTraverseGrants;
-            traverseRetracked |= TraversePathsHelper.TrackPath(traversePaths, traverseDir, appliedPaths);
+            var traversePaths = traverseGrantOwnerResolver.GetOrCreateTraverseStore(database, containerSid);
+            traverseRetracked |= TraversePathsHelper.TrackPath(
+                traversePaths,
+                traverseDir,
+                appliedPaths,
+                trackedSourceSid: containerSid);
         }
 
         return (result.TimestampUpdates.Count > 0, traverseRetracked);

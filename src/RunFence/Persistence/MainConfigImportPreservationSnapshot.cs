@@ -10,10 +10,6 @@ public class MainConfigImportPreservationSnapshot
     public Dictionary<string, List<GrantedPathEntry>> AdditionalGrants { get; init; } =
         new(StringComparer.OrdinalIgnoreCase);
 
-    public List<GrantedPathEntry> OldMainSharedContainerTraverseGrants { get; init; } = [];
-
-    public List<GrantedPathEntry> AdditionalSharedContainerTraverseGrants { get; init; } = [];
-
     public List<AccountEntry> AccountsToPreserve { get; init; } = [];
 
     public Dictionary<string, string> OldSidNames { get; init; } =

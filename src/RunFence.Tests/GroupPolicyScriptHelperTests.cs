@@ -1,6 +1,9 @@
 using System.Text;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Moq;
 using RunFence.Account;
+using RunFence.Acl.Traverse;
 using RunFence.Core;
 using Xunit;
 
@@ -10,7 +13,26 @@ public class GroupPolicyScriptHelperTests : IDisposable
 {
     private const string FakeSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
 
+    private sealed class FakeLogonScriptTraverseGranter : ILogonScriptTraverseGranter
+    {
+        public (string Sid, string ScriptsDirPath)? LastGrantCall { get; private set; }
+        public (string Sid, string ScriptsDirPath)? LastRevokeCall { get; private set; }
+        public List<string>? NextGrantResult { get; set; }
+
+        public List<string>? GrantTraverseAccess(string sid, string scriptsDirPath)
+        {
+            LastGrantCall = (sid, scriptsDirPath);
+            return NextGrantResult;
+        }
+
+        public void RevokeTraverseAccess(string sid, string scriptsDirPath)
+        {
+            LastRevokeCall = (sid, scriptsDirPath);
+        }
+    }
+
     private readonly TempDirectory _tempDir;
+    private readonly FakeLogonScriptTraverseGranter _traverseGranter;
     private readonly GroupPolicyScriptHelper _helper;
     private readonly string _iniPath;
     private readonly string _gptPath;
@@ -22,7 +44,9 @@ public class GroupPolicyScriptHelperTests : IDisposable
         _tempDir = new TempDirectory("ram_gptest");
         _scriptsDir = Path.Combine(_tempDir.Path, "scripts");
         _legacyScriptsDir = Path.Combine(_tempDir.Path, "legacy_scripts");
+        _traverseGranter = new FakeLogonScriptTraverseGranter();
         _helper = new GroupPolicyScriptHelper(new LogonScriptIniManager(), new Mock<ILoggingService>().Object,
+            _traverseGranter,
             systemDir: _tempDir.Path, scriptsDir: _scriptsDir, legacyScriptsDir: _legacyScriptsDir);
         _iniPath = Path.Combine(_tempDir.Path, "GroupPolicyUsers", FakeSid, "User", "Scripts", "scripts.ini");
         _gptPath = Path.Combine(_tempDir.Path, "GroupPolicyUsers", FakeSid, "gpt.ini");
@@ -151,6 +175,50 @@ public class GroupPolicyScriptHelperTests : IDisposable
         var wrapperPath = Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
         Assert.True(File.Exists(wrapperPath));
         Assert.Contains("logoff.exe", File.ReadAllText(wrapperPath));
+    }
+
+    [Fact]
+    public void SetLoginBlocked_Block_UsesSecureScriptsDirectoryAndPerUserWrapperAcl()
+    {
+        _helper.SetLoginBlocked(FakeSid, true);
+
+        var wrapperPath = Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
+        var scriptsDirInfo = new DirectoryInfo(_scriptsDir);
+        var directorySecurity = scriptsDirInfo.GetAccessControl();
+        Assert.True(directorySecurity.AreAccessRulesProtected);
+
+        var fileSecurity = new FileInfo(wrapperPath).GetAccessControl();
+        var accessRules = fileSecurity.GetAccessRules(true, true, typeof(SecurityIdentifier))
+            .Cast<FileSystemAccessRule>()
+            .ToArray();
+        var sidMatch = new SecurityIdentifier(FakeSid);
+        Assert.Contains(accessRules, rule =>
+            rule.IdentityReference.Value == sidMatch.Value &&
+            rule.AccessControlType == AccessControlType.Allow &&
+            (rule.FileSystemRights & FileSystemRights.ReadAndExecute) != 0);
+    }
+
+    [Fact]
+    public void SetLoginBlocked_Block_InvokesTraverseGranterAndReturnsPaths()
+    {
+        _traverseGranter.NextGrantResult = [_scriptsDir, Path.Combine(_tempDir.Path, "common")];
+
+        var result = _helper.SetLoginBlocked(FakeSid, true);
+
+        Assert.NotNull(_traverseGranter.LastGrantCall);
+        Assert.Equal((FakeSid, _scriptsDir), _traverseGranter.LastGrantCall);
+        Assert.Equal(_traverseGranter.NextGrantResult, result.TraversePaths);
+    }
+
+    [Fact]
+    public void SetLoginBlocked_Unblock_InvokesTraverseRevoke()
+    {
+        _helper.SetLoginBlocked(FakeSid, true);
+
+        _helper.SetLoginBlocked(FakeSid, false);
+
+        Assert.NotNull(_traverseGranter.LastRevokeCall);
+        Assert.Equal((FakeSid, _scriptsDir), _traverseGranter.LastRevokeCall);
     }
 
     [Fact]

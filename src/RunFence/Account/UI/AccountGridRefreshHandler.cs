@@ -16,7 +16,8 @@ public class AccountGridRefreshHandler(
     AccountGridPopulator gridPopulator,
     ISessionProvider sessionProvider,
     GrantReconciliationService reconciler,
-    ReconciliationGuard reconciliationGuard)
+    ReconciliationGuard reconciliationGuard,
+    AccountGridIconLifetimeManager iconLifetimeManager)
 {
     private DataGridView _grid = null!;
     private IGridSortState _sortState = null!;
@@ -32,6 +33,7 @@ public class AccountGridRefreshHandler(
         _sortState = sortState;
         _callbacks = callbacks;
         gridPopulator.Initialize(grid);
+        grid.Disposed += (_, _) => iconLifetimeManager.Dispose();
     }
 
     public async Task InitialRefreshAsync()
@@ -39,6 +41,7 @@ public class AccountGridRefreshHandler(
         log.Info("AccountGridRefreshHandler: initial SID resolution starting.");
         _callbacks.SetIsRefreshing();
         _grid.CancelEdit();
+        iconLifetimeManager.ReleaseAllTrackedIcons();
         _grid.Rows.Clear();
 
         try
@@ -52,7 +55,11 @@ public class AccountGridRefreshHandler(
 
             var session = sessionProvider.GetSession();
             var db = session.Database;
-            persistenceHelper.ApplyStaleNameUpdates(resolutions, db, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
+            persistenceHelper.ApplyStaleNameUpdates(
+                resolutions,
+                db,
+                session.PinDerivedKey,
+                session.CredentialStore.ArgonSalt);
 
             var displayNameCache = BuildDisplayNameCache(resolutions);
             PopulateGrid(displayNameCache, resolutions);
@@ -120,7 +127,11 @@ public class AccountGridRefreshHandler(
                 return;
         }
 
-        persistenceHelper.ApplyStaleNameUpdates(sidResolutions, db, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
+        persistenceHelper.ApplyStaleNameUpdates(
+            sidResolutions,
+            db,
+            session.PinDerivedKey,
+            session.CredentialStore.ArgonSalt);
 
         var displayNameCache = BuildDisplayNameCache(sidResolutions);
         PopulateGrid(displayNameCache, sidResolutions);
@@ -152,6 +163,7 @@ public class AccountGridRefreshHandler(
 
         _callbacks.SetIsRefreshing();
         _grid.CancelEdit();
+        iconLifetimeManager.ReleaseAllTrackedIcons();
         _grid.Rows.Clear();
         _callbacks.ClearStatus();
 

@@ -47,6 +47,9 @@ public class PathGrantServiceSaclTests
         _traverseAcl.Setup(t => t.HasExplicitTraverseAce(It.IsAny<string>(),
                 It.IsAny<SecurityIdentifier>()))
             .Returns(true);
+        _traverseAcl.Setup(t => t.HasExplicitTraverseAceOrThrow(It.IsAny<string>(),
+                It.IsAny<SecurityIdentifier>()))
+            .Returns(true);
         _aclPermission.Setup(p => p.ResolveAccountGroupSids(It.IsAny<string>()))
             .Returns([]);
         _aclPermission.Setup(p => p.NeedsPermissionGrant(It.IsAny<string>(), It.IsAny<string>(),
@@ -63,25 +66,55 @@ public class PathGrantServiceSaclTests
     {
         var grantAceMock = new Mock<IGrantAceService>();
         var ownerMock = new Mock<IFileOwnerService>();
-        var pathExistenceMock = new Mock<IPathExistenceService>();
+        var aclAccessorMock = new Mock<IAclAccessor>();
         var mandatoryLabelMock = new Mock<IMandatoryLabelService>();
         var db = new AppDatabase();
-        var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => db), SyncInvoker);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        var mainGrantStore = new RuntimeDatabaseGrantIntentStore(() => db, ownershipProjection);
+        var storeProvider = new TestGrantIntentStoreProvider(mainGrantStore, ownershipProjection);
+        var repository = new GrantIntentRepository(storeProvider);
+        var traverseGrantOwnerResolver = new TraverseGrantOwnerResolver();
+        var traverseIntentStoreCoordinator = new TraverseIntentStoreCoordinator(() => repository, traverseGrantOwnerResolver);
+        var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => db), () => SyncInvoker);
         var ancestorGranter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object, _traverseAcl.Object,
             _pathInfo);
         var grantCore = new GrantCoreOperations(grantAceMock.Object, ownerMock.Object,
             dbAccessor, _log.Object, _pathInfo);
         var traverseCore = new TraverseCoreOperations(_traverseAcl.Object,
-            ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
+            ancestorGranter, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo, traverseGrantOwnerResolver);
         var containerIuSync = new ContainerInteractiveUserSync(grantCore, traverseCore,
-            _iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
+            traverseGrantOwnerResolver, _iuResolver.Object, _aclPermission.Object, dbAccessor, _log.Object, _pathInfo);
+        var traverseGrantStateService = new TraverseGrantStateService(dbAccessor, _pathInfo, traverseIntentStoreCoordinator);
         var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
             mandatoryLabelMock.Object, dbAccessor);
-        var syncService = new PathGrantSyncService(dbAccessor, grantAceMock.Object, _log.Object, _pathInfo);
-        var service = new PathGrantService(grantCore, traverseCore, grantAceMock.Object,
-            ownerMock.Object, pathExistenceMock.Object, mandatoryLabelMock.Object,
-            _iuResolver.Object, _aclPermission.Object, dbAccessor, containerIuSync, lowIlSync, syncService,
-            _pathInfo);
+        var syncService = new PathGrantSyncService(
+            dbAccessor,
+            grantAceMock.Object,
+            () => storeProvider,
+            () => repository,
+            _log.Object,
+            _pathInfo,
+            traverseGrantOwnerResolver);
+        var fsOps = new GrantFileSystemOperations(grantCore, grantAceMock.Object,
+            ownerMock.Object, mandatoryLabelMock.Object, dbAccessor);
+        var accessEnsurer = new GrantAccessEnsurer(_aclPermission.Object, dbAccessor,
+            aclAccessorMock.Object, _pathInfo, traverseCore, fsOps, _iuResolver.Object, traverseGrantOwnerResolver, () => repository, () => mainGrantStore, new GrantIntentStoreSaveService());
+        var grantIntentStoreSaveService = new GrantIntentStoreSaveService();
+        var traverseRestoreWorkflow = new TraverseRestoreWorkflow(
+            traverseCore,
+            dbAccessor,
+            containerIuSync,
+            _pathInfo,
+            _traverseAcl.Object,
+            traverseGrantOwnerResolver,
+            traverseIntentStoreCoordinator,
+            traverseGrantStateService,
+            () => storeProvider,
+            grantIntentStoreSaveService);
+        var service = new PathGrantService(grantCore, traverseCore, dbAccessor,
+            containerIuSync, lowIlSync, syncService, mandatoryLabelMock.Object, fsOps, accessEnsurer, grantAceMock.Object, _pathInfo,
+            aclAccessorMock.Object, traverseGrantOwnerResolver, traverseIntentStoreCoordinator, traverseGrantStateService, () => storeProvider, () => repository, () => mainGrantStore,
+            grantIntentStoreSaveService, traverseRestoreWorkflow);
         return (service, mandatoryLabelMock, db);
     }
 
@@ -121,14 +154,11 @@ public class PathGrantServiceSaclTests
     [Fact]
     public void AddGrant_LowIntegritySid_WriteRights_AlreadyExistingEntry_PreviousLabelNotOverwritten()
     {
-        // Arrange: pre-populate DB with existing Low IL entry that already has PreviousSaclLabel set
+        // Arrange: create an existing Low IL write grant whose stored previous label is already High.
         var (service, mandatoryLabelMock, db) = BuildService();
-        db.GetOrCreateAccount(LowIlSid).Grants.Add(new GrantedPathEntry
-        {
-            Path = TestPath, IsDeny = false,
-            SavedRights = WriteRights,
-            PreviousSaclLabel = HighLabel
-        });
+        mandatoryLabelMock.Setup(n => n.ReadMandatoryLabel(TestPath)).Returns(HighLabel);
+        service.AddGrant(LowIlSid, TestPath, isDeny: false, WriteRights);
+        mandatoryLabelMock.Invocations.Clear();
         mandatoryLabelMock.Setup(n => n.ReadMandatoryLabel(TestPath)).Returns(MediumLabel);
 
         // Act: re-grant with Write (entry already existed — AlreadyExisted=true)
@@ -149,11 +179,7 @@ public class PathGrantServiceSaclTests
     {
         // Arrange: Low IL entry with Read rights (no Write yet)
         var (service, mandatoryLabelMock, db) = BuildService();
-        db.GetOrCreateAccount(LowIlSid).Grants.Add(new GrantedPathEntry
-        {
-            Path = TestPath, IsDeny = false,
-            SavedRights = ReadOnly
-        });
+        service.AddGrant(LowIlSid, TestPath, isDeny: false, ReadOnly);
         mandatoryLabelMock.Setup(n => n.ReadMandatoryLabel(TestPath)).Returns(MediumLabel);
 
         // Act: update to Write rights
@@ -172,12 +198,9 @@ public class PathGrantServiceSaclTests
     {
         // Arrange: Low IL entry with Write rights and stored PreviousSaclLabel
         var (service, mandatoryLabelMock, db) = BuildService();
-        db.GetOrCreateAccount(LowIlSid).Grants.Add(new GrantedPathEntry
-        {
-            Path = TestPath, IsDeny = false,
-            SavedRights = WriteRights,
-            PreviousSaclLabel = MediumLabel
-        });
+        mandatoryLabelMock.Setup(n => n.ReadMandatoryLabel(TestPath)).Returns(MediumLabel);
+        service.AddGrant(LowIlSid, TestPath, isDeny: false, WriteRights);
+        mandatoryLabelMock.Invocations.Clear();
 
         // Act: update to Read-only (remove Write)
         service.UpdateGrant(LowIlSid, TestPath, isDeny: false, ReadOnly);
@@ -197,15 +220,12 @@ public class PathGrantServiceSaclTests
     {
         // Arrange: Low IL entry with Write rights and stored PreviousSaclLabel
         var (service, mandatoryLabelMock, db) = BuildService();
-        db.GetOrCreateAccount(LowIlSid).Grants.Add(new GrantedPathEntry
-        {
-            Path = TestPath, IsDeny = false,
-            SavedRights = WriteRights,
-            PreviousSaclLabel = MediumLabel
-        });
+        mandatoryLabelMock.Setup(n => n.ReadMandatoryLabel(TestPath)).Returns(MediumLabel);
+        service.AddGrant(LowIlSid, TestPath, isDeny: false, WriteRights);
+        mandatoryLabelMock.Invocations.Clear();
 
         // Act
-        service.RemoveGrant(LowIlSid, TestPath, isDeny: false, updateFileSystem: true);
+        service.RemoveGrant(LowIlSid, TestPath, isDeny: false);
 
         // Assert: label restored
         mandatoryLabelMock.Verify(n => n.RestoreMandatoryLabel(TestPath, MediumLabel), Times.Once);
@@ -218,19 +238,16 @@ public class PathGrantServiceSaclTests
     {
         // Arrange: DB-only remove of a Low IL write grant must not touch NTFS SACL state.
         var (service, mandatoryLabelMock, db) = BuildService();
-        db.GetOrCreateAccount(LowIlSid).Grants.Add(new GrantedPathEntry
-        {
-            Path = TestPath,
-            IsDeny = false,
-            SavedRights = WriteRights,
-            PreviousSaclLabel = MediumLabel
-        });
+        mandatoryLabelMock.Setup(n => n.ReadMandatoryLabel(TestPath)).Returns(MediumLabel);
+        service.AddGrant(LowIlSid, TestPath, isDeny: false, WriteRights);
+        mandatoryLabelMock.Invocations.Clear();
 
         // Act
-        bool removed = service.RemoveGrant(LowIlSid, TestPath, isDeny: false, updateFileSystem: false);
+        var removed = service.UntrackGrant(LowIlSid, TestPath, isDeny: false);
 
         // Assert
-        Assert.True(removed);
+        Assert.True(removed.DatabaseModified);
+        Assert.False(removed.GrantApplied);
         mandatoryLabelMock.Verify(n => n.RestoreMandatoryLabel(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
         Assert.Null(db.GetAccount(LowIlSid)?.Grants
             .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false }));
@@ -240,24 +257,15 @@ public class PathGrantServiceSaclTests
     public void RemoveGrant_SourceSid_UpdateFileSystemFalse_LastLowIntegritySource_DoesNotRestoreSaclLabel()
     {
         var (service, mandatoryLabelMock, db) = BuildService();
-        db.GetOrCreateAccount(UserSid).Grants.Add(new GrantedPathEntry
-        {
-            Path = TestPath,
-            IsDeny = false,
-            SavedRights = ReadOnly
-        });
-        db.GetOrCreateAccount(LowIlSid).Grants.Add(new GrantedPathEntry
-        {
-            Path = TestPath,
-            IsDeny = false,
-            SavedRights = WriteRights,
-            PreviousSaclLabel = MediumLabel,
-            SourceSids = [UserSid]
-        });
+        service.AddGrant(UserSid, TestPath, isDeny: false, ReadOnly);
+        mandatoryLabelMock.Setup(n => n.ReadMandatoryLabel(TestPath)).Returns(MediumLabel);
+        service.AddGrant(LowIlSid, TestPath, isDeny: false, WriteRights);
+        mandatoryLabelMock.Invocations.Clear();
 
-        bool removed = service.RemoveGrant(UserSid, TestPath, isDeny: false, updateFileSystem: false);
+        var removed = service.UntrackGrant(UserSid, TestPath, isDeny: false);
 
-        Assert.True(removed);
+        Assert.True(removed.DatabaseModified);
+        Assert.False(removed.GrantApplied);
         mandatoryLabelMock.Verify(n => n.RestoreMandatoryLabel(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
         Assert.Null(db.GetAccount(UserSid)?.Grants
             .FirstOrDefault(e => e is { IsTraverseOnly: false, IsDeny: false }));
@@ -277,7 +285,7 @@ public class PathGrantServiceSaclTests
         });
 
         // Act
-        service.RemoveGrant(LowIlSid, TestPath, isDeny: false, updateFileSystem: true);
+        service.RemoveGrant(LowIlSid, TestPath, isDeny: false);
 
         // Assert: no SACL restore
         mandatoryLabelMock.Verify(n => n.RestoreMandatoryLabel(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
@@ -289,25 +297,16 @@ public class PathGrantServiceSaclTests
     public void RemoveAll_LowIntegritySid_WithWriteGrants_RestoresAllSaclLabels()
     {
         // Arrange: Low IL account with one Write entry and one Read entry
-        var (service, mandatoryLabelMock, db) = BuildService();
+        var (service, mandatoryLabelMock, _) = BuildService();
         const string writePath = @"C:\TestFolder\WriteDir";
         const string readPath = @"C:\TestFolder\ReadDir";
-        db.GetOrCreateAccount(LowIlSid).Grants.AddRange([
-            new GrantedPathEntry
-            {
-                Path = writePath, IsDeny = false,
-                SavedRights = WriteRights,
-                PreviousSaclLabel = MediumLabel
-            },
-            new GrantedPathEntry
-            {
-                Path = readPath, IsDeny = false,
-                SavedRights = ReadOnly
-            }
-        ]);
+        mandatoryLabelMock.Setup(n => n.ReadMandatoryLabel(writePath)).Returns(MediumLabel);
+        service.AddGrant(LowIlSid, writePath, isDeny: false, WriteRights);
+        service.AddGrant(LowIlSid, readPath, isDeny: false, ReadOnly);
+        mandatoryLabelMock.Invocations.Clear();
 
         // Act
-        service.RemoveAll(LowIlSid, updateFileSystem: true);
+        service.RemoveAll(LowIlSid);
 
         // Assert: RestoreMandatoryLabel called only for the Write entry
         mandatoryLabelMock.Verify(n => n.RestoreMandatoryLabel(writePath, MediumLabel), Times.Once);
@@ -327,7 +326,7 @@ public class PathGrantServiceSaclTests
         });
 
         // Act: updateFileSystem=false — no NTFS operations
-        service.RemoveAll(LowIlSid, updateFileSystem: false);
+        service.UntrackAll(LowIlSid);
 
         // Assert: no SACL restore
         mandatoryLabelMock.Verify(n => n.RestoreMandatoryLabel(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
@@ -340,10 +339,8 @@ public class PathGrantServiceSaclTests
     {
         // Arrange: two regular accounts already have grants to TestPath
         var (service, _, db) = BuildService();
-        db.GetOrCreateAccount(UserSid).Grants.Add(
-            new GrantedPathEntry { Path = TestPath, IsDeny = false, SavedRights = ReadOnly });
-        db.GetOrCreateAccount(OtherUserSid).Grants.Add(
-            new GrantedPathEntry { Path = TestPath, IsDeny = false, SavedRights = ReadOnly });
+        service.AddGrant(UserSid, TestPath, isDeny: false, ReadOnly);
+        service.AddGrant(OtherUserSid, TestPath, isDeny: false, ReadOnly);
 
         // Act: add Low IL grant
         service.AddGrant(LowIlSid, TestPath, isDeny: false, ReadOnly);
@@ -376,11 +373,8 @@ public class PathGrantServiceSaclTests
     {
         // Arrange: Low IL grant already exists with SourceSids (auto-managed)
         var (service, _, db) = BuildService();
-        db.GetOrCreateAccount(LowIlSid).Grants.Add(new GrantedPathEntry
-        {
-            Path = TestPath, IsDeny = false, SavedRights = ReadOnly,
-            SourceSids = [UserSid]
-        });
+        service.AddGrant(UserSid, TestPath, isDeny: false, ReadOnly);
+        service.AddGrant(LowIlSid, TestPath, isDeny: false, ReadOnly);
 
         // Act: new regular account grant added — should be back-tracked into Low IL SourceSids
         service.AddGrant(OtherUserSid, TestPath, isDeny: false, ReadOnly);

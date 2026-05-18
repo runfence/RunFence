@@ -1,6 +1,8 @@
+using RunFence.Launch;
+
 namespace RunFence.RunAs;
 
 public interface IRunAsLaunchErrorHandler
 {
-    void RunWithErrorHandling(Action launchAction, string filePath);
+    void RunWithErrorHandling(Func<LaunchExecutionResult> launchAction, string filePath);
 }

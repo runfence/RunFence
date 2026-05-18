@@ -1,4 +1,5 @@
 using RunFence.Account;
+using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -10,7 +11,7 @@ namespace RunFence.SidMigration.UI.Forms;
 /// Owns the loading label and delegates grid building to SidMigrationMappingBuilder.
 /// </summary>
 /// <remarks>Manually constructed by SidMigrationDialog with runtime data — not DI-registered.</remarks>
-public partial class MigrationMappingStep : UserControl
+public partial class MigrationMappingStep : UserControl, ISidMigrationMappingStepView
 {
     private readonly SessionContext _session;
     private readonly ISidMigrationService _sidMigrationService;
@@ -19,6 +20,7 @@ public partial class MigrationMappingStep : UserControl
     private readonly IEnumerable<OrphanedSid> _orphanedSids;
     private readonly IProfilePathResolver _profilePathResolver;
     private readonly ISidNameCacheService _sidNameCache;
+    private readonly IMessageBoxService _messageBoxService;
 
     private SidMigrationMappingBuilder? _builder;
 
@@ -29,7 +31,8 @@ public partial class MigrationMappingStep : UserControl
         ILoggingService log,
         IEnumerable<OrphanedSid> orphanedSids,
         IProfilePathResolver profilePathResolver,
-        ISidNameCacheService sidNameCache)
+        ISidNameCacheService sidNameCache,
+        IMessageBoxService messageBoxService)
     {
         _session = session;
         _sidMigrationService = sidMigrationService;
@@ -38,7 +41,9 @@ public partial class MigrationMappingStep : UserControl
         _orphanedSids = orphanedSids;
         _profilePathResolver = profilePathResolver;
         _sidNameCache = sidNameCache;
+        _messageBoxService = messageBoxService;
         InitializeComponent();
+        AdjustDescriptionLayout();
     }
 
     public void BeginAsync(Action onReady, Action onFailed)
@@ -46,7 +51,7 @@ public partial class MigrationMappingStep : UserControl
         var logic = new SidMigrationMappingLogic(
             _session, _sidMigrationService, _localUserProvider, _orphanedSids, _sidNameCache);
         var validator = new SidMigrationMappingValidator(_profilePathResolver);
-        _builder = new SidMigrationMappingBuilder(logic, validator, _log, _orphanedSids);
+        _builder = new SidMigrationMappingBuilder(logic, validator, _log, _messageBoxService, _orphanedSids);
         _builder.Ready += () =>
         {
             if (_builder.Content != null)
@@ -57,17 +62,34 @@ public partial class MigrationMappingStep : UserControl
         _ = _builder.BuildMappingsAsync(_loadingLabel);
     }
 
-    public bool TryCollectMappings(out List<SidMigrationMapping> mappings)
+    public bool TryCollectSelections(out List<SidMigrationMapping> mappings, out List<string> deleteSids)
     {
         if (_builder == null)
         {
             mappings = [];
+            deleteSids = [];
             return true;
         }
 
-        return _builder.TryCollectMappingsFromGrid(out mappings);
+        return _builder.TryCollectSelectionsFromGrid(out mappings, out deleteSids);
     }
 
-    public List<string> CollectDeleteSids()
-        => _builder?.CollectDeleteSidsFromGrid() ?? [];
+    Control ISidMigrationStepView.View => this;
+
+    private void AdjustDescriptionLayout()
+    {
+        var descriptionHeight = TextRenderer.MeasureText(
+            _descriptionLabel.Text,
+            _descriptionLabel.Font,
+            new Size(_descriptionLabel.Width, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height;
+        _descriptionLabel.Height = descriptionHeight + _descriptionLabel.Padding.Vertical;
+        _loadingLabel.Top = _descriptionLabel.Bottom + 8;
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        AdjustDescriptionLayout();
+    }
 }

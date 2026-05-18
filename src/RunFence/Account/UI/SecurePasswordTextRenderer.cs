@@ -10,35 +10,34 @@ internal sealed class SecurePasswordTextRenderer
     public RenderedSecurePasswordText Render(ProtectedString password, bool revealed)
     {
         int charCount = password.Length;
-        int byteCount = (charCount + 1) * 2;
+        int byteCount = (charCount + 1) * sizeof(char);
         IntPtr textPointer = Marshal.AllocHGlobal(byteCount);
 
         try
         {
             if (revealed)
             {
-                IntPtr source = password.AllocUnicode();
-                try
+                password.UseUtf16BytesSnapshot(utf16Bytes =>
                 {
-                    for (int i = 0; i < byteCount; i++)
-                        Marshal.WriteByte(textPointer, i, Marshal.ReadByte(source, i));
-                }
-                finally
-                {
-                    Marshal.ZeroFreeGlobalAllocUnicode(source);
-                }
+                    for (int i = 0; i < utf16Bytes.Length; i++)
+                        Marshal.WriteByte(textPointer, i, utf16Bytes[i]);
+
+                    Marshal.WriteInt16(textPointer, utf16Bytes.Length, 0);
+                });
             }
             else
             {
                 for (int i = 0; i < charCount; i++)
-                    Marshal.WriteInt16(textPointer, i * 2, (short)BulletChar);
-                Marshal.WriteInt16(textPointer, charCount * 2, 0);
+                    Marshal.WriteInt16(textPointer, i * sizeof(char), (short)BulletChar);
+
+                Marshal.WriteInt16(textPointer, charCount * sizeof(char), 0);
             }
         }
         catch
         {
             for (int i = 0; i < byteCount; i++)
                 Marshal.WriteByte(textPointer, i, 0);
+
             Marshal.FreeHGlobal(textPointer);
             throw;
         }

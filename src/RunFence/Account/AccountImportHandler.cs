@@ -11,7 +11,6 @@ namespace RunFence.Account;
 public class AccountImportHandler(
     ISettingsTransferService settingsTransferService,
     ICredentialDecryptionService credentialDecryption,
-    SessionPersistenceHelper persistenceHelper,
     ILoggingService log) : IAccountImportHandler
 {
     /// <summary>
@@ -19,15 +18,12 @@ public class AccountImportHandler(
     /// </summary>
     /// <param name="accounts">Accounts to import to. Accounts without a stored credential entry are skipped.</param>
     /// <param name="credStore">The credential store for password decryption.</param>
-    /// <param name="pinKey">The PIN-derived key.</param>
     /// <param name="sink">Progress sink for file selection and UI feedback.</param>
     /// <returns>The selected settings file path if import completed, or null if the user cancelled.</returns>
     public async Task<string?> RunImportAsync(
         List<ImportAccount> accounts,
         CredentialStore credStore,
-        ProtectedBuffer pinKey,
-        IImportProgressSink sink,
-        AppDatabase? db = null)
+        IImportProgressSink sink)
     {
         var settingsPath = sink.SelectFile();
         if (settingsPath == null)
@@ -61,14 +57,18 @@ public class AccountImportHandler(
                     continue;
                 }
 
-                var result = await Task.Run(() => settingsTransferService.Import(
-                    settingsPath, account.CredEntry.Sid));
+                var result = await SettingsImportHelper.ImportAsync(
+                    settingsPath, account.CredEntry.Sid, settingsTransferService);
 
-                if (result.DatabaseModified && db != null)
-                    persistenceHelper.SaveConfig(db, pinKey, credStore.ArgonSalt);
-
-                var status = result.Success ? "OK" : "FAILED";
-                sink.AppendLog($"  [{status}] {result.Message}");
+                var uiMessage = result.Status switch
+                {
+                    SettingsImportStatus.Succeeded => "Imported successfully.",
+                    SettingsImportStatus.Canceled => "Import canceled due to permission or user decision.",
+                    SettingsImportStatus.PartialSuccess => "Import completed with skipped or conflicting items.",
+                    _ => result.Errors.Count > 0 ? string.Join("; ", result.Errors) : "Import failed."
+                };
+                var status = result.Status == SettingsImportStatus.Succeeded ? "OK" : "FAILED";
+                sink.AppendLog($"  [{status}] {uiMessage}");
             }
 
             sink.AppendLog("");

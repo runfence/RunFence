@@ -60,6 +60,7 @@ public class IpcServerService(
         _cts?.Cancel();
         try
         {
+            // Bounded wait is intentional cleanup during shutdown; do not block indefinitely here.
             _listenTask?.Wait(TimeSpan.FromSeconds(2));
         }
         catch (AggregateException)

@@ -4,7 +4,7 @@ namespace RunFence.SidMigration.UI.Forms;
 /// UserControl for Step 1 (Path Selection) of SidMigrationDialog.
 /// Owns the checked list box of drive/folder paths and exposes the selection state.
 /// </summary>
-public partial class SidMigrationPathStep : UserControl
+public partial class SidMigrationPathStep : UserControl, ISidMigrationPathStepView
 {
     /// <summary>Raised when the user clicks the "Skip — I know the SIDs" button.</summary>
     public event EventHandler? SkipRequested;
@@ -21,6 +21,8 @@ public partial class SidMigrationPathStep : UserControl
 
         if (!showSkipButton)
             _skipButton.Visible = false;
+
+        AdjustLayout();
     }
 
     /// <summary>
@@ -56,6 +58,8 @@ public partial class SidMigrationPathStep : UserControl
 
     public List<(string path, bool isChecked)>? SavedState { get; private set; }
 
+    Control ISidMigrationStepView.View => this;
+
     private void OnSelectAllClick(object? sender, EventArgs e)
     {
         for (int i = 0; i < _pathListBox.Items.Count; i++)
@@ -78,4 +82,28 @@ public partial class SidMigrationPathStep : UserControl
     }
 
     private void OnSkipClick(object? sender, EventArgs e) => SkipRequested?.Invoke(this, EventArgs.Empty);
+
+    private void AdjustLayout()
+    {
+        var hintHeight = TextRenderer.MeasureText(
+            _hintLabel.Text,
+            _hintLabel.Font,
+            new Size(_hintLabel.Width, int.MaxValue),
+            TextFormatFlags.WordBreak | TextFormatFlags.TextBoxControl).Height;
+        _hintLabel.Height = hintHeight;
+        _hintLabel.Top = Height - _hintLabel.Height - 10;
+
+        if (_skipButton.Visible)
+        {
+            _skipButton.Top = _hintLabel.Top - _skipButton.Height - 12;
+        }
+
+        _pathListBox.Height = Math.Max(80, _hintLabel.Top - _pathListBox.Top - 10);
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        AdjustLayout();
+    }
 }

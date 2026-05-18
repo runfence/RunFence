@@ -17,15 +17,17 @@ namespace RunFence.Wizard.UI.Forms;
 /// <see cref="WizardLauncher"/> executes them after the dialog closes.
 /// </para>
 /// </summary>
-public partial class WizardDialog : Form, IWizardExecutionContext
+public partial class WizardDialog : RunFence.UI.Forms.ContextHelpForm, IWizardExecutionContext
 {
     // Step state — index 0 is always the template picker
     private readonly List<WizardStepPage> _steps = [];
     private readonly TemplatePickerStep _templatePickerStep;
-    private readonly IReadOnlyList<IWizardTemplate> _templates;
+    private readonly IReadOnlyList<IWizardTemplate> _allTemplates;
     private int _currentStepIndex;
     private IWizardTemplate? _selectedTemplate;
     private WizardStepPage? _canProceedSubscribedStep;
+    private readonly bool _skipAvailabilityFilter;
+    private bool _isTemplateWarmupInProgress;
 
     // Post-wizard actions accumulated from completed templates
     private readonly List<Action<IWin32Window>> _postWizardActions = [];
@@ -59,16 +61,17 @@ public partial class WizardDialog : Form, IWizardExecutionContext
         _executionHandler.Initialize(this);
         _navigationHandler.Initialize(this);
 
-        bool skipAvailabilityFilter = ModifierKeys.HasFlag(Keys.Shift);
-        _templates = templates
-            .Where(t => skipAvailabilityFilter || t.IsAvailable)
-            .OrderByDescending(t => t.IsPrerequisite)
-            .ToList();
-        _templatePickerStep = new TemplatePickerStep(_templates);
+        _allTemplates = templates.ToList();
+        _skipAvailabilityFilter = ModifierKeys.HasFlag(Keys.Shift);
+        var initialTemplates = _skipAvailabilityFilter
+            ? BuildVisibleTemplates()
+            : [];
+        _templatePickerStep = new TemplatePickerStep(initialTemplates, isLoading: true);
         _templatePickerStep.DoubleClickedToAdvance += (_, _) => OnNextClick(this, EventArgs.Empty);
         _steps.Add(_templatePickerStep);
 
         ShowStep(0);
+        _ = LoadTemplatesAsync();
     }
 
     // -----------------------------------------------------------------------------------------
@@ -84,7 +87,7 @@ public partial class WizardDialog : Form, IWizardExecutionContext
         set => _selectedTemplate = value;
     }
 
-    IReadOnlyList<IWizardTemplate> IWizardExecutionContext.Templates => _templates;
+    IReadOnlyList<IWizardTemplate> IWizardExecutionContext.Templates => _allTemplates;
     bool IWizardExecutionContext.IsExecuting { get; set; }
 
     List<Action<IWin32Window>> IWizardExecutionContext.PostWizardActions => _postWizardActions;
@@ -108,6 +111,9 @@ public partial class WizardDialog : Form, IWizardExecutionContext
     void IWizardExecutionContext.HideError() => HideError();
     void IWizardExecutionContext.SetProgressVisible(bool visible) => SetProgressVisible(visible);
     void IWizardExecutionContext.SetNavigationEnabled(bool enabled) => SetNavigationEnabled(enabled);
+    void IWizardExecutionContext.SetNextEnabled(bool enabled) => _nextButton.Enabled = enabled;
+    void IWizardExecutionContext.SetCancelEnabled(bool enabled) => _cancelButton.Enabled = enabled;
+    void IWizardExecutionContext.SetCancelText(string text) => _cancelButton.Text = text;
 
     void IWizardExecutionContext.SetStatusText(string text)
     {
@@ -163,8 +169,8 @@ public partial class WizardDialog : Form, IWizardExecutionContext
 
         _titleLabel.Text = step.StepTitle;
         _stepIndicatorPanel.Invalidate();
-        _backButton.Enabled = index > 0;
-        _nextButton.Enabled = step.CanProceed;
+        _backButton.Enabled = index > 0 && !_isTemplateWarmupInProgress;
+        _nextButton.Enabled = !_isTemplateWarmupInProgress && step.CanProceed;
 
         bool isLastTemplateStep = _selectedTemplate != null && index == _steps.Count - 1;
         _nextButton.Text = isLastTemplateStep ? "Apply" : "Next \u2192";
@@ -176,7 +182,7 @@ public partial class WizardDialog : Form, IWizardExecutionContext
     }
 
     private void OnCanProceedChanged(object? sender, EventArgs e)
-        => _nextButton.Enabled = _steps[_currentStepIndex].CanProceed;
+        => _nextButton.Enabled = !_isTemplateWarmupInProgress && _steps[_currentStepIndex].CanProceed;
 
     // -----------------------------------------------------------------------------------------
     // Event handlers (thin wrappers — delegate to handlers)
@@ -184,6 +190,9 @@ public partial class WizardDialog : Form, IWizardExecutionContext
 
     private async void OnNextClick(object sender, EventArgs e)
     {
+        if (_isTemplateWarmupInProgress)
+            return;
+
         var step = _steps[_currentStepIndex];
 
         if (step is Steps.CompletionStep)
@@ -240,10 +249,18 @@ public partial class WizardDialog : Form, IWizardExecutionContext
         => _navigationHandler.GoBack();
 
     private void OnCancelClick(object sender, EventArgs e)
-        => Close();
+    {
+        if (((IWizardExecutionContext)this).IsExecuting)
+        {
+            _executionHandler.CancelExecution();
+            return;
+        }
+
+        Close();
+    }
 
     private void OnFormClosing(object sender, FormClosingEventArgs e)
-        => e.Cancel = _navigationHandler.HandleClosing();
+        => e.Cancel = ((IWizardExecutionContext)this).IsExecuting || _navigationHandler.HandleClosing();
 
     private void OnReplaceFollowingSteps(object? sender, IReadOnlyList<WizardStepPage> newSteps)
         => _navigationHandler.ReplaceFollowingSteps(sender as WizardStepPage, newSteps);
@@ -288,4 +305,56 @@ public partial class WizardDialog : Form, IWizardExecutionContext
 
     private void OnFooterPanelPaint(object? sender, PaintEventArgs e)
         => WizardStylingHelper.PaintFooterSeparator(e.Graphics, ((Panel)sender!).Width);
+
+    private async Task LoadTemplatesAsync()
+    {
+        SetTemplateWarmupState(true);
+
+        try
+        {
+            await Task.WhenAll(_allTemplates.Select(t => t.WarmCacheAsync()));
+
+            if (IsDisposed || Disposing)
+                return;
+
+            if (!_skipAvailabilityFilter)
+                _templatePickerStep.SetTemplates(BuildVisibleTemplates());
+        }
+        catch (Exception ex)
+        {
+            if (IsDisposed || Disposing)
+                return;
+
+            if (!_skipAvailabilityFilter)
+                _templatePickerStep.SetTemplates([]);
+            ShowError($"Failed to load templates: {ex.Message}");
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing)
+            {
+                _templatePickerStep.SetLoading(false);
+                SetTemplateWarmupState(false);
+            }
+        }
+    }
+
+    private List<IWizardTemplate> BuildVisibleTemplates() =>
+        _allTemplates
+            .Where(t => _skipAvailabilityFilter || t.IsAvailable)
+            .OrderByDescending(t => t.IsPrerequisite)
+            .ToList();
+
+    private void SetTemplateWarmupState(bool isLoading)
+    {
+        _isTemplateWarmupInProgress = isLoading;
+        _templatePickerStep.SetLoading(isLoading);
+        UseWaitCursor = isLoading;
+
+        if (_steps.Count == 0 || _currentStepIndex != 0)
+            return;
+
+        _backButton.Enabled = false;
+        _nextButton.Enabled = !isLoading && _steps[_currentStepIndex].CanProceed;
+    }
 }

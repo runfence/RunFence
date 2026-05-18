@@ -26,8 +26,13 @@ public interface ILicenseService
 internal class LicenseService : ILicenseService, IRequiresInitialization
 {
     private readonly IMachineIdProvider _machineIdProvider;
-    private readonly LicenseValidator _validator;
-    private readonly string _licenseFilePath;
+    private readonly ILicenseStore _store;
+    private readonly ILicenseValidator _validator;
+    private readonly IFeatureRestrictionService _featureRestrictionService;
+    private readonly ILicenseMessageFormatter _messageFormatter;
+    private readonly ISessionProvider _sessionProvider;
+    private readonly ISessionSaver _sessionSaver;
+    private readonly IEvaluationCredentialCounter _credentialCounter;
     private readonly string _registryKeyPath;
     private readonly ILoggingService? _log;
     private readonly Lock _lock = new();
@@ -35,9 +40,18 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
 
     public event Action? LicenseStatusChanged;
 
-    public LicenseService(IMachineIdProvider machineIdProvider, LicenseValidator validator,
-        ILoggingService log)
-        : this(machineIdProvider, validator, PathConstants.LicenseFilePath, PathConstants.LicenseRegistryKey, log)
+    public LicenseService(
+        IMachineIdProvider machineIdProvider,
+        ILicenseStore store,
+        ILicenseValidator validator,
+        IFeatureRestrictionService featureRestrictionService,
+        ILicenseMessageFormatter messageFormatter,
+        ISessionProvider sessionProvider,
+        ISessionSaver sessionSaver,
+        IEvaluationCredentialCounter credentialCounter,
+        ILoggingService? log = null)
+        : this(machineIdProvider, store, validator, featureRestrictionService, messageFormatter, PathConstants.LicenseRegistryKey,
+            sessionProvider, sessionSaver, credentialCounter, log)
     {
     }
 
@@ -46,14 +60,24 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
     /// </summary>
     public LicenseService(
         IMachineIdProvider machineIdProvider,
-        LicenseValidator validator,
-        string licenseFilePath,
+        ILicenseStore store,
+        ILicenseValidator validator,
+        IFeatureRestrictionService featureRestrictionService,
+        ILicenseMessageFormatter messageFormatter,
         string registryKeyPath,
+        ISessionProvider sessionProvider,
+        ISessionSaver sessionSaver,
+        IEvaluationCredentialCounter credentialCounter,
         ILoggingService? log = null)
     {
         _machineIdProvider = machineIdProvider;
+        _store = store;
         _validator = validator;
-        _licenseFilePath = licenseFilePath;
+        _featureRestrictionService = featureRestrictionService;
+        _messageFormatter = messageFormatter;
+        _sessionProvider = sessionProvider;
+        _sessionSaver = sessionSaver;
+        _credentialCounter = credentialCounter;
         _registryKeyPath = registryKeyPath;
         _log = log;
     }
@@ -67,6 +91,7 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         _initialized = true;
         _log?.Info("LicenseService: initializing.");
         LoadFromFile();
+        ApplyNagEligibilityLatch();
         _log?.Info($"LicenseService: initialized ({(IsLicensed ? "licensed" : "evaluation mode")}).");
     }
 
@@ -79,7 +104,9 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         }
     }
 
-    public string MachineCode => _machineIdProvider.MachineCode;
+    public string MachineCode => _machineIdProvider.GetMachineIdentity().Status == MachineIdentityStatus.Available
+        ? _machineIdProvider.MachineCode
+        : "Unavailable";
 
     public LicenseInfo GetLicenseInfo()
     {
@@ -89,14 +116,28 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
 
     public LicenseActivationResult ActivateLicense(string key)
     {
-        var (result, info) = _validator.Validate(key, _machineIdProvider.MachineIdHash, DateTime.Today);
-        if (result != LicenseActivationResult.Success)
-            return result;
+        var validation = _validator.Validate(key, DateTime.Today);
+        if (validation.Status == LicenseValidationStatus.MachineIdentityUnavailable)
+            return LicenseActivationResult.MachineIdentityUnavailable;
+        if (validation.Status != LicenseValidationStatus.Valid)
+            return validation.Status switch
+            {
+                LicenseValidationStatus.WrongVersion => LicenseActivationResult.WrongVersion,
+                LicenseValidationStatus.Expired => LicenseActivationResult.Expired,
+                LicenseValidationStatus.SignatureInvalid => LicenseActivationResult.InvalidSignature,
+                LicenseValidationStatus.MachineMismatch => LicenseActivationResult.WrongMachine,
+                _ => LicenseActivationResult.Malformed
+            };
 
         lock (_lock)
         {
-            SaveLicenseFile(key);
-            _cachedInfo = info;
+            var saveResult = _store.Save(key);
+            if (saveResult.Status != LicenseStoreStatus.Succeeded)
+            {
+                _log?.Error($"LicenseService: failed to persist license ({saveResult.Status}): {saveResult.ErrorText}");
+                return LicenseActivationResult.PersistenceFailed;
+            }
+            _cachedInfo = validation.ParsedLicenseInfo;
         }
 
         LicenseStatusChanged?.Invoke();
@@ -123,6 +164,8 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
             {
                 if (_cachedInfo.ExpiryDate.HasValue && now.Date > _cachedInfo.ExpiryDate.Value.Date)
                 {
+                    // Expiry transition is applied by nag/status flow here;
+                    // Can* checks and restriction messages stay pure limit evaluation.
                     // License expired: transition to evaluation mode and clean up the file
                     _cachedInfo = LicenseInfo.Unlicensed;
                     DeleteLicenseFile();
@@ -137,12 +180,18 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         if (justExpired)
             LicenseStatusChanged?.Invoke();
 
+        var session = _sessionProvider.GetSession();
+        if (!session.Database.Settings.NagEligible)
+            return false;
+
         var lastShown = ReadLastNagDate();
         if (lastShown == null)
             return true;
-        // Forward time protection: future datetime → treat as invalid → show nag
+
+        // Forward time protection: future datetime â†’ treat as invalid â†’ show nag
         if (lastShown.Value > now)
             return true;
+
         return now - lastShown.Value >= TimeSpan.FromHours(24);
     }
 
@@ -159,60 +208,50 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
     }
 
     public bool CanAddApp(int currentCount) =>
-        IsLicensed || currentCount < EvaluationConstants.EvaluationMaxApps;
+        // Pure quota check; no expiry transition or side effects here.
+        _featureRestrictionService.GetRestriction(EvaluationFeature.Apps, currentCount, IsLicensed).Allowed;
 
     public bool CanCreateContainer(int currentCount) =>
-        IsLicensed || currentCount < EvaluationConstants.EvaluationMaxContainers;
+        // Pure quota check; no expiry transition or side effects here.
+        _featureRestrictionService.GetRestriction(EvaluationFeature.Containers, currentCount, IsLicensed).Allowed;
 
     public bool CanHideAccount(int currentHiddenCount) =>
-        IsLicensed || currentHiddenCount < EvaluationConstants.EvaluationMaxHiddenAccounts;
+        // Pure quota check; no expiry transition or side effects here.
+        _featureRestrictionService.GetRestriction(EvaluationFeature.HiddenAccounts, currentHiddenCount, IsLicensed).Allowed;
 
     public bool CanAddCredential(int currentCredentialCount) =>
-        IsLicensed || currentCredentialCount < EvaluationConstants.EvaluationMaxCredentials;
+        // Pure quota check; no expiry transition or side effects here.
+        _featureRestrictionService.GetRestriction(EvaluationFeature.Credentials, currentCredentialCount, IsLicensed).Allowed;
 
     public bool CanAddFirewallAllowlistEntry(int currentCount) =>
-        IsLicensed || currentCount < EvaluationConstants.EvaluationMaxFirewallAllowlistEntries;
+        // Pure quota check; no expiry transition or side effects here.
+        _featureRestrictionService.GetRestriction(EvaluationFeature.FirewallAllowlist, currentCount, IsLicensed).Allowed;
 
     public string? GetRestrictionMessage(EvaluationFeature feature, int currentCount)
     {
-        return feature switch
-        {
-            EvaluationFeature.Apps when !CanAddApp(currentCount) =>
-                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxApps} app entries. Activate a license to remove this limit.",
-            EvaluationFeature.Containers when !CanCreateContainer(currentCount) =>
-                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxContainers} AppContainer profiles. Activate a license to remove this limit.",
-            EvaluationFeature.HiddenAccounts when !CanHideAccount(currentCount) =>
-                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxHiddenAccounts} hidden accounts. Activate a license to remove this limit.",
-            EvaluationFeature.Credentials when !CanAddCredential(currentCount) =>
-                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxCredentials} stored credentials. Activate a license to remove this limit.",
-            EvaluationFeature.FirewallAllowlist when !CanAddFirewallAllowlistEntry(currentCount) =>
-                $"Evaluation mode allows up to {EvaluationConstants.EvaluationMaxFirewallAllowlistEntries} firewall allowlist entries. Activate a license to remove this limit.",
-            _ => null
-        };
+        // Restriction messages are derived from current quotas only; they do not mutate expiry state.
+        var restriction = _featureRestrictionService.GetRestriction(feature, currentCount, IsLicensed);
+        return restriction.Allowed ? null : _messageFormatter.FormatRestrictionMessage(restriction);
     }
 
     private void LoadFromFile()
     {
         try
         {
-            if (!File.Exists(_licenseFilePath))
+            var stored = _store.Load();
+            if (stored.Status == LicenseStoreStatus.NotFound)
+                return;
+            if (stored.Status != LicenseStoreStatus.Succeeded || string.IsNullOrWhiteSpace(stored.LicenseKey))
             {
-                _log?.Warn($"License file not found: {_licenseFilePath}");
+                _log?.Warn($"LicenseService: license store load failed ({stored.Status}): {stored.ErrorText}");
                 return;
             }
 
-            var key = File.ReadAllText(_licenseFilePath).Trim();
-            if (string.IsNullOrEmpty(key))
-            {
-                _log?.Warn("License file is empty.");
-                return;
-            }
-
-            var (result, info) = _validator.Validate(key, _machineIdProvider.MachineIdHash, DateTime.Today);
-            if (result == LicenseActivationResult.Success)
-                _cachedInfo = info;
+            var validation = _validator.Validate(stored.LicenseKey, DateTime.Today);
+            if (validation.Status == LicenseValidationStatus.Valid)
+                _cachedInfo = validation.ParsedLicenseInfo;
             else
-                _log?.Warn($"License validation failed: {result}");
+                _log?.Warn($"License validation failed: {validation.Status}");
         }
         catch (Exception ex)
         {
@@ -220,35 +259,31 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         }
     }
 
-    private void SaveLicenseFile(string key)
-    {
-        var dir = Path.GetDirectoryName(_licenseFilePath)!;
-        Directory.CreateDirectory(dir);
-        var tmp = _licenseFilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        File.WriteAllText(tmp, key);
-        try
-        {
-            if (File.Exists(_licenseFilePath))
-                File.Replace(tmp, _licenseFilePath, _licenseFilePath + ".bak");
-            else
-                File.Move(tmp, _licenseFilePath);
-        }
-        catch
-        {
-            try { File.Delete(tmp); } catch { }
-            throw;
-        }
-    }
-
     private void DeleteLicenseFile()
     {
+        _store.Remove();
+    }
+
+    private void ApplyNagEligibilityLatch()
+    {
+        var session = _sessionProvider.GetSession();
+        if (session.Database.Settings.NagEligible)
+            return;
+        if (session.Database.Apps.Count == 0)
+            return;
+
+        var credentialCount = _credentialCounter.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
+        if (credentialCount == 0)
+            return;
+
+        session.Database.Settings.NagEligible = true;
         try
         {
-            if (File.Exists(_licenseFilePath))
-                File.Delete(_licenseFilePath);
+            _sessionSaver.SaveConfig();
         }
-        catch
+        catch (Exception ex)
         {
+            _log?.Warn($"LicenseService: failed to persist NagEligible=true: {ex.Message}");
         }
     }
 

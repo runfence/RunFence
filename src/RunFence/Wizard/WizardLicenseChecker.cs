@@ -7,7 +7,7 @@ namespace RunFence.Wizard;
 /// Centralizes evaluation license checks for wizard templates. Returns false (with error
 /// reported to progress) when a limit is hit so templates can early-return immediately.
 /// </summary>
-public class WizardLicenseChecker(ILicenseService licenseService, IEvaluationLimitHelper evaluationLimitHelper)
+public class WizardLicenseChecker(ILicenseService licenseService, IEvaluationCredentialCounter credentialCounter)
 {
     /// <summary>
     /// Checks whether adding another credential is within the evaluation limit.
@@ -19,7 +19,7 @@ public class WizardLicenseChecker(ILicenseService licenseService, IEvaluationLim
     {
         if (!checkCredential)
             return true;
-        var credCount = evaluationLimitHelper.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
+        var credCount = credentialCounter.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
         if (licenseService.CanAddCredential(credCount))
             return true;
         progress.ReportError(licenseService.GetRestrictionMessage(EvaluationFeature.Credentials, credCount)!);
@@ -36,19 +36,6 @@ public class WizardLicenseChecker(ILicenseService licenseService, IEvaluationLim
         if (licenseService.CanAddApp(appCount))
             return true;
         progress.ReportError(licenseService.GetRestrictionMessage(EvaluationFeature.Apps, appCount)!);
-        return false;
-    }
-
-    /// <summary>
-    /// Checks whether adding <paramref name="count"/> app entries is within the evaluation limit.
-    /// Reports an error and returns false if the limit is exceeded.
-    /// </summary>
-    public bool CheckCanAddApps(SessionContext session, int count, IWizardProgressReporter progress)
-    {
-        var appCount = session.Database.Apps.Count;
-        if (licenseService.CanAddApp(appCount + count - 1))
-            return true;
-        progress.ReportError(licenseService.GetRestrictionMessage(EvaluationFeature.Apps, appCount + count - 1)!);
         return false;
     }
 

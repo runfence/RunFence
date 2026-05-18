@@ -42,6 +42,8 @@ public class FirewallResolvedDomainCache(FirewallDomainDirtyTracker dirtyTracker
                 if (normalizedFreshAddresses.Count == 0)
                     continue;
 
+                // Keep last-good resolved IPs when a domain cannot be resolved right now:
+                // this prevents an allowlist from silently loosening during transient DNS failures.
                 if (!_resolvedDomains.TryGetValue(domain, out var cachedAddresses)
                     || cachedAddresses.Count == 0
                     || !AddressSetsEqual(cachedAddresses, normalizedFreshAddresses))

@@ -41,6 +41,10 @@ public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : I
         FileSystemRights denyDirect = 0;
         FileSystemRights allowGroup = 0;
         FileSystemRights denyGroup = 0;
+        bool directTraverseAllow = false;
+        bool groupTraverseAllow = false;
+        bool directTraverseDeny = false;
+        bool groupTraverseDeny = false;
         int directAllowAceCount = 0;
         int directDenyAceCount = 0;
 
@@ -58,11 +62,17 @@ public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : I
 
             if (rule.AccessControlType == AccessControlType.Allow)
             {
+                if (IsTraverseOnlyAce(rule))
+                {
+                    if (isDirect)
+                        directTraverseAllow = true;
+                    else
+                        groupTraverseAllow = true;
+                    continue;
+                }
+
                 if (isDirect)
                 {
-                    if (GrantRightsMapper.IsTraverseOnly(rule.FileSystemRights) &&
-                        rule.InheritanceFlags == InheritanceFlags.None)
-                        continue;
                     allowDirect |= rule.FileSystemRights;
                     directAllowAceCount++;
                 }
@@ -71,6 +81,15 @@ public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : I
             }
             else
             {
+                if (IsTraverseOnlyAce(rule))
+                {
+                    if (isDirect)
+                        directTraverseDeny = true;
+                    else
+                        groupTraverseDeny = true;
+                    continue;
+                }
+
                 if (isDirect)
                 {
                     denyDirect |= rule.FileSystemRights;
@@ -103,6 +122,8 @@ public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : I
             DenyExecute: GetCheckState(GrantRightsMapper.ExecuteMask, denyDirect, denyGroup),
             DenyWrite: GetCheckState(writeMask, denyDirect, denyGroup),
             DenySpecial: GetCheckState(specialMask, denyDirect, denyGroup),
+            TraverseOnlyAllow: GetTraverseOnlyCheckState(directTraverseAllow, groupTraverseAllow),
+            TraverseOnlyDeny: GetTraverseOnlyCheckState(directTraverseDeny, groupTraverseDeny),
             IsAccountOwner: isAccountOwner,
             IsAdminOwner: isAdminOwner,
             DirectAllowAceCount: directAllowAceCount,
@@ -129,7 +150,7 @@ public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : I
                 bool matches = isDeny
                     ? rule.AccessControlType == AccessControlType.Deny
                     : rule.AccessControlType == AccessControlType.Allow;
-                if (matches)
+                if (matches && !IsTraverseOnlyAce(rule))
                     return PathAclStatus.Available;
             }
 
@@ -149,4 +170,17 @@ public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : I
             return RightCheckState.Indeterminate;
         return RightCheckState.Unchecked;
     }
+
+    private static RightCheckState GetTraverseOnlyCheckState(bool direct, bool group)
+    {
+        if (direct)
+            return RightCheckState.Checked;
+        if (group)
+            return RightCheckState.Indeterminate;
+        return RightCheckState.Unchecked;
+    }
+
+    private static bool IsTraverseOnlyAce(FileSystemAccessRule rule)
+        => GrantRightsMapper.IsTraverseOnly(rule.FileSystemRights) &&
+           rule.InheritanceFlags == InheritanceFlags.None;
 }

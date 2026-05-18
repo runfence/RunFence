@@ -8,6 +8,18 @@ namespace RunFence.Acl;
 /// </summary>
 public interface ITraverseCoreOperations
 {
+    IReadOnlyList<string> CollectCoveragePaths(string path);
+
+    IReadOnlyList<string> GetPathsNeedingTraverseAce(string sid, IReadOnlyList<string> coveragePaths);
+
+    bool TrackTraverse(string sid, GrantedPathEntry entry);
+
+    IReadOnlyList<string> ApplyTraverseAces(string sid, IReadOnlyList<string> paths);
+
+    void RemoveTraverseAces(string sid, IReadOnlyList<string> paths);
+
+    void VerifyEffectiveTraverse(string sid, IReadOnlyList<string> paths);
+
     /// <summary>
     /// Grants Traverse | ReadAttributes | Synchronize (no inheritance) on <paramref name="path"/>
     /// and every ancestor up to the drive root. Records a <see cref="GrantedPathEntry"/> with

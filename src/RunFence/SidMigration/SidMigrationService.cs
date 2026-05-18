@@ -1,6 +1,7 @@
 using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 
 namespace RunFence.SidMigration;
@@ -11,6 +12,7 @@ public class SidMigrationService(
     ISidCleanupHelper sidCleanup,
     ISidAclScanService aclScan,
     ISidNameCacheService sidNameCache,
+    IInteractiveUserSidResolver interactiveUserSidResolver,
     IDatabaseProvider databaseProvider) : ISidMigrationService
 {
     public List<SidMigrationMapping> BuildMappings(
@@ -19,13 +21,17 @@ public class SidMigrationService(
         IReadOnlyDictionary<string, string>? sidNames = null)
     {
         var mappings = new List<SidMigrationMapping>();
+        var interactiveUserSid = interactiveUserSidResolver.GetInteractiveUserSid();
         var accountsByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var account in currentLocalAccounts)
             accountsByName[account.Username] = account.Sid;
 
         foreach (var cred in credentials)
         {
-            if (cred.IsCurrentAccount || cred.IsInteractiveUser || string.IsNullOrEmpty(cred.Sid))
+            if (cred.IsCurrentAccount
+                || (!string.IsNullOrEmpty(interactiveUserSid)
+                    && string.Equals(cred.Sid, interactiveUserSid, StringComparison.OrdinalIgnoreCase))
+                || string.IsNullOrEmpty(cred.Sid))
                 continue;
 
             // Check if old SID still resolves
@@ -151,6 +157,10 @@ public class SidMigrationService(
         if (sidMap.TryGetValue(database.Settings.LastUsedRunAsAccountSid ?? "", out var newLast))
             database.Settings.LastUsedRunAsAccountSid = newLast;
 
+        // JobKeeper identities are intentionally left keyed to the original SID. They are durable
+        // reconnect hints for already-running keepers, not general SID-owned data to rewrite during
+        // migration, and must not be copied or re-keyed onto the replacement SID here.
+
         return new MigrationCounts(credCount, appCount, ipcCount, allowCount);
     }
 
@@ -165,6 +175,8 @@ public class SidMigrationService(
             deletedCreds += credentialStore.Credentials.RemoveAll(c =>
                 string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase));
 
+            // Keep any persisted JobKeeper identity under its original SID unless some other explicit
+            // stale-keeper cleanup path removes it. Deletion must not synthesize a replacement SID entry.
             var (removedApps, removedCallers) = sidCleanup.CleanupSidFromAppData(sid);
             deletedApps += removedApps;
             deletedCallers += removedCallers;

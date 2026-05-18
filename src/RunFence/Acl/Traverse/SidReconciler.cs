@@ -1,4 +1,6 @@
+using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Linq;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -18,18 +20,26 @@ public class SidReconciler(
     IInteractiveUserResolver interactiveUserResolver,
     IFileSystemPathInfo pathInfo)
 {
+    public readonly record struct SidReconciliationResult(
+        string Sid,
+        List<string> NewGroups,
+        bool Succeeded,
+        List<(string Path, List<string> AppliedPaths)> NewTraverseEntries,
+        HashSet<string> RemovedTraversePaths,
+        string? ErrorMessage);
+
     /// <summary>
     /// Reconciles traverse grants for a single SID given its new group memberships.
-    /// Populates <paramref name="newTraverseEntries"/> and <paramref name="removedTraversePaths"/>.
-    /// Runs on the background thread — does NOT access the database.
+    /// Runs on the background thread and returns a self-contained result.
     /// </summary>
-    public void ReconcileSid(
+    public SidReconciliationResult ReconcileSid(
         string sid,
         IReadOnlyList<string> newGroups,
-        Dictionary<string, List<(string Path, List<string> AppliedPaths)>> newTraverseEntries,
-        HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
+        IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants)
     {
+        var newTraverseEntries = new List<(string Path, List<string> AppliedPaths)>();
+        var removedTraversePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         try
         {
             var identity = new SecurityIdentifier(sid);
@@ -40,52 +50,70 @@ public class SidReconciler(
                 ReconcileAppDirectory(sid, identity, newGroups, newTraverseEntries, removedTraversePaths, accountGrants);
 
             ReconcileDragBridgeTempRoot(sid, identity, newGroups, newTraverseEntries, removedTraversePaths, accountGrants);
+
+            return new SidReconciliationResult(
+                sid,
+                newGroups.ToList(),
+                true,
+                newTraverseEntries,
+                removedTraversePaths,
+                null);
         }
         catch (Exception ex)
         {
             log.Warn($"SidReconciler: reconciliation failed for '{sid}': {ex.Message}");
+            return new SidReconciliationResult(
+                sid,
+                newGroups.ToList(),
+                false,
+                newTraverseEntries,
+                removedTraversePaths,
+                ex.Message);
         }
     }
 
     private void ReconcileLogonScript(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
+        List<(string, List<string>)> newTraverseEntries,
         HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
+        IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants)
     {
         var scriptsDir = Path.Combine(PathConstants.ProgramDataDir, "scripts");
         var scriptFile = Path.Combine(scriptsDir, $"{sid}_block_login.cmd");
-        ReconcileTraverseLocation(sid, identity, groupSids, scriptsDir, scriptFile,
-            newTraverseEntries, removedTraversePaths, accountGrants);
+        ReconcileTraverseLocation(identity, groupSids, scriptsDir, scriptFile,
+            newTraverseEntries, removedTraversePaths, accountGrants, sid);
     }
 
     private void ReconcileAppDirectory(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
+        List<(string, List<string>)> newTraverseEntries,
         HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
+        IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants)
     {
         var appDir = Path.GetDirectoryName(PathConstants.UnlockCmdPath);
         if (string.IsNullOrEmpty(appDir))
             return;
-        ReconcileTraverseLocation(sid, identity, groupSids, appDir, null,
-            newTraverseEntries, removedTraversePaths, accountGrants);
+        ReconcileTraverseLocation(identity, groupSids, appDir, null,
+            newTraverseEntries, removedTraversePaths, accountGrants, sid);
     }
 
     private void ReconcileDragBridgeTempRoot(string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
+        List<(string, List<string>)> newTraverseEntries,
         HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
+        IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants)
     {
         var tempRoot = Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir);
-        ReconcileTraverseLocation(sid, identity, groupSids, tempRoot, null,
-            newTraverseEntries, removedTraversePaths, accountGrants);
+        ReconcileTraverseLocation(identity, groupSids, tempRoot, null,
+            newTraverseEntries, removedTraversePaths, accountGrants, sid);
     }
 
     private void ReconcileTraverseLocation(
-        string sid, SecurityIdentifier identity, IReadOnlyList<string> groupSids,
-        string dirPath, string? prerequisiteFilePath,
-        Dictionary<string, List<(string, List<string>)>> newTraverseEntries,
+        SecurityIdentifier identity,
+        IReadOnlyList<string> groupSids,
+        string dirPath,
+        string? prerequisiteFilePath,
+        List<(string, List<string>)> newTraverseEntries,
         HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
+        IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants,
+        string sid)
     {
         if (!pathInfo.DirectoryExists(dirPath))
             return;
@@ -96,23 +124,17 @@ public class SidReconciler(
         var (appliedPaths, anyAceAdded) = granter.GrantOnPathAndAncestors(dirPath, identity, groupSids: groupSids);
         if (anyAceAdded)
         {
-            if (!newTraverseEntries.TryGetValue(sid, out var entries))
-            {
-                entries = [];
-                newTraverseEntries[sid] = entries;
-            }
-
-            entries.Add((dirPath, appliedPaths));
+            EnsureTraverseEffectiveOnTrackedPaths(sid, groupSids, appliedPaths);
+            newTraverseEntries.Add((dirPath, appliedPaths));
         }
 
         CheckRedundantTraverse(sid, dirPath, groupSids, granter, removedTraversePaths, accountGrants);
     }
 
     /// <summary>
-    /// Checks if an existing traverse entry for <paramref name="sid"/> on <paramref name="path"/>
-    /// is now redundant because the SID's groups provide traverse rights on all applied paths
-    /// without needing the SID's own direct ACE. If redundant, adds to <paramref name="removedTraversePaths"/>
-    /// and reverts the SID's direct traverse ACEs.
+    /// Checks whether a direct traverse entry is redundant by removing only that managed direct
+    /// traverse ACE from an in-memory security copy and re-evaluating effective rights for the
+    /// real account SID plus its groups.
     /// </summary>
     private void CheckRedundantTraverse(
         string sid,
@@ -120,16 +142,14 @@ public class SidReconciler(
         IReadOnlyList<string> groupSids,
         AncestorTraverseGranter granter,
         HashSet<string> removedTraversePaths,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants)
+        IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants)
     {
-        if (accountGrants == null || groupSids.Count == 0)
-            return;
-        if (!accountGrants.TryGetValue(sid, out var entries))
+        if (accountGrants == null || !accountGrants.TryGetValue(sid, out var entries))
             return;
 
         var traverseRights = TraverseRightsHelper.TraverseRights;
-
         var normalizedPath = Path.GetFullPath(path);
+
         foreach (var entry in entries)
         {
             if (!entry.IsTraverseOnly)
@@ -138,7 +158,7 @@ public class SidReconciler(
                 continue;
 
             var pathsToCheck = entry.AllAppliedPaths ?? [entry.Path];
-            bool allCoveredByGroups = true;
+            bool stillEffectiveWithoutDirectAce = true;
 
             foreach (var appliedPath in pathsToCheck)
             {
@@ -146,21 +166,39 @@ public class SidReconciler(
                 {
                     if (!pathInfo.DirectoryExists(appliedPath))
                         continue;
+
                     var dirSecurity = pathInfo.GetDirectorySecurity(appliedPath);
-                    if (!aclPermission.HasEffectiveRights(dirSecurity, "", groupSids, traverseRights))
+                    var identity = new SecurityIdentifier(sid);
+                    var hasDirectTraverseDeny = dirSecurity
+                        .GetAccessRules(true, false, typeof(SecurityIdentifier))
+                        .OfType<FileSystemAccessRule>()
+                        .Any(rule =>
+                            rule.AccessControlType == AccessControlType.Deny &&
+                            rule.IdentityReference is SecurityIdentifier ruleSid &&
+                            ruleSid.Equals(identity) &&
+                            GrantRightsMapper.IsTraverseOnly(rule.FileSystemRights) &&
+                            rule.InheritanceFlags == InheritanceFlags.None);
+                    if (hasDirectTraverseDeny)
                     {
-                        allCoveredByGroups = false;
+                        stillEffectiveWithoutDirectAce = false;
+                        break;
+                    }
+
+                    var modifiedSecurity = RemoveManagedTraverseAce(dirSecurity, sid);
+                    if (!aclPermission.HasEffectiveRights(modifiedSecurity, sid, groupSids, traverseRights))
+                    {
+                        stillEffectiveWithoutDirectAce = false;
                         break;
                     }
                 }
                 catch
                 {
-                    allCoveredByGroups = false;
+                    stillEffectiveWithoutDirectAce = false;
                     break;
                 }
             }
 
-            if (allCoveredByGroups)
+            if (stillEffectiveWithoutDirectAce)
             {
                 removedTraversePaths.Add(normalizedPath);
 
@@ -176,9 +214,80 @@ public class SidReconciler(
                         log.Warn($"Failed to remove redundant traverse ACE on '{appliedPath}': {ex.Message}");
                     }
                 }
+
+                EnsureDirectTraverseRemoved(pathsToCheck, sid);
             }
 
             break;
         }
+    }
+
+    private void EnsureTraverseEffectiveOnTrackedPaths(
+        string sid,
+        IReadOnlyList<string> groupSids,
+        IEnumerable<string> appliedPaths)
+    {
+        foreach (var appliedPath in appliedPaths)
+        {
+            if (!pathInfo.DirectoryExists(appliedPath))
+                continue;
+
+            var security = pathInfo.GetDirectorySecurity(appliedPath);
+            if (!aclPermission.HasEffectiveRights(security, sid, groupSids, TraverseRightsHelper.TraverseRights))
+            {
+                throw new InvalidOperationException(
+                    $"Traverse reconciliation failed to make '{appliedPath}' effective for '{sid}'.");
+            }
+        }
+    }
+
+    private void EnsureDirectTraverseRemoved(IEnumerable<string> appliedPaths, string sid)
+    {
+        var identity = new SecurityIdentifier(sid);
+
+        foreach (var appliedPath in appliedPaths)
+        {
+            if (!pathInfo.DirectoryExists(appliedPath))
+                continue;
+
+            var security = pathInfo.GetDirectorySecurity(appliedPath);
+            var hasDirectTraverseAllow = security
+                .GetAccessRules(true, false, typeof(SecurityIdentifier))
+                .OfType<FileSystemAccessRule>()
+                .Any(rule =>
+                    rule.AccessControlType == AccessControlType.Allow &&
+                    rule.IdentityReference is SecurityIdentifier ruleSid &&
+                    ruleSid.Equals(identity) &&
+                    GrantRightsMapper.IsTraverseOnly(rule.FileSystemRights) &&
+                    rule.InheritanceFlags == InheritanceFlags.None);
+            if (hasDirectTraverseAllow)
+            {
+                throw new InvalidOperationException(
+                    $"Traverse reconciliation failed to remove redundant traverse ACE on '{appliedPath}' for '{sid}'.");
+            }
+        }
+    }
+
+    private static FileSystemSecurity RemoveManagedTraverseAce(FileSystemSecurity security, string sid)
+    {
+        var clone = new DirectorySecurity();
+        clone.SetSecurityDescriptorBinaryForm(security.GetSecurityDescriptorBinaryForm());
+
+        var identity = new SecurityIdentifier(sid);
+        foreach (FileSystemAccessRule rule in clone.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+        {
+            if (rule.AccessControlType != AccessControlType.Allow)
+                continue;
+            if (rule.IdentityReference is not SecurityIdentifier ruleSid || !ruleSid.Equals(identity))
+                continue;
+            if (!GrantRightsMapper.IsTraverseOnly(rule.FileSystemRights) ||
+                rule.InheritanceFlags != InheritanceFlags.None)
+                continue;
+
+            clone.RemoveAccessRuleSpecific(rule);
+            break;
+        }
+
+        return clone;
     }
 }

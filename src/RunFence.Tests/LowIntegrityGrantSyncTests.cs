@@ -34,7 +34,7 @@ public class LowIntegrityGrantSyncTests
     public LowIntegrityGrantSyncTests()
     {
         var dbProvider = new LambdaDatabaseProvider(() => _database);
-        var dbAccessor = new UiThreadDatabaseAccessor(dbProvider, SyncInvoker);
+        var dbAccessor = new UiThreadDatabaseAccessor(dbProvider, () => SyncInvoker);
         _sync = new LowIntegrityGrantSync(_grantCore.Object, _traverseCore.Object,
             _mandatoryLabelService.Object, dbAccessor);
     }

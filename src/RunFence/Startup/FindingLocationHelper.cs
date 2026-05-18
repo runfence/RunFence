@@ -5,7 +5,10 @@ using RunFence.Launch;
 
 namespace RunFence.Startup;
 
-public class FindingLocationHelper(ILaunchFacade launchFacade, IShellHelper shellHelper)
+public class FindingLocationHelper(
+    ILaunchFacade launchFacade,
+    ILaunchFeedbackPresenter launchFeedbackPresenter,
+    IShellHelper shellHelper)
 {
     public void OpenLocation(StartupSecurityFinding finding)
     {
@@ -72,6 +75,7 @@ public class FindingLocationHelper(ILaunchFacade launchFacade, IShellHelper shel
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Applets\Regedit", true);
+            // LastKey is best-effort convenience navigation state; failures here must not block regedit launch.
             key?.SetValue("LastKey", fullPath);
         }
         catch
@@ -86,7 +90,8 @@ public class FindingLocationHelper(ILaunchFacade launchFacade, IShellHelper shel
     {
         try
         {
-            launchFacade.LaunchFile(fileName, AccountLaunchIdentity.CurrentAccountElevated, arguments)?.Dispose();
+            using var launch = launchFacade.LaunchFile(fileName, AccountLaunchIdentity.CurrentAccountElevated, arguments);
+            launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The requested location", LaunchFeedbackSource.InteractiveUi));
         }
         catch
         {

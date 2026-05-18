@@ -1,4 +1,5 @@
 using RunFence.Core;
+using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
@@ -15,6 +16,7 @@ public class OptionsFolderBrowserSection
     private readonly OptionsFolderBrowserHandler _folderBrowserHandler;
     private readonly OptionsDesktopSettingsHandler _desktopSettingsHandler;
     private readonly ILaunchFacade _launchFacade;
+    private readonly ILaunchFeedbackPresenter _launchFeedbackPresenter;
     private readonly ILoggingService _log;
     private readonly IModalCoordinator _modalCoordinator;
 
@@ -34,12 +36,14 @@ public class OptionsFolderBrowserSection
         OptionsFolderBrowserHandler folderBrowserHandler,
         OptionsDesktopSettingsHandler desktopSettingsHandler,
         ILaunchFacade launchFacade,
+        ILaunchFeedbackPresenter launchFeedbackPresenter,
         ILoggingService log)
     {
         _modalCoordinator = modalCoordinator;
         _folderBrowserHandler = folderBrowserHandler;
         _desktopSettingsHandler = desktopSettingsHandler;
         _launchFacade = launchFacade;
+        _launchFeedbackPresenter = launchFeedbackPresenter;
         _log = log;
     }
 
@@ -155,12 +159,18 @@ public class OptionsFolderBrowserSection
             var openForEdit = MessageBox.Show("Desktop settings exported successfully.\n\nOpen file for editing?",
                 "Success", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
             if (openForEdit == DialogResult.Yes)
-                _launchFacade.LaunchFile(
+            {
+                using var launch = _launchFacade.LaunchFile(
                     outputPath,
                     AccountLaunchIdentity.InteractiveUser with
                     {
                         AssociationResolutionPolicy = AssociationResolutionPolicy.AllowAccountRedirection
                     });
+                _launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("Desktop settings", LaunchFeedbackSource.InteractiveUi)
+                {
+                    WarningCaption = "Export Desktop Settings"
+                });
+            }
         }
         catch (Exception ex)
         {

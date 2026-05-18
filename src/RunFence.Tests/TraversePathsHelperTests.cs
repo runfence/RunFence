@@ -68,6 +68,39 @@ public class TraversePathsHelperTests
         Assert.Null(traversePaths[0].AllAppliedPaths);
     }
 
+    [Fact]
+    public void TrackPath_TrackedSourceSid_NewSpecificContainerEntryStoresSource()
+    {
+        var traversePaths = new List<GrantedPathEntry>();
+
+        TraversePathsHelper.TrackPath(
+            traversePaths,
+            @"C:\Foo\Bar",
+            [],
+            trackedSourceSid: "S-1-15-2-99-1-2-3-4-5-6");
+
+        var entry = Assert.Single(traversePaths);
+        Assert.Contains("S-1-15-2-99-1-2-3-4-5-6", entry.SourceSids ?? []);
+    }
+
+    [Fact]
+    public void TrackPath_TrackedSourceSid_DoesNotConvertManualSharedEntry()
+    {
+        var traversePaths = new List<GrantedPathEntry>
+        {
+            new() { Path = @"C:\Foo\Bar", IsTraverseOnly = true, SourceSids = null }
+        };
+
+        var changed = TraversePathsHelper.TrackPath(
+            traversePaths,
+            @"C:\Foo\Bar",
+            [],
+            trackedSourceSid: "S-1-15-2-99-1-2-3-4-5-6");
+
+        Assert.False(changed);
+        Assert.Null(Assert.Single(traversePaths).SourceSids);
+    }
+
     // --- CollectAncestorPaths ---
 
     [Fact]

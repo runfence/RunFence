@@ -1,10 +1,23 @@
 using RunFence.Account.Lifecycle;
+using RunFence.Infrastructure;
 using Xunit;
 
 namespace RunFence.Tests;
 
 public class EphemeralNameGeneratorTests
 {
+    private sealed class SequenceRandomSource(params int[] values) : IRandomSource
+    {
+        private readonly Queue<int> _values = new(values);
+
+        public int NextInt32(int exclusiveUpperBound)
+        {
+            var next = _values.Dequeue();
+            Assert.InRange(next, 0, exclusiveUpperBound - 1);
+            return next;
+        }
+    }
+
     [Fact]
     public void Generate_StartsWithE()
     {
@@ -31,14 +44,15 @@ public class EphemeralNameGeneratorTests
         }
     }
 
-    [Fact]
-    public void Generate_LargeSet_AllUnique()
+    [Theory]
+    [InlineData(new[] { 0, 1, 2, 3, 4, 5 }, "eABCDEF")]
+    [InlineData(new[] { 51, 52, 53, 54, 55, 61 }, "ez01239")]
+    public void Generate_UsesRandomSourceSequence(int[] indexes, string expectedName)
     {
-        const int count = 1000;
-        var names = new HashSet<string>();
-        for (int i = 0; i < count; i++)
-            names.Add(EphemeralNameGenerator.Generate());
+        var randomSource = new SequenceRandomSource(indexes);
 
-        Assert.Equal(count, names.Count);
+        var name = EphemeralNameGenerator.Generate(randomSource);
+
+        Assert.Equal(expectedName, name);
     }
 }

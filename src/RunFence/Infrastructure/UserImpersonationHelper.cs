@@ -37,19 +37,20 @@ public class UserImpersonationHelper : IUserImpersonationHelper
             username = fullName ?? targetSid;
         }
 
-        var passwordPtr = password.AllocUnicode();
-        IntPtr hToken;
-        try
+        IntPtr hToken = IntPtr.Zero;
+        password.UseUnicodeSnapshot(snapshot =>
         {
-            if (!ProcessLaunchNative.LogonUser(username, domain, passwordPtr,
+            if (!ProcessLaunchNative.LogonUser(
+                    username,
+                    domain,
+                    snapshot.DangerousGetIntPtr(),
                     ProcessLaunchNative.LOGON32_LOGON_INTERACTIVE,
-                    ProcessLaunchNative.LOGON32_PROVIDER_DEFAULT, out hToken))
+                    ProcessLaunchNative.LOGON32_PROVIDER_DEFAULT,
+                    out hToken))
+            {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
-        }
-        finally
-        {
-            Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
-        }
+            }
+        });
 
         using var safeToken = new SafeAccessTokenHandle(hToken);
 

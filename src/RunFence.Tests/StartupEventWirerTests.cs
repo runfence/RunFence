@@ -66,15 +66,20 @@ public class StartupEventWirerTests
     public void LockUi_WiresWindowRequestsAndWindowsHelloConfirmations()
     {
         var source = new RecordingLockUiEventSource();
+        var fallbackSource = new RecordingWindowsHelloPinFallbackPromptEventSource();
         var target = new RecordingMainFormTarget { WindowsHelloUnavailableResult = true };
-        var wirer = new LockUiStartupEventWirer(new InlineUiThreadInvoker(action => action()), source, target);
+        var wirer = new LockUiStartupEventWirer(
+            new InlineUiThreadInvoker(action => action()),
+            source,
+            fallbackSource,
+            target);
 
         wirer.WireEvents();
         source.RaiseShowWindowRequested();
         source.RaiseShowWindowUnlockedRequested();
         source.RaiseWindowlessUnlockCompleted();
-        var unavailableResult = source.RaiseWindowsHelloUnavailableConfirmRequested();
-        var failedResult = source.RaiseWindowsHelloFailedConfirmRequested();
+        var unavailableResult = fallbackSource.RaiseWindowsHelloUnavailableConfirmRequested();
+        var failedResult = fallbackSource.RaiseWindowsHelloFailedConfirmRequested();
 
         Assert.Equal(1, target.ShowWindowNormalCount);
         Assert.Equal(1, target.ShowWindowUnlockedCount);
@@ -143,51 +148,6 @@ public class StartupEventWirerTests
         dragBridge.Verify(d => d.SetData(session), Times.Once);
         dragBridge.Verify(d => d.ApplySettings(session.Database.Settings), Times.Once);
         dragBridge.Verify(d => d.Dispose(), Times.Once);
-    }
-
-    [Fact]
-    public void InputInjectionBlocker_WiresInitialConfigAndDataRefresh()
-    {
-        var session = new SessionContext
-        {
-            Database = new AppDatabase
-            {
-                Settings = new AppSettings { BlockInputInjection = true },
-                Accounts =
-                [
-                    new AccountEntry { Sid = "S-1-5-21-100", ReceiveInjectedInput = true },
-                    new AccountEntry { Sid = "S-1-5-21-200", ReceiveInjectedInput = false }
-                ]
-            },
-            CredentialStore = new CredentialStore()
-        };
-        var appSource = new RecordingApplicationDataSource();
-        var tray = new RecordingInputInjectionTraySink();
-        var blocker = new Mock<IInputInjectionBlockerService>();
-        var sessionSaver = new Mock<ISessionSaver>();
-        var wirer = new InputInjectionBlockerEventWirer(
-            tray,
-            blocker.Object,
-            new LambdaSessionProvider(() => session),
-            sessionSaver.Object,
-            appSource);
-
-        wirer.WireEvents();
-        session.Database.Settings.BlockInputInjection = false;
-        appSource.RaiseDataChanged();
-        blocker.SetupGet(b => b.IsEnabled).Returns(false);
-        tray.RaiseInputInjectionToggleRequested();
-
-        blocker.Verify(b => b.ApplyConfigSetting(false), Times.Once);
-        blocker.Verify(b => b.ReEnable(), Times.Once);
-        blocker.Verify(b => b.ApplyConfigSetting(true), Times.Exactly(2));
-        sessionSaver.Verify(s => s.SaveConfig(), Times.Once);
-        Assert.True(session.Database.Settings.BlockInputInjection);
-        Assert.Equal(1, tray.UpdateDatabaseCount);
-        blocker.Verify(
-            b => b.UpdateExemptedSids(It.Is<IReadOnlyCollection<string>>(sids =>
-                sids.Count == 1 && sids.Contains("S-1-5-21-100"))),
-            Times.Exactly(2));
     }
 
     private sealed class RecordingMainFormTarget : IMainFormDataRefreshTarget, IMainFormLockTarget
@@ -261,11 +221,16 @@ public class StartupEventWirerTests
         public event Action? ShowWindowRequested;
         public event Action? ShowWindowUnlockedRequested;
         public event Action? WindowlessUnlockCompleted;
-        public event Func<bool>? WindowsHelloUnavailableConfirmRequested;
-        public event Func<bool>? WindowsHelloFailedConfirmRequested;
         public void RaiseShowWindowRequested() => ShowWindowRequested?.Invoke();
         public void RaiseShowWindowUnlockedRequested() => ShowWindowUnlockedRequested?.Invoke();
         public void RaiseWindowlessUnlockCompleted() => WindowlessUnlockCompleted?.Invoke();
+    }
+
+    private sealed class RecordingWindowsHelloPinFallbackPromptEventSource : IWindowsHelloPinFallbackPromptEventSource
+    {
+        public event Func<bool>? WindowsHelloUnavailableConfirmRequested;
+        public event Func<bool>? WindowsHelloFailedConfirmRequested;
+
         public bool RaiseWindowsHelloUnavailableConfirmRequested() =>
             WindowsHelloUnavailableConfirmRequested?.Invoke() ?? false;
         public bool RaiseWindowsHelloFailedConfirmRequested() =>
@@ -312,22 +277,4 @@ public class StartupEventWirerTests
         public void RaiseDragBridgeSettingsChanged() => DragBridgeSettingsChanged?.Invoke();
     }
 
-    private sealed class RecordingInputInjectionTraySink : IInputInjectionTraySink
-    {
-        private Action? _inputInjectionToggleRequested;
-        public int UpdateDatabaseCount { get; private set; }
-
-        public event Action? InputInjectionToggleRequested
-        {
-            add => _inputInjectionToggleRequested += value;
-            remove => _inputInjectionToggleRequested -= value;
-        }
-
-        public void RaiseInputInjectionToggleRequested() => _inputInjectionToggleRequested?.Invoke();
-
-        public void UpdateDatabase(CredentialStore credentialStore)
-        {
-            UpdateDatabaseCount++;
-        }
-    }
 }

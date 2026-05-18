@@ -26,17 +26,17 @@ internal sealed class ShortcutTraversalScanner(IShortcutComHelper shortcutHelper
 
             foreach (var lnk in files)
             {
-                ShortcutInfo info;
+                ShortcutDefinition info;
                 try
                 {
-                    info = shortcutHelper.GetShortcutTargetAndArgs(lnk);
+                    info = shortcutHelper.GetShortcutDefinition(lnk);
                 }
                 catch
                 {
                     continue;
                 }
 
-                yield return new ShortcutTraversalEntry(lnk, info.Target, info.Arguments);
+                yield return new ShortcutTraversalEntry(lnk, info.TargetPath, info.Arguments);
             }
         }
     }

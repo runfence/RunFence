@@ -14,7 +14,7 @@ public interface IAccountCredentialManager
     /// </summary>
     Guid? StoreCreatedUserCredential(
         string sid, ProtectedString password,
-        CredentialStore credStore, ProtectedBuffer pinKey);
+        CredentialStore credStore, ISecureSecretSnapshotSource pinKey);
 
     /// <summary>
     /// Adds a new credential from the credential edit dialog fields.
@@ -22,9 +22,9 @@ public interface IAccountCredentialManager
     /// </summary>
     (bool Success, Guid? CredentialId, string? Error) AddNewCredential(
         string sid, ProtectedString? password,
-        CredentialStore credStore, ProtectedBuffer pinKey);
+        CredentialStore credStore, ISecureSecretSnapshotSource pinKey);
 
-    void UpdateCredentialPassword(CredentialEntry credEntry, ProtectedString password, ProtectedBuffer pinKey);
+    void UpdateCredentialPassword(CredentialEntry credEntry, ProtectedString password, ISecureSecretSnapshotSource pinKey);
 
     void RemoveCredential(Guid credentialId, CredentialStore credStore);
 
@@ -38,6 +38,6 @@ public interface IAccountCredentialManager
     /// (e.g. Task Scheduler registration).
     /// </summary>
     bool TryDecryptStoredPassword(
-        string accountSid, CredentialStore credStore, ProtectedBuffer pinKey,
+        string accountSid, CredentialStore credStore, ISecureSecretSnapshotSource pinKey,
         out ProtectedString? password);
 }

@@ -7,6 +7,6 @@ public interface IAccountConfigMigrationService
 {
     bool TargetHasExistingData(string targetSid);
     void MigrateToAccount(CredentialStore store, string targetSid,
-        ProtectedString targetPassword, byte[] currentPinKey);
+        ProtectedString targetPassword, ISecureSecretSnapshotSource currentPinKey);
     void DeleteCurrentAccountData();
 }

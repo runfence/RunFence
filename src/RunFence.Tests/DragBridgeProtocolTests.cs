@@ -1,6 +1,7 @@
 using System.IO.Pipes;
 using System.Text;
 using RunFence.Core.Ipc;
+using RunFence.DragBridge;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -229,5 +230,83 @@ public class DragBridgeProtocolTests
 
         Assert.Equal(data1.FilePaths, r1!.FilePaths);
         Assert.Equal(data2.FilePaths, r2!.FilePaths);
+    }
+
+    [Fact]
+    public async Task PipeClient_SendDropAsync_FailedWrite_DoesNotRaiseDropSent()
+    {
+        await using var client = new NamedPipeClientStream(".", $"TestDragBridge_SendDropFail_{Guid.NewGuid():N}",
+            PipeDirection.InOut, PipeOptions.Asynchronous);
+
+        using var pipeClient = new DragBridgePipeClient(client);
+        var dropSentRaised = false;
+        pipeClient.DropSent += _ => dropSentRaised = true;
+
+        var result = await pipeClient.SendDropAsync([@"C:\file.txt"]);
+
+        Assert.False(result.Succeeded);
+        Assert.False(dropSentRaised);
+    }
+
+    [Fact]
+    public async Task PipeClient_SendDropAsync_Success_RaisesDropSent()
+    {
+        var pipeName = $"TestDragBridge_SendDropOk_{Guid.NewGuid():N}";
+        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024);
+        await using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+
+        var serverTask = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync();
+            var request = await DragBridgeProtocol.ReadAsync(server);
+            Assert.Equal([@"C:\file.txt"], request!.FilePaths);
+        });
+
+        await client.ConnectAsync(5000);
+
+        using var pipeClient = new DragBridgePipeClient(client);
+        List<string>? droppedFiles = null;
+        pipeClient.DropSent += files => droppedFiles = files;
+
+        var result = await pipeClient.SendDropAsync([@"C:\file.txt"]);
+        await serverTask;
+
+        Assert.True(result.Succeeded);
+        Assert.Equal([@"C:\file.txt"], droppedFiles);
+    }
+
+    [Fact]
+    public async Task PipeClient_ReceiveAndRunAsync_RaisesInitialFilesWithoutUiHandleDependency()
+    {
+        var pipeName = $"TestDragBridge_Receive_{Guid.NewGuid():N}";
+        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024);
+        await using var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+
+        var serverTask = Task.Run(async () =>
+        {
+            await server.WaitForConnectionAsync();
+            await DragBridgeProtocol.WriteAsync(server,
+                new DragBridgeData { FilePaths = [@"C:\one.txt"], FilesResolved = true });
+            server.Dispose();
+        });
+
+        await client.ConnectAsync(5000);
+
+        using var pipeClient = new DragBridgePipeClient(client);
+        List<string>? receivedFiles = null;
+        bool? receivedResolved = null;
+        pipeClient.InitialFilesReceived += (files, resolved) =>
+        {
+            receivedFiles = files;
+            receivedResolved = resolved;
+        };
+
+        await pipeClient.ReceiveAndRunAsync();
+        await serverTask;
+
+        Assert.Equal([@"C:\one.txt"], receivedFiles);
+        Assert.True(receivedResolved);
     }
 }

@@ -1,6 +1,7 @@
 using Moq;
 using RunFence.Acl;
 using RunFence.Core;
+using RunFence.Infrastructure;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -16,10 +17,11 @@ namespace RunFence.Tests;
 public class AclManagerScanServiceTests
 {
     private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<ISessionSaver> _sessionSaver = new();
     private readonly Mock<ILoggingService> _log = new();
 
     private AclManagerScanService CreateService() =>
-        new(_pathGrantService.Object, _log.Object);
+        new(_pathGrantService.Object, () => _sessionSaver.Object, _log.Object);
 
     [Fact]
     public async Task ScanAsync_EmptyFolder_CallsUpdateFromPathForRootAndAncestors()
@@ -87,6 +89,23 @@ public class AclManagerScanServiceTests
         var updated = await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
 
         Assert.True(updated > 0);
+        _sessionSaver.Verify(s => s.SaveConfig(), Times.Once);
+    }
+
+    [Fact]
+    public async Task ScanAsync_NoTrackedChanges_DoesNotSaveConfig()
+    {
+        using var tempDir = new TempDirectory("rftest_scan");
+        _pathGrantService.Setup(s => s.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()))
+            .Returns(false);
+
+        var service = CreateService();
+        var progress = new Progress<long>();
+
+        var updated = await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
+
+        Assert.Equal(0, updated);
+        _sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
     }
 
     [Fact]
@@ -137,6 +156,20 @@ public class AclManagerScanServiceTests
         await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
 
         Assert.NotEmpty(reported);
+    }
+
+    [Fact]
+    public async Task ScanAsync_WhenAnyPathFails_ThrowsIOException()
+    {
+        using var tempDir = new TempDirectory("rftest_scan");
+        _pathGrantService.Setup(s => s.UpdateFromPath(tempDir.Path, It.IsAny<string?>()))
+            .Throws(new UnauthorizedAccessException("denied"));
+
+        var service = CreateService();
+        var progress = new Progress<long>();
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None));
     }
 
     private sealed class SynchronousProgress<T>(Action<T> callback) : IProgress<T>

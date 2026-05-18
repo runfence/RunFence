@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using RunFence.Core.Infrastructure;
 using RunFence.Infrastructure;
 using RunFence.UI;
 

@@ -110,6 +110,50 @@ public class ClipboardPasteInterceptServiceTests : IDisposable
     }
 
     [Fact]
+    public void HookCallback_RestrictedTarget_InjectionFails_DoesNotSendSyntheticPaste()
+    {
+        _keyboard.DownKeys.Add(VK_CONTROL);
+        _targetResolver.Resolution = ClipboardPasteTargetResolution.Intercept(new ClipboardPasteTarget((IntPtr)100, 10, 10, 20));
+        _clipboard.Formats = [new ClipboardFormatData(13, [1])];
+        _injector.ShouldInjectSucceed = false;
+
+        var result = InvokeHook(WM_KEYDOWN, VK_V, flags: 0, extraInfo: 0);
+
+        Assert.Equal((IntPtr)1, result);
+        Assert.Equal(1, _injector.Calls);
+        Assert.Equal(0, _synthetic.Calls);
+    }
+
+    [Fact]
+    public void HookCallback_RestrictedTarget_ReadThrows_DoesNotSendSyntheticPaste()
+    {
+        _keyboard.DownKeys.Add(VK_CONTROL);
+        _targetResolver.Resolution = ClipboardPasteTargetResolution.Intercept(new ClipboardPasteTarget((IntPtr)100, 10, 10, 20));
+        _clipboard.ThrowOnRead = true;
+
+        var result = InvokeHook(WM_KEYDOWN, VK_V, flags: 0, extraInfo: 0);
+
+        Assert.Equal((IntPtr)1, result);
+        Assert.Equal(1, _clipboard.ReadCalls);
+        Assert.Equal(0, _synthetic.Calls);
+    }
+
+    [Fact]
+    public void HookCallback_RestrictedTarget_ScheduleThrows_DoesNotSendSyntheticPaste()
+    {
+        _keyboard.DownKeys.Add(VK_CONTROL);
+        _targetResolver.Resolution = ClipboardPasteTargetResolution.Intercept(new ClipboardPasteTarget((IntPtr)100, 10, 10, 20));
+        _workScheduler.ThrowOnRun = true;
+
+        var result = InvokeHook(WM_KEYDOWN, VK_V, flags: 0, extraInfo: 0);
+
+        Assert.Equal((IntPtr)1, result);
+        Assert.Equal(1, _workScheduler.RunCalls);
+        Assert.Equal(0, _synthetic.Calls);
+        Assert.Equal(0, _clipboard.ReadCalls);
+    }
+
+    [Fact]
     public void HookCallback_NonRestrictedTarget_PassesThroughAndStartsNoBackgroundWork()
     {
         _keyboard.DownKeys.Add(VK_CONTROL);
@@ -300,10 +344,13 @@ public class ClipboardPasteInterceptServiceTests : IDisposable
     {
         public int ReadCalls { get; private set; }
         public IReadOnlyList<ClipboardFormatData> Formats { get; set; } = [];
+        public bool ThrowOnRead { get; set; }
         public IntPtr GetClipboardOwnerWindow() => IntPtr.Zero;
         public IReadOnlyList<ClipboardFormatData> ReadGlobalMemoryFormats()
         {
             ReadCalls++;
+            if (ThrowOnRead)
+                throw new InvalidOperationException("read failed");
             return Formats;
         }
     }
@@ -312,11 +359,12 @@ public class ClipboardPasteInterceptServiceTests : IDisposable
     {
         public int Calls { get; private set; }
         public int LastTargetProcessId { get; private set; }
+        public bool ShouldInjectSucceed { get; set; } = true;
         public bool TryInjectClipboardData(int targetProcessId, IntPtr hWnd, IReadOnlyList<ClipboardFormatData> formats)
         {
             Calls++;
             LastTargetProcessId = targetProcessId;
-            return true;
+            return ShouldInjectSucceed;
         }
     }
 
@@ -335,10 +383,13 @@ public class ClipboardPasteInterceptServiceTests : IDisposable
     {
         public int RunCalls { get; private set; }
         public bool RunInline { get; set; }
+        public bool ThrowOnRun { get; set; }
 
         public void Run(Action action)
         {
             RunCalls++;
+            if (ThrowOnRun)
+                throw new InvalidOperationException("schedule failed");
             if (RunInline)
                 action();
         }

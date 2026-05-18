@@ -1,10 +1,13 @@
 using System.Security.AccessControl;
+using System.Security.Principal;
 using Moq;
 using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
 using RunFence.Acl.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 using Xunit;
 
@@ -54,7 +57,8 @@ public class TraverseAutoManagerTests
             aclPermission ?? _defaultAclPermission.Object,
             dbProvider,
             new GrantTraversePathResolver(_pathInfo),
-            _pathInfo);
+            _pathInfo,
+            new TraverseGrantOwnerResolver());
         mgr.Initialize(pending, sid, groupSids ?? []);
         return mgr;
     }
@@ -136,13 +140,31 @@ public class TraverseAutoManagerTests
     public void AutoAdd_SpecificContainerSharedTraverseAlreadyTracked_DoesNotAddAgain()
     {
         var db = MakeDatabase();
-        db.SharedContainerTraverseGrants.Add(TraverseEntry(AppDir));
+        db.GetOrCreateAccount(AclHelper.AllApplicationPackagesSid).Grants.Add(TraverseEntry(AppDir));
         var pending = new AclManagerPendingChanges();
         var mgr = CreateManager(pending, db, sid: ContainerSid);
 
         mgr.AutoAddTraverseIfMissing(AppDir);
 
         Assert.False(pending.IsPendingTraverseAdd(AppDir));
+    }
+
+    [Fact]
+    public void AutoAdd_SpecificContainerOtherTrackedSharedTraverse_AddsCurrentContainerIntent()
+    {
+        var db = MakeDatabase();
+        db.GetOrCreateAccount(AclHelper.AllApplicationPackagesSid).Grants.Add(new GrantedPathEntry
+        {
+            Path = AppDir,
+            IsTraverseOnly = true,
+            SourceSids = ["S-1-15-2-99-1-2-3-4-5-7"]
+        });
+        var pending = new AclManagerPendingChanges();
+        var mgr = CreateManager(pending, db, sid: ContainerSid);
+
+        mgr.AutoAddTraverseIfMissing(AppDir);
+
+        Assert.True(pending.IsPendingTraverseAdd(AppDir));
     }
 
     // --- AutoRemoveTraverseIfUnneeded ---
@@ -163,11 +185,26 @@ public class TraverseAutoManagerTests
     }
 
     [Fact]
-    public void AutoRemove_SpecificContainerSharedTraverseNoOtherGrantsDependOnPath_SchedulesRemoval()
+    public void AutoRemove_SpecificContainerManualSharedTraverseNoOtherGrantsDependOnPath_DoesNotScheduleRemoval()
     {
         var db = MakeDatabase();
         var sharedEntry = TraverseEntry(AppDir);
-        db.SharedContainerTraverseGrants.Add(sharedEntry);
+        db.GetOrCreateAccount(AclHelper.AllApplicationPackagesSid).Grants.Add(sharedEntry);
+        var pending = new AclManagerPendingChanges();
+        var mgr = CreateManager(pending, db, sid: ContainerSid);
+
+        mgr.AutoRemoveTraverseIfUnneeded(AppDir);
+
+        Assert.False(pending.IsPendingTraverseRemove(AppDir));
+    }
+
+    [Fact]
+    public void AutoRemove_SpecificContainerTrackedSharedTraverseNoOtherGrantsDependOnPath_SchedulesRemoval()
+    {
+        var db = MakeDatabase();
+        var sharedEntry = TraverseEntry(AppDir);
+        sharedEntry.SourceSids = [ContainerSid];
+        db.GetOrCreateAccount(AclHelper.AllApplicationPackagesSid).Grants.Add(sharedEntry);
         var pending = new AclManagerPendingChanges();
         var mgr = CreateManager(pending, db, sid: ContainerSid);
 
@@ -175,6 +212,24 @@ public class TraverseAutoManagerTests
 
         Assert.True(pending.PendingTraverseRemoves.TryGetValue(AppDir, out var queued));
         Assert.Same(sharedEntry, queued);
+    }
+
+    [Fact]
+    public void AutoRemove_SpecificContainerOtherTrackedSharedTraverse_DoesNotScheduleRemoval()
+    {
+        var db = MakeDatabase();
+        db.GetOrCreateAccount(AclHelper.AllApplicationPackagesSid).Grants.Add(new GrantedPathEntry
+        {
+            Path = AppDir,
+            IsTraverseOnly = true,
+            SourceSids = ["S-1-15-2-99-1-2-3-4-5-7"]
+        });
+        var pending = new AclManagerPendingChanges();
+        var mgr = CreateManager(pending, db, sid: ContainerSid);
+
+        mgr.AutoRemoveTraverseIfUnneeded(AppDir);
+
+        Assert.False(pending.IsPendingTraverseRemove(AppDir));
     }
 
     [Fact]
@@ -527,4 +582,78 @@ public class TraverseAutoManagerTests
         Assert.NotNull(capturedGroupSids);
         Assert.Contains("S-1-5-32-545", capturedGroupSids!);
     }
+
+    [Fact]
+    public void AutoAdd_RealAclEvaluation_GroupAllowButUserDeny_AddsTraverse()
+    {
+        const string traversePath = @"C:\Existing\TraverseConflict";
+        var security = CreateDirectorySecurity(
+            allowSids: [("S-1-1-0", TraverseRightsHelper.TraverseRights)],
+            denySids: [(Sid, TraverseRightsHelper.TraverseRights)]);
+        _pathInfo.AddDirectory(traversePath, security);
+
+        var aclPermission = CreateRealAclPermissionService();
+        var pending = new AclManagerPendingChanges();
+        var mgr = CreateManager(pending, MakeDatabase(), aclPermission, groupSids: ["S-1-1-0"]);
+
+        mgr.AutoAddTraverseIfMissing(traversePath);
+
+        Assert.True(pending.IsPendingTraverseAdd(traversePath));
+    }
+
+    [Fact]
+    public void AutoAdd_RealAclEvaluation_DirectNonTraverseAllow_SkipsTraverse()
+    {
+        const string traversePath = @"C:\Existing\TraverseCovered";
+        var security = CreateDirectorySecurity(
+            allowSids: [(Sid, FileSystemRights.ReadAndExecute)]);
+        _pathInfo.AddDirectory(traversePath, security);
+
+        var aclPermission = CreateRealAclPermissionService();
+        var pending = new AclManagerPendingChanges();
+        var mgr = CreateManager(pending, MakeDatabase(), aclPermission, groupSids: ["S-1-1-0"]);
+
+        mgr.AutoAddTraverseIfMissing(traversePath);
+
+        Assert.False(pending.IsPendingTraverseAdd(traversePath));
+    }
+
+    private static IAclPermissionService CreateRealAclPermissionService()
+        => new AclPermissionService(
+            new NTTranslateApi(new Mock<ILoggingService>().Object),
+            new GroupMembershipApi(new Mock<ILoggingService>().Object),
+            new Mock<ILocalGroupQueryService>().Object,
+            AclAccessorFactory.Create(),
+            new DeterministicAclAccessEvaluator());
+
+    private static DirectorySecurity CreateDirectorySecurity(
+        IEnumerable<(string Sid, FileSystemRights Rights)>? allowSids = null,
+        IEnumerable<(string Sid, FileSystemRights Rights)>? denySids = null)
+    {
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+        foreach (var (sid, rights) in allowSids ?? [])
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(sid),
+                rights,
+                InheritanceFlags.None,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        }
+
+        foreach (var (sid, rights) in denySids ?? [])
+        {
+            security.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(sid),
+                rights,
+                InheritanceFlags.None,
+                PropagationFlags.None,
+                AccessControlType.Deny));
+        }
+
+        return security;
+    }
 }
+

@@ -26,6 +26,9 @@ public class DragBridgeProcessLauncher(
     private string? _currentSid;
     private string? _interactiveSid;
     private CredentialStore? _credentialStore;
+    private AppDatabase? _database;
+    private bool _activeLaunchRequiresLowIntegrityPipe;
+    private string? _activeLaunchAppContainerSid;
 
     // Active operation tracking for concurrent instance guard
     private volatile ProcessInfo? _activeProcess;
@@ -33,6 +36,7 @@ public class DragBridgeProcessLauncher(
 
     public void SetData(SessionContext session)
     {
+        _database = session.Database;
         _credentialStore = session.CredentialStore;
         _currentSid = SidResolutionHelper.GetCurrentUserSid();
         _interactiveSid = NativeTokenHelper.TryGetInteractiveUserSid()?.Value;
@@ -60,12 +64,16 @@ public class DragBridgeProcessLauncher(
     public NamedPipeServerStream CreatePipeServer(
         string pipeName,
         SecurityIdentifier targetUserSid,
+        SecurityIdentifier? targetAppContainerSid,
         bool allowLowIntegrityClient)
     {
         var pipeSecurity = new PipeSecurity();
         var adminSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
         pipeSecurity.AddAccessRule(new PipeAccessRule(adminSid, PipeAccessRights.FullControl, AccessControlType.Allow));
+        AdminOperationMockAccessHelper.AddCurrentProcessPipeAccess(pipeSecurity, PipeAccessRights.FullControl);
         pipeSecurity.AddAccessRule(new PipeAccessRule(targetUserSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
+        if (targetAppContainerSid != null)
+            pipeSecurity.AddAccessRule(new PipeAccessRule(targetAppContainerSid, PipeAccessRights.ReadWrite, AccessControlType.Allow));
         var networkSid = new SecurityIdentifier(WellKnownSidType.NetworkSid, null);
         pipeSecurity.AddAccessRule(new PipeAccessRule(networkSid, PipeAccessRights.FullControl, AccessControlType.Deny));
 
@@ -89,9 +97,34 @@ public class DragBridgeProcessLauncher(
     {
         var sid = ownerInfo.Sid;
         var privilegeLevel = DragBridgeLaunchPolicy.ResolvePrivilegeLevel(ownerInfo);
+        _activeLaunchRequiresLowIntegrityPipe = DragBridgeLaunchPolicy.RequiresLowIntegrityPipe(ownerInfo);
+        _activeLaunchAppContainerSid = ownerInfo.AppContainerSid?.Value;
         ProcessInfo? process;
 
-        if (_currentSid != null && string.Equals(sid.Value, _currentSid, StringComparison.OrdinalIgnoreCase))
+        if (ownerInfo.AppContainerSid != null)
+        {
+            var appContainerEntry = _database?.AppContainers.FirstOrDefault(entry =>
+                string.Equals(entry.Sid, ownerInfo.AppContainerSid.Value, StringComparison.OrdinalIgnoreCase));
+            if (appContainerEntry == null)
+            {
+                uiThreadInvoker.Invoke(() => notifications.ShowWarning(
+                    "Drag Bridge",
+                    "This app container is not available in the current configuration."));
+                return null;
+            }
+
+            try
+            {
+                process = launcher.LaunchAppContainer(_dragBridgeExePath, appContainerEntry, args);
+            }
+            catch (Exception ex)
+            {
+                log.Error("DragBridgeService: app container launch failed", ex);
+                uiThreadInvoker.Invoke(() => notifications.ShowError("Drag Bridge", "Failed to launch drag bridge process."));
+                return null;
+            }
+        }
+        else if (_currentSid != null && string.Equals(sid.Value, _currentSid, StringComparison.OrdinalIgnoreCase))
         {
             process = launcher.LaunchDirect(_dragBridgeExePath, args, privilegeLevel);
             if (process == null)
@@ -157,6 +190,17 @@ public class DragBridgeProcessLauncher(
             if (!string.Equals(sb.ToString(), _dragBridgeExePath, StringComparison.OrdinalIgnoreCase))
                 return false;
 
+            var clientAppContainerSid = ProcessNative.GetTokenSid(handle.DangerousGetHandle(), ProcessNative.TokenAppContainerSid);
+            if (!string.Equals(clientAppContainerSid, _activeLaunchAppContainerSid, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (_activeLaunchRequiresLowIntegrityPipe)
+            {
+                var integrityLevel = NativeTokenHelper.TryGetProcessIntegrityLevel(clientPid);
+                if (integrityLevel == null || integrityLevel > NativeTokenHelper.MandatoryLevelLow)
+                    return false;
+            }
+
             // For direct launches (where we hold a process handle), additionally confirm the PID matches.
             if (expectedProcess != null)
                 return clientPid == (uint)expectedProcess.Id;
@@ -169,7 +213,15 @@ public class DragBridgeProcessLauncher(
         }
     }
 
-    public void SetActiveProcess(ProcessInfo? process) => _activeProcess = process;
+    public void SetActiveProcess(ProcessInfo? process)
+    {
+        _activeProcess = process;
+        if (process == null)
+        {
+            _activeLaunchRequiresLowIntegrityPipe = false;
+            _activeLaunchAppContainerSid = null;
+        }
+    }
 
     public void KillProcess(ProcessInfo? process)
     {

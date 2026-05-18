@@ -2,13 +2,13 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Groups.UI.Forms;
 
-public partial class CreateGroupDialog : Form
+public partial class CreateGroupDialog : RunFence.UI.Forms.ContextHelpForm
 {
-    private readonly ILocalGroupMembershipService _groupMembership;
+    private readonly ILocalGroupMutationService _groupMembership;
 
     public string? CreatedGroupSid { get; private set; }
 
-    internal CreateGroupDialog(ILocalGroupMembershipService groupMembership)
+    internal CreateGroupDialog(ILocalGroupMutationService groupMembership)
     {
         _groupMembership = groupMembership;
         InitializeComponent();

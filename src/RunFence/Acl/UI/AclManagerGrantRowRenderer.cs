@@ -185,18 +185,7 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
     {
         var key = (entry.Path, entry.IsDeny);
         if (!_pending.PendingAdds.ContainsKey(key))
-        {
-            bool wasIsDeny = _pending.PendingModifications.TryGetValue(key, out var existingMod)
-                ? existingMod.WasIsDeny
-                : entry.IsDeny;
-            bool newIsDeny = existingMod?.NewIsDeny ?? entry.IsDeny;
-            bool wasOwn = existingMod?.WasOwn ?? entry.SavedRights?.Own == true;
-            // NewRights: preserve existing pending rights if any, otherwise use the DB entry's saved rights.
-            var newRights = existingMod?.NewRights ?? entry.SavedRights;
-            _pending.PendingModifications[key] = new PendingModification(
-                entry, WasIsDeny: wasIsDeny, WasOwn: wasOwn,
-                NewIsDeny: newIsDeny, NewRights: newRights);
-        }
+            _pending.PendingGrantFixes[key] = entry;
 
         SetPendingRowColor(row);
         FixableEntries.Remove(entry);
@@ -240,6 +229,7 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
             return new GrantRightsState(
                 RightCheckState.Unchecked, RightCheckState.Unchecked, RightCheckState.Unchecked,
                 RightCheckState.Unchecked, RightCheckState.Unchecked, RightCheckState.Unchecked, RightCheckState.Unchecked,
+                RightCheckState.Unchecked, RightCheckState.Unchecked,
                 RightCheckState.Unchecked, false, 0, 0);
         }
     }
@@ -293,6 +283,7 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
             return new GrantRightsState(
                 RightCheckState.Unchecked, RightCheckState.Unchecked, RightCheckState.Unchecked,
                 RightCheckState.Unchecked, RightCheckState.Unchecked, RightCheckState.Unchecked, RightCheckState.Unchecked,
+                RightCheckState.Unchecked, RightCheckState.Unchecked,
                 RightCheckState.Unchecked, false, 1, 0);
 
         if (!isDeny)
@@ -305,6 +296,8 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
                 DenyExecute: RightCheckState.Unchecked,
                 DenyWrite: RightCheckState.Unchecked,
                 DenySpecial: RightCheckState.Unchecked,
+                TraverseOnlyAllow: RightCheckState.Unchecked,
+                TraverseOnlyDeny: RightCheckState.Unchecked,
                 IsAccountOwner: s.Own ? RightCheckState.Checked : RightCheckState.Unchecked,
                 IsAdminOwner: false,
                 DirectAllowAceCount: 1,
@@ -319,6 +312,8 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
             DenyExecute: s.Execute ? RightCheckState.Checked : RightCheckState.Unchecked,
             DenyWrite: RightCheckState.Checked,
             DenySpecial: RightCheckState.Checked,
+            TraverseOnlyAllow: RightCheckState.Unchecked,
+            TraverseOnlyDeny: RightCheckState.Unchecked,
             IsAccountOwner: RightCheckState.Unchecked,
             IsAdminOwner: s.Own,
             DirectAllowAceCount: 0,

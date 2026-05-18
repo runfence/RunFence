@@ -1,3 +1,4 @@
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.Persistence;
@@ -11,12 +12,14 @@ public enum ConfigIntegrityResult
 
 public interface IDatabaseService : IConfigRepository, ICredentialRepository
 {
-    AppConfig LoadAppConfig(string configPath, byte[] pinDerivedKey);
-    void SaveAppConfig(AppConfig config, string configPath, byte[] pinDerivedKey, byte[] argonSalt);
-
+    AppDatabase LoadConfigFromPath(string configPath, ISecureSecretSnapshotSource pinDerivedKey);
+    CredentialStore LoadCredentialStoreFromPath(string credentialStorePath);
+    AppConfig LoadAppConfigFromPath(string configPath, ISecureSecretSnapshotSource pinDerivedKey);
+    void SaveAppConfig(AppConfig config, string configPath, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt);
     void SaveCredentialStoreAndAllConfigs(CredentialStore store, AppDatabase database,
-        byte[] pinDerivedKey, List<(string path, AppConfig config)> additionalConfigs);
-
+        ISecureSecretSnapshotSource pinDerivedKey, List<(string path, AppConfig config)> additionalConfigs);
     byte[]? TryGetConfigSalt();
+    byte[]? TryGetConfigSaltFromPath(string configPath);
     byte[]? TryGetAppConfigSalt(string configPath);
+    byte[]? TryGetAppConfigSaltFromPath(string configPath);
 }

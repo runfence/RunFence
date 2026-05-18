@@ -1,5 +1,3 @@
-using RunFence.Core.Models;
-
 namespace RunFence.Account.UI;
 
 /// <summary>
@@ -11,10 +9,10 @@ public class AccountSidMigrationLauncher(AccountMigrationOrchestrator migrationO
     /// <summary>
     /// Opens the SID migration dialog and returns <c>true</c> if a migration was applied.
     /// </summary>
-    public bool LaunchMigrationDialog(SessionContext session, IWin32Window? owner, Action onMigrationApplied)
+    public bool LaunchMigrationDialog(IWin32Window? owner, Action onMigrationApplied)
     {
         bool applied = false;
-        migrationOrchestrator.MigrateSids(session, owner as Form, () =>
+        migrationOrchestrator.MigrateSids(owner as Form, () =>
         {
             applied = true;
             onMigrationApplied();

@@ -54,7 +54,6 @@ partial class OptionsPanel
     private TableLayoutPanel _mainFillPanel;
     private GroupBox _firewallGroup;
     private CheckBox _blockIcmpCheckBox;
-    private ToolTip _blockIcmpCheckBoxTooltip;
     private Panel _spacer1;
     private Panel _spacer2;
     private Panel _spacer3;
@@ -70,7 +69,6 @@ partial class OptionsPanel
         {
             _settingsHandler?.FlushPendingSave(SaveSettings);
             _tooltip?.Dispose();
-            _blockIcmpCheckBoxTooltip?.Dispose();
             components?.Dispose();
         }
         base.Dispose(disposing);
@@ -127,7 +125,6 @@ partial class OptionsPanel
         _spacer1 = new Panel();
         _spacer2 = new Panel();
         _spacer3 = new Panel();
-        _blockIcmpCheckBoxTooltip = new ToolTip();
         _folderBrowserExePanel = new TableLayoutPanel();
         _folderBrowserArgsPanel = new TableLayoutPanel();
         _desktopSettingsPathPanel = new TableLayoutPanel();

@@ -3,8 +3,6 @@ using System.Runtime.InteropServices;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Launching.Environment;
-using RunFence.Launching.Resolution;
 
 namespace RunFence.Launch.Tokens;
 
@@ -12,22 +10,15 @@ public class CreateProcessLauncherHelper(
     ILoggingService log,
     IElevatedLinkedTokenProvider elevatedLinkedTokenProvider,
     ISaferDeElevationHelper saferDeElevationHelper,
+    ITokenIntegrityLevelService tokenIntegrityLevelService,
     IProcessJobManager processJobManager,
     IJobKeeperService jobKeeperService,
     IRestrictedJobLaunchCoordinator restrictedJobLaunchCoordinator,
-    IExecutablePathResolver executablePathResolver)
-    : ICreateProcessLauncherHelper, IRestrictedJobProcessLauncher
+    IPreparedTokenProcessLauncher preparedTokenProcessLauncher,
+    IProfileKeeperBootstrapContext profileKeeperBootstrapContext,
+    string profileKeeperExePath)
+    : ICreateProcessLauncherHelper
 {
-    private static readonly string[] PrivilegesToDisable =
-    [
-        TokenPrivilegeHelper.SeBackupPrivilege,
-        TokenPrivilegeHelper.SeRestorePrivilege,
-        TokenPrivilegeHelper.SeTakeOwnershipPrivilege,
-        TokenPrivilegeHelper.SeDebugPrivilege,
-        TokenPrivilegeHelper.SeIncreaseQuotaPrivilege,
-        TokenPrivilegeHelper.SeRelabelPrivilege,
-    ];
-
     public ProcessInfo LaunchUsingAcquiredToken(IntPtr hToken, ProcessLaunchTarget psi, AccountLaunchIdentity identity)
     {
         var tokenSource = identity.Credentials!.Value.TokenSource;
@@ -36,10 +27,20 @@ public class CreateProcessLauncherHelper(
         // Fast path: if a job keeper is already active for this SID/IL, bypass token preparation
         // and delegate directly to the keeper. The keeper inherits all token properties from when
         // it was seeded (DACL, privileges, IL) so children automatically get the right setup.
-        bool useJobKeeper = privilegeLevel is PrivilegeLevel.Basic or PrivilegeLevel.LowIntegrity;
+        bool useJobKeeper = privilegeLevel is PrivilegeLevel.Isolated or PrivilegeLevel.LowIntegrity;
         bool isLow = privilegeLevel == PrivilegeLevel.LowIntegrity;
         if (useJobKeeper && jobKeeperService.HasJobKeeper(identity.Sid, isLow))
-            return restrictedJobLaunchCoordinator.LaunchViaJobKeeper(identity.Sid, isLow, psi);
+        {
+            try
+            {
+                return restrictedJobLaunchCoordinator.LaunchViaJobKeeper(identity.Sid, isLow, psi);
+            }
+            catch (StaleJobKeeperException ex) when (string.Equals(ex.Sid, identity.Sid, StringComparison.Ordinal))
+            {
+                log.Warn(
+                    $"LaunchUsingAcquiredToken: existing JobKeeper fast path failed for {identity.Sid} (isLow={isLow}), reseeding in same attempt: {ex.Message}");
+            }
+        }
 
         IntPtr hDupToken = IntPtr.Zero;
         IntPtr hLinkedToken = IntPtr.Zero;
@@ -87,11 +88,12 @@ public class CreateProcessLauncherHelper(
                         log.Info("LaunchUsingAcquiredToken: EnableAllPresentPrivilegesOnToken for SYSTEM");
                         TokenPrivilegeHelper.EnableAllPresentPrivilegesOnToken(hDupToken);
                     }
-                    pi = LaunchWithTokenCore(hDupToken, psi, tokenSource, identity.Sid);
+
+                    pi = preparedTokenProcessLauncher.LaunchWithPreparedToken(hDupToken, psi, tokenSource, identity.Sid);
                     break;
                 }
+                case PrivilegeLevel.Isolated:
                 case PrivilegeLevel.Basic:
-                case PrivilegeLevel.AboveBasic:
                 case PrivilegeLevel.LowIntegrity:
                 {
                     var integrityLabel = isLow ? "low" : "medium";
@@ -112,7 +114,7 @@ public class CreateProcessLauncherHelper(
                         }
                         else
                         {
-                            log.Info("LaunchUsingAcquiredToken: No linked token — will use SaferDeElevation");
+                            log.Info("LaunchUsingAcquiredToken: No linked token - will use SaferDeElevation");
                         }
 
                         log.Info("LaunchUsingAcquiredToken: DuplicateToken");
@@ -121,16 +123,16 @@ public class CreateProcessLauncherHelper(
                         var effectiveToken = hDupToken;
                         if (!hasLinkedToken)
                         {
-                            log.Info($"LaunchUsingAcquiredToken: no linked token — using SaferDeElevation, IL={integrityLabel}");
+                            log.Info($"LaunchUsingAcquiredToken: no linked token - using SaferDeElevation, IL={integrityLabel}");
                             hRestrictedToken = saferDeElevationHelper.CreateDeElevatedToken(hDupToken);
                             effectiveToken = hRestrictedToken;
                         }
 
                         log.Info($"LaunchUsingAcquiredToken: set integrity to {integrityLabel}");
                         if (isLow)
-                            NativeTokenAcquisition.SetLowIntegrityOnToken(effectiveToken, out pIntegritySid, out tmlBuffer);
+                            tokenIntegrityLevelService.SetLowIntegrity(effectiveToken, out pIntegritySid, out tmlBuffer);
                         else
-                            NativeTokenAcquisition.SetMediumIntegrityOnToken(effectiveToken, out pIntegritySid, out tmlBuffer);
+                            tokenIntegrityLevelService.SetMediumIntegrity(effectiveToken, out pIntegritySid, out tmlBuffer);
 
                         if (useJobKeeper)
                         {
@@ -138,7 +140,7 @@ public class CreateProcessLauncherHelper(
                             return new ProcessInfo(pi);
                         }
 
-                        pi = LaunchWithTokenCore(effectiveToken, psi, tokenSource, identity.Sid);
+                        pi = preparedTokenProcessLauncher.LaunchWithPreparedToken(effectiveToken, psi, tokenSource, identity.Sid);
                     }
                     else
                     {
@@ -147,7 +149,7 @@ public class CreateProcessLauncherHelper(
                         if (isLow)
                         {
                             log.Info("LaunchUsingAcquiredToken: not elevated, set low integrity");
-                            NativeTokenAcquisition.SetLowIntegrityOnToken(hDupToken, out pIntegritySid, out tmlBuffer);
+                            tokenIntegrityLevelService.SetLowIntegrity(hDupToken, out pIntegritySid, out tmlBuffer);
                         }
 
                         if (useJobKeeper)
@@ -156,7 +158,7 @@ public class CreateProcessLauncherHelper(
                             return new ProcessInfo(pi);
                         }
 
-                        pi = LaunchWithTokenCore(hDupToken, psi, tokenSource, identity.Sid);
+                        pi = preparedTokenProcessLauncher.LaunchWithPreparedToken(hDupToken, psi, tokenSource, identity.Sid);
                     }
                     break;
                 }
@@ -170,6 +172,7 @@ public class CreateProcessLauncherHelper(
                 if (pi.hThread != IntPtr.Zero && ProcessLaunchNative.ResumeThread(pi.hThread) == uint.MaxValue)
                     log.Error($"ResumeThread failed for process {pi.dwProcessId}: error {Marshal.GetLastWin32Error()}");
             }
+
             return new ProcessInfo(pi);
         }
         finally
@@ -187,131 +190,54 @@ public class CreateProcessLauncherHelper(
         }
     }
 
-    private ProcessLaunchNative.PROCESS_INFORMATION LaunchWithTokenCore(
-        IntPtr hDupToken,
-        ProcessLaunchTarget psi,
-        LaunchTokenSource tokenSource,
-        string accountSid,
-        bool allowUnsuspendedRetry = true)
+    public IntPtr AcquireProfileKeeperToken(AccountLaunchIdentity identity)
     {
-        log.Info("LaunchWithTokenCore: AllowSetForegroundWindow");
-
-        // Best-effort: if RunFence.exe currently holds foreground rights (e.g. its window is focused),
-        // grant any process the right to set the foreground window. The primary grant for IPC-triggered
-        // launches is made in RunFence.Launcher (which is created by the shell with foreground rights).
-        ProcessLaunchNative.AllowSetForegroundWindow(ProcessLaunchNative.ASFW_ANY);
-
-        if (tokenSource == LaunchTokenSource.CurrentProcess)
+        return profileKeeperBootstrapContext.Run(() =>
         {
-            log.Info("LaunchWithTokenCore: DisablePrivilegesOnToken");
-            TokenPrivilegeHelper.DisablePrivilegesOnToken(hDupToken, PrivilegesToDisable);
-        }
+            log.Info("AcquireProfileKeeperToken: CreateProcessWithLogonW");
 
-        log.Info("LaunchWithTokenCore: SetRestrictiveDefaultDacl");
-        NativeTokenAcquisition.SetRestrictiveDefaultDacl(hDupToken, accountSid);
-
-        log.Info("LaunchWithTokenCore: BuildEnvironmentBlock");
-        NativeEnvironmentBlock envBlock;
-        if (ProcessLaunchNative.CreateEnvironmentBlock(out var pEnv, hDupToken, false))
-            envBlock = new NativeEnvironmentBlock(pEnv, isOverridden: false);
-        else
-        {
-            log.Warn("CreateEnvironmentBlock failed — process will inherit parent environment");
-            envBlock = new NativeEnvironmentBlock();
-        }
-
-        try
-        {
-            envBlock.MergeInPlace(psi.EnvironmentVariables);
-
-            // Resolve short exe names (e.g. "wt.exe") against the target user's PATH.
-            // CreateProcessWithTokenW uses the calling process's PATH for module search,
-            // not the environment block's PATH, so we must resolve beforehand.
-            var resolutionContext = envBlock.Pointer != IntPtr.Zero
-                ? ExecutablePathResolutionContext.TargetEnvironment(
-                    new NativeEnvironmentVariableReader(envBlock.Pointer),
-                    accountSid)
-                : ExecutablePathResolutionContext.DirectOnly();
-            var resolvedExePath = executablePathResolver.TryResolvePath(psi.ExePath, resolutionContext);
-            if (resolvedExePath != null)
-                psi = psi with { ExePath = resolvedExePath };
+            var pi = ProcessLaunchNative.CreateProcessWithLogon(
+                new ProcessLaunchTarget(
+                    profileKeeperExePath,
+                    WorkingDirectory: AppContext.BaseDirectory,
+                    HideWindow: true,
+                    SuppressStartupFeedback: true),
+                identity.Credentials!.Value,
+                log);
 
             try
             {
-                return ProcessLaunchNative.CreateProcessWithToken(hDupToken, psi, envBlock.Pointer, log, suspended: true);
-            }
-            catch (Win32Exception ex) when (ex.NativeErrorCode == 5)
-            {
-                // CREATE_BREAKAWAY_FROM_JOB failed — the parent job (PCA/seclogon) does not
-                // allow breakaway. Retry without it; the process will remain in the parent job
-                // and TryAssignToJob handles the nesting conflict via its fresh-job path.
-                log.Warn("LaunchWithTokenCore: breakaway denied, retrying without CREATE_BREAKAWAY_FROM_JOB");
+                log.Info("AcquireProfileKeeperToken: OpenProcessToken");
+                if (!ProcessNative.OpenProcessToken(
+                        pi.hProcess,
+                        ProcessLaunchNative.TOKEN_DUPLICATE | ProcessLaunchNative.TOKEN_QUERY | ProcessLaunchNative.TOKEN_IMPERSONATE,
+                        out var hTempToken))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+
                 try
                 {
-                    return ProcessLaunchNative.CreateProcessWithToken(hDupToken, psi, envBlock.Pointer, log, suspended: true, breakawayFromJob: false);
+                    log.Info("AcquireProfileKeeperToken: DuplicateToken");
+                    return NativeTokenAcquisition.DuplicateToken(hTempToken);
                 }
-                catch (Win32Exception ex2) when (ex2.NativeErrorCode == 5)
+                finally
                 {
-                    if (!allowUnsuspendedRetry)
-                        throw;
-
-                    // CREATE_SUSPENDED fails when an existing restricted job with UI limits is active
-                    // for this user (e.g. the medium keeper job already has JOB_OBJECT_UILIMIT_*).
-                    // Retry without suspend — the process starts before job assignment, but the
-                    // job keeper's pipe protocol ensures no launches are dispatched until after
-                    // WaitAndRegisterJobKeeper (which runs after TryAssignToJob).
-                    log.Warn("LaunchWithTokenCore: suspended launch denied (restricted job active), retrying without CREATE_SUSPENDED");
-                    return ProcessLaunchNative.CreateProcessWithToken(hDupToken, psi, envBlock.Pointer, log, suspended: false, breakawayFromJob: false);
+                    ProcessNative.CloseHandle(hTempToken);
                 }
             }
-        }
-        finally
-        {
-            envBlock.Dispose();
-        }
-    }
-
-    public ProcessLaunchNative.PROCESS_INFORMATION LaunchWithPreparedToken(
-        IntPtr token,
-        ProcessLaunchTarget target,
-        LaunchTokenSource tokenSource,
-        string accountSid,
-        bool allowUnsuspendedRetry = true) =>
-        LaunchWithTokenCore(token, target, tokenSource, accountSid, allowUnsuspendedRetry);
-
-    public (IntPtr Token, ProcessLaunchNative.PROCESS_INFORMATION TempProcess) AcquireBootstrapToken(AccountLaunchIdentity identity)
-    {
-        log.Info("AcquireBootstrapToken: CreateProcessWithLogonW");
-
-        var pi = ProcessLaunchNative.CreateProcessWithLogon(new ProcessLaunchTarget("cmd.exe", "/c timeout /t 10 /nobreak >nul", HideWindow: true), identity.Credentials!.Value, log);
-
-        try
-        {
-            log.Info("AcquireBootstrapToken: OpenProcessToken");
-            if (!ProcessNative.OpenProcessToken(
-                    pi.hProcess,
-                    ProcessLaunchNative.TOKEN_DUPLICATE | ProcessLaunchNative.TOKEN_QUERY | ProcessLaunchNative.TOKEN_IMPERSONATE,
-                    out var hTempToken))
+            catch
             {
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            }
-
-            try
-            {
-                log.Info("AcquireBootstrapToken: DuplicateToken");
-                return (NativeTokenAcquisition.DuplicateToken(hTempToken), pi);
+                ProcessLaunchNative.TerminateProcess(pi.hProcess, 1);
+                throw;
             }
             finally
             {
-                ProcessNative.CloseHandle(hTempToken);
+                if (pi.hThread != IntPtr.Zero)
+                    ProcessNative.CloseHandle(pi.hThread);
+                if (pi.hProcess != IntPtr.Zero)
+                    ProcessNative.CloseHandle(pi.hProcess);
             }
-        }
-        catch
-        {
-            ProcessLaunchNative.TerminateProcess(pi.hProcess, 1);
-            ProcessNative.CloseHandle(pi.hProcess);
-            ProcessNative.CloseHandle(pi.hThread);
-            throw;
-        }
+        });
     }
 }

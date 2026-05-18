@@ -7,6 +7,7 @@ public static class IpcConstants
 
     public const int LauncherTimeoutMs = 30_000; // 30 seconds
     public const int PipeConnectTimeoutMs = 5_000;
+    public const int JobKeeperLaunchIpcTimeoutMs = 5_000;
 
     public const string MutexName = @"Global\RunFence";
 

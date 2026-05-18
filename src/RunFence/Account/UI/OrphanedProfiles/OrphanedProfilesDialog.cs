@@ -4,22 +4,67 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Account.UI.OrphanedProfiles;
 
-public partial class OrphanedProfilesDialog : Form
+public partial class OrphanedProfilesDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private enum DialogState { Loading, Results, Error }
+    private enum InitialLoadMode { Scan, ShowProfiles, ShowError }
 
     private readonly IOrphanedProfileService _service;
     private readonly OperationGuard _operationGuard = new();
+    private readonly List<OrphanedProfile>? _initialProfiles;
+    private readonly InitialLoadMode _initialLoadMode;
 
     private OrphanedProfilesSelectionPanel? _selectionPanel;
     private OrphanedProfilesReportPanel? _reportPanel;
     private DialogState _dialogState;
+    private bool _initialized;
 
     public OrphanedProfilesDialog(IOrphanedProfileService orphanedProfileService)
+        : this(orphanedProfileService, null, InitialLoadMode.Scan)
     {
+    }
+
+    public OrphanedProfilesDialog(IOrphanedProfileService orphanedProfileService, List<OrphanedProfile> initialProfiles)
+        : this(orphanedProfileService, initialProfiles, InitialLoadMode.ShowProfiles)
+    {
+    }
+
+    public static OrphanedProfilesDialog CreateScanErrorDialog(IOrphanedProfileService orphanedProfileService)
+        => new(orphanedProfileService, null, InitialLoadMode.ShowError);
+
+    private OrphanedProfilesDialog(
+        IOrphanedProfileService orphanedProfileService,
+        List<OrphanedProfile>? initialProfiles,
+        InitialLoadMode initialLoadMode)
+    {
+        ArgumentNullException.ThrowIfNull(orphanedProfileService);
         _service = orphanedProfileService;
+        _initialProfiles = initialProfiles?.ToList();
+        _initialLoadMode = initialLoadMode;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
+    }
+
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+
+        if (_initialized)
+            return;
+
+        _initialized = true;
+        if (_initialProfiles != null)
+        {
+            ShowSelectionPhase(_initialProfiles);
+            return;
+        }
+
+        if (_initialLoadMode == InitialLoadMode.ShowError)
+        {
+            ShowScanErrorPhase();
+            return;
+        }
+
         LoadProfilesAsync();
     }
 
@@ -55,6 +100,7 @@ public partial class OrphanedProfilesDialog : Form
     private async void LoadProfilesAsync()
     {
         _dialogState = DialogState.Loading;
+        _selectionPanel?.StopSizeCalculation();
         _deleteButton.Text = "Delete Selected";
         _deleteButton.Enabled = false;
         _deleteButton.Visible = true;
@@ -80,17 +126,7 @@ public partial class OrphanedProfilesDialog : Form
             if (IsDisposed)
                 return;
             UseWaitCursor = false;
-            _dialogState = DialogState.Error;
-            ClearContentPanel();
-            _contentPanel.Controls.Add(new Label
-            {
-                Location = new Point(15, 15),
-                Size = new Size(870, 35),
-                AutoSize = false,
-                Text = "Failed to scan for orphaned profiles."
-            });
-            _deleteButton.Text = "Rescan";
-            _deleteButton.Enabled = true;
+            ShowScanErrorPhase();
             return;
         }
 
@@ -103,10 +139,25 @@ public partial class OrphanedProfilesDialog : Form
     private void ShowSelectionPhase(List<OrphanedProfile> profiles)
     {
         _dialogState = DialogState.Results;
-        _selectionPanel ??= new OrphanedProfilesSelectionPanel();
+        _selectionPanel ??= new OrphanedProfilesSelectionPanel(_service);
         _selectionPanel.Populate(profiles);
         ShowPanel(_selectionPanel);
         _deleteButton.Enabled = profiles.Count > 0;
+    }
+
+    private void ShowScanErrorPhase()
+    {
+        _dialogState = DialogState.Error;
+        ClearContentPanel();
+        _contentPanel.Controls.Add(new Label
+        {
+            Location = new Point(15, 15),
+            Size = new Size(870, 35),
+            AutoSize = false,
+            Text = "Failed to scan for orphaned profiles."
+        });
+        _deleteButton.Text = "Rescan";
+        _deleteButton.Enabled = true;
     }
 
     private async void DeleteSelectedAsync()
@@ -124,13 +175,14 @@ public partial class OrphanedProfilesDialog : Form
 
         var noun = checkedProfiles.Count == 1 ? "directory" : "directories";
         var confirm = MessageBox.Show(
-            $"Delete {checkedProfiles.Count} selected profile {noun}? This cannot be undone.",
-            "Confirm Deletion",
+            $"Move {checkedProfiles.Count} selected profile {noun} to the Recycle Bin?",
+            "Move to Recycle Bin",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning);
         if (confirm != DialogResult.Yes)
             return;
 
+        _selectionPanel.StopSizeCalculation();
         _operationGuard.Begin(this);
         UseWaitCursor = true;
         try
@@ -147,6 +199,8 @@ public partial class OrphanedProfilesDialog : Form
 
     private void ShowReportPhase(List<string> deleted, List<(string Path, string Error)> failed)
     {
+        _selectionPanel?.StopSizeCalculation();
+
         if (failed.Count > 0)
         {
             _dialogState = DialogState.Error;

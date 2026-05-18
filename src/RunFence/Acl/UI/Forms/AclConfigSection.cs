@@ -3,6 +3,7 @@ using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.UI;
+using RunFence.UI.Forms;
 
 namespace RunFence.Acl.UI.Forms;
 
@@ -170,47 +171,41 @@ public partial class AclConfigSection : UserControl
         return error;
     }
 
-    /// <summary>
-    /// Validates ACL settings. Returns error message or null if valid.
-    /// </summary>
-    public string? Validate(string exePath, bool isFolder)
+    public AclConfigSectionSnapshot CaptureSnapshot()
     {
-        var (aclTarget, depth) = ResolveAclTargetAndDepth(isFolder);
-        return _validator.Validate(exePath, isFolder, _restrictAclCheckBox.Checked,
-            _aclModeAllowRadio.Checked, aclTarget, depth, _allowEntriesGrid.Rows.Count,
-            CheckPathConflict);
+        if (_allowEntriesGrid.IsCurrentCellDirty)
+            _allowEntriesGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        _allowEntriesGrid.EndEdit();
+
+        var allowedEntries = _allowEntriesGrid.Rows
+            .Cast<DataGridViewRow>()
+            .Where(row => row.Tag is AllowAclEntry)
+            .Select(row =>
+            {
+                var entry = (AllowAclEntry)row.Tag!;
+                return new AllowAclEntry
+                {
+                    Sid = entry.Sid,
+                    AllowExecute = row.Cells["Execute"].Value is true,
+                    AllowWrite = row.Cells["Write"].Value is true
+                };
+            })
+            .ToList();
+
+        return new AclConfigSectionSnapshot(
+            RestrictAcl: _restrictAclCheckBox.Checked,
+            AclMode: _aclModeAllowRadio.Checked ? AclMode.Allow : AclMode.Deny,
+            SelectedAclTarget: _aclFileRadio.Checked ? AclTarget.File : AclTarget.Folder,
+            FolderAclDepth: _folderDepthHelper.GetSelectedDepth(_folderDepthComboBox.SelectedIndex),
+            DeniedRights: (DeniedRights)_deniedRightsComboBox.SelectedIndex,
+            AllowedEntries: allowedEntries);
     }
 
-    /// <summary>
-    /// Builds ACL result values from current control state.
-    /// </summary>
-    public AclConfigResult BuildResult(string exePath, bool isFolder)
+    public void RegisterContextHelp(ContextHelpForm host)
     {
-        var isUrl = PathHelper.IsUrlScheme(exePath);
-        var restrictAcl = _restrictAclCheckBox.Checked && !isUrl;
-        var aclMode = _aclModeAllowRadio.Checked ? AclMode.Allow : AclMode.Deny;
-        var (aclTarget, depth) = ResolveAclTargetAndDepth(isFolder);
-        var deniedRights = (DeniedRights)_deniedRightsComboBox.SelectedIndex;
-
-        List<AllowAclEntry>? allowedEntries = null;
-        if (aclMode == AclMode.Allow && restrictAcl)
-        {
-            allowedEntries = new List<AllowAclEntry>();
-            foreach (DataGridViewRow row in _allowEntriesGrid.Rows)
-            {
-                if (row.Tag is AllowAclEntry entry)
-                {
-                    allowedEntries.Add(new AllowAclEntry
-                    {
-                        Sid = entry.Sid,
-                        AllowExecute = row.Cells["Execute"].Value is true,
-                        AllowWrite = row.Cells["Write"].Value is true
-                    });
-                }
-            }
-        }
-
-        return new AclConfigResult(restrictAcl, aclMode, aclTarget, depth, deniedRights, allowedEntries);
+        host.SetContextHelp(_aclModeDenyRadio, ContextHelpTextCatalog.AppEdit_Acl_ModeDeny);
+        host.SetContextHelp(_aclModeAllowRadio, ContextHelpTextCatalog.AppEdit_Acl_ModeAllow);
+        host.SetContextHelp(_deniedRightsComboBox, ContextHelpTextCatalog.AppEdit_Acl_DeniedRights);
     }
 
     // --- Event handlers (from Designer wiring) ---

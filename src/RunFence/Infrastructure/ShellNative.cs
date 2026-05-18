@@ -40,6 +40,28 @@ public static class ShellNative
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool ShellExecuteEx(ref ShellExecuteExInfo pExecInfo);
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct SHFILEOPSTRUCT
+    {
+        public IntPtr hwnd;
+        public uint wFunc;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? pFrom;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? pTo;
+        public ushort fFlags;
+        [MarshalAs(UnmanagedType.Bool)] public bool fAnyOperationsAborted;
+        public IntPtr hNameMappings;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? lpszProgressTitle;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    public static extern int SHFileOperation(ref SHFILEOPSTRUCT lpFileOp);
+
+    public const uint FoDelete = 0x0003;
+    public const ushort FofSilent = 0x0004;
+    public const ushort FofNoConfirmation = 0x0010;
+    public const ushort FofAllowUndo = 0x0040;
+    public const ushort FofNoErrorUi = 0x0400;
+
     // ── Shell drag-drop (WM_DROPFILES) ────────────────────────────────────────
 
     [DllImport("shell32.dll")]
@@ -119,5 +141,23 @@ public static class ShellNative
         if (result == IntPtr.Zero || shInfo.hIcon == IntPtr.Zero)
             return IntPtr.Zero;
         return shInfo.hIcon;
+    }
+
+    public static void MoveToRecycleBin(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        var operation = new SHFILEOPSTRUCT
+        {
+            wFunc = FoDelete,
+            pFrom = path + '\0' + '\0',
+            fFlags = FofAllowUndo | FofNoConfirmation | FofNoErrorUi | FofSilent
+        };
+
+        var result = SHFileOperation(ref operation);
+        if (result != 0)
+            throw new IOException($"Shell recycle-bin operation failed with code {result}.");
+        if (operation.fAnyOperationsAborted)
+            throw new IOException("Shell recycle-bin operation was aborted.");
     }
 }

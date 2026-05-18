@@ -1,8 +1,5 @@
-using RunFence.Account;
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.SidMigration;
 using RunFence.SidMigration.UI.Forms;
 
 namespace RunFence.Groups.UI;
@@ -13,21 +10,14 @@ namespace RunFence.Groups.UI;
 /// </summary>
 public class GroupSidMigrationLauncher(
     IModalCoordinator modalCoordinator,
-    ISidMigrationService sidMigrationService,
-    Func<InAppMigrationHandler> createMigrationHandler,
-    ILocalUserProvider localUserProvider,
-    ILoggingService log,
-    IProfilePathResolver profilePathResolver,
-    ISidNameCacheService sidNameCache)
+    SidMigrationDialogFactory sidMigrationDialogFactory)
 {
     /// <summary>
     /// Opens the SID migration dialog. Returns <c>true</c> if an in-app migration was applied.
     /// </summary>
-    public bool Launch(SessionContext session, IWin32Window? owner)
+    public bool Launch(IWin32Window? owner)
     {
-        using var dlg = new SidMigrationDialog(session, sidMigrationService, createMigrationHandler(), localUserProvider,
-            log, profilePathResolver, sidNameCache);
-        modalCoordinator.ShowModal(dlg, owner);
-        return dlg.InAppMigrationApplied;
+        using var dlg = sidMigrationDialogFactory.Create();
+        return modalCoordinator.ShowModal(dlg, owner) == DialogResult.OK;
     }
 }

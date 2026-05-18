@@ -37,8 +37,20 @@ public class AiAgentToolStep : WizardStepPage
         BuildContent(discoveryService, iconHelper);
     }
 
-    public override Task OnCommitBeforeNextAsync(IWizardProgressReporter progress) =>
-        _commitAction != null ? _commitAction(progress) : Task.CompletedTask;
+    public override Task OnCommitBeforeNextAsync(IWizardProgressReporter progress)
+    {
+        try
+        {
+            Collect();
+        }
+        catch (InvalidOperationException ex)
+        {
+            progress.ReportError(ex.Message);
+            throw new WizardReportedException(ex.Message, ex);
+        }
+
+        return _commitAction != null ? _commitAction(progress) : Task.CompletedTask;
+    }
 
     public override string StepTitle => "AI Agent Tool";
     public override string? Validate() => null;
@@ -46,9 +58,11 @@ public class AiAgentToolStep : WizardStepPage
     public override void Collect()
     {
         var useAiPackage = _aiPackageRadio.Checked;
-        var appPath = !useAiPackage && !string.IsNullOrWhiteSpace(_appPathBrowseControl.PathText)
-            ? _appPathBrowseControl.PathText.Trim()
-            : null;
+        var appPath = useAiPackage
+            ? null
+            : NormalizeOptionalExecutablePathOrThrow(_appPathBrowseControl.PathText);
+        if (!useAiPackage)
+            _appPathBrowseControl.PathText = appPath ?? string.Empty;
         _setOptions(useAiPackage, appPath);
     }
 
@@ -107,5 +121,30 @@ public class AiAgentToolStep : WizardStepPage
     private void UpdateOtherToolVisibility()
     {
         _appPathPanel.Visible = !_aiPackageRadio.Checked;
+    }
+
+    private static string? NormalizeOptionalExecutablePathOrThrow(string pathText)
+    {
+        var trimmed = pathText.Trim();
+        if (trimmed.Length == 0)
+            return null;
+
+        if (!Path.IsPathRooted(trimmed))
+            return trimmed;
+
+        try
+        {
+            var normalizedPath = Path.GetFullPath(trimmed);
+            if (!File.Exists(normalizedPath))
+                throw new InvalidOperationException("The selected tool executable does not exist.");
+
+            return normalizedPath;
+        }
+        catch (Exception ex)
+        {
+            throw ex is InvalidOperationException
+                ? ex
+                : new InvalidOperationException($"Tool path is invalid: {ex.Message}", ex);
+        }
     }
 }

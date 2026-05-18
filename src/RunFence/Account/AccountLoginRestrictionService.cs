@@ -14,17 +14,20 @@ public class AccountLoginRestrictionService(
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(UserListKeyPath);
-            var value = key?.GetValue(username);
-            if (value is int intValue)
-                return intValue == 0;
-            return false;
+            return GetAccountHiddenStateOrThrow(username);
         }
         catch (Exception ex)
         {
             log.Error($"Failed to check hidden status for {username}", ex);
             return false;
         }
+    }
+
+    public bool GetAccountHiddenStateOrThrow(string username)
+    {
+        using var key = Registry.LocalMachine.OpenSubKey(UserListKeyPath);
+        var value = key?.GetValue(username);
+        return value is int intValue && intValue == 0;
     }
 
     public void SetAccountHidden(string username, string sid, bool hidden)
@@ -35,6 +38,16 @@ public class AccountLoginRestrictionService(
             accountValidation.ValidateNotLastAdmin(sid, "hide");
         }
 
+        SetAccountHiddenCore(username, hidden);
+    }
+
+    public void RestoreAccountHiddenState(string username, bool hidden)
+    {
+        SetAccountHiddenCore(username, hidden);
+    }
+
+    private void SetAccountHiddenCore(string username, bool hidden)
+    {
         try
         {
             if (hidden)
@@ -137,6 +150,9 @@ public class AccountLoginRestrictionService(
             accountValidation.ValidateNotLastAdmin(sid, "block login for");
         }
 
+        var previousScriptBlocked = gpHelper.IsLoginBlocked(sid);
+        var previousHiddenState = GetAccountHiddenStateOrThrow(username);
+
         SetLoginBlockedResult result;
         try
         {
@@ -157,14 +173,24 @@ public class AccountLoginRestrictionService(
             log.Error($"SetAccountHidden failed for {username}; rolling back login-blocked change", ex);
             try
             {
-                gpHelper.SetLoginBlocked(sid, !blocked);
+                gpHelper.SetLoginBlocked(sid, previousScriptBlocked);
+                RestoreAccountHiddenState(username, previousHiddenState);
             }
-            catch
+            catch (Exception rollbackEx)
             {
-                /* rollback best-effort */
+                log.Error($"Rollback failed for login-blocked change on {username}", rollbackEx);
+                throw new AccountRestrictionOperationException(
+                    $"{ex.Message} Rollback failed: {rollbackEx.Message}",
+                    AccountRestrictionStatus.Failed,
+                    rollbackAttempted: true,
+                    ex);
             }
 
-            throw;
+            throw new AccountRestrictionOperationException(
+                ex.Message,
+                AccountRestrictionStatus.RolledBack,
+                rollbackAttempted: true,
+                ex);
         }
 
         log.Info(blocked ? $"Login blocked for: {username}" : $"Login unblocked for: {username}");

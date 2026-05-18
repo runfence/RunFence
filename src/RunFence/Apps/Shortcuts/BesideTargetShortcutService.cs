@@ -8,6 +8,8 @@ internal class BesideTargetShortcutService(
     ILoggingService log,
     IShortcutProtectionService protection,
     IShortcutComHelper shortcutHelper,
+    IShortcutWriteAccessService shortcutWriteAccessService,
+    IShortcutFilePersistenceNative shortcutFilePersistenceNative,
     IExecutableKindService executableKindService)
     : IBesideTargetShortcutService
 {
@@ -18,6 +20,7 @@ internal class BesideTargetShortcutService(
         if (executableKindService.IsUwpExeFile(app.ExePath))
             return;
 
+        // Managed suffix naming is used for discovery/reconciliation and is not a trust boundary for ownership.
         var shortcutName = GetBesideTargetShortcutName(app, username);
         var paths = GetBesideTargetShortcutPaths(app, shortcutName);
 
@@ -29,43 +32,37 @@ internal class BesideTargetShortcutService(
                 if (dir != null && !Directory.Exists(dir))
                     continue;
 
-                // Remove existing if present
-                if (File.Exists(shortcutPath))
-                {
-                    protection.UnprotectShortcut(shortcutPath);
-                    File.Delete(shortcutPath);
-                }
-
-                shortcutHelper.WithShortcut(shortcutPath, sc =>
-                {
-                    sc.TargetPath = launcherPath;
-                    sc.Arguments = app.Id;
-                    sc.WorkingDirectory = ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath);
-                    if (!string.IsNullOrEmpty(iconPath) && File.Exists(iconPath))
-                        sc.IconLocation = $"{iconPath},0";
-                    sc.Save();
-                });
+                shortcutWriteAccessService.Save(shortcutPath, new ShortcutMutation(
+                    launcherPath,
+                    app.Id,
+                    ShortcutPathHelper.GetLauncherWorkingDirectory(launcherPath),
+                    !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath) ? $"{iconPath},0" : null,
+                    !string.IsNullOrEmpty(iconPath) && File.Exists(iconPath) ? ShortcutIconUpdateMode.Set : ShortcutIconUpdateMode.None,
+                    null,
+                    null,
+                    1),
+                    ShortcutDestinationMetadataMode.PreserveExisting,
+                    ShortcutContentMode.RecreateCanonical);
 
                 var isInternal = app.IsFolder && IsInsideFolder(shortcutPath, app.ExePath);
                 if (isInternal && !string.IsNullOrEmpty(app.AccountSid))
                     protection.ProtectInternalShortcut(shortcutPath, app.AccountSid);
                 else
-                    protection.ProtectShortcut(shortcutPath);
+                    protection.ProtectShortcut(shortcutPath, allowAdministratorsDelete: true);
 
                 log.Info($"Created beside-target shortcut: {shortcutPath}");
+            }
+            catch (ShortcutProtectionException)
+            {
+                TryDeleteFailedShortcut(shortcutPath);
+
+                throw;
             }
             catch (Exception ex)
             {
                 log.Error($"Failed to create beside-target shortcut: {shortcutPath}", ex);
                 // Clean up orphaned .lnk on failure
-                try
-                {
-                    if (File.Exists(shortcutPath))
-                        File.Delete(shortcutPath);
-                }
-                catch
-                {
-                } // best-effort cleanup
+                TryDeleteFailedShortcut(shortcutPath);
             }
         }
     }
@@ -76,6 +73,8 @@ internal class BesideTargetShortcutService(
             return;
 
         var baseName = GetTargetBaseName(app);
+        // Managed beside-target shortcuts are intentionally located by suffix pattern (baseName-as-<user>.lnk);
+        // this is for RunFence-managed matching only, not for generic shortcut ownership proof.
         var searchPattern = $"{baseName}-as-*.lnk";
         var directories = GetBesideTargetDirectories(app);
 
@@ -96,22 +95,31 @@ internal class BesideTargetShortcutService(
                             string? args = sc.Arguments;
                             return target != null &&
                                    target.EndsWith(PathConstants.LauncherExeName, StringComparison.OrdinalIgnoreCase) &&
-                                   args != null &&
-                                   (args == app.Id || args.StartsWith(app.Id + " "));
+                                   string.Equals(
+                                       ShortcutClassificationHelper.TryGetManagedShortcutAppId(args),
+                                       app.Id,
+                                       StringComparison.Ordinal);
                         });
 
                         if (matches)
                         {
-                            protection.UnprotectShortcut(lnk);
-                            File.Delete(lnk);
+                            shortcutFilePersistenceNative.DeleteExistingDestination(lnk);
                             log.Info($"Removed beside-target shortcut: {lnk}");
                         }
+                    }
+                    catch (ShortcutProtectionException)
+                    {
+                        throw;
                     }
                     catch (Exception ex)
                     {
                         log.Error($"Failed to remove beside-target shortcut: {lnk}", ex);
                     }
                 }
+            }
+            catch (ShortcutProtectionException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -135,6 +143,7 @@ internal class BesideTargetShortcutService(
                     continue;
 
                 var (username, iconPath) = info.Value;
+                // Enforcement intentionally keeps suffix-based managed matching scoped to discovery/reconciliation.
                 var shortcutName = GetBesideTargetShortcutName(app, username);
                 var paths = GetBesideTargetShortcutPaths(app, shortcutName);
 
@@ -151,8 +160,12 @@ internal class BesideTargetShortcutService(
                     if (isInternal && !string.IsNullOrEmpty(app.AccountSid))
                         protection.ProtectInternalShortcut(shortcutPath, app.AccountSid);
                     else
-                        protection.ProtectShortcut(shortcutPath);
+                        protection.ProtectShortcut(shortcutPath, allowAdministratorsDelete: true);
                 }
+            }
+            catch (ShortcutProtectionException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -164,6 +177,7 @@ internal class BesideTargetShortcutService(
     internal static string GetBesideTargetShortcutName(AppEntry app, string username)
     {
         var baseName = GetTargetBaseName(app);
+        // Suffix-based managed naming preserves deterministic discovery under multiple accounts.
         var sanitizedUsername = ShortcutPathHelper.SanitizeFileName(username);
         return $"{baseName}-as-{sanitizedUsername}.lnk";
     }
@@ -218,6 +232,8 @@ internal class BesideTargetShortcutService(
     {
         return shortcutHelper.WithShortcut(shortcutPath, sc =>
         {
+            // Recheck logic intentionally uses launcher + argument fields only for managed-suffix shortcut freshness,
+            // and is not used as complete ownership verification.
             string? target = sc.TargetPath;
             string? args = sc.Arguments;
             string? workingDirectory = sc.WorkingDirectory;
@@ -244,6 +260,19 @@ internal class BesideTargetShortcutService(
         var normalizedFolder = Path.GetFullPath(folderPath).TrimEnd(Path.DirectorySeparatorChar)
                                + Path.DirectorySeparatorChar;
         return normalizedShortcut.StartsWith(normalizedFolder, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void TryDeleteFailedShortcut(string shortcutPath)
+    {
+        try
+        {
+            if (!File.Exists(shortcutPath))
+                return;
+            shortcutFilePersistenceNative.DeleteExistingDestination(shortcutPath);
+        }
+        catch
+        {
+        }
     }
 
 }

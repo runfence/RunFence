@@ -18,10 +18,11 @@ public class DragBridgeCopyFlowTests
     {
         var store = new CapturedFileStore();
 
-        var (captured, sourceSid, expired) = store.GetCapturedFiles();
+        var (captured, sourceSid, sourceContainerSid, expired) = store.GetCapturedFiles();
 
         Assert.Null(captured);
         Assert.Null(sourceSid);
+        Assert.Null(sourceContainerSid);
         Assert.False(expired);
     }
 
@@ -31,14 +32,47 @@ public class DragBridgeCopyFlowTests
         long fakeTick = 0;
         var store = new CapturedFileStore(() => fakeTick);
         var files = new List<string> { @"C:\file1.txt", @"C:\file2.txt" };
-        store.SetCapturedFiles(files, "S-1-5-21-1-2-3-4");
+        store.SetCapturedFiles(files, "S-1-5-21-1-2-3-4", null);
         fakeTick = 4 * 60_000; // advance to 4 minutes — still within 5-minute expiry
 
-        var (captured, sourceSid, expired) = store.GetCapturedFiles();
+        var (captured, sourceSid, sourceContainerSid, expired) = store.GetCapturedFiles();
 
         Assert.Equal(files, captured);
         Assert.Equal("S-1-5-21-1-2-3-4", sourceSid);
+        Assert.Null(sourceContainerSid);
         Assert.False(expired);
+    }
+
+    [Fact]
+    public void GetCapturedFiles_WithinFiveMinutes_ReturnsCapturedContainerSid()
+    {
+        long fakeTick = 0;
+        var store = new CapturedFileStore(() => fakeTick);
+        var files = new List<string> { @"C:\file1.txt" };
+        store.SetCapturedFiles(files, "S-1-5-21-1-2-3-4", "S-1-15-2-42");
+        fakeTick = 4 * 60_000;
+
+        var (captured, sourceSid, sourceContainerSid, expired) = store.GetCapturedFiles();
+
+        Assert.Equal(files, captured);
+        Assert.Equal("S-1-5-21-1-2-3-4", sourceSid);
+        Assert.Equal("S-1-15-2-42", sourceContainerSid);
+        Assert.False(expired);
+    }
+
+    [Fact]
+    public void SetCapturedFiles_CallerMutationAfterCapture_DoesNotChangeStoredSnapshot()
+    {
+        var store = new CapturedFileStore(() => 0);
+        var files = new List<string> { @"C:\file1.txt" };
+        store.SetCapturedFiles(files, "S-1-5-21-1-2-3-4", null);
+        files.Add(@"C:\file2.txt");
+
+        var (captured, _, _, _) = store.GetCapturedFiles();
+
+        Assert.NotNull(captured);
+        Assert.Single(captured!);
+        Assert.Equal(@"C:\file1.txt", captured[0]);
     }
 
     [Fact]
@@ -47,13 +81,14 @@ public class DragBridgeCopyFlowTests
         // Simulate time: capture at tick 0, read at tick 6 minutes later
         long fakeTick = 0;
         var store = new CapturedFileStore(() => fakeTick);
-        store.SetCapturedFiles([@"C:\file1.txt"], "S-1-5-21-1-2-3-4");
+        store.SetCapturedFiles([@"C:\file1.txt"], "S-1-5-21-1-2-3-4", null);
         fakeTick = 6 * 60_000; // advance time by 6 minutes
 
-        var (captured, sourceSid, expired) = store.GetCapturedFiles();
+        var (captured, sourceSid, sourceContainerSid, expired) = store.GetCapturedFiles();
 
         Assert.Null(captured);
         Assert.Null(sourceSid);
+        Assert.Null(sourceContainerSid);
         Assert.True(expired);
     }
 
@@ -63,14 +98,15 @@ public class DragBridgeCopyFlowTests
         // After expiry, state is cleared. A second call should return not-expired (no files, no expiry).
         long fakeTick = 0;
         var store = new CapturedFileStore(() => fakeTick);
-        store.SetCapturedFiles(["file.txt"], "S-1-2-3");
+        store.SetCapturedFiles(["file.txt"], "S-1-2-3", null);
         fakeTick = 6 * 60_000; // advance time past expiry
 
         store.GetCapturedFiles(); // clears state
-        var (captured, sourceSid, expired) = store.GetCapturedFiles();
+        var (captured, sourceSid, sourceContainerSid, expired) = store.GetCapturedFiles();
 
         Assert.Null(captured);
         Assert.Null(sourceSid);
+        Assert.Null(sourceContainerSid);
         Assert.False(expired);
     }
 
@@ -146,7 +182,7 @@ public class DragBridgeCopyFlowTests
         NamedPipeServerStream server, bool verifyResult)
     {
         var launcher = new Mock<IDragBridgePipeLauncher>();
-        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, It.IsAny<bool>())).Returns(server);
+        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, null, It.IsAny<bool>())).Returns(server);
         launcher.Setup(l => l.LaunchForSid(It.IsAny<WindowOwnerInfo>(), It.IsAny<IReadOnlyList<string>>(),
             It.IsAny<INotificationService>())).Returns((ProcessInfo?)null);
         launcher.Setup(l => l.VerifyClientProcess(It.IsAny<NamedPipeServerStream>(), null)).Returns(verifyResult);
@@ -163,7 +199,7 @@ public class DragBridgeCopyFlowTests
             PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024);
 
         var launcher = new Mock<IDragBridgePipeLauncher>();
-        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, It.IsAny<bool>())).Returns(server);
+        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, null, It.IsAny<bool>())).Returns(server);
         launcher.Setup(l => l.LaunchForSid(It.IsAny<WindowOwnerInfo>(), It.IsAny<IReadOnlyList<string>>(),
             It.IsAny<INotificationService>())).Returns((ProcessInfo?)null);
         launcher.Setup(l => l.KillProcess(null));
@@ -181,12 +217,12 @@ public class DragBridgeCopyFlowTests
 
         // Assert: timeout error logged; no files captured
         log.Verify(l => l.Error(It.Is<string>(s => s.Contains("timeout"))), Times.Once);
-        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<List<string>>(), It.IsAny<string>()), Times.Never);
+        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
     }
 
     [Theory]
     [InlineData(NativeTokenHelper.MandatoryLevelLow, true, true)]
-    [InlineData(NativeTokenHelper.MandatoryLevelLow, false, false)]
+    [InlineData(NativeTokenHelper.MandatoryLevelLow, false, true)]
     [InlineData(NativeTokenHelper.MandatoryLevelMedium, true, false)]
     public async Task RunBridgeAsync_CreatesLowIntegrityPipeOnlyForLowIntegrityOwner(
         int integrityLevel,
@@ -199,7 +235,7 @@ public class DragBridgeCopyFlowTests
 
         var owner = new WindowOwnerInfo(TestSid, integrityLevel, isInRestrictedJob);
         var launcher = new Mock<IDragBridgePipeLauncher>();
-        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, expectedAllowLowIntegrityClient))
+        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, null, expectedAllowLowIntegrityClient))
             .Returns(server);
         launcher.Setup(l => l.LaunchForSid(It.IsAny<WindowOwnerInfo>(), It.IsAny<IReadOnlyList<string>>(),
             It.IsAny<INotificationService>())).Returns((ProcessInfo?)null);
@@ -213,7 +249,39 @@ public class DragBridgeCopyFlowTests
 
         await flow.RunBridgeAsync(owner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
 
-        launcher.Verify(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, expectedAllowLowIntegrityClient), Times.Once);
+        launcher.Verify(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, null, expectedAllowLowIntegrityClient), Times.Once);
+    }
+
+    [Fact]
+    public async Task RunBridgeAsync_AppContainerOwner_PassesContainerSidToPipeServer()
+    {
+        const string containerSid = "S-1-15-2-42";
+        var pipeName = $"RunFenceTest_AppContainerPipe_{Guid.NewGuid():N}";
+        await using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 64 * 1024, 64 * 1024);
+
+        var owner = new WindowOwnerInfo(TestSid, NativeTokenHelper.MandatoryLevelMedium, false, new SecurityIdentifier(containerSid));
+        var launcher = new Mock<IDragBridgePipeLauncher>();
+        launcher.Setup(l => l.CreatePipeServer(It.IsAny<string>(), TestSid, It.Is<SecurityIdentifier?>(sid => sid != null && sid.Value == containerSid), false))
+            .Returns(server);
+        launcher.Setup(l => l.LaunchForSid(It.IsAny<WindowOwnerInfo>(), It.IsAny<IReadOnlyList<string>>(),
+            It.IsAny<INotificationService>())).Returns((ProcessInfo?)null);
+        launcher.Setup(l => l.KillProcess(null));
+
+        var flow = new DragBridgeCopyFlow(
+            launcher.Object,
+            new Mock<INotificationService>().Object,
+            new Mock<ILoggingService>().Object,
+            new Mock<ICapturedFileStore>().Object,
+            pipeConnectTimeoutMs: 50);
+
+        await flow.RunBridgeAsync(owner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
+
+        launcher.Verify(l => l.CreatePipeServer(
+            It.IsAny<string>(),
+            TestSid,
+            It.Is<SecurityIdentifier?>(sid => sid != null && sid.Value == containerSid),
+            false), Times.Once);
     }
 
     [Fact]
@@ -241,7 +309,7 @@ public class DragBridgeCopyFlowTests
 
         // Assert: verification failure logged; no files captured; no SignalReady called
         log.Verify(l => l.Error(It.Is<string>(s => s.Contains("verification"))), Times.Once);
-        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<List<string>>(), It.IsAny<string>()), Times.Never);
+        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
         launcher.Verify(l => l.SignalReady(It.IsAny<NamedPipeServerStream>()), Times.Never);
     }
 
@@ -294,7 +362,7 @@ public class DragBridgeCopyFlowTests
         await clientTask;
 
         // Assert: resolve delegate was invoked (verified by client receiving resolved paths)
-        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<List<string>>(), It.IsAny<string>()), Times.Never);
+        capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<List<string>>(), It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
     }
 
     [Fact]
@@ -337,9 +405,56 @@ public class DragBridgeCopyFlowTests
         // Assert: dropped files captured with the owner SID
         capturedFileStore.Verify(
             s => s.SetCapturedFiles(
-                It.Is<List<string>>(files => files.SequenceEqual(droppedFiles)),
-                TestSid.Value),
+                It.Is<IReadOnlyList<string>>(files => files.SequenceEqual(droppedFiles)),
+                TestSid.Value,
+                null),
             Times.Once);
         log.Verify(l => l.Info(It.Is<string>(s => s.Contains("captured") && s.Contains("2"))), Times.Once);
+    }
+
+    [Fact]
+    public async Task RunBridgeAsync_FileListMessage_AppContainerOwner_StoresCapturedSourceContainerSid()
+    {
+        var (server, client) = CreatePipePair();
+        await using var _1 = server;
+        await using var _2 = client;
+        var containerSid = new SecurityIdentifier("S-1-15-2-42");
+        var owner = new WindowOwnerInfo(TestSid, NativeTokenHelper.MandatoryLevelMedium, false, containerSid);
+        var droppedFiles = new List<string> { @"C:\user\file1.txt" };
+
+        var launcher = new Mock<IDragBridgePipeLauncher>();
+        launcher.Setup(l => l.CreatePipeServer(
+                It.IsAny<string>(),
+                TestSid,
+                It.Is<SecurityIdentifier?>(sid => sid != null && sid.Value == containerSid.Value),
+                false))
+            .Returns(server);
+        launcher.Setup(l => l.LaunchForSid(It.IsAny<WindowOwnerInfo>(), It.IsAny<IReadOnlyList<string>>(),
+            It.IsAny<INotificationService>())).Returns((ProcessInfo?)null);
+        launcher.Setup(l => l.VerifyClientProcess(It.IsAny<NamedPipeServerStream>(), null)).Returns(true);
+        var capturedFileStore = new Mock<ICapturedFileStore>();
+        var flow = new DragBridgeCopyFlow(
+            launcher.Object,
+            new Mock<INotificationService>().Object,
+            new Mock<ILoggingService>().Object,
+            capturedFileStore.Object);
+
+        var clientTask = Task.Run(async () =>
+        {
+            await client.ConnectAsync(5000);
+            await DragBridgeProtocol.ReadAsync(client);
+            await DragBridgeProtocol.WriteAsync(client, new DragBridgeData { FilePaths = droppedFiles });
+            client.Close();
+        });
+
+        await flow.RunBridgeAsync(owner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
+        await clientTask;
+
+        capturedFileStore.Verify(
+            store => store.SetCapturedFiles(
+                It.Is<IReadOnlyList<string>>(files => files.SequenceEqual(droppedFiles)),
+                TestSid.Value,
+                containerSid.Value),
+            Times.Once);
     }
 }

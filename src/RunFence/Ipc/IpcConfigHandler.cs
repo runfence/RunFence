@@ -19,8 +19,8 @@ public class IpcConfigHandler(
     public IpcResponse HandleLoadApps(string? callerIdentity, bool isAdmin, IpcMessage message)
         => HandleConfigOperation(callerIdentity, isAdmin, "LoadApps", message, path =>
         {
-            var (success, error) = configContext!.LoadApps(path);
-            return (success, success ? null : error ?? "Failed to load apps.");
+            var result = configContext!.LoadApps(path);
+            return (result.Succeeded, result.Succeeded ? null : result.ErrorMessage ?? "Failed to load apps.");
         });
 
     public IpcResponse HandleUnloadApps(string? callerIdentity, bool isAdmin, IpcMessage message)

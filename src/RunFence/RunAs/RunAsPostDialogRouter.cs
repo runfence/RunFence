@@ -14,12 +14,14 @@ public class RunAsPostDialogRouter(
     IEvaluationLimitHelper evaluationLimitHelper,
     RunAsDosProtection dosProtection)
 {
+    public void RecordUnlockDecline() => dosProtection.RecordDecline();
+
     /// <summary>
     /// Evaluates the dialog outcome and routes to the correct creation or selection flow.
     /// Returns the final <see cref="RunAsDialogResult"/> on success, or an empty result
     /// representing a declined or no-op outcome.
     /// </summary>
-    public RunAsDialogResult Route(
+    public async Task<RunAsDialogResult> RouteAsync(
         DialogResult dlgResult,
         RunAsDialogResult? capturedResult,
         bool createNewAccountRequested,
@@ -29,7 +31,8 @@ public class RunAsPostDialogRouter(
     {
         if (dlgResult != DialogResult.OK || capturedResult == null)
         {
-            dosProtection.RecordDecline();
+            if (dlgResult != DialogResult.OK)
+                dosProtection.RecordDecline();
             return RunAsDialogResult.Empty();
         }
 
@@ -51,7 +54,7 @@ public class RunAsPostDialogRouter(
                 SelectedContainer: newContainer,
                 PermissionGrant: capturedResult.PermissionGrant,
                 CreateAppEntryOnly: capturedResult.CreateAppEntryOnly,
-                PrivilegeLevel: PrivilegeLevel.Basic,
+                PrivilegeLevel: PrivilegeLevel.Isolated,
                 UpdateOriginalShortcut: capturedResult.UpdateOriginalShortcut,
                 RevertShortcutRequested: false,
                 EditExistingApp: capturedResult.EditExistingApp,
@@ -64,16 +67,15 @@ public class RunAsPostDialogRouter(
 
             if (!evaluationLimitHelper.CheckCredentialLimit(credentials))
             {
-                dosProtection.RecordDecline();
                 return RunAsDialogResult.Empty();
             }
 
-            var newCred = userAccountCreator.CreateNewAccount(filePath, out var newAccountGrant);
-            if (newCred == null)
+            var newAccount = await userAccountCreator.CreateNewAccountAsync(filePath);
+            if (newAccount == null)
                 return RunAsDialogResult.Empty();
-            var grantSelection = newAccountGrant ?? capturedResult.PermissionGrant;
+            var grantSelection = newAccount.PermissionGrant ?? capturedResult.PermissionGrant;
             return new RunAsDialogResult(
-                Credential: newCred,
+                Credential: newAccount.Credential,
                 SelectedContainer: null,
                 PermissionGrant: grantSelection,
                 CreateAppEntryOnly: capturedResult.CreateAppEntryOnly,

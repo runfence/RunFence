@@ -16,7 +16,6 @@ public class UserSettings
     public TrayIconsSettings? TrayIcons { get; set; }
     public NotificationSettings? Notifications { get; set; }
     public UserFoldersSettings? UserFolders { get; set; }
-    public EnvironmentSettings? Environment { get; set; }
     public FileAssociationsSettings? FileAssociations { get; set; }
     public NightLightSettings? NightLight { get; set; }
 }

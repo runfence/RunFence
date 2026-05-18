@@ -4,56 +4,47 @@ using RunFence.Persistence;
 namespace RunFence.Apps.UI;
 
 /// <summary>
-/// Owns the mutable state and domain mutation operations for handler mappings:
-/// adding, changing, removing app-based and direct handler mappings, and restoring HKCU
-/// fallback entries when handlers are removed or their type changes.
-/// Each mutation applies <see cref="AppEntry.AllowPassingArguments"/> immediately and fires
-/// <see cref="Changed"/> so subscribers (e.g. <see cref="HandlerMappingsDialog"/>) can save.
+/// Owns in-memory handler mapping mutations for add/edit/remove flows.
+/// Registry synchronization and HKCU restore side effects are handled separately by callers.
 /// </summary>
-public class HandlerMappingMutationHandler(
-    IHandlerMappingService handlerMappingService,
-    IAssociationAutoSetService autoSetService,
-    IDatabaseProvider databaseProvider,
-    IHandlerMappingNotifier notifier)
+public class HandlerMappingMutationHandler(IHandlerMappingService handlerMappingService)
 {
-    /// <summary>
-    /// Raised after each mutation so subscribers (e.g. <see cref="HandlerMappingsDialog"/>)
-    /// can react without polling. Fired on the UI thread — no cross-thread marshaling needed.
-    /// </summary>
     public event Action? Changed;
 
-    /// <summary>
-    /// Adds app-based mappings for each key. Keys are assumed to have been validated by the caller.
-    /// If the app does not have AllowPassingArguments enabled, enables it immediately with a user warning.
-    /// </summary>
-    public void AddAppMapping(IReadOnlyList<string> keys, AppEntry selectedApp, string? template,
-        IReadOnlyList<string>? prefixes = null, bool replacePrefixes = false)
+    public void AddAppMapping(
+        AppDatabase database,
+        IReadOnlyList<string> keys,
+        AppEntry selectedApp,
+        string? template,
+        IReadOnlyList<string>? prefixes = null,
+        bool replacePrefixes = false,
+        bool requiresAllowPassingArgumentsEnable = false)
     {
-        if (!selectedApp.AllowPassingArguments)
-        {
+        if (requiresAllowPassingArgumentsEnable && !selectedApp.AllowPassingArguments)
             selectedApp.AllowPassingArguments = true;
-            notifier.ShowAllowPassingArgumentsEnabled(selectedApp.Name);
-        }
 
-        var db = databaseProvider.GetDatabase();
         foreach (var key in keys)
-            handlerMappingService.SetHandlerMapping(key,
-                new HandlerMappingEntry(selectedApp.Id, template,
+        {
+            handlerMappingService.SetHandlerMapping(
+                key,
+                new HandlerMappingEntry(
+                    selectedApp.Id,
+                    template,
                     PathPrefixes: prefixes?.Count > 0 ? [..prefixes] : null,
                     ReplacePrefixes: replacePrefixes),
-                db);
+                database);
+        }
 
         Changed?.Invoke();
     }
 
-    /// <summary>
-    /// Adds direct handler mappings for each key using pre-resolved handler entries.
-    /// Restores HKCU fallback when the handler type changes for an existing key.
-    /// </summary>
-    public void AddDirectHandler(IReadOnlyList<string> keys, IReadOnlyList<DirectHandlerEntry> resolvedEntries)
+    public HandlerMappingMutationOutcome AddDirectHandler(
+        AppDatabase database,
+        IReadOnlyList<string> keys,
+        IReadOnlyList<DirectHandlerEntry> resolvedEntries)
     {
-        var db = databaseProvider.GetDatabase();
-        var existingDirectMappings = handlerMappingService.GetEffectiveDirectHandlerMappings(db);
+        var existingDirectMappings = handlerMappingService.GetEffectiveDirectHandlerMappings(database);
+        var keysToRestore = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < keys.Count; i++)
         {
@@ -61,125 +52,131 @@ public class HandlerMappingMutationHandler(
             var newEntry = resolvedEntries[i];
 
             if (existingDirectMappings.TryGetValue(key, out var currentEntry) &&
-                ((currentEntry.ClassName != null && newEntry.ClassName == null) ||
-                 (currentEntry.Command != null && newEntry.Command == null)))
-                autoSetService.RestoreKeyForAllUsers(key);
+                ((currentEntry.ClassName != null && newEntry.Command != null) ||
+                 (currentEntry.Command != null && newEntry.ClassName != null)))
+            {
+                keysToRestore.Add(key);
+            }
 
-            handlerMappingService.SetDirectHandlerMapping(key, newEntry, db);
+            handlerMappingService.SetDirectHandlerMapping(key, newEntry, database);
         }
 
         Changed?.Invoke();
+        return new HandlerMappingMutationOutcome([..keysToRestore]);
     }
 
-    /// <summary>
-    /// Changes the app and/or template for an existing app-based mapping.
-    /// Returns false and makes no changes when neither the app, the template, nor the prefixes changed.
-    /// If the new app does not have AllowPassingArguments enabled, enables it immediately with a user warning.
-    /// </summary>
-    public bool ChangeAppMapping(string key, string oldAppId, AppEntry newApp, string? newTemplate,
+    public bool ChangeAppMapping(
+        AppDatabase database,
+        string key,
+        string oldAppId,
+        AppEntry newApp,
+        string? newTemplate,
         string? currentTemplateInRow,
-        IReadOnlyList<string>? currentPrefixes = null, IReadOnlyList<string>? newPrefixes = null,
-        bool currentReplacePrefixes = false, bool newReplacePrefixes = false)
+        IReadOnlyList<string>? currentPrefixes = null,
+        IReadOnlyList<string>? newPrefixes = null,
+        bool currentReplacePrefixes = false,
+        bool newReplacePrefixes = false,
+        bool requiresAllowPassingArgumentsEnable = false)
     {
         var existingTemplate = string.IsNullOrEmpty(currentTemplateInRow) ? null : currentTemplateInRow;
-        if (string.Equals(newApp.Id, oldAppId, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(newTemplate, existingTemplate, StringComparison.Ordinal) &&
-            (currentPrefixes ?? []).SequenceEqual(newPrefixes ?? [], StringComparer.OrdinalIgnoreCase) &&
-            currentReplacePrefixes == newReplacePrefixes)
-            return false;
+        var templateChanged = !string.Equals(newTemplate, existingTemplate, StringComparison.Ordinal);
+        var prefixesChanged = !(currentPrefixes ?? []).SequenceEqual(newPrefixes ?? [], StringComparer.OrdinalIgnoreCase);
+        var replaceModeChanged = currentReplacePrefixes != newReplacePrefixes;
+        var appWillMutate = requiresAllowPassingArgumentsEnable && !newApp.AllowPassingArguments;
 
-        var db = databaseProvider.GetDatabase();
-        handlerMappingService.RemoveHandlerMapping(key, oldAppId, db);
-        if (!newApp.AllowPassingArguments)
+        if (string.Equals(newApp.Id, oldAppId, StringComparison.OrdinalIgnoreCase) &&
+            !templateChanged &&
+            !prefixesChanged &&
+            !replaceModeChanged &&
+            !appWillMutate)
         {
-            newApp.AllowPassingArguments = true;
-            notifier.ShowAllowPassingArgumentsEnabled(newApp.Name);
+            return false;
         }
-        handlerMappingService.SetHandlerMapping(key,
-            new HandlerMappingEntry(newApp.Id, newTemplate,
+
+        if (requiresAllowPassingArgumentsEnable && !newApp.AllowPassingArguments)
+            newApp.AllowPassingArguments = true;
+
+        if (string.Equals(newApp.Id, oldAppId, StringComparison.OrdinalIgnoreCase) &&
+            !templateChanged &&
+            !prefixesChanged &&
+            !replaceModeChanged)
+        {
+            Changed?.Invoke();
+            return true;
+        }
+
+        handlerMappingService.RemoveHandlerMapping(key, oldAppId, database);
+        handlerMappingService.SetHandlerMapping(
+            key,
+            new HandlerMappingEntry(
+                newApp.Id,
+                newTemplate,
                 PathPrefixes: newPrefixes?.Count > 0 ? [..newPrefixes] : null,
                 ReplacePrefixes: newReplacePrefixes),
-            db);
+            database);
         Changed?.Invoke();
         return true;
     }
 
-    /// <summary>
-    /// Edits a direct handler mapping with a pre-resolved entry.
-    /// Restores HKCU fallback when the handler type changes.
-    /// </summary>
-    public void EditDirectHandler(string key, DirectHandlerEntry currentEntry, DirectHandlerEntry newEntry)
+    public HandlerMappingMutationOutcome EditDirectHandler(
+        AppDatabase database,
+        string key,
+        DirectHandlerEntry currentEntry,
+        DirectHandlerEntry newEntry)
     {
-        if (currentEntry.ClassName != null && newEntry.ClassName == null)
-            autoSetService.RestoreKeyForAllUsers(key);
-        else if (currentEntry.Command != null && newEntry.Command == null)
-            autoSetService.RestoreKeyForAllUsers(key);
+        var keysToRestore =
+            (currentEntry.ClassName != null && newEntry.Command != null) ||
+            (currentEntry.Command != null && newEntry.ClassName != null)
+                ? new[] { key }
+                : Array.Empty<string>();
 
-        var db = databaseProvider.GetDatabase();
-        handlerMappingService.SetDirectHandlerMapping(key, newEntry, db);
+        handlerMappingService.SetDirectHandlerMapping(key, newEntry, database);
         Changed?.Invoke();
+        return new HandlerMappingMutationOutcome(keysToRestore);
     }
 
-    /// <summary>
-    /// Removes an app-based mapping. Restores HKCU fallback when the key has no remaining app mappings.
-    /// If no handler mappings remain for this app across all keys, disables AllowPassingArguments immediately.
-    /// </summary>
-    public void RemoveMapping(AppMappingRowTag tag)
+    public RemovedAppMappingState? RemoveMapping(AppDatabase database, AppMappingRowTag tag)
     {
-        var db = databaseProvider.GetDatabase();
-        handlerMappingService.RemoveHandlerMapping(tag.Key, tag.AppId, db);
-        var remaining = handlerMappingService.GetAllHandlerMappings(db);
-        if (!remaining.ContainsKey(tag.Key))
-            autoSetService.RestoreKeyForAllUsers(tag.Key);
+        var allMappings = handlerMappingService.GetAllHandlerMappings(database);
+        if (!allMappings.TryGetValue(tag.Key, out var entries))
+            return null;
 
-        if (!remaining.Values.SelectMany(ids => ids)
-                .Any(e => string.Equals(e.AppId, tag.AppId, StringComparison.OrdinalIgnoreCase)))
-        {
-            var app = db.Apps.FirstOrDefault(a => string.Equals(a.Id, tag.AppId, StringComparison.OrdinalIgnoreCase));
-            if (app is { AllowPassingArguments: true })
-            {
-                app.AllowPassingArguments = false;
-                notifier.ShowAllowPassingArgumentsDisabled(app.Name);
-            }
-        }
+        var removedEntry = entries.FirstOrDefault(e =>
+            string.Equals(e.AppId, tag.AppId, StringComparison.OrdinalIgnoreCase));
+        if (removedEntry.AppId == null)
+            return null;
 
+        handlerMappingService.RemoveHandlerMapping(tag.Key, tag.AppId, database);
+        var remaining = handlerMappingService.GetAllHandlerMappings(database);
         Changed?.Invoke();
+        return new RemovedAppMappingState(tag.Key, removedEntry, RequiresRestore: !remaining.ContainsKey(tag.Key));
     }
 
-    /// <summary>
-    /// Removes a direct handler mapping and restores the HKCU fallback.
-    /// </summary>
-    public void RemoveDirectHandler(DirectHandlerRowTag tag)
+    public RemovedDirectHandlerState? RemoveDirectHandler(AppDatabase database, DirectHandlerRowTag tag)
     {
-        var db = databaseProvider.GetDatabase();
-        handlerMappingService.RemoveDirectHandlerMapping(tag.Key, db);
-        autoSetService.RestoreKeyForAllUsers(tag.Key);
+        var directMappings = handlerMappingService.GetEffectiveDirectHandlerMappings(database);
+        if (!directMappings.TryGetValue(tag.Key, out var removedEntry))
+            return null;
+
+        handlerMappingService.RemoveDirectHandlerMapping(tag.Key, database);
         Changed?.Invoke();
+        return new RemovedDirectHandlerState(tag.Key, removedEntry, RequiresRestore: true);
     }
 
-    /// <summary>
-    /// Applies imported association entries to the database as direct handler mappings.
-    /// Entries are assumed to have been validated and selected by the caller.
-    /// </summary>
-    public void ApplyImportedAssociations(IReadOnlyList<InteractiveAssociationEntry> entries)
+    public void ApplyImportedAssociations(AppDatabase database, IReadOnlyList<InteractiveAssociationEntry> entries)
     {
-        var db = databaseProvider.GetDatabase();
         foreach (var entry in entries)
-            handlerMappingService.SetDirectHandlerMapping(entry.Key, entry.Handler, db);
+            handlerMappingService.SetDirectHandlerMapping(entry.Key, entry.Handler, database);
 
         Changed?.Invoke();
     }
 
-    /// <summary>
-    /// Replaces all app-based handler mappings for the given app with the provided associations,
-    /// computing a diff and applying only the minimal set of changes. Fires <see cref="Changed"/>
-    /// when any additions or removals occurred, allowing subscribers to sync.
-    /// Returns the list of keys that were removed.
-    /// </summary>
-    public IReadOnlyList<string> SetAssociationsForApp(string appId, IReadOnlyList<HandlerAssociationItem> newAssociations)
+    public IReadOnlyList<string> SetAssociationsForApp(
+        AppDatabase database,
+        string appId,
+        IReadOnlyList<HandlerAssociationItem> newAssociations)
     {
-        var db = databaseProvider.GetDatabase();
-        var allMappings = handlerMappingService.GetAllHandlerMappings(db);
+        var allMappings = handlerMappingService.GetAllHandlerMappings(database);
 
         var originalItems = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var kv in allMappings)
@@ -198,29 +195,32 @@ public class HandlerMappingMutationHandler(
         {
             if (!newKeys.Contains(key))
             {
-                handlerMappingService.RemoveHandlerMapping(key, appId, db);
+                handlerMappingService.RemoveHandlerMapping(key, appId, database);
                 removedKeys.Add(key);
             }
         }
 
-        bool anyMutated = false;
+        var anyMutated = false;
         foreach (var item in newAssociations)
         {
-            bool isNew = !originalItems.ContainsKey(item.Key);
-            bool templateChanged = !isNew && originalItems[item.Key].ArgumentsTemplate != item.ArgumentsTemplate;
-            bool prefixesChanged = !isNew &&
+            var isNew = !originalItems.ContainsKey(item.Key);
+            var templateChanged = !isNew && originalItems[item.Key].ArgumentsTemplate != item.ArgumentsTemplate;
+            var prefixesChanged = !isNew &&
                 (!(originalItems[item.Key].PathPrefixes ?? []).SequenceEqual(item.PathPrefixes ?? [], StringComparer.OrdinalIgnoreCase) ||
                  originalItems[item.Key].ReplacePrefixes != item.ReplacePrefixes);
 
-            if (isNew || templateChanged || prefixesChanged)
-            {
-                handlerMappingService.SetHandlerMapping(item.Key,
-                    new HandlerMappingEntry(appId, item.ArgumentsTemplate,
-                        PathPrefixes: item.PathPrefixes?.Count > 0 ? [..item.PathPrefixes] : null,
-                        ReplacePrefixes: item.ReplacePrefixes),
-                    db);
-                anyMutated = true;
-            }
+            if (!isNew && !templateChanged && !prefixesChanged)
+                continue;
+
+            handlerMappingService.SetHandlerMapping(
+                item.Key,
+                new HandlerMappingEntry(
+                    appId,
+                    item.ArgumentsTemplate,
+                    PathPrefixes: item.PathPrefixes?.Count > 0 ? [..item.PathPrefixes] : null,
+                    ReplacePrefixes: item.ReplacePrefixes),
+                database);
+            anyMutated = true;
         }
 
         if (anyMutated || removedKeys.Count > 0)
@@ -229,17 +229,42 @@ public class HandlerMappingMutationHandler(
         return removedKeys;
     }
 
-    /// <summary>
-    /// Updates the app-level path prefix constraint for the specified app entry.
-    /// Sets to null when <paramref name="prefixes"/> is null or empty.
-    /// </summary>
-    public void UpdateAppPrefixes(string appId, IReadOnlyList<string>? prefixes)
+    public bool UpdateAppPrefixes(AppDatabase database, string appId, IReadOnlyList<string>? prefixes)
     {
-        var db = databaseProvider.GetDatabase();
-        var app = db.Apps.FirstOrDefault(a => string.Equals(a.Id, appId, StringComparison.OrdinalIgnoreCase));
-        if (app == null) return;
-        app.PathPrefixes = prefixes?.Count > 0 ? [..prefixes] : null;
+        var app = database.Apps.FirstOrDefault(a => string.Equals(a.Id, appId, StringComparison.OrdinalIgnoreCase));
+        if (app == null)
+            return false;
+
+        List<string>? normalizedPrefixes = prefixes?.Count > 0 ? [..prefixes] : null;
+        if ((app.PathPrefixes ?? []).SequenceEqual(normalizedPrefixes ?? [], StringComparer.OrdinalIgnoreCase))
+            return false;
+
+        app.PathPrefixes = normalizedPrefixes;
+        Changed?.Invoke();
+        return true;
+    }
+
+    public void RestoreRemovedAppMapping(AppDatabase database, RemovedAppMappingState removed)
+    {
+        handlerMappingService.SetHandlerMapping(removed.Key, removed.Entry, database);
         Changed?.Invoke();
     }
 
+    public void RestoreRemovedDirectHandler(AppDatabase database, RemovedDirectHandlerState removed)
+    {
+        handlerMappingService.SetDirectHandlerMapping(removed.Key, removed.Entry, database);
+        Changed?.Invoke();
+    }
 }
+
+public sealed record HandlerMappingMutationOutcome(IReadOnlyList<string> KeysToRestore);
+
+public sealed record RemovedAppMappingState(
+    string Key,
+    HandlerMappingEntry Entry,
+    bool RequiresRestore);
+
+public sealed record RemovedDirectHandlerState(
+    string Key,
+    DirectHandlerEntry Entry,
+    bool RequiresRestore);

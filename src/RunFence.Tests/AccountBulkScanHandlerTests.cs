@@ -2,444 +2,306 @@ using Moq;
 using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Acl;
+using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
 
-/// <summary>
-/// Tests for <see cref="AccountBulkScanHandler.FilterManagedPaths"/> and
-/// <see cref="AccountBulkScanHandler.ApplyScanResults"/>.
-/// </summary>
 public class AccountBulkScanHandlerTests
 {
-    private const string Sid1 = "S-1-5-21-1234567890-1234567890-1234567890-1001";
-    private const string Sid2 = "S-1-5-21-1234567890-1234567890-1234567890-1002";
-
-    private static AccountBulkScanHandler CreateHandler(IDatabaseProvider? databaseProvider = null) => new(
-        new Mock<IAccountAclBulkScanService>().Object,
-        new Mock<IAclService>().Object,
-        new Mock<ILoggingService>().Object,
-        new Mock<ISidNameCacheService>().Object,
-        databaseProvider ?? new Mock<IDatabaseProvider>().Object);
-
-    private static AccountBulkScanHandler CreateHandlerWithDatabase(AppDatabase database) =>
-        CreateHandler(new LambdaDatabaseProvider(() => database));
-
-    private static DiscoveredGrant MakeGrant(string path, bool isDeny = false) =>
-        new(Path: path, IsDeny: isDeny, Execute: false, Write: false, Read: true, Special: false, IsOwner: false);
-
-    private static Mock<IAclService> MockAcl(params (AppEntry App, string ResolvedPath)[] mappings)
-    {
-        var mock = new Mock<IAclService>();
-        foreach (var (app, resolvedPath) in mappings)
-            mock.Setup(a => a.ResolveAclTargetPath(app)).Returns(resolvedPath);
-        return mock;
-    }
-
     [Fact]
-    public void NoManagedApps_ResultsUnchanged()
+    public async Task ScanAcls_RunsSharedWorkflowAndSavesSelectedResults()
     {
-        var grant = MakeGrant(@"C:\apps\foo.exe");
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
+        var sid = "S-1-5-21-1-2-3-1001";
+        var rootPath = @"C:\scan-root";
+        var scanResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
         {
-            [Sid1] = new([grant], [])
+            [sid] = new([new DiscoveredGrant(@"C:\data", false, false, false, true, false, false)], [])
         };
-
-        var filtered = CreateHandler().FilterManagedPaths(results, [], new Mock<IAclService>().Object);
-
-        Assert.Single(filtered[Sid1].Grants);
-    }
-
-    [Fact]
-    public void GrantAtManagedFilePath_Filtered()
-    {
-        var app = new AppEntry { ExePath = @"C:\apps\foo.exe", AclTarget = AclTarget.File, RestrictAcl = true };
-        var aclMock = MockAcl((app, @"C:\apps\foo.exe"));
-        var grant = MakeGrant(@"C:\apps\foo.exe");
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
+        var filteredResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
         {
-            [Sid1] = new([grant], [])
+            [sid] = scanResults[sid]
         };
+        var summary = new AclBulkScanImportSummary(1, 0, [@"C:\conflict"]);
 
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
+        var folderDialog = new Mock<IFolderBrowserDialogAdapter>();
+        folderDialog.SetupGet(dialog => dialog.Dialog).Returns(new FolderBrowserDialog
+        {
+            SelectedPath = rootPath
+        });
+        folderDialog.Setup(dialog => dialog.ShowDialog(It.IsAny<IWin32Window?>())).Returns(DialogResult.OK);
 
-        Assert.Empty(filtered);
+        var folderDialogFactory = new Mock<IFolderBrowserDialogAdapterFactory>();
+        folderDialogFactory.Setup(factory => factory.Create()).Returns(folderDialog.Object);
+
+        var bulkScan = new Mock<IAccountAclBulkScanService>();
+        bulkScan.Setup(service => service.ScanAllAccountsAsync(
+                rootPath,
+                It.Is<IReadOnlySet<string>>(sids => sids.Count == 1 && sids.Contains(sid)),
+                It.IsAny<IProgress<long>>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(scanResults);
+
+        var processor = new Mock<IAclBulkScanResultProcessor>();
+        processor.Setup(service => service.FilterManagedPaths(
+                scanResults,
+                It.IsAny<IReadOnlyList<AppEntry>>(),
+                It.IsAny<IAclService>()))
+            .Returns(filteredResults);
+        processor.Setup(service => service.ApplyScanResults(filteredResults, It.IsAny<Action>()))
+            .Callback<Dictionary<string, AccountScanResult>, Action>((_, saveDatabase) => saveDatabase())
+            .Returns(summary);
+
+        var resultDialog = new Mock<IAclBulkScanResultDialog>();
+        resultDialog.SetupGet(dialog => dialog.Form).Returns(new Form());
+        resultDialog.SetupGet(dialog => dialog.SelectedResults).Returns(filteredResults);
+
+        var resultDialogFactory = new Mock<IAclBulkScanResultDialogFactory>();
+        resultDialogFactory.Setup(factory => factory.Create(filteredResults, It.IsAny<ISidNameCacheService>()))
+            .Returns(resultDialog.Object);
+
+        var warningPresenter = new Mock<IAclBulkScanWarningPresenter>();
+        var messagePresenter = new Mock<IAclBulkScanMessagePresenter>();
+        var workflow = new AclBulkScanWorkflow(
+            bulkScan.Object,
+            Mock.Of<IAclService>(),
+            Mock.Of<ILoggingService>(),
+            Mock.Of<ISidNameCacheService>(),
+            processor.Object,
+            warningPresenter.Object,
+            resultDialogFactory.Object,
+            folderDialogFactory.Object,
+            new LambdaDatabaseProvider(() => new AppDatabase()));
+
+        var owner = new Control();
+        using var form = new Form();
+        form.Controls.Add(owner);
+
+        var context = new Mock<IAccountsPanelContext>();
+        context.SetupGet(c => c.OwnerControl).Returns(owner);
+        context.SetupGet(c => c.CredentialStore).Returns(new CredentialStore
+        {
+            Credentials =
+            [
+                new CredentialEntry { Sid = sid },
+                new CredentialEntry { Sid = string.Empty }
+            ]
+        });
+        context.Setup(c => c.ShowModal(It.IsAny<Form>())).Returns(DialogResult.OK);
+
+        var progress = new Mock<IScanProgressReporter>();
+        var handler = new AccountBulkScanHandler(workflow, messagePresenter.Object);
+
+        await handler.ScanAcls(context.Object, progress.Object);
+
+        folderDialog.Verify(dialog => dialog.ShowDialog(form), Times.Once);
+        bulkScan.Verify(service => service.ScanAllAccountsAsync(
+            rootPath,
+            It.Is<IReadOnlySet<string>>(sids => sids.Count == 1 && sids.Contains(sid)),
+            It.IsAny<IProgress<long>>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+        processor.Verify(service => service.FilterManagedPaths(scanResults, It.IsAny<IReadOnlyList<AppEntry>>(), It.IsAny<IAclService>()), Times.Once);
+        processor.Verify(service => service.ApplyScanResults(filteredResults, It.IsAny<Action>()), Times.Once);
+        context.Verify(c => c.ShowModal(It.IsAny<Form>()), Times.Once);
+        context.Verify(c => c.SaveAndRefresh(null, -1), Times.Once);
+        warningPresenter.Verify(service => service.ShowSkippedConflictWarning(summary, "Scan ACLs"), Times.Once);
+        progress.Verify(p => p.SetScanEnabled(false), Times.Once);
+        progress.Verify(p => p.SetScanEnabled(true), Times.Once);
+        progress.Verify(p => p.SetStatus("Scanning ACLs..."), Times.Once);
+        progress.Verify(p => p.SetStatus("Ready"), Times.Once);
     }
 
     [Fact]
-    public void GrantUnderManagedFolderPath_Filtered()
+    public async Task ScanAcls_WhenNoKnownAccounts_PresentsExistingMessage()
     {
-        var app = new AppEntry { ExePath = @"C:\apps\myapp\myapp.exe", AclTarget = AclTarget.Folder, RestrictAcl = true };
-        var aclMock = MockAcl((app, @"C:\apps\myapp"));
-        var grant = MakeGrant(@"C:\apps\myapp\myapp.exe");
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
+        var folderDialog = new Mock<IFolderBrowserDialogAdapter>();
+        folderDialog.SetupGet(dialog => dialog.Dialog).Returns(new FolderBrowserDialog
         {
-            [Sid1] = new([grant], [])
-        };
+            SelectedPath = @"C:\scan-root"
+        });
+        folderDialog.Setup(dialog => dialog.ShowDialog(It.IsAny<IWin32Window?>())).Returns(DialogResult.OK);
 
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
+        var folderDialogFactory = new Mock<IFolderBrowserDialogAdapterFactory>();
+        folderDialogFactory.Setup(factory => factory.Create()).Returns(folderDialog.Object);
 
-        Assert.Empty(filtered);
-    }
+        var workflow = new AclBulkScanWorkflow(
+            new Mock<IAccountAclBulkScanService>(MockBehavior.Strict).Object,
+            Mock.Of<IAclService>(),
+            Mock.Of<ILoggingService>(),
+            Mock.Of<ISidNameCacheService>(),
+            new Mock<IAclBulkScanResultProcessor>(MockBehavior.Strict).Object,
+            new Mock<IAclBulkScanWarningPresenter>(MockBehavior.Strict).Object,
+            Mock.Of<IAclBulkScanResultDialogFactory>(),
+            folderDialogFactory.Object,
+            new LambdaDatabaseProvider(() => new AppDatabase()));
 
-    [Fact]
-    public void GrantAtUnmanagedPath_PassesThrough()
-    {
-        var app = new AppEntry { ExePath = @"C:\apps\myapp\myapp.exe", AclTarget = AclTarget.Folder, RestrictAcl = true };
-        var aclMock = MockAcl((app, @"C:\apps\myapp"));
-        var grant = MakeGrant(@"C:\other\data.txt");
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
+        var owner = new Control();
+        using var form = new Form();
+        form.Controls.Add(owner);
+
+        var context = new Mock<IAccountsPanelContext>();
+        context.SetupGet(c => c.OwnerControl).Returns(owner);
+        context.SetupGet(c => c.CredentialStore).Returns(new CredentialStore
         {
-            [Sid1] = new([grant], [])
-        };
-
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
-
-        Assert.Single(filtered[Sid1].Grants);
-    }
-
-    [Fact]
-    public void TraversePathUnderManagedFolder_Filtered()
-    {
-        var app = new AppEntry { ExePath = @"C:\apps\myapp\myapp.exe", AclTarget = AclTarget.Folder, RestrictAcl = true };
-        var aclMock = MockAcl((app, @"C:\apps\myapp"));
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [Sid1] = new([], [@"C:\apps\myapp"])
-        };
-
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
-
-        Assert.Empty(filtered);
-    }
-
-    [Fact]
-    public void SidWithAllPathsFiltered_RemovedFromResults()
-    {
-        var app = new AppEntry { ExePath = @"C:\apps\myapp\myapp.exe", AclTarget = AclTarget.Folder, RestrictAcl = true };
-        var aclMock = MockAcl((app, @"C:\apps\myapp"));
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [Sid1] = new([MakeGrant(@"C:\apps\myapp\myapp.exe")], []),
-            [Sid2] = new([MakeGrant(@"C:\other\file.txt")], [])
-        };
-
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
-
-        Assert.False(filtered.ContainsKey(Sid1));
-        Assert.True(filtered.ContainsKey(Sid2));
-    }
-
-    [Fact]
-    public void AppWithRestrictAclFalse_PathNotInManagedSet()
-    {
-        var app = new AppEntry { ExePath = @"C:\apps\foo.exe", AclTarget = AclTarget.File, RestrictAcl = false };
-        var aclMock = new Mock<IAclService>();
-        var grant = MakeGrant(@"C:\apps\foo.exe");
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [Sid1] = new([grant], [])
-        };
-
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
-
-        Assert.Single(filtered[Sid1].Grants);
-        aclMock.Verify(a => a.ResolveAclTargetPath(It.IsAny<AppEntry>()), Times.Never);
-    }
-
-    [Fact]
-    public void AppWithIsUrlScheme_PathNotInManagedSet()
-    {
-        var app = new AppEntry { ExePath = "myapp://", IsUrlScheme = true, RestrictAcl = true };
-        var aclMock = new Mock<IAclService>();
-        var grant = MakeGrant(@"C:\apps\foo.exe");
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [Sid1] = new([grant], [])
-        };
-
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
-
-        Assert.Single(filtered[Sid1].Grants);
-        aclMock.Verify(a => a.ResolveAclTargetPath(It.IsAny<AppEntry>()), Times.Never);
-    }
-
-    [Fact]
-    public void PathMatchingIsCaseInsensitive()
-    {
-        var app = new AppEntry { ExePath = @"C:\Apps\MyApp\MyApp.exe", AclTarget = AclTarget.Folder, RestrictAcl = true };
-        var aclMock = MockAcl((app, @"C:\Apps\MyApp"));
-        var grant = MakeGrant(@"C:\apps\myapp\myapp.exe");
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [Sid1] = new([grant], [])
-        };
-
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
-
-        Assert.Empty(filtered);
-    }
-
-    [Fact]
-    public void MixedManagedAndUnmanagedGrants_OnlyUnmanagedRetained()
-    {
-        var app = new AppEntry { ExePath = @"C:\apps\myapp\myapp.exe", AclTarget = AclTarget.Folder, RestrictAcl = true };
-        var aclMock = MockAcl((app, @"C:\apps\myapp"));
-        var results = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [Sid1] = new(
-                [MakeGrant(@"C:\apps\myapp\myapp.exe"), MakeGrant(@"C:\data\shared")],
-                [@"C:\apps\myapp", @"C:\other\traverse"])
-        };
-
-        var filtered = CreateHandler().FilterManagedPaths(results, [app], aclMock.Object);
-
-        Assert.Single(filtered[Sid1].Grants);
-        Assert.Equal(@"C:\data\shared", filtered[Sid1].Grants[0].Path);
-        Assert.Single(filtered[Sid1].TraversePaths);
-        Assert.Equal(@"C:\other\traverse", filtered[Sid1].TraversePaths[0]);
-    }
-
-    // ── ApplyScanResults ─────────────────────────────────────────────────────
-
-    private static DiscoveredGrant MakeAllow(string path, bool execute = false, bool write = false,
-        bool read = true, bool special = false, bool isOwner = false)
-        => new(path, IsDeny: false, Execute: execute, Write: write, Read: read, Special: special, IsOwner: isOwner);
-
-    private static DiscoveredGrant MakeDeny(string path, bool execute = false, bool read = false)
-        => new(path, IsDeny: true, Execute: execute, Write: false, Read: read, Special: false, IsOwner: false);
-
-    [Fact]
-    public void ApplyScanResults_AddsGrantToDatabase()
-    {
-        // Arrange
-        var database = new AppDatabase();
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([MakeAllow(@"C:\data\shared")], [])
-        };
-        bool saveInvoked = false;
-
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => saveInvoked = true);
-
-        // Assert
-        Assert.True(saveInvoked);
-        var grants = database.GetAccount(Sid1)?.Grants;
-        Assert.NotNull(grants);
-        Assert.Single(grants);
-        Assert.Equal(AclHelper.NormalizePath(@"C:\data\shared"), grants[0].Path);
-        Assert.False(grants[0].IsDeny);
-        Assert.False(grants[0].IsTraverseOnly);
-    }
-
-    [Fact]
-    public void ApplyScanResults_AddsDenyGrantToDatabase()
-    {
-        // Arrange
-        var database = new AppDatabase();
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([MakeDeny(@"C:\restricted")], [])
-        };
-
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
-
-        // Assert
-        var grants = database.GetAccount(Sid1)?.Grants;
-        Assert.NotNull(grants);
-        Assert.Single(grants);
-        Assert.True(grants[0].IsDeny);
-        Assert.False(grants[0].IsTraverseOnly);
-    }
-
-    [Fact]
-    public void ApplyScanResults_DeduplicatesGrant_WhenSamePathAndSameIsDeny()
-    {
-        // Arrange: an Allow grant for the same path already exists — the scan must NOT add a duplicate.
-        var database = new AppDatabase();
-        var normalizedPath = AclHelper.NormalizePath(@"C:\data\shared");
-        database.GetOrCreateAccount(Sid1).Grants.Add(new GrantedPathEntry
-        {
-            Path = normalizedPath,
-            IsDeny = false,
-            IsTraverseOnly = false
+            Credentials = [new CredentialEntry { Sid = string.Empty }]
         });
 
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([MakeAllow(@"C:\data\shared")], [])
-        };
+        var progress = new Mock<IScanProgressReporter>(MockBehavior.Strict);
+        var messagePresenter = new Mock<IAclBulkScanMessagePresenter>();
+        var handler = new AccountBulkScanHandler(workflow, messagePresenter.Object);
 
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+        await handler.ScanAcls(context.Object, progress.Object);
 
-        // Assert: still only one grant — no duplicate
-        Assert.Single(database.GetAccount(Sid1)!.Grants);
+        messagePresenter.Verify(
+            presenter => presenter.ShowNoKnownSids(form, "No known accounts to scan for."),
+            Times.Once);
+        messagePresenter.Verify(
+            presenter => presenter.ShowNoResults(It.IsAny<IWin32Window?>(), It.IsAny<string>()),
+            Times.Never);
+        messagePresenter.Verify(
+            presenter => presenter.ShowScanFailed(It.IsAny<IWin32Window?>(), It.IsAny<Exception>()),
+            Times.Never);
+        context.Verify(c => c.ShowModal(It.IsAny<Form>()), Times.Never);
     }
 
     [Fact]
-    public void ApplyScanResults_AllowAndDenyForSamePath_BothAdded_DifferentIsDeny()
+    public async Task ScanAcls_WhenScanFails_PresentsExistingFailureMessage()
     {
-        // Arrange: existing Allow grant; scanning discovers a Deny for the same path.
-        // These are distinct entries (different IsDeny) so both should be present.
-        var database = new AppDatabase();
-        var normalizedPath = AclHelper.NormalizePath(@"C:\data\shared");
-        database.GetOrCreateAccount(Sid1).Grants.Add(new GrantedPathEntry
+        var sid = "S-1-5-21-1-2-3-1001";
+        var exception = new InvalidOperationException("boom");
+        var folderDialog = new Mock<IFolderBrowserDialogAdapter>();
+        folderDialog.SetupGet(dialog => dialog.Dialog).Returns(new FolderBrowserDialog
         {
-            Path = normalizedPath,
-            IsDeny = false,
-            IsTraverseOnly = false
+            SelectedPath = @"C:\scan-root"
+        });
+        folderDialog.Setup(dialog => dialog.ShowDialog(It.IsAny<IWin32Window?>())).Returns(DialogResult.OK);
+
+        var folderDialogFactory = new Mock<IFolderBrowserDialogAdapterFactory>();
+        folderDialogFactory.Setup(factory => factory.Create()).Returns(folderDialog.Object);
+
+        var bulkScan = new Mock<IAccountAclBulkScanService>();
+        bulkScan.Setup(service => service.ScanAllAccountsAsync(
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlySet<string>>(),
+                It.IsAny<IProgress<long>>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(exception);
+
+        var workflow = new AclBulkScanWorkflow(
+            bulkScan.Object,
+            Mock.Of<IAclService>(),
+            Mock.Of<ILoggingService>(),
+            Mock.Of<ISidNameCacheService>(),
+            new Mock<IAclBulkScanResultProcessor>(MockBehavior.Strict).Object,
+            new Mock<IAclBulkScanWarningPresenter>(MockBehavior.Strict).Object,
+            Mock.Of<IAclBulkScanResultDialogFactory>(),
+            folderDialogFactory.Object,
+            new LambdaDatabaseProvider(() => new AppDatabase()));
+
+        var owner = new Control();
+        using var form = new Form();
+        form.Controls.Add(owner);
+
+        var context = new Mock<IAccountsPanelContext>();
+        context.SetupGet(c => c.OwnerControl).Returns(owner);
+        context.SetupGet(c => c.CredentialStore).Returns(new CredentialStore
+        {
+            Credentials = [new CredentialEntry { Sid = sid }]
         });
 
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([MakeDeny(@"C:\data\shared")], [])
-        };
+        var progress = new Mock<IScanProgressReporter>();
+        var messagePresenter = new Mock<IAclBulkScanMessagePresenter>();
+        var handler = new AccountBulkScanHandler(workflow, messagePresenter.Object);
 
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+        await handler.ScanAcls(context.Object, progress.Object);
 
-        // Assert: two grants (one allow, one deny)
-        Assert.Equal(2, database.GetAccount(Sid1)!.Grants.Count);
+        messagePresenter.Verify(
+            presenter => presenter.ShowScanFailed(form, exception),
+            Times.Once);
+        messagePresenter.Verify(
+            presenter => presenter.ShowNoKnownSids(It.IsAny<IWin32Window?>(), It.IsAny<string>()),
+            Times.Never);
+        messagePresenter.Verify(
+            presenter => presenter.ShowNoResults(It.IsAny<IWin32Window?>(), It.IsAny<string>()),
+            Times.Never);
+        context.Verify(c => c.ShowModal(It.IsAny<Form>()), Times.Never);
     }
 
     [Fact]
-    public void ApplyScanResults_AddsTraversePathEntry()
+    public async Task ScanAcls_WhenNoResults_PresentsExistingNoResultsMessage()
     {
-        // Arrange
-        var database = new AppDatabase();
-        var selected = new Dictionary<string, AccountScanResult>
+        var sid = "S-1-5-21-1-2-3-1001";
+        var scanResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
         {
-            [Sid1] = new([], [@"C:\parent\traverse"])
+            [sid] = new([new DiscoveredGrant(@"C:\data", false, false, false, true, false, false)], [])
         };
 
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
-
-        // Assert: traverse-only entry added
-        var grants = database.GetAccount(Sid1)?.Grants;
-        Assert.NotNull(grants);
-        Assert.Single(grants);
-        Assert.True(grants[0].IsTraverseOnly);
-        Assert.Equal(AclHelper.NormalizePath(@"C:\parent\traverse"), grants[0].Path);
-    }
-
-    [Fact]
-    public void ApplyScanResults_DeduplicatesTraversePath()
-    {
-        // Arrange: traverse path already exists in database
-        var database = new AppDatabase();
-        var normalizedPath = AclHelper.NormalizePath(@"C:\parent");
-        database.GetOrCreateAccount(Sid1).Grants.Add(new GrantedPathEntry
+        var folderDialog = new Mock<IFolderBrowserDialogAdapter>();
+        folderDialog.SetupGet(dialog => dialog.Dialog).Returns(new FolderBrowserDialog
         {
-            Path = normalizedPath,
-            IsTraverseOnly = true
+            SelectedPath = @"C:\scan-root"
+        });
+        folderDialog.Setup(dialog => dialog.ShowDialog(It.IsAny<IWin32Window?>())).Returns(DialogResult.OK);
+
+        var folderDialogFactory = new Mock<IFolderBrowserDialogAdapterFactory>();
+        folderDialogFactory.Setup(factory => factory.Create()).Returns(folderDialog.Object);
+
+        var bulkScan = new Mock<IAccountAclBulkScanService>();
+        bulkScan.Setup(service => service.ScanAllAccountsAsync(
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlySet<string>>(),
+                It.IsAny<IProgress<long>>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(scanResults);
+
+        var processor = new Mock<IAclBulkScanResultProcessor>();
+        processor.Setup(service => service.FilterManagedPaths(
+                scanResults,
+                It.IsAny<IReadOnlyList<AppEntry>>(),
+                It.IsAny<IAclService>()))
+            .Returns([]);
+
+        var workflow = new AclBulkScanWorkflow(
+            bulkScan.Object,
+            Mock.Of<IAclService>(),
+            Mock.Of<ILoggingService>(),
+            Mock.Of<ISidNameCacheService>(),
+            processor.Object,
+            new Mock<IAclBulkScanWarningPresenter>(MockBehavior.Strict).Object,
+            Mock.Of<IAclBulkScanResultDialogFactory>(),
+            folderDialogFactory.Object,
+            new LambdaDatabaseProvider(() => new AppDatabase()));
+
+        var owner = new Control();
+        using var form = new Form();
+        form.Controls.Add(owner);
+
+        var context = new Mock<IAccountsPanelContext>();
+        context.SetupGet(c => c.OwnerControl).Returns(owner);
+        context.SetupGet(c => c.CredentialStore).Returns(new CredentialStore
+        {
+            Credentials = [new CredentialEntry { Sid = sid }]
         });
 
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([], [@"C:\parent"])
-        };
+        var progress = new Mock<IScanProgressReporter>();
+        var messagePresenter = new Mock<IAclBulkScanMessagePresenter>();
+        var handler = new AccountBulkScanHandler(workflow, messagePresenter.Object);
 
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
+        await handler.ScanAcls(context.Object, progress.Object);
 
-        // Assert: still only one entry
-        Assert.Single(database.GetAccount(Sid1)!.Grants);
-    }
-
-    [Fact]
-    public void ApplyScanResults_AllowGrant_RightsMapFromDiscoveredGrant()
-    {
-        // Arrange: discovered grant with Execute=true, Write=true, IsOwner=true
-        var database = new AppDatabase();
-        var grant = MakeAllow(@"C:\tools\util.exe", execute: true, write: true, read: true, isOwner: true);
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([grant], [])
-        };
-
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
-
-        // Assert: SavedRights reflects discovered rights; Own=true because IsOwner=true
-        var savedRights = database.GetAccount(Sid1)!.Grants[0].SavedRights;
-        Assert.NotNull(savedRights);
-        Assert.True(savedRights.Execute);
-        Assert.True(savedRights.Write);
-        Assert.True(savedRights.Own);
-    }
-
-    [Fact]
-    public void ApplyScanResults_DenyGrant_RightsMapFromDiscoveredGrant()
-    {
-        // Arrange: discovered deny grant with Execute=true, Read=true
-        var database = new AppDatabase();
-        var grant = MakeDeny(@"C:\restricted", execute: true, read: true);
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([grant], [])
-        };
-
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
-
-        // Assert: SavedRights has Execute and Read from scan; Own=false for deny by convention
-        var savedRights = database.GetAccount(Sid1)!.Grants[0].SavedRights;
-        Assert.NotNull(savedRights);
-        Assert.True(savedRights.Execute);
-        Assert.True(savedRights.Read);
-        Assert.False(savedRights.Own);
-    }
-
-    [Fact]
-    public void ApplyScanResults_MultipleSids_EachGetsSeparateGrants()
-    {
-        // Arrange
-        var database = new AppDatabase();
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([MakeAllow(@"C:\data\path1")], []),
-            [Sid2] = new([MakeAllow(@"C:\data\path2")], [])
-        };
-
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
-
-        // Assert: each SID has its own grant
-        Assert.Single(database.GetAccount(Sid1)!.Grants);
-        Assert.Equal(AclHelper.NormalizePath(@"C:\data\path1"), database.GetAccount(Sid1)!.Grants[0].Path);
-        Assert.Single(database.GetAccount(Sid2)!.Grants);
-        Assert.Equal(AclHelper.NormalizePath(@"C:\data\path2"), database.GetAccount(Sid2)!.Grants[0].Path);
-    }
-
-    [Fact]
-    public void ApplyScanResults_NormalizesPathCaseInsensitive()
-    {
-        // Arrange: path already in database with different casing — must be treated as duplicate
-        var database = new AppDatabase();
-        var normalizedPath = AclHelper.NormalizePath(@"C:\Data\Shared");
-        database.GetOrCreateAccount(Sid1).Grants.Add(new GrantedPathEntry
-        {
-            Path = normalizedPath,
-            IsDeny = false,
-            IsTraverseOnly = false
-        });
-
-        var selected = new Dictionary<string, AccountScanResult>
-        {
-            [Sid1] = new([MakeAllow(@"C:\data\shared")], [])
-        };
-
-        // Act
-        CreateHandlerWithDatabase(database).ApplyScanResults(selected, () => { });
-
-        // Assert: case-insensitive dedup — still only one entry
-        Assert.Single(database.GetAccount(Sid1)!.Grants);
+        messagePresenter.Verify(
+            presenter => presenter.ShowNoResults(form, "No ACL entries found for the known accounts in the selected folder."),
+            Times.Once);
+        messagePresenter.Verify(
+            presenter => presenter.ShowNoKnownSids(It.IsAny<IWin32Window?>(), It.IsAny<string>()),
+            Times.Never);
+        messagePresenter.Verify(
+            presenter => presenter.ShowScanFailed(It.IsAny<IWin32Window?>(), It.IsAny<Exception>()),
+            Times.Never);
+        context.Verify(c => c.ShowModal(It.IsAny<Form>()), Times.Never);
     }
 }

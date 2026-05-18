@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -10,7 +9,8 @@ namespace RunFence.Startup.UI;
 
 /// <summary>
 /// Orchestrates the PIN change flow: opens a PinDialog on a secure desktop,
-/// re-encrypts all config, updates the session, and fires the key-change event.
+/// re-encrypts all config, updates the session, and notifies callers after
+/// key rotation completes.
 /// </summary>
 public class PinChangeOrchestrator(
     IPinService pinService,
@@ -21,18 +21,16 @@ public class PinChangeOrchestrator(
 {
     /// <summary>
     /// Runs the full PIN change flow. Calls <paramref name="onPinChanged"/> if the PIN was
-    /// successfully changed, passing (oldBuffer, newStore, newPinDerivedKey).
+    /// successfully changed.
     /// </summary>
     public void Run(
         SessionContext session,
-        Action<ProtectedBuffer, CredentialStore, ProtectedBuffer> onPinChanged)
+        Action onPinChanged)
     {
-        CredentialStore? newStore = null;
-        byte[]? newKey = null;
+        PinKeyRotationResult? rotationResult = null;
         DialogResult dlgResult = DialogResult.Cancel;
-
-        using var pinnedKey = PinnedKeyBuffer.FromProtected(session.PinDerivedKey);
         var store = session.CredentialStore;
+        var currentKey = session.PinDerivedKey;
 
         modalCoordinator.RunOnSecureDesktop(() =>
         {
@@ -41,14 +39,13 @@ public class PinChangeOrchestrator(
             {
                 try
                 {
-                    var (resultStore, resultKey) = await Task.Run(() =>
-                        pinService.ChangePin(pinnedKey.Data, newPin, store));
-                    newStore = resultStore;
-                    newKey = resultKey;
+                    rotationResult = await Task.Run(() => pinService.ChangePin(currentKey, newPin, store));
                     return null;
                 }
                 catch (Exception ex)
                 {
+                    rotationResult?.Dispose();
+                    rotationResult = null;
                     log.Error("PIN change failed", ex);
                     return $"PIN change failed: {ex.Message}";
                 }
@@ -58,51 +55,51 @@ public class PinChangeOrchestrator(
 
         if (dlgResult == DialogResult.OK)
         {
-            ProtectedBuffer? newKeyBuffer = null;
             try
             {
-                newKeyBuffer = new ProtectedBuffer(newKey!);
-                newKey = null;
-                ApplyKeyRotation(session, newStore!, newKeyBuffer, onPinChanged, updateRememberPin: true);
-                newKeyBuffer = null;
+                ApplyKeyRotation(session, rotationResult!, onPinChanged, updateRememberPin: true);
+                rotationResult = null;
             }
             finally
             {
-                newKeyBuffer?.Dispose();
-                if (newKey != null)
-                    CryptographicOperations.ZeroMemory(newKey);
+                rotationResult?.Dispose();
             }
 
-            MessageBox.Show("PIN changed successfully.", "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(
+                "PIN changed successfully.\r\n\r\n" +
+                "Backups of the last loaded configs are still encrypted with the old PIN. " +
+                "They will be replaced after those configs are loaded again, such as on the next restart.",
+                "Success",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
         }
-        else if (newKey != null)
+        else
         {
-            CryptographicOperations.ZeroMemory(newKey);
+            rotationResult?.Dispose();
         }
     }
 
     public void ApplyKeyRotation(
         SessionContext session,
-        CredentialStore newStore,
-        ProtectedBuffer newKey,
-        Action<ProtectedBuffer, CredentialStore, ProtectedBuffer> onKeyRotated,
+        PinKeyRotationResult rotationResult,
+        Action onKeyRotated,
         bool updateRememberPin = true)
     {
-        ProtectedBuffer? ownedNewKey = newKey;
+        ArgumentNullException.ThrowIfNull(rotationResult);
+
+        SecureSecret? ownedNewKey = null;
         try
         {
+            ownedNewKey = rotationResult.TakeNewPinDerivedKey();
+
             // Save to disk before updating in-memory state so a failed save
             // doesn't leave the session pointing at a new key while disk has old data.
-            using (var scope = ownedNewKey.Unprotect())
-            {
-                appConfigService.ReencryptAndSaveAll(newStore, session.Database, scope.Data);
-            }
+            appConfigService.ReencryptAndSaveAll(rotationResult.Store, session.Database, ownedNewKey);
 
-            var oldBuffer = session.PinDerivedKey;
-            session.CredentialStore = newStore;
-            session.PinDerivedKey = ownedNewKey;
+            session.CredentialStore = rotationResult.Store;
+            session.ReplacePinDerivedKey(ownedNewKey);
             ownedNewKey = null;
-            onKeyRotated(oldBuffer, session.CredentialStore, session.PinDerivedKey);
+            onKeyRotated();
 
             if (updateRememberPin)
                 TryRefreshRememberPin(session.PinDerivedKey);
@@ -113,7 +110,7 @@ public class PinChangeOrchestrator(
         }
     }
 
-    private void TryRefreshRememberPin(ProtectedBuffer pinDerivedKey)
+    private void TryRefreshRememberPin(ISecureSecretSnapshotSource pinDerivedKey)
     {
         try
         {

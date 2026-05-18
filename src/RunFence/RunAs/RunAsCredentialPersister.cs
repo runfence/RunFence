@@ -14,7 +14,7 @@ namespace RunFence.RunAs;
 public class RunAsCredentialPersister(
     IAppStateProvider appState,
     SessionContext session,
-    ICredentialEncryptionService encryptionService,
+    ICredentialEncryptionSpanService encryptionService,
     IDatabaseService databaseService,
     ILoggingService log)
 {
@@ -46,8 +46,10 @@ public class RunAsCredentialPersister(
         settings.LastUsedRunAsContainerName = LastUsedRunAsContainerName;
         try
         {
-            using var scope = session.PinDerivedKey.Unprotect();
-            databaseService.SaveConfig(appState.Database, scope.Data, session.CredentialStore.ArgonSalt);
+            databaseService.SaveConfig(
+                appState.Database,
+                session.PinDerivedKey,
+                session.CredentialStore.ArgonSalt);
         }
         catch (Exception ex)
         {
@@ -64,9 +66,8 @@ public class RunAsCredentialPersister(
             return;
         try
         {
-            byte[] encryptedPassword;
-            using (var scope = session.PinDerivedKey.Unprotect())
-                encryptedPassword = encryptionService.Encrypt(result.AdHocPassword, scope.Data);
+            var encryptedPassword = session.PinDerivedKey.TransformSnapshot(key =>
+                encryptionService.Encrypt(result.AdHocPassword, key));
 
             var existing = session.CredentialStore.Credentials
                 .FirstOrDefault(c => string.Equals(c.Sid, result.Credential.Sid, StringComparison.OrdinalIgnoreCase));

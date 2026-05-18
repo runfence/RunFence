@@ -2,7 +2,7 @@ using System.Drawing.Drawing2D;
 
 namespace RunFence.DragBridge.UI.Forms;
 
-public partial class DragBridgeAccessDialog : Form
+public partial class DragBridgeAccessDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private const long LargeSizeWarningBytes = 100L * 1024 * 1024; // 100 MB
 

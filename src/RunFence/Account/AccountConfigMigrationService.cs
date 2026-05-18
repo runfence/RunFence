@@ -10,9 +10,10 @@ namespace RunFence.Account;
 
 public class AccountConfigMigrationService(
     IProfilePathResolver profilePathResolver,
-    ICredentialEncryptionService encryptionService,
+    ICredentialEncryptionSpanService encryptionService,
     IUserImpersonationHelper impersonationHelper,
     IConfigPaths configPaths,
+    IManagedPersistenceFileCleaner managedPersistenceFileCleaner,
     ILoggingService log)
     : IAccountConfigMigrationService
 {
@@ -28,7 +29,7 @@ public class AccountConfigMigrationService(
     }
 
     public void MigrateToAccount(CredentialStore store, string targetSid,
-        ProtectedString targetPassword, byte[] currentPinKey)
+        ProtectedString targetPassword, ISecureSecretSnapshotSource currentPinKey)
     {
         var reencryptEntries = new List<(Guid id, string sid, ProtectedString decrypted)>();
         var copyAsIsEntries = new List<CredentialEntry>();
@@ -42,7 +43,7 @@ public class AccountConfigMigrationService(
                     reencryptEntries.Add((
                         cred.Id,
                         cred.Sid,
-                        encryptionService.Decrypt(cred.EncryptedPassword, currentPinKey)));
+                        currentPinKey.TransformSnapshot(key => encryptionService.Decrypt(cred.EncryptedPassword, key))));
                 }
                 continue;
             }
@@ -55,7 +56,7 @@ public class AccountConfigMigrationService(
             reencryptEntries.Add((
                 cred.Id,
                 cred.Sid,
-                encryptionService.Decrypt(cred.EncryptedPassword, currentPinKey)));
+                currentPinKey.TransformSnapshot(key => encryptionService.Decrypt(cred.EncryptedPassword, key))));
         }
 
         try
@@ -71,12 +72,16 @@ public class AccountConfigMigrationService(
                     foreach (var entry in copyAsIsEntries)
                         result.Credentials.Add(entry);
                     foreach (var (id, sid, password) in reencryptEntries)
+                    {
+                        var encryptedPassword = currentPinKey.TransformSnapshot(key => encryptionService.Encrypt(password, key));
                         result.Credentials.Add(new CredentialEntry
                         {
                             Id = id,
                             Sid = sid,
-                            EncryptedPassword = encryptionService.Encrypt(password, currentPinKey)
+                            EncryptedPassword = encryptedPassword
                         });
+                    }
+
                     return result;
                 });
 
@@ -89,8 +94,8 @@ public class AccountConfigMigrationService(
             var credJson = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(newStore, JsonDefaults.Options));
             File.WriteAllBytes(targetCredPath, credJson);
             File.Copy(configPaths.ConfigFilePath, targetConfigPath, overwrite: true);
-            if (File.Exists(PathConstants.LicenseFilePath))
-                File.Copy(PathConstants.LicenseFilePath, targetLicensePath, overwrite: true);
+            if (File.Exists(configPaths.LicenseFilePath))
+                File.Copy(configPaths.LicenseFilePath, targetLicensePath, overwrite: true);
             log.Info($"Migration to {targetSid} complete.");
         }
         finally
@@ -102,17 +107,9 @@ public class AccountConfigMigrationService(
 
     public void DeleteCurrentAccountData()
     {
-        TryDelete(configPaths.CredentialsFilePath);
-        TryDelete(configPaths.ConfigFilePath);
-        TryDelete(PathConstants.LicenseFilePath);
-        TryDelete(configPaths.RememberPinFilePath);
-    }
-
-    private void TryDelete(string path)
-    {
-        if (!File.Exists(path))
-            return;
-        File.Delete(path);
-        log.Info($"Deleted {path}.");
+        managedPersistenceFileCleaner.DeletePrimaryAndManagedArtifacts(configPaths.CredentialsFilePath);
+        managedPersistenceFileCleaner.DeletePrimaryAndManagedArtifacts(configPaths.ConfigFilePath);
+        managedPersistenceFileCleaner.DeletePrimaryAndManagedArtifacts(configPaths.LicenseFilePath);
+        managedPersistenceFileCleaner.DeletePrimaryAndManagedArtifacts(configPaths.RememberPinFilePath);
     }
 }

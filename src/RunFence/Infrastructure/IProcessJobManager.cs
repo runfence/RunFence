@@ -3,7 +3,7 @@ namespace RunFence.Infrastructure;
 public enum JobAssignment
 {
     Tracking,
-    Restricted,       // Basic / medium-IL — Global\RunFence_Job_{SID}_Restricted
+    Restricted,       // Isolated / medium-IL — Global\RunFence_Job_{SID}_Restricted
     LowIntegrity,     // LowIntegrity — Global\RunFence_Job_{SID}_LowIntegrity
 }
 

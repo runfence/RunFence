@@ -8,7 +8,10 @@ namespace RunFence.Apps;
 /// Performs all HKCU registry write operations for per-user association overrides.
 /// Receives the HKU root key as a method parameter — it is an OS singleton, not a DI dependency.
 /// </summary>
-public class AssociationRegistryWriter(ILoggingService log)
+public class AssociationRegistryWriter(
+    ILoggingService log,
+    Func<RegistryKey, AssociationFallbackRegistry> registryFactory,
+    Func<IAssociationFallbackRegistry, AssociationFallbackRestoreService> restoreServiceFactory)
 {
     /// <summary>
     /// Sets the HKCU default value for a file extension to the RunFence ProgId,
@@ -123,13 +126,17 @@ public class AssociationRegistryWriter(ILoggingService log)
     /// <summary>
     /// Restores the original handler for the given association key by reading the RunFenceFallback value.
     /// </summary>
-    public void RestoreKey(RegistryKey hku, string sid, string key)
+    public void RestoreKey(
+        RegistryKey hku,
+        string sid,
+        string key)
     {
-        using var assocKey = hku.OpenSubKey($@"{sid}\Software\Classes\{key}", writable: true);
-        if (assocKey == null)
-            return;
-
-        AssociationCommandHelper.RestoreFromFallback(assocKey, key);
+        var registry = registryFactory(hku);
+        var restoreService = restoreServiceFactory(registry);
+        restoreService.RestoreFromFallback(
+            key,
+            FallbackCleanupMode.RemoveRunFenceOverrideThenRestoreFallback,
+            sid);
     }
 
     /// <summary>

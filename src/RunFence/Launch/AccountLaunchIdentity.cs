@@ -15,7 +15,7 @@ public record AccountLaunchIdentity(string Sid) : LaunchIdentity
     public AssociationResolutionPolicy AssociationResolutionPolicy { get; init; } = AssociationResolutionPolicy.RequireSameAccount;
 
     public static AccountLaunchIdentity CurrentAccountBasic =>
-        new(SidResolutionHelper.GetCurrentUserSid()) { PrivilegeLevel = Core.Models.PrivilegeLevel.Basic };
+        new(SidResolutionHelper.GetCurrentUserSid()) { PrivilegeLevel = Core.Models.PrivilegeLevel.Isolated };
     public static AccountLaunchIdentity CurrentAccountElevated =>
         new(SidResolutionHelper.GetCurrentUserSid()) { PrivilegeLevel = Core.Models.PrivilegeLevel.HighestAllowed };
 

@@ -1,26 +1,22 @@
 using RunFence.Account.OrphanedProfiles;
 using RunFence.Account.UI.OrphanedProfiles;
+using RunFence.Apps.UI;
 using RunFence.Core;
-using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.SidMigration;
 using RunFence.SidMigration.UI.Forms;
 
 namespace RunFence.Account.UI;
 
 public class AccountMigrationOrchestrator(
     IModalCoordinator modalCoordinator,
-    ISidMigrationService sidMigrationService,
-    Func<InAppMigrationHandler> createMigrationHandler,
+    SidMigrationDialogFactory sidMigrationDialogFactory,
     IOrphanedProfileService orphanedProfileService,
     IAccountLifecycleManager lifecycleManager,
-    ILocalUserProvider localUserProvider,
-    ILoggingService log,
-    IProfilePathResolver profilePathResolver,
-    ISidNameCacheService sidNameCache) : IDisposable
+    IAccountMessageBoxService messageBoxService) : IDisposable
 {
     private CancellationTokenSource? _aclCleanupCts;
     private readonly List<string> _pendingAclCleanupSids = new();
+    private bool _isOpeningOrphanedProfilesDialog;
 
     public void Dispose()
     {
@@ -29,18 +25,68 @@ public class AccountMigrationOrchestrator(
         _aclCleanupCts = null;
     }
 
-    public void MigrateSids(SessionContext session, Form? parent, Action onMigrationApplied)
+    public void MigrateSids(Form? parent, Action onMigrationApplied)
     {
-        using var dlg = new SidMigrationDialog(session, sidMigrationService, createMigrationHandler(), localUserProvider, log, profilePathResolver, sidNameCache);
-        modalCoordinator.ShowModal(dlg, parent);
-        if (dlg.InAppMigrationApplied)
+        using var dlg = sidMigrationDialogFactory.Create();
+        if (modalCoordinator.ShowModal(dlg, parent) == DialogResult.OK)
             onMigrationApplied();
     }
 
-    public void DeleteProfiles(Form? parent)
+    public async void DeleteProfiles(Form? parent)
     {
-        using var dlg = new OrphanedProfilesDialog(orphanedProfileService);
-        modalCoordinator.ShowModal(dlg, parent);
+        if (_isOpeningOrphanedProfilesDialog)
+            return;
+
+        _isOpeningOrphanedProfilesDialog = true;
+        try
+        {
+            List<OrphanedProfile> profiles;
+            try
+            {
+                if (parent != null)
+                    parent.UseWaitCursor = true;
+
+                profiles = await Task.Run(orphanedProfileService.GetOrphanedProfiles);
+
+                if (parent != null && parent.IsDisposed)
+                    return;
+            }
+            catch
+            {
+                if (parent != null && parent.IsDisposed)
+                    return;
+
+                using var dlg = OrphanedProfilesDialog.CreateScanErrorDialog(orphanedProfileService);
+                modalCoordinator.ShowModal(dlg, parent);
+                return;
+            }
+            finally
+            {
+                if (parent != null)
+                    parent.UseWaitCursor = false;
+            }
+
+            if (parent != null && parent.IsDisposed)
+                return;
+
+            if (profiles.Count == 0)
+            {
+                messageBoxService.Show(
+                    parent,
+                    "No orphaned profiles found.",
+                    "Delete Orphaned Profiles",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            using var dialog = new OrphanedProfilesDialog(orphanedProfileService, profiles);
+            modalCoordinator.ShowModal(dialog, parent);
+        }
+        finally
+        {
+            _isOpeningOrphanedProfilesDialog = false;
+        }
     }
 
     public async Task StartBackgroundAclCleanupAsync(string sid, Action<string> setStatus, Func<bool> isAlive)
@@ -64,18 +110,18 @@ public class AccountMigrationOrchestrator(
             setStatus($"Scanning {shortPath}... ({p.ObjectsFixed} fixed)");
         });
 
-        var (fixedCount, error) = await lifecycleManager.CleanupAclReferencesAsync(sidsToClean, progress, ct);
+        var cleanupResult = await lifecycleManager.CleanupAclReferencesAsync(sidsToClean, progress, ct);
 
         if (!ct.IsCancellationRequested && isAlive())
         {
             foreach (var s in sidsToClean)
                 _pendingAclCleanupSids.Remove(s);
 
-            if (error != null)
+            if (cleanupResult.ErrorMessage != null)
                 setStatus("ACL cleanup failed");
             else
-                setStatus(fixedCount > 0
-                    ? $"ACL cleanup done: {fixedCount} reference{(fixedCount == 1 ? "" : "s")} fixed"
+                setStatus(cleanupResult.FixedCount > 0
+                    ? $"ACL cleanup done: {cleanupResult.FixedCount} reference{(cleanupResult.FixedCount == 1 ? "" : "s")} fixed"
                     : "ACL cleanup done: no orphaned references found");
         }
     }

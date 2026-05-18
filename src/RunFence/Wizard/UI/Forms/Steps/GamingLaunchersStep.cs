@@ -213,7 +213,8 @@ public class GamingLaunchersStep : WizardStepPage
         Cursor = Cursors.WaitCursor;
         try
         {
-            var apps = await Task.Run(() => _discoveryService.DiscoverApps());
+            var apps = await Task.Run(() =>
+                ShortcutClassificationHelper.ExcludeSystemExecutables(_discoveryService.DiscoverApps()));
             if (IsDisposed) return;
 
             using var dlg = new AppDiscoveryDialog(apps, _iconHelper);

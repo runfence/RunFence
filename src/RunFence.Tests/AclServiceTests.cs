@@ -23,7 +23,7 @@ public class AclServiceTests
     public AclServiceTests()
     {
         _log = new Mock<ILoggingService>();
-        _localUserProvider = new CachingLocalUserProvider(_log.Object, new LocalSamSidResolver(_log.Object));
+        _localUserProvider = new CachingLocalUserProvider(_log.Object, new LocalSamSidResolver(_log.Object), new SystemClock());
         _service = CreateService(_log.Object, _localUserProvider);
     }
 
@@ -33,7 +33,7 @@ public class AclServiceTests
     {
         var resolvedDatabaseProvider = databaseProvider ?? new LambdaDatabaseProvider(() => new AppDatabase());
         var containerLookup = new ContainerLookupHelper(resolvedDatabaseProvider);
-        var aclAccessor = new AclAccessor();
+        var aclAccessor = AclAccessorFactory.Create();
         var denyService = new AclDenyModeService(log, localUserProvider, containerLookup, new Mock<IInteractiveUserResolver>().Object, aclAccessor);
         var allowService = new AclAllowModeService(log, localUserProvider, aclAccessor);
         pathGrantService ??= new Mock<IPathGrantService>();
@@ -652,9 +652,159 @@ public class AclServiceTests
         pathGrantService.Verify(p => p.RemoveGrant(
             containerSid,
             exePath,
-            false,
-            true), Times.Once);
+            false), Times.Once);
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Revoked") && s.Contains(containerSid))), Times.Once);
+    }
+
+    [Fact]
+    public void ApplyAcl_AppContainer_GrantOperationException_IsLoggedAndSwallowed()
+    {
+        using var tempDir = new TempDirectory("RunFence_AclTest");
+        var exePath = Path.Combine(tempDir.Path, "app.exe");
+        File.WriteAllBytes(exePath, []);
+
+        const string containerSid = "S-1-15-2-1";
+        var db = new AppDatabase();
+        db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService.Setup(p => p.EnsureAccess(
+                containerSid,
+                exePath,
+                FileSystemRights.ReadAndExecute,
+                null,
+                false))
+            .Throws(new GrantOperationException(
+                GrantApplyFailureStep.GrantAclApply,
+                exePath,
+                null,
+                new UnauthorizedAccessException("denied")));
+        var service = CreateService(
+            _log.Object,
+            _localUserProvider,
+            new LambdaDatabaseProvider(() => db),
+            pathGrantService);
+        var app = CreateApp("c0001", "BrowserApp", exePath, accountSid: "", aclMode: AclMode.Deny);
+        app.AppContainerName = "ram_browser";
+
+        var exception = Record.Exception(() => service.ApplyAcl(app, new List<AppEntry> { app }));
+
+        Assert.Null(exception);
+        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("Failed to grant AppContainer SID"))), Times.Once);
+    }
+
+    [Fact]
+    public void ApplyAcl_AppContainer_GrantReturnsWarning_IsLoggedAndSwallowed()
+    {
+        using var tempDir = new TempDirectory("RunFence_AclTest");
+        var exePath = Path.Combine(tempDir.Path, "app.exe");
+        File.WriteAllBytes(exePath, []);
+
+        const string containerSid = "S-1-15-2-1";
+        var warning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostGrantMutationSave,
+            exePath,
+            null,
+            new InvalidOperationException("save failed"));
+        var db = new AppDatabase();
+        db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService.Setup(p => p.EnsureAccess(
+                containerSid,
+                exePath,
+                FileSystemRights.ReadAndExecute,
+                null,
+                false))
+            .Returns(new GrantApplyResult(
+                DatabaseModified: true,
+                DurableSaveCompleted: false,
+                Warnings: [warning]));
+        var service = CreateService(
+            _log.Object,
+            _localUserProvider,
+            new LambdaDatabaseProvider(() => db),
+            pathGrantService);
+        var app = CreateApp("c0001", "BrowserApp", exePath, accountSid: "", aclMode: AclMode.Deny);
+        app.AppContainerName = "ram_browser";
+
+        var exception = Record.Exception(() => service.ApplyAcl(app, new List<AppEntry> { app }));
+
+        Assert.Null(exception);
+        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(GrantApplyFailureFormatter.Format(warning)))), Times.Once);
+    }
+
+    [Fact]
+    public void RevertAcl_AppContainer_RevokeCanceled_IsLoggedAndSwallowed()
+    {
+        using var tempDir = new TempDirectory("RunFence_AclTest");
+        var exePath = Path.Combine(tempDir.Path, "app.exe");
+        File.WriteAllBytes(exePath, []);
+
+        const string containerSid = "S-1-15-2-1";
+        var db = new AppDatabase();
+        db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService.Setup(p => p.RemoveGrant(
+                containerSid,
+                exePath,
+                false))
+            .Throws(new OperationCanceledException("user declined"));
+        var service = CreateService(
+            _log.Object,
+            _localUserProvider,
+            new LambdaDatabaseProvider(() => db),
+            pathGrantService);
+        var app = CreateApp("c0001", "BrowserApp", exePath,
+            accountSid: Sid1, aclMode: AclMode.Deny);
+        app.AppContainerName = "ram_browser";
+
+        var exception = Record.Exception(() => service.RevertAcl(app, new List<AppEntry> { app }));
+
+        Assert.Null(exception);
+        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("Failed to revoke AppContainer SID"))), Times.Once);
+    }
+
+    [Fact]
+    public void RevertAcl_AppContainer_RevokeReturnsWarning_IsLoggedAndSwallowed()
+    {
+        using var tempDir = new TempDirectory("RunFence_AclTest");
+        var exePath = Path.Combine(tempDir.Path, "app.exe");
+        File.WriteAllBytes(exePath, []);
+
+        const string containerSid = "S-1-15-2-1";
+        var warning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostGrantRemoveSave,
+            exePath,
+            null,
+            new InvalidOperationException("save failed"));
+        var db = new AppDatabase();
+        db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
+
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService.Setup(p => p.RemoveGrant(
+                containerSid,
+                exePath,
+                false))
+            .Returns(new GrantApplyResult(
+                DatabaseModified: true,
+                DurableSaveCompleted: false,
+                Warnings: [warning]));
+        var service = CreateService(
+            _log.Object,
+            _localUserProvider,
+            new LambdaDatabaseProvider(() => db),
+            pathGrantService);
+        var app = CreateApp("c0001", "BrowserApp", exePath,
+            accountSid: Sid1, aclMode: AclMode.Deny);
+        app.AppContainerName = "ram_browser";
+
+        service.ApplyAcl(app, new List<AppEntry> { app });
+        var exception = Record.Exception(() => service.RevertAcl(app, new List<AppEntry> { app }));
+
+        Assert.Null(exception);
+        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(GrantApplyFailureFormatter.Format(warning)))), Times.Once);
     }
 
     [Fact]
@@ -682,7 +832,7 @@ public class AclServiceTests
         interactiveResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
 
         var containerLookup = new ContainerLookupHelper(new LambdaDatabaseProvider(() => new AppDatabase()));
-        var aclAccessor = new AclAccessor();
+        var aclAccessor = AclAccessorFactory.Create();
         var denyService = new AclDenyModeService(_log.Object, _localUserProvider,
             containerLookup, interactiveResolver.Object, aclAccessor);
         var service = new AclService(_log.Object, denyService, new AclAllowModeService(_log.Object, _localUserProvider, aclAccessor),
@@ -739,3 +889,4 @@ public class AclServiceTests
         Assert.Null(app.AllowedAclEntries);
     }
 }
+

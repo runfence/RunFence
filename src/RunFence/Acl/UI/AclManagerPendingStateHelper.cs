@@ -36,7 +36,10 @@ public class AclManagerPendingStateHelper
 
         _pending.PendingModifications[dbKey] = new PendingModification(
             entry, WasIsDeny: originalWasIsDeny, WasOwn: wasOwn,
-            NewIsDeny: newIsDeny, NewRights: newRights ?? SavedRightsState.DefaultForMode(newIsDeny, own: ownValue));
+            NewIsDeny: newIsDeny,
+            NewRights: newRights ?? SavedRightsState.DefaultForMode(newIsDeny, own: ownValue),
+            WasRights: existingMod?.WasRights ?? entry.SavedRights,
+            WasPreviousSaclLabel: existingMod?.WasPreviousSaclLabel ?? entry.PreviousSaclLabel);
     }
 
     /// <summary>
@@ -48,15 +51,20 @@ public class AclManagerPendingStateHelper
         var dbKey = (entry.Path, entry.IsDeny);
         _pending.PendingModifications.TryGetValue(dbKey, out var existingMod);
 
-        // Re-key the config move from wherever it currently lives to the new mode key.
-        // On a first switch the move lives at dbKey; on a subsequent switch it already lives
-        // at the previous effective mode key (existingMod.NewIsDeny), so check that key first.
+        // Re-key the config move from whichever mode key currently owns it to the new mode key.
         var prevEffectiveKey = existingMod != null ? (entry.Path, existingMod.NewIsDeny) : dbKey;
         var newPendingAddKey = (entry.Path, newIsDeny);
-        bool hadConfigMove = _pending.PendingConfigMoves.Remove(prevEffectiveKey, out var configTarget);
+        bool hadConfigMove = _pending.PendingConfigMoves.Remove(prevEffectiveKey, out var configMove);
         if (!hadConfigMove && prevEffectiveKey != dbKey)
-            hadConfigMove = _pending.PendingConfigMoves.Remove(dbKey, out configTarget);
+            hadConfigMove = _pending.PendingConfigMoves.Remove(dbKey, out configMove);
+        if (!hadConfigMove)
+            hadConfigMove = _pending.PendingConfigMoves.Remove((entry.Path, !newIsDeny), out configMove);
         if (hadConfigMove)
-            _pending.PendingConfigMoves[newPendingAddKey] = configTarget;
+        {
+            var updatedEntry = configMove!.Entry.Clone();
+            updatedEntry.IsDeny = newIsDeny;
+            _pending.PendingConfigMoves[newPendingAddKey] =
+                new PendingConfigMove(updatedEntry, configMove.TargetConfigPath);
+        }
     }
 }

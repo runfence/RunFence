@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using RunFence.Account;
 using RunFence.Account.UI;
+using RunFence.Acl;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -16,13 +17,21 @@ public class TrayLaunchHandler(
     IAppEntryLauncher entryLauncher,
     ILaunchFacade facade,
     ToolLauncher launchService,
+    ILaunchFeedbackPresenter launchFeedbackPresenter,
     ISidNameCacheService sidNameCache,
     ILoggingService log)
 {
     public void LaunchApp(AppEntry app)
         => RunWithLaunchErrorHandling(
-            () => entryLauncher.Launch(app, null,
-                permissionPrompt: AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache)),
+            () =>
+            {
+                using var launch = entryLauncher.Launch(app, null,
+                    permissionPrompt: AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache));
+                launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The application", LaunchFeedbackSource.InteractiveUi)
+                {
+                    SummaryName = app.Name
+                });
+            },
             $"tray app {app.Name}");
 
     public void LaunchFolderBrowser(LaunchIdentity identity)
@@ -38,7 +47,14 @@ public class TrayLaunchHandler(
 
     public void LaunchDiscoveredApp(string exePath, LaunchIdentity identity)
         => RunWithLaunchErrorHandling(
-            () => facade.LaunchFile(new ProcessLaunchTarget(exePath), identity),
+            () =>
+            {
+                using var launch = facade.LaunchFile(new ProcessLaunchTarget(exePath, IsPathApproved: false), identity);
+                launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The application", LaunchFeedbackSource.InteractiveUi)
+                {
+                    SummaryName = Path.GetFileName(exePath)
+                });
+            },
             "discovered app");
 
     private void RunWithLaunchErrorHandling(Action launchAction, string context)
@@ -62,6 +78,10 @@ public class TrayLaunchHandler(
         }
         catch (OperationCanceledException)
         {
+        }
+        catch (GrantOperationException ex)
+        {
+            launchFeedbackPresenter.ShowGrantFailure(ex, new LaunchFeedbackContext(context, LaunchFeedbackSource.InteractiveUi));
         }
         catch (Exception ex)
         {

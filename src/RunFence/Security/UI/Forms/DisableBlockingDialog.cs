@@ -2,7 +2,7 @@ using RunFence.Apps.UI;
 
 namespace RunFence.Security.UI.Forms;
 
-public partial class DisableBlockingDialog : Form
+public partial class DisableBlockingDialog : RunFence.UI.Forms.ContextHelpForm
 {
     public DisableBlockingChoice Choice { get; private set; } = DisableBlockingChoice.Cancelled;
 

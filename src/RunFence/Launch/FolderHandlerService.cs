@@ -1,5 +1,4 @@
 using System.Security.AccessControl;
-using Microsoft.Win32;
 using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Infrastructure;
@@ -10,123 +9,134 @@ public class FolderHandlerService(
     ILoggingService log,
     IPathGrantService pathGrantService,
     ILocalGroupMembershipService localGroupMembership,
-    RegistryKey? hkuOverride = null,
-    string? launcherPathOverride = null,
-    string? shellServerPathOverride = null)
+    FolderHandlerRegistryStore registryStore,
+    FolderHandlerRegistrationRollback registrationRollback,
+    FolderHandlerSidLockProvider sidLockProvider,
+    string? launcherPathOverride = null)
     : IFolderHandlerService
 {
-    private readonly RegistryKey _hku = hkuOverride ?? Registry.Users;
+    public bool IsRegistered(string accountSid) => registryStore.IsRegistered(accountSid);
 
-    private readonly HashSet<string> _registeredSids =
-        new(StringComparer.OrdinalIgnoreCase);
-
-    public bool IsRegistered(string accountSid)
-        => _registeredSids.Contains(accountSid);
-
-    public void Register(string accountSid)
+    public FolderHandlerRegistrationResult Register(string accountSid)
     {
-        if (_registeredSids.Contains(accountSid))
+        using var sidLock = sidLockProvider.Acquire(accountSid);
+        if (registryStore.IsRegistered(accountSid))
         {
             log.Info($"FolderHandlerService: already registered for {accountSid}, skipping");
-            return;
+            return new FolderHandlerRegistrationResult();
         }
 
         if (SidResolutionHelper.IsSystemSid(accountSid))
         {
-            log.Info($"FolderHandlerService: skipping registration for SYSTEM account");
-            return;
+            log.Info("FolderHandlerService: skipping registration for SYSTEM account");
+            return new FolderHandlerRegistrationResult();
         }
 
-        if (string.Equals(accountSid, SidResolutionHelper.GetInteractiveUserSid(),
-                StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(accountSid, SidResolutionHelper.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
         {
             log.Info($"FolderHandlerService: skipping registration for interactive user {accountSid}");
-            return;
+            return new FolderHandlerRegistrationResult();
         }
 
         if (localGroupMembership.GetGroupsForUser(accountSid)
                 .Any(g => string.Equals(g.Sid, "S-1-5-32-544", StringComparison.OrdinalIgnoreCase)))
         {
             log.Info($"FolderHandlerService: skipping registration for admin account {accountSid}");
-            return;
+            return new FolderHandlerRegistrationResult();
         }
 
-        // No IPC authorization check here by design: opening a folder in Explorer grants no elevated access.
-        // Path safety is enforced in IpcOpenFolderHandler via IDirectoryValidator (including TOCTOU protection).
-        // Restricting registration to IPC-authorized accounts would silently break the "Show in Folder"
-        // feature for accounts not explicitly listed as IPC callers.
-        var launcherPath = launcherPathOverride
-                           ?? Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
+        var launcherPath = launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
             log.Warn($"FolderHandlerService: launcher not found at {launcherPath}, skipping registration");
-            return;
+            return new FolderHandlerRegistrationResult();
         }
 
         log.Info($"FolderHandlerService: registering folder handler for {accountSid}");
+        var effects = new FolderHandlerRegistrationEffects(accountSid, launcherPath);
+        var warnings = new List<string>();
+        string? saveFailureMessage = null;
+        var saveFailureEncountered = false;
+
         try
         {
             var commandValue = $"\"{launcherPath}\" --open-folder \"%V\"";
+            registryStore.Register(accountSid, commandValue);
+            effects.RegistryWritten = true;
+            effects.SidTracked = registryStore.IsRegistered(accountSid);
 
-            // Register "open" and "explore" verbs under Directory so we intercept both
-            // ShellExecute("open", dir) and ShellExecute("explore", dir) calls.
-            // Also set the Directory\shell default verb to "open" so that ShellExecute with
-            // a NULL verb (used by Firefox's fallback after SHOpenFolderAndSelectItems fails)
-            // resolves to our handler instead of falling through to Windows internal Explorer.
-            // (HKLM sets Directory\shell default to "none" with no matching subkey.)
-            try
+            var launcherDir = Path.GetDirectoryName(launcherPath);
+            if (!string.IsNullOrEmpty(launcherDir))
             {
-                SetCommandValue(accountSid, @"Directory\shell\open\command", commandValue);
-                SetCommandValue(accountSid, @"Directory\shell\explore\command", commandValue);
-                SetDirectoryShellDefaultVerb(accountSid, "open");
-                SetFolderCommandValue(accountSid, commandValue);
-
-                // Ensure the RunAs account can execute the launcher.
-                var launcherDir = Path.GetDirectoryName(launcherPath);
-                if (!string.IsNullOrEmpty(launcherDir))
-                {
-                    pathGrantService.EnsureAccess(accountSid, launcherDir,
-                        FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
-                    pathGrantService.EnsureAccess(AclHelper.LowIntegritySid, launcherDir,
-                        FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
-                }
-
-                // Schedule cleanup via RunOnce so if the account ever logs in interactively,
-                // it removes the handler from its own HKCU on first logon.
-                SetRunOnce(accountSid, launcherPath);
+                TryEnsureRegistrationAccess(
+                    accountSid,
+                    launcherDir,
+                    effects,
+                    warnings,
+                    isAccountGrant: true,
+                    out var accountSaveFailure);
+                TryEnsureRegistrationAccess(
+                    AclHelper.LowIntegritySid,
+                    launcherDir,
+                    effects,
+                    warnings,
+                    isAccountGrant: false,
+                    out var lowIntegritySaveFailure);
+                saveFailureEncountered = accountSaveFailure || lowIntegritySaveFailure;
             }
-            catch
-            {
-                Unregister(accountSid);
-                throw;
-            }
+
+            if (!saveFailureEncountered)
+                effects.RunOnceWritten = registryStore.WriteRunOnce(accountSid, launcherPath);
 
             ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST,
                 IntPtr.Zero, IntPtr.Zero);
-            _registeredSids.Add(accountSid);
-            log.Info($"FolderHandlerService: registration complete for {accountSid}");
+
+            if (saveFailureEncountered)
+            {
+                var warningText = warnings.Count == 0
+                    ? "Folder handler registration completed with a grant save failure."
+                    : string.Join("\n", warnings);
+                log.Warn($"FolderHandlerService: registration completed with {warnings.Count} warning(s): {warningText}");
+                saveFailureMessage = $"Folder handler registration completed with {warnings.Count} warning(s): {warningText}";
+            }
+        }
+        catch (GrantOperationException ex) when (!IsSaveFailureStep(ex.Step) && !saveFailureEncountered)
+        {
+            log.Error($"FolderHandlerService: registration failed for {accountSid}", ex);
+            registrationRollback.Rollback(effects);
+            throw;
+        }
+        catch (Exception ex) when (saveFailureEncountered)
+        {
+            var warningText = saveFailureMessage ?? $"Folder handler registration encountered an additional warning for {accountSid}: {ex.Message}";
+            log.Warn(warningText);
+            throw new InvalidOperationException(warningText, ex);
         }
         catch (Exception ex)
         {
             log.Error($"FolderHandlerService: registration failed for {accountSid}", ex);
+            registrationRollback.Rollback(effects);
+            throw;
         }
+
+        if (saveFailureMessage != null)
+            throw new InvalidOperationException(saveFailureMessage);
+
+        if (warnings.Count > 0)
+            log.Warn($"FolderHandlerService: registration completed with {warnings.Count} warning(s) for {accountSid}");
+
+        log.Info($"FolderHandlerService: registration complete for {accountSid}");
+        return new FolderHandlerRegistrationResult(warnings);
     }
 
     public void Unregister(string accountSid)
     {
+        using var sidLock = sidLockProvider.Acquire(accountSid);
         log.Info($"FolderHandlerService: unregistering folder handler for {accountSid}");
+
         try
         {
-            _hku.DeleteSubKeyTree($@"{accountSid}\Software\Classes\Directory\shell\open",
-                throwOnMissingSubKey: false);
-            _hku.DeleteSubKeyTree($@"{accountSid}\Software\Classes\Directory\shell\explore",
-                throwOnMissingSubKey: false);
-            RemoveDirectoryShellDefaultVerb(accountSid);
-            _hku.DeleteSubKeyTree($@"{accountSid}\Software\Classes\Folder\shell\open",
-                throwOnMissingSubKey: false);
-            RemoveRunOnce(accountSid);
-
-            _registeredSids.Remove(accountSid);
+            registryStore.Unregister(accountSid);
             ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST,
                 IntPtr.Zero, IntPtr.Zero);
         }
@@ -138,27 +148,21 @@ public class FolderHandlerService(
 
     public void UnregisterAll()
     {
-        foreach (var sid in _registeredSids.ToList())
+        foreach (var sid in registryStore.GetRegisteredSids())
             Unregister(sid);
     }
 
-    /// <summary>
-    /// Removes any stale folder/directory handler registrations and CLSID overrides left by a
-    /// prior crash or approach change. Enumerates all loaded HKU hives.
-    /// Called once at startup before any app launches.
-    /// </summary>
     public void CleanupStaleRegistrations()
     {
         log.Info("FolderHandlerService: cleaning up stale registrations.");
         try
         {
-            var launcherExeName = Path.GetFileName(
-                launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName));
-            var shellServerExeName = Path.GetFileName(
-                shellServerPathOverride ?? Path.Combine(AppContext.BaseDirectory, PathConstants.ShellServerExeName));
-
-            foreach (var sidName in _hku.GetSubKeyNames())
-                CleanupStaleForSid(sidName, launcherExeName, shellServerExeName);
+            var cleanedAny = registryStore.CleanupStaleEntries();
+            if (cleanedAny)
+            {
+                ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST,
+                    IntPtr.Zero, IntPtr.Zero);
+            }
         }
         catch (Exception ex)
         {
@@ -166,138 +170,50 @@ public class FolderHandlerService(
         }
     }
 
-    private void CleanupStaleForSid(string sidName, string launcherExeName, string shellServerExeName)
+    private void TryEnsureRegistrationAccess(
+        string sid,
+        string launcherDir,
+        FolderHandlerRegistrationEffects effects,
+        List<string> warnings,
+        bool isAccountGrant,
+        out bool saveFailure)
     {
-        bool cleaned = false;
-        bool dirOpenCleaned = TryDeleteStaleCommandKey(sidName, @"Software\Classes\Directory\shell\open\command", launcherExeName);
-        if (dirOpenCleaned)
-            RemoveDirectoryShellDefaultVerb(sidName);
-        cleaned |= dirOpenCleaned;
-        cleaned |= TryDeleteStaleCommandKey(sidName, @"Software\Classes\Directory\shell\explore\command", launcherExeName);
-        cleaned |= TryDeleteStaleCommandKey(sidName, @"Software\Classes\Folder\shell\open\command", launcherExeName);
-        cleaned |= TryDeleteStaleClsidOverride(sidName, shellServerExeName, launcherExeName);
-        if (cleaned)
-        {
-            log.Info($"FolderHandlerService: removed stale registration for {sidName}");
-            ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST,
-                IntPtr.Zero, IntPtr.Zero);
-        }
-    }
-
-    private bool TryDeleteStaleCommandKey(string sidName, string subKeyPath, string launcherExeName)
-    {
+        saveFailure = false;
         try
         {
-            using var key = _hku.OpenSubKey($@"{sidName}\{subKeyPath}");
-            if (key?.GetValue(null) is not string value)
-                return false;
-            if (!value.Contains(launcherExeName, StringComparison.OrdinalIgnoreCase))
-                return false;
+            var result = pathGrantService.EnsureAccess(
+                sid,
+                launcherDir,
+                FileSystemRights.ReadAndExecute,
+                confirm: null,
+                unelevated: true);
+            if (isAccountGrant)
+            {
+                effects.AccountGrantApplied = result.GrantApplied;
+                effects.AccountTraverseApplied = result.TraverseApplied;
+            }
+            else
+            {
+                effects.LowIntegrityGrantApplied = result.GrantApplied;
+                effects.LowIntegrityTraverseApplied = result.TraverseApplied;
+            }
 
-            var parentPath = subKeyPath[..subKeyPath.LastIndexOf('\\')];
-            _hku.DeleteSubKeyTree($@"{sidName}\{parentPath}", throwOnMissingSubKey: false);
-            return true;
+            AppendGrantWarnings(warnings, result.Warnings);
         }
-        catch (Exception ex)
+        catch (GrantOperationException ex) when (IsSaveFailureStep(ex.Step))
         {
-            log.Warn($"FolderHandlerService: failed to delete stale command key {sidName}\\{subKeyPath}: {ex.Message}");
-            return false;
-        }
-    }
-
-    private bool TryDeleteStaleClsidOverride(string sidName, string shellServerExeName, string launcherExeName)
-    {
-        try
-        {
-            using var key = _hku.OpenSubKey(
-                $@"{sidName}\{FolderHandlerNative.ShellWindowsClsidRegistryPath}\LocalServer32");
-            if (key?.GetValue(null) is not string value)
-                return false;
-            if (!value.Contains(shellServerExeName, StringComparison.OrdinalIgnoreCase) &&
-                !value.Contains(launcherExeName, StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            _hku.DeleteSubKeyTree(
-                $@"{sidName}\{FolderHandlerNative.ShellWindowsClsidRegistryPath}",
-                throwOnMissingSubKey: false);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            log.Warn($"FolderHandlerService: failed to delete stale CLSID override for {sidName}: {ex.Message}");
-            return false;
-        }
-    }
-
-    private void SetCommandValue(string accountSid, string subKeyPath, string commandValue)
-    {
-        var fullPath = $@"{accountSid}\Software\Classes\{subKeyPath}";
-        using var key = _hku.CreateSubKey(fullPath)
-                        ?? throw new InvalidOperationException($"Failed to create registry key: {fullPath}");
-        key.SetValue(null, commandValue);
-    }
-
-    private void SetDirectoryShellDefaultVerb(string accountSid, string verb)
-    {
-        var fullPath = $@"{accountSid}\Software\Classes\Directory\shell";
-        using var key = _hku.CreateSubKey(fullPath)
-                        ?? throw new InvalidOperationException($"Failed to create registry key: {fullPath}");
-        key.SetValue(null, verb);
-    }
-
-    private void RemoveDirectoryShellDefaultVerb(string accountSid)
-    {
-        try
-        {
-            using var key = _hku.OpenSubKey($@"{accountSid}\Software\Classes\Directory\shell",
-                writable: true);
-            key?.DeleteValue("", throwOnMissingValue: false);
-        }
-        catch
-        {
-        }
-    }
-
-    // Folder\shell\open\command in HKLM has a DelegateExecute value that causes the shell to
-    // use COM activation (ExplorerFrame.dll) instead of the command string, even when HKCU
-    // provides a command. Shadow it with an empty string so the shell falls through to our command.
-    private void SetFolderCommandValue(string accountSid, string commandValue)
-    {
-        var fullPath = $@"{accountSid}\Software\Classes\Folder\shell\open\command";
-        using var key = _hku.CreateSubKey(fullPath)
-                        ?? throw new InvalidOperationException($"Failed to create registry key: {fullPath}");
-        key.SetValue(null, commandValue);
-        key.SetValue("DelegateExecute", "");
-    }
-
-    private void SetRunOnce(string accountSid, string launcherPath)
-    {
-        var scriptPath = Path.Combine(Path.GetDirectoryName(launcherPath)!, PathConstants.FolderHandlerUnregisterScriptName);
-        if (!File.Exists(scriptPath))
-        {
-            log.Warn($"FolderHandlerService: unregister script not found at {scriptPath}, skipping RunOnce");
+            saveFailure = true;
+            warnings.Add(GrantApplyFailureFormatter.Format(new GrantApplyFailure(ex.Step, ex.Path, ex.ConfigPath, ex.Cause)));
             return;
         }
-
-        var fullPath = $@"{accountSid}\Software\Microsoft\Windows\CurrentVersion\RunOnce";
-        using var key = _hku.CreateSubKey(fullPath)
-                        ?? throw new InvalidOperationException($"Failed to create registry key: {fullPath}");
-        // cmd /c ""path"" — outer quotes required by cmd.exe when the argument starts with a quote
-        key.SetValue(PathConstants.FolderHandlerRunOnceValueName, $"cmd /c \"\"{scriptPath}\"\"");
     }
 
-    private void RemoveRunOnce(string accountSid)
+    private static void AppendGrantWarnings(List<string> warnings, IReadOnlyList<GrantApplyWarning> grantWarnings)
     {
-        try
-        {
-            using var key = _hku.OpenSubKey(
-                $@"{accountSid}\Software\Microsoft\Windows\CurrentVersion\RunOnce", writable: true);
-            key?.DeleteValue(PathConstants.FolderHandlerRunOnceValueName, throwOnMissingValue: false);
-        }
-        catch (Exception ex)
-        {
-            log.Warn($"FolderHandlerService: failed to remove RunOnce for {accountSid}: {ex.Message}");
-        }
+        foreach (var warning in grantWarnings)
+            warnings.Add(GrantApplyFailureFormatter.Format(warning));
     }
 
+    private static bool IsSaveFailureStep(GrantApplyFailureStep step)
+        => GrantApplyFailureFormatter.IsSaveFailureStep(step);
 }

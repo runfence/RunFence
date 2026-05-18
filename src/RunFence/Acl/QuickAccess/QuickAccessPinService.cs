@@ -72,8 +72,11 @@ public class QuickAccessPinService(
         {
             var flag = unpin ? "--unpin-folders" : "--pin-folders";
             var cmdArgs = CommandLineHelper.JoinArgs(new[] { flag }.Concat(paths));
-            var target = new ProcessLaunchTarget(PinHelperExe, Arguments: cmdArgs);
-            facade.LaunchFile(target, new AccountLaunchIdentity(accountSid));
+            var target = new ProcessLaunchTarget(PinHelperExe, Arguments: cmdArgs, SuppressStartupFeedback: true);
+            using var launch = facade.LaunchFile(target, new AccountLaunchIdentity(accountSid));
+            var warning = LaunchExecutionWarningFormatter.Format("The Quick Access helper", launch);
+            if (warning != null)
+                log.Warn(warning);
             log.Info($"PinHelper ({(unpin ? "unpin" : "pin")}) succeeded for {accountSid}");
         }
         catch (Exception ex)

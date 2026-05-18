@@ -5,26 +5,33 @@ namespace RunFence.JobKeeper;
 
 internal sealed class JobKeeperPipeClientLoop(
     JobKeeperStartupOptions options,
-    IJobKeeperRequestHandler requestHandler)
+    IJobKeeperRequestHandler requestHandler,
+    IJobKeeperLifetimeController lifetimeController)
 {
-    public void RunOnce()
+    private const int ConnectTimeoutMilliseconds = 1_000;
+    private const int ReadPollTimeoutMilliseconds = 1_000;
+
+    public bool RunOnce()
     {
+        if (lifetimeController.ShouldExit())
+            return false;
+
         NamedPipeClientStream? pipe = null;
         try
         {
-            pipe = new NamedPipeClientStream(".", options.PipeName, PipeDirection.InOut, PipeOptions.None);
+            pipe = new NamedPipeClientStream(".", options.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
             try
             {
-                pipe.Connect(1_000);
+                pipe.Connect(ConnectTimeoutMilliseconds);
             }
             catch
             {
                 pipe.Dispose();
                 Thread.Sleep(500);
-                return;
+                return !lifetimeController.ShouldExit();
             }
 
-            RunLoop(pipe);
+            return RunLoop(pipe);
         }
         catch
         {
@@ -33,26 +40,56 @@ internal sealed class JobKeeperPipeClientLoop(
         {
             pipe?.Dispose();
         }
+
+        return !lifetimeController.ShouldExit();
     }
 
-    private void RunLoop(NamedPipeClientStream pipe)
+    private bool RunLoop(NamedPipeClientStream pipe)
     {
+        Task<JobKeeperLaunchRequest?>? pendingRead = null;
         while (true)
         {
+            pendingRead ??= Task.Run(() => JobKeeperProtocol.ReadMessage<JobKeeperLaunchRequest>(pipe));
+            if (Task.WaitAny([pendingRead], ReadPollTimeoutMilliseconds) != 0)
+            {
+                if (!lifetimeController.ShouldExit())
+                    continue;
+
+                pipe.Dispose();
+                ObservePendingReadCompletion(pendingRead);
+                return false;
+            }
+
             JobKeeperLaunchRequest? request;
             try
             {
-                request = JobKeeperProtocol.ReadMessage<JobKeeperLaunchRequest>(pipe);
+                request = pendingRead.GetAwaiter().GetResult();
             }
             catch (IOException)
             {
-                return;
+                return !lifetimeController.ShouldExit();
+            }
+            finally
+            {
+                pendingRead = null;
             }
 
             if (request == null)
-                return;
+                return !lifetimeController.ShouldExit();
 
+            lifetimeController.RecordRequestArrival();
             JobKeeperProtocol.WriteMessage(pipe, requestHandler.Handle(request));
+        }
+    }
+
+    private static void ObservePendingReadCompletion(Task<JobKeeperLaunchRequest?> pendingRead)
+    {
+        try
+        {
+            pendingRead.Wait(1_000);
+        }
+        catch
+        {
         }
     }
 }

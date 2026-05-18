@@ -6,19 +6,31 @@ namespace RunFence.Launch;
 
 public sealed class LaunchAccessManager(IGrantMutatorService grantMutatorService) : ILaunchAccessManager
 {
-    public GrantOperationResult EnsureAccess(LaunchIdentity identity, string path,
+    public GrantApplyResult EnsureAccess(LaunchIdentity identity, string path,
         FileSystemRights rights, Func<string, string, bool>? confirm, bool unelevated)
     {
         var result = grantMutatorService.EnsureAccess(identity.Sid, path, rights, confirm, unelevated);
-        if (identity is AccountLaunchIdentity { PrivilegeLevel: PrivilegeLevel.LowIntegrity })
-        {
-            var liResult = grantMutatorService.EnsureAccess(
-                AclHelper.LowIntegritySid, path, rights, confirm, unelevated);
-            return new GrantOperationResult(
-                result.GrantAdded || liResult.GrantAdded,
-                result.TraverseAdded || liResult.TraverseAdded,
-                result.DatabaseModified || liResult.DatabaseModified);
-        }
-        return result;
+        if (identity is not AccountLaunchIdentity { PrivilegeLevel: PrivilegeLevel.LowIntegrity })
+            return result;
+
+        var lowIntegrityResult = grantMutatorService.EnsureAccess(
+            AclHelper.LowIntegritySid,
+            path,
+            rights,
+            confirm: null,
+            unelevated);
+
+        var databaseModified = result.DatabaseModified || lowIntegrityResult.DatabaseModified;
+        var durableSaveCompleted =
+            databaseModified &&
+            (!result.DatabaseModified || result.DurableSaveCompleted) &&
+            (!lowIntegrityResult.DatabaseModified || lowIntegrityResult.DurableSaveCompleted);
+
+        return new GrantApplyResult(
+            GrantApplied: result.GrantApplied || lowIntegrityResult.GrantApplied,
+            TraverseApplied: result.TraverseApplied || lowIntegrityResult.TraverseApplied,
+            DatabaseModified: databaseModified,
+            DurableSaveCompleted: durableSaveCompleted,
+            Warnings: result.Warnings.Concat(lowIntegrityResult.Warnings).ToList());
     }
 }

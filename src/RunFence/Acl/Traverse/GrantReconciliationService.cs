@@ -28,9 +28,7 @@ public class GrantReconciliationService(
 {
     /// <summary>Result of a reconciliation pass over a set of changed SIDs.</summary>
     public record ReconciliationResult(
-        Dictionary<string, List<string>> UpdatedSnapshots,
-        Dictionary<string, List<(string Path, List<string> AppliedPaths)>> NewTraverseEntries,
-        Dictionary<string, HashSet<string>> RemovedTraversePaths);
+        IReadOnlyList<SidReconciler.SidReconciliationResult> SidResults);
 
     /// <summary>
     /// Compares current group memberships against the stored snapshot.
@@ -103,22 +101,14 @@ public class GrantReconciliationService(
     /// </summary>
     public ReconciliationResult ReconcileChangedSids(
         List<(string Sid, List<string> NewGroups)> changedSids,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>>? accountGrants = null)
+        IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants = null)
     {
-        var updatedSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        var newTraverseEntries = new Dictionary<string, List<(string, List<string>)>>(StringComparer.OrdinalIgnoreCase);
-        var removedTraversePaths = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        var sidResults = new List<SidReconciler.SidReconciliationResult>(changedSids.Count);
 
         foreach (var (sid, newGroups) in changedSids)
-        {
-            updatedSnapshots[sid] = newGroups;
-            var sidRemovedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            sidReconciler.ReconcileSid(sid, newGroups, newTraverseEntries, sidRemovedPaths, accountGrants);
-            if (sidRemovedPaths.Count > 0)
-                removedTraversePaths[sid] = sidRemovedPaths;
-        }
+            sidResults.Add(sidReconciler.ReconcileSid(sid, newGroups, accountGrants));
 
-        return new ReconciliationResult(updatedSnapshots, newTraverseEntries, removedTraversePaths);
+        return new ReconciliationResult(sidResults);
     }
 
     /// <summary>
@@ -128,30 +118,34 @@ public class GrantReconciliationService(
     {
         var database = databaseProvider.GetDatabase();
         database.AccountGroupSnapshots ??= new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (sid, groups) in result.UpdatedSnapshots)
-            database.AccountGroupSnapshots[sid] = groups;
+        bool databaseChanged = false;
 
-        if (result.RemovedTraversePaths.Count > 0)
+        foreach (var sidResult in result.SidResults.Where(r => r.Succeeded))
         {
-            foreach (var (sid, removedPaths) in result.RemovedTraversePaths)
+            database.AccountGroupSnapshots[sidResult.Sid] = sidResult.NewGroups;
+            databaseChanged = true;
+
+            if (sidResult.RemovedTraversePaths.Count > 0)
             {
-                var entries = database.GetAccount(sid)?.Grants;
-                if (entries == null)
-                    continue;
-                entries.RemoveAll(e => e.IsTraverseOnly &&
-                                       removedPaths.Contains(Path.GetFullPath(e.Path)));
-                database.RemoveAccountIfEmpty(sid);
+                var entries = database.GetAccount(sidResult.Sid)?.Grants;
+                if (entries != null)
+                {
+                    entries.RemoveAll(e => e.IsTraverseOnly &&
+                                           sidResult.RemovedTraversePaths.Contains(Path.GetFullPath(e.Path)));
+                    database.RemoveAccountIfEmpty(sidResult.Sid);
+                }
             }
+
+            if (sidResult.NewTraverseEntries.Count == 0)
+                continue;
+
+            var traversePaths = TraversePathsHelper.GetOrCreateTraversePaths(database, sidResult.Sid);
+            foreach (var (path, appliedPaths) in sidResult.NewTraverseEntries)
+                TraversePathsHelper.TrackPath(traversePaths, path, appliedPaths, trackedSourceSid: null);
         }
 
-        foreach (var (sid, entries) in result.NewTraverseEntries)
-        {
-            var traversePaths = TraversePathsHelper.GetOrCreateTraversePaths(database, sid);
-            foreach (var (path, appliedPaths) in entries)
-                TraversePathsHelper.TrackPath(traversePaths, path, appliedPaths);
-        }
-
-        sessionSaver.SaveConfig();
+        if (databaseChanged)
+            sessionSaver.SaveConfig();
     }
 
     /// <summary>
@@ -166,9 +160,14 @@ public class GrantReconciliationService(
             return false;
 
         var database = databaseProvider.GetDatabase();
-        var accountGrants = database.Accounts.ToDictionary(a => a.Sid, a => a.Grants.ToList(), StringComparer.OrdinalIgnoreCase);
+        var accountGrants = database.Accounts.ToDictionary(
+            account => account.Sid,
+            account => (IReadOnlyList<GrantedPathEntry>)account.Grants
+                .Select(entry => entry.Clone())
+                .ToArray(),
+            StringComparer.OrdinalIgnoreCase);
         var result = await Task.Run(() => ReconcileChangedSids(changed, accountGrants));
         ApplyReconciliationResult(result);
-        return true;
+        return result.SidResults.Any(r => r.Succeeded);
     }
 }

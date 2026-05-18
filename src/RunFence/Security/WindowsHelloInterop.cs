@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Threading;
 // ReSharper disable UnusedMember.Global
 
 namespace RunFence.Security;
@@ -18,70 +19,130 @@ public static class WindowsHelloInterop
 
     /// <remarks>Known limitation: polling loop used because WinRT put_Completed requires COM marshaling setup. Consider callback approach in future.</remarks>
     public static async Task<HelloVerificationResult> RequestAsync(IntPtr hwnd, string message)
-    {
-        IntPtr classId = IntPtr.Zero;
-        IntPtr messageHString = IntPtr.Zero;
-        IntPtr factoryPtr = IntPtr.Zero;
-        IntPtr opPtr = IntPtr.Zero;
+        => await RequestCoreAsync(hwnd, message, async () => await Task.Delay(50).ConfigureAwait(false));
 
-        try
+    public static HelloVerificationResult RequestBlocking(IntPtr hwnd, string message)
+        => RequestCore(hwnd, message, () =>
         {
-            ThrowIfFailed(WindowsCreateString(ClassId, ClassId.Length, out classId));
+            Thread.Sleep(50);
+            return Task.CompletedTask;
+        });
 
-            var interopIid = typeof(IUserConsentVerifierInterop).GUID;
-            ThrowIfFailed(RoGetActivationFactory(classId, ref interopIid, out factoryPtr));
+    private static async Task<HelloVerificationResult> RequestCoreAsync(
+        IntPtr hwnd,
+        string message,
+        Func<Task> waitStrategy)
+    {
+        using var context = WindowsHelloRequestContext.Create(hwnd, message);
 
-            var interop = (IUserConsentVerifierInterop)Marshal.GetObjectForIUnknown(factoryPtr);
+        while (true)
+        {
+            context.Operation.get_Status(out var status);
 
-            var msg = message;
-            ThrowIfFailed(WindowsCreateString(msg, msg.Length, out messageHString));
+            if (status == AsyncStatus.Completed)
+                break;
 
-            var asyncIid = typeof(IAsyncOperation_VerificationResult).GUID;
-            interop.RequestVerificationForWindowAsync(hwnd, messageHString, ref asyncIid, out opPtr);
-
-            var op = (IAsyncOperation_VerificationResult)Marshal.GetObjectForIUnknown(opPtr);
-
-            while (true)
+            switch (status)
             {
-                op.get_Status(out var status);
-
-                if (status == AsyncStatus.Completed)
+                case AsyncStatus.Error:
+                    context.Operation.get_ErrorCode(out var hr);
+                    Marshal.ThrowExceptionForHR(hr);
                     break;
-
-                switch (status)
-                {
-                    case AsyncStatus.Error:
-                        op.get_ErrorCode(out var hr);
-                        Marshal.ThrowExceptionForHR(hr);
-                        break;
-                    case AsyncStatus.Canceled:
-                        return HelloVerificationResult.Canceled;
-                }
-
-                await Task.Delay(50).ConfigureAwait(false);
+                case AsyncStatus.Canceled:
+                    return HelloVerificationResult.Canceled;
             }
 
-            op.GetResults(out var result);
-            return result switch
-            {
-                VerificationResult.Verified => HelloVerificationResult.Verified,
-                VerificationResult.Canceled => HelloVerificationResult.Canceled,
-                VerificationResult.DeviceNotPresent or VerificationResult.NotConfiguredForUser or
-                    VerificationResult.DisabledByPolicy or VerificationResult.DeviceBusy or
-                    VerificationResult.RetriesExhausted => HelloVerificationResult.NotAvailable,
-                _ => HelloVerificationResult.Failed
-            };
+            await waitStrategy().ConfigureAwait(false);
         }
-        finally
+
+        context.Operation.GetResults(out var result);
+        return MapVerificationResult(result);
+    }
+
+    private static HelloVerificationResult RequestCore(IntPtr hwnd, string message, Func<Task> waitStrategy)
+        => RequestCoreAsync(hwnd, message, waitStrategy).GetAwaiter().GetResult();
+
+    private sealed class WindowsHelloRequestContext : IDisposable
+    {
+        private IntPtr _requestClassId;
+        private IntPtr _requestMessage;
+        private IntPtr _activationFactory;
+        private IntPtr _asyncOperation;
+        private IntPtr _operationObject;
+        private bool _disposed;
+        private IAsyncOperation_VerificationResult? _operation;
+
+        private WindowsHelloRequestContext()
         {
-            if (opPtr != IntPtr.Zero)
-                Marshal.Release(opPtr);
-            if (factoryPtr != IntPtr.Zero)
-                Marshal.Release(factoryPtr);
-            if (messageHString != IntPtr.Zero)
-                WindowsDeleteString(messageHString);
-            if (classId != IntPtr.Zero)
-                WindowsDeleteString(classId);
+        }
+
+        public static WindowsHelloRequestContext Create(IntPtr hwnd, string message)
+        {
+            var context = new WindowsHelloRequestContext();
+
+            try
+            {
+                ThrowIfFailed(WindowsCreateString(ClassId, ClassId.Length, out context._requestClassId));
+
+                var interopIid = typeof(IUserConsentVerifierInterop).GUID;
+                ThrowIfFailed(RoGetActivationFactory(context._requestClassId, ref interopIid, out context._activationFactory));
+
+                var interop = (IUserConsentVerifierInterop)Marshal.GetObjectForIUnknown(context._activationFactory);
+
+                ThrowIfFailed(WindowsCreateString(message, message.Length, out context._requestMessage));
+
+                var asyncIid = typeof(IAsyncOperation_VerificationResult).GUID;
+                interop.RequestVerificationForWindowAsync(hwnd, context._requestMessage, ref asyncIid, out context._asyncOperation);
+                context._operation = (IAsyncOperation_VerificationResult)Marshal.GetObjectForIUnknown(context._asyncOperation);
+                context._operationObject = Marshal.GetIUnknownForObject(context._operation);
+
+                return context;
+            }
+            catch
+            {
+                context.Dispose();
+                throw;
+            }
+        }
+
+        public IAsyncOperation_VerificationResult Operation => _operation!;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            _disposed = true;
+
+            if (_operationObject != IntPtr.Zero)
+            {
+                Marshal.Release(_operationObject);
+                _operationObject = IntPtr.Zero;
+            }
+
+            if (_asyncOperation != IntPtr.Zero)
+            {
+                Marshal.Release(_asyncOperation);
+                _asyncOperation = IntPtr.Zero;
+            }
+
+            if (_activationFactory != IntPtr.Zero)
+            {
+                Marshal.Release(_activationFactory);
+                _activationFactory = IntPtr.Zero;
+            }
+
+            if (_requestMessage != IntPtr.Zero)
+            {
+                WindowsDeleteString(_requestMessage);
+                _requestMessage = IntPtr.Zero;
+            }
+
+            if (_requestClassId != IntPtr.Zero)
+            {
+                WindowsDeleteString(_requestClassId);
+                _requestClassId = IntPtr.Zero;
+            }
         }
     }
 
@@ -117,6 +178,16 @@ public static class WindowsHelloInterop
         if (hr < 0)
             Marshal.ThrowExceptionForHR(hr);
     }
+
+    private static HelloVerificationResult MapVerificationResult(VerificationResult result) => result switch
+    {
+        VerificationResult.Verified => HelloVerificationResult.Verified,
+        VerificationResult.Canceled => HelloVerificationResult.Canceled,
+        VerificationResult.DeviceNotPresent or VerificationResult.NotConfiguredForUser or
+            VerificationResult.DisabledByPolicy or VerificationResult.DeviceBusy or
+            VerificationResult.RetriesExhausted => HelloVerificationResult.NotAvailable,
+        _ => HelloVerificationResult.Failed
+    };
 
     private enum VerificationResult
     {

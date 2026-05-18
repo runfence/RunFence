@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI.Forms;
 
@@ -58,6 +59,11 @@ public partial class PathPrefixesSection : PrefixListBase
         _addButton.Enabled = enabled;
         _addManualButton.Enabled = enabled;
         _removeButton.Enabled = enabled && _dataGrid.CurrentRow != null;
+    }
+
+    public void RegisterContextHelp(ContextHelpForm host)
+    {
+        host.SetContextHelp(_contentGroup, ContextHelpTextCatalog.App_PathPrefixes);
     }
 
     protected override void PerformAdd(string path)

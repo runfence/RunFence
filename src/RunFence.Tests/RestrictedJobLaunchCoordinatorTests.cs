@@ -27,7 +27,7 @@ public sealed class RestrictedJobLaunchCoordinatorTests
     private readonly Mock<IJobObjectApi> _jobObjectApi = new();
     private readonly Mock<IRestrictedProcessControl> _processControl = new();
     private readonly Mock<IJobKeeperLaunchProcessApi> _launchProcessApi = new();
-    private readonly Mock<IRestrictedJobProcessLauncher> _processLauncher = new();
+    private readonly Mock<IPreparedTokenProcessLauncher> _preparedTokenLauncher = new();
     private readonly RestrictedJobLaunchCoordinator _coordinator;
 
     public RestrictedJobLaunchCoordinatorTests()
@@ -49,8 +49,8 @@ public sealed class RestrictedJobLaunchCoordinatorTests
             _jobObjectApi.Object,
             new RestrictedProcessActivationGuard(_processControl.Object),
             _launchProcessApi.Object,
+            _preparedTokenLauncher.Object,
             @"C:\RunFence\RunFence.JobKeeper.exe");
-        _coordinator.Initialize(_processLauncher.Object);
 
         _launchProcessApi.Setup(a => a.OpenLaunchedProcess(It.IsAny<int>()))
             .Returns(new IntPtr(700));
@@ -64,9 +64,18 @@ public sealed class RestrictedJobLaunchCoordinatorTests
         var target = new ProcessLaunchTarget(@"C:\Apps\App.exe", "--flag", @"C:\Apps", HideWindow: true);
 
         SetupSuccessfulSeed(identity, pipe, isLow: false);
-        _launchIpcClient.Setup(s => s.SendLaunchRequest(Sid, false, It.Is<JobKeeperLaunchRequest>(r =>
-                r.ExePath == target.ExePath && r.Arguments == target.Arguments && r.WorkingDirectory == target.WorkingDirectory && r.HideWindow)))
-            .Returns(Environment.ProcessId);
+        _launchIpcClient.Setup(s => s.SendLaunchRequestAsync(
+                Sid,
+                false,
+                It.Is<JobKeeperLaunchRequest>(r =>
+                    r.ExePath == target.ExePath
+                    && r.Arguments == target.Arguments
+                    && r.WorkingDirectory == target.WorkingDirectory
+                    && r.HideWindow
+                    && !r.SuppressStartupFeedback),
+                It.IsAny<TimeSpan>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Environment.ProcessId);
 
         var result = _coordinator.SeedJobKeeperAndLaunch(TokenHandle, LaunchTokenSource.Credentials, Sid, false, target);
 
@@ -84,14 +93,19 @@ public sealed class RestrictedJobLaunchCoordinatorTests
         var target = new ProcessLaunchTarget(@"C:\Apps\App.exe", (string?)null, null, HideWindow: false);
         _jobKeeperService.Setup(s => s.TryReconnectExistingJobKeeper(Sid, false, It.IsAny<SecurityIdentifier>()))
             .Returns(5678);
-        _launchIpcClient.Setup(s => s.SendLaunchRequest(Sid, false, It.IsAny<JobKeeperLaunchRequest>()))
-            .Returns(Environment.ProcessId);
+        _launchIpcClient.Setup(s => s.SendLaunchRequestAsync(
+                Sid,
+                false,
+                It.IsAny<JobKeeperLaunchRequest>(),
+                It.IsAny<TimeSpan>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Environment.ProcessId);
 
         var result = _coordinator.SeedJobKeeperAndLaunch(TokenHandle, LaunchTokenSource.Credentials, Sid, false, target);
 
         Assert.Equal((uint)Environment.ProcessId, result.dwProcessId);
         _identityStore.Verify(s => s.CreateFresh(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
-        _processLauncher.Verify(l => l.LaunchWithPreparedToken(
+        _preparedTokenLauncher.Verify(l => l.LaunchWithPreparedToken(
             It.IsAny<IntPtr>(),
             It.IsAny<ProcessLaunchTarget>(),
             It.IsAny<LaunchTokenSource>(),
@@ -105,8 +119,13 @@ public sealed class RestrictedJobLaunchCoordinatorTests
         var identity = Identity(isLow: true);
         using var pipe = CreatePipe();
         SetupSuccessfulSeed(identity, pipe, isLow: true);
-        _launchIpcClient.Setup(s => s.SendLaunchRequest(Sid, true, It.IsAny<JobKeeperLaunchRequest>()))
-            .Returns(Environment.ProcessId);
+        _launchIpcClient.Setup(s => s.SendLaunchRequestAsync(
+                Sid,
+                true,
+                It.IsAny<JobKeeperLaunchRequest>(),
+                It.IsAny<TimeSpan>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Environment.ProcessId);
 
         var result = _coordinator.SeedJobKeeperAndLaunch(
             TokenHandle,
@@ -140,7 +159,7 @@ public sealed class RestrictedJobLaunchCoordinatorTests
         _processControl.Verify(c => c.CloseHandle(KeeperProcessHandle), Times.Once);
         _processJobManager.Verify(m => m.ResetJobHandle(Sid, JobAssignment.Restricted), Times.Exactly(2));
         _identityStore.Verify(s => s.Remove(Sid, false), Times.Once);
-        _processLauncher.Verify(l => l.LaunchWithPreparedToken(
+        _preparedTokenLauncher.Verify(l => l.LaunchWithPreparedToken(
                 It.IsAny<IntPtr>(),
                 It.Is<ProcessLaunchTarget>(t => t.ExePath == target.ExePath),
                 It.IsAny<LaunchTokenSource>(),
@@ -155,7 +174,7 @@ public sealed class RestrictedJobLaunchCoordinatorTests
             .Returns(0);
         _identityStore.Setup(s => s.CreateFresh(Sid, isLow)).Returns(identity);
         _pipeServerFactory.Setup(s => s.Create(identity, It.IsAny<SecurityIdentifier>())).Returns(pipe);
-        _processLauncher.Setup(l => l.LaunchWithPreparedToken(
+        _preparedTokenLauncher.Setup(l => l.LaunchWithPreparedToken(
                 TokenHandle,
                 It.Is<ProcessLaunchTarget>(t => t.ExePath.EndsWith("RunFence.JobKeeper.exe", StringComparison.OrdinalIgnoreCase)),
                 LaunchTokenSource.Credentials,

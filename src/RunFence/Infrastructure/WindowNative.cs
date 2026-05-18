@@ -29,14 +29,15 @@ public static class WindowNative
     public const uint WM_GETOBJECT = 0x003D;
 
     /// <summary>
-    /// Allows OLE drag-and-drop messages from lower-IL processes to reach the given HWND.
+    /// Allows the Win32 and OLE messages used by file drag-drop from lower-IL processes
+    /// to reach the given HWND.
     /// Must be called after the control handle is created.
     /// </summary>
-    public static void AllowDropFromLowIL(IntPtr hwnd)
+    public static bool AllowDropFilesFromLowIL(IntPtr hwnd)
     {
-        ChangeWindowMessageFilterEx(hwnd, WM_DROPFILES, MSGFLT_ALLOW, IntPtr.Zero);
-        ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, IntPtr.Zero);
-        ChangeWindowMessageFilterEx(hwnd, WM_COPYGLOBALDATA, MSGFLT_ALLOW, IntPtr.Zero);
+        return ChangeWindowMessageFilterEx(hwnd, WM_DROPFILES, MSGFLT_ALLOW, IntPtr.Zero)
+               && ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, IntPtr.Zero)
+               && ChangeWindowMessageFilterEx(hwnd, WM_COPYGLOBALDATA, MSGFLT_ALLOW, IntPtr.Zero);
     }
 
     // ── User32 (shell hook) ───────────────────────────────────────────────────
@@ -192,7 +193,7 @@ public static class WindowNative
     [DllImport("user32.dll")]
     public static extern bool BringWindowToTop(IntPtr hWnd);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]

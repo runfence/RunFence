@@ -13,7 +13,7 @@ public class CredentialEncryptionServiceTests
 
     public CredentialEncryptionServiceTests()
     {
-        _service = new CredentialEncryptionService();
+        _service = new CredentialEncryptionService(new NativeDpapiProtector());
         _pinDerivedKey = new byte[32];
         new Random(99).NextBytes(_pinDerivedKey);
     }
@@ -26,7 +26,7 @@ public class CredentialEncryptionServiceTests
         var encrypted = _service.Encrypt(password, _pinDerivedKey);
         Assert.NotEmpty(encrypted);
 
-        var decrypted = _service.Decrypt(encrypted, _pinDerivedKey);
+        using var decrypted = _service.Decrypt(encrypted, _pinDerivedKey);
         Assert.NotNull(decrypted);
 
         Assert.Equal("TestPassword123!", ProtectedStringToString(decrypted));
@@ -56,9 +56,11 @@ public class CredentialEncryptionServiceTests
 
         Assert.NotEqual(encrypted1, encrypted2);
 
-        var decrypted1 = ProtectedStringToString(_service.Decrypt(encrypted1, _pinDerivedKey));
-        var decrypted2 = ProtectedStringToString(_service.Decrypt(encrypted2, _pinDerivedKey));
-        Assert.Equal(decrypted1, decrypted2);
+        using var decrypted1 = _service.Decrypt(encrypted1, _pinDerivedKey);
+        using var decrypted2 = _service.Decrypt(encrypted2, _pinDerivedKey);
+        var decryptedValue1 = ProtectedStringToString(decrypted1);
+        var decryptedValue2 = ProtectedStringToString(decrypted2);
+        Assert.Equal(decryptedValue1, decryptedValue2);
     }
 
     [Fact]
@@ -69,7 +71,7 @@ public class CredentialEncryptionServiceTests
         empty.MakeReadOnly();
 
         var encrypted = _service.Encrypt(empty, _pinDerivedKey);
-        var decrypted = _service.Decrypt(encrypted, _pinDerivedKey);
+        using var decrypted = _service.Decrypt(encrypted, _pinDerivedKey);
 
         Assert.NotNull(decrypted);
         Assert.Equal(0, decrypted.Length);
@@ -86,24 +88,76 @@ public class CredentialEncryptionServiceTests
         var password = CreateProtectedString(passwordValue);
         var encrypted = _service.Encrypt(password, _pinDerivedKey);
 
-        var decrypted = _service.Decrypt(encrypted, _pinDerivedKey);
+        using var decrypted = _service.Decrypt(encrypted, _pinDerivedKey);
 
         Assert.Equal(passwordValue, ProtectedStringToString(decrypted));
+    }
+
+    [Fact]
+    public void EncryptDecrypt_SpanInterface_RoundTrip()
+    {
+        var spanService = (ICredentialEncryptionSpanService)_service;
+        var password = CreateProtectedString("SpanPassword123!");
+
+        var encrypted = spanService.Encrypt(password, _pinDerivedKey.AsSpan());
+        Assert.NotEmpty(encrypted);
+
+        using var decrypted = spanService.Decrypt(encrypted, _pinDerivedKey.AsSpan());
+
+        Assert.Equal("SpanPassword123!", ProtectedStringToString(decrypted));
+    }
+
+    [Fact]
+    public void Encrypt_WhenDpapiProtectFails_PropagatesException()
+    {
+        var expected = new CryptographicException("protect failed");
+        var service = new CredentialEncryptionService(new FakeDpapiProtector
+        {
+            ProtectFunc = (_, _) => throw expected
+        });
+        var password = CreateProtectedString("TestPassword123!");
+
+        var actual = Assert.Throws<CryptographicException>(() => service.Encrypt(password, _pinDerivedKey));
+
+        Assert.Same(expected, actual);
+    }
+
+    [Fact]
+    public void Decrypt_WhenDpapiUnprotectFails_PropagatesException()
+    {
+        var expected = new CryptographicException("unprotect failed");
+        var service = new CredentialEncryptionService(new FakeDpapiProtector
+        {
+            UnprotectToProtectedStringFunc = (_, _) => throw expected
+        });
+
+        var actual = Assert.Throws<CryptographicException>(() => service.Decrypt([0x01, 0x02, 0x03], _pinDerivedKey));
+
+        Assert.Same(expected, actual);
     }
 
     private static ProtectedString CreateProtectedString(string value)
         => new(value.AsSpan(), protect: false);
 
     private static string ProtectedStringToString(ProtectedString ps)
+        => ps.UseUnicodeSnapshot(snapshot =>
+            Marshal.PtrToStringUni(snapshot.DangerousGetIntPtr(), snapshot.CharCount) ?? string.Empty);
+
+    private sealed class FakeDpapiProtector : IDpapiProtector
     {
-        var ptr = ps.AllocUnicode();
-        try
-        {
-            return Marshal.PtrToStringUni(ptr)!;
-        }
-        finally
-        {
-            Marshal.ZeroFreeGlobalAllocUnicode(ptr);
-        }
+        public Func<byte[], byte[], byte[]>? ProtectFunc { get; init; }
+        public Func<byte[], byte[], SecureSecret>? UnprotectToSecretFunc { get; init; }
+        public Func<byte[], byte[], ProtectedString>? UnprotectToProtectedStringFunc { get; init; }
+
+        public byte[] Protect(ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> entropy)
+            => ProtectFunc?.Invoke(plaintext.ToArray(), entropy.ToArray()) ?? plaintext.ToArray();
+
+        public SecureSecret UnprotectToSecret(byte[] protectedData, ReadOnlySpan<byte> entropy)
+            => UnprotectToSecretFunc?.Invoke(protectedData, entropy.ToArray())
+                ?? throw new NotSupportedException();
+
+        public ProtectedString UnprotectToProtectedString(byte[] protectedData, ReadOnlySpan<byte> entropy)
+            => UnprotectToProtectedStringFunc?.Invoke(protectedData, entropy.ToArray())
+                ?? throw new NotSupportedException();
     }
 }

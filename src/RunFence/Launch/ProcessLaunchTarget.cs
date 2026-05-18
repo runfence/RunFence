@@ -1,4 +1,4 @@
-using System.Text;
+using RunFence.Core;
 
 namespace RunFence.Launch;
 
@@ -17,24 +17,22 @@ public record ProcessLaunchTarget(
     string? Arguments = null,
     string? WorkingDirectory = null,
     Dictionary<string, string>? EnvironmentVariables = null,
-    bool HideWindow = false)
+    bool HideWindow = false,
+    bool SuppressStartupFeedback = false,
+    bool IsPathApproved = true)
 {
-    public ProcessLaunchTarget(string ExePath, List<string> ArgumentsList, string? WorkingDirectory = null, Dictionary<string, string>? EnvironmentVariables = null, bool HideWindow = false)
-        : this(ExePath, CombineArguments(ArgumentsList), WorkingDirectory, EnvironmentVariables, HideWindow)
+    public ProcessLaunchTarget(
+        string ExePath,
+        List<string> ArgumentsList,
+        string? WorkingDirectory = null,
+        Dictionary<string, string>? EnvironmentVariables = null,
+        bool HideWindow = false,
+        bool SuppressStartupFeedback = false,
+        bool IsPathApproved = true)
+        : this(ExePath, CombineArguments(ArgumentsList), WorkingDirectory, EnvironmentVariables, HideWindow, SuppressStartupFeedback, IsPathApproved)
     {
     }
 
     public static string CombineArguments(List<string> args)
-    {
-        var sb = new StringBuilder();
-        for (var i = 0; i < args.Count; i++)
-        {
-            var arg = args[i];
-            if (i != 0)
-                sb.Append(' ');
-            ProcessLaunchHelper.AppendQuotedArg(sb, arg);
-        }
-
-        return sb.ToString();
-    }
+        => CommandLineHelper.MaterializeProcessArguments(args) ?? string.Empty;
 }

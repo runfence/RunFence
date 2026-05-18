@@ -1,6 +1,4 @@
-using Moq;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 using RunFence.Launch;
 using Xunit;
 
@@ -10,19 +8,8 @@ public class LaunchDefaultsResolverTests
 {
     private const string TestSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
 
-    private readonly Mock<ISessionProvider> _sessionProvider = new();
     private readonly AppDatabase _database = new();
-    private readonly LaunchDefaultsResolver _resolver;
-
-    public LaunchDefaultsResolverTests()
-    {
-        _sessionProvider.Setup(s => s.GetSession()).Returns(new SessionContext
-        {
-            Database = _database
-        });
-
-        _resolver = new LaunchDefaultsResolver(_sessionProvider.Object);
-    }
+    private readonly LaunchDefaultsResolver _resolver = new();
 
     [Fact]
     public void ResolveDefaults_NullPrivilegeLevel_FilledFromAccountEntry()
@@ -32,7 +19,7 @@ public class LaunchDefaultsResolverTests
         var identity = new AccountLaunchIdentity(TestSid) { PrivilegeLevel = null };
 
         // Act
-        var result = _resolver.ResolveDefaults(identity);
+        var result = _resolver.ResolveDefaults(identity, _database);
 
         // Assert — PrivilegeLevel filled from account entry; HighestAllowed → IsUnelevated=false
         var account = Assert.IsType<AccountLaunchIdentity>(result);
@@ -43,16 +30,16 @@ public class LaunchDefaultsResolverTests
     [Fact]
     public void ResolveDefaults_ExistingPrivilegeLevel_Preserved()
     {
-        // Arrange — identity already has PrivilegeLevel.Basic; account entry should not override it
+        // Arrange — identity already has PrivilegeLevel.Isolated; account entry should not override it
         _database.Accounts.Add(new AccountEntry { Sid = TestSid, PrivilegeLevel = PrivilegeLevel.HighestAllowed });
-        var identity = new AccountLaunchIdentity(TestSid) { PrivilegeLevel = PrivilegeLevel.Basic };
+        var identity = new AccountLaunchIdentity(TestSid) { PrivilegeLevel = PrivilegeLevel.Isolated };
 
         // Act
-        var result = _resolver.ResolveDefaults(identity);
+        var result = _resolver.ResolveDefaults(identity, _database);
 
-        // Assert — original PrivilegeLevel preserved; Basic → IsUnelevated=true
+        // Assert — original PrivilegeLevel preserved; Isolated → IsUnelevated=true
         var account = Assert.IsType<AccountLaunchIdentity>(result);
-        Assert.Equal(PrivilegeLevel.Basic, account.PrivilegeLevel);
+        Assert.Equal(PrivilegeLevel.Isolated, account.PrivilegeLevel);
         Assert.True(account.IsUnelevated);
     }
 
@@ -63,11 +50,11 @@ public class LaunchDefaultsResolverTests
         var identity = new AccountLaunchIdentity(TestSid) { PrivilegeLevel = null };
 
         // Act
-        var result = _resolver.ResolveDefaults(identity);
+        var result = _resolver.ResolveDefaults(identity, _database);
 
-        // Assert — falls back to PrivilegeLevel.Basic; Basic → IsUnelevated=true
+        // Assert — falls back to PrivilegeLevel.Isolated; Isolated → IsUnelevated=true
         var account = Assert.IsType<AccountLaunchIdentity>(result);
-        Assert.Equal(PrivilegeLevel.Basic, account.PrivilegeLevel);
+        Assert.Equal(PrivilegeLevel.Isolated, account.PrivilegeLevel);
         Assert.True(account.IsUnelevated);
     }
 
@@ -79,10 +66,21 @@ public class LaunchDefaultsResolverTests
         var identity = new AppContainerLaunchIdentity(entry);
 
         // Act
-        var result = _resolver.ResolveDefaults(identity);
+        var result = _resolver.ResolveDefaults(identity, _database);
 
         // Assert — same instance returned; IsUnelevated=true
         Assert.Same(identity, result);
         Assert.True(result.IsUnelevated);
+    }
+
+    [Fact]
+    public void ResolveDefaults_UsesPassedSnapshot_NotLiveDatabase()
+    {
+        var snapshot = new AppDatabase();
+        snapshot.Accounts.Add(new AccountEntry { Sid = TestSid, PrivilegeLevel = PrivilegeLevel.HighestAllowed });
+        var result = _resolver.ResolveDefaults(new AccountLaunchIdentity(TestSid) { PrivilegeLevel = null }, snapshot);
+
+        var account = Assert.IsType<AccountLaunchIdentity>(result);
+        Assert.Equal(PrivilegeLevel.HighestAllowed, account.PrivilegeLevel);
     }
 }

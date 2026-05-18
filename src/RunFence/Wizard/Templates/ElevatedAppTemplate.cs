@@ -28,6 +28,7 @@ internal class ElevatedAppTemplate(
     WizardAccountSetupHelperFactory setupHelperFactory,
     IAccountCredentialManager credentialManager,
     WizardAccountPickerStepFactory pickerStepFactory,
+    WizardCredentialCollector credentialCollector,
     SessionContext session,
     WizardLicenseChecker licenseChecker,
     IShortcutDiscoveryService discoveryService,
@@ -94,7 +95,7 @@ internal class ElevatedAppTemplate(
             {
                 if (_data.CreateNewAccount || string.IsNullOrEmpty(_data.SelectedExistingSid))
                     return Task.CompletedTask;
-                var pw = pickerStepFactory.CreateCredentialCollector().CollectIfNeeded(_data.SelectedExistingSid, session, progress);
+                var pw = credentialCollector.CollectCredentialForStep(_data.SelectedExistingSid, progress);
                 if (pw != null) _data.CollectedPassword = pw;
                 return Task.CompletedTask;
             });
@@ -121,8 +122,6 @@ internal class ElevatedAppTemplate(
         // (meaning the account had no stored credential and the user provided one).
         bool willAddCredential = _data.CreateNewAccount || _data.CollectedPassword != null;
         if (!licenseChecker.CheckCanAddCredential(session, progress, willAddCredential))
-            return;
-        if (!licenseChecker.CheckCanAddApp(session, progress))
             return;
 
         if (_data.CreateNewAccount)

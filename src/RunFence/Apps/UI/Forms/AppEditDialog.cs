@@ -6,6 +6,7 @@ using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Helpers;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Launching.Resolution;
 using RunFence.Persistence;
 using RunFence.UI;
@@ -13,18 +14,19 @@ using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI.Forms;
 
-public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContextProvider, IAppEditBrowseResultReceiver
+public partial class AppEditDialog : RunFence.UI.Forms.ContextHelpForm, IAclConfigContextProvider, IAppEditBrowseResultReceiver
 {
     private ToolTip? _configToolTip;
     private bool _hasLoadedConfigs;
     private bool _isFolder;
-    private string? _lastAboveBasicPromptedPath;
+    private string? _lastBasicPromptedPath;
 
     private AppEntry? _existing;
     private List<CredentialEntry> _credentials = null!;
     private List<AppEntry> _existingApps = null!;
     private IReadOnlyDictionary<string, string>? _sidNames;
     private AppDatabase? _database;
+    private AppEditDialogCommandContext _commandContext = null!;
 
     private readonly IAppConfigService _appConfigService;
 
@@ -37,28 +39,25 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
     private readonly AppEditAccountSwitchHandler _switchHandler;
     private readonly AppEditDialogController _controller;
     private readonly IExecutablePathResolver _executablePathResolver;
-    private readonly ISidResolver _sidResolver;
-    private readonly IProfilePathResolver _profilePathResolver;
-    private readonly AppEditAssociationHandler _associationHandler;
-    private readonly AppEditDialogSaveHandler _saveHandler;
-    private readonly AppEditDialogPopulator _populator;
-    private readonly AppEditDialogInitializer _initializer;
-    private readonly Func<IpcCallerSection> _ipcCallerSectionFactory;
+    private readonly AppEditDialogInitializationBinder _initializationBinder;
+    private readonly AppEditDialogSubmitController _submitController;
+    private readonly IUserConfirmationService _userConfirmationService;
 
     public AppEntry Result { get; private set; } = null!;
     public bool LaunchNow => _launchNowCheckBox.Checked;
+    public bool HasUnsavedInMemoryMutations { get; private set; }
+    public AppEntry? ExistingApp => _existing;
+    public IReadOnlyList<CredentialEntry> Credentials => _credentials;
+    public IReadOnlyList<AppEntry> ExistingApps => _existingApps;
+    public IReadOnlyDictionary<string, string>? SidNames => _sidNames;
+    public AppDatabase? DatabaseOrNull => _database;
 
     /// <summary>Returns null for main config, or the full path for an additional config.</summary>
     public string? SelectedConfigPath
     {
         get
         {
-            if (_hasLoadedConfigs)
-                return _configComboBox.SelectedItem is ConfigComboItem item ? item.Path : null;
-
-            // Combo disabled (no additional configs loaded) — preserve the existing app's current config
-            // assignment to prevent silently demoting it to main config on edit.
-            return _existing != null ? _appConfigService.GetConfigPath(_existing.Id) : null;
+            return _configComboBox.SelectedItem is ConfigComboItem item ? item.Path : null;
         }
     }
 
@@ -79,62 +78,31 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _database?.UpdateSidName(sid, name);
     }
 
-    // IAppEditDialogState implementation
-    string IAppEditDialogState.NameText => _nameTextBox.Text;
-    string IAppEditDialogState.FilePathText => _filePathTextBox.Text;
-    bool IAppEditDialogState.IsFolder => _isFolder;
-    object? IAppEditDialogState.SelectedAccountItem => _accountComboBox.SelectedItem;
-    bool IAppEditDialogState.ManageShortcuts => _manageShortcutsCheckBox.Checked;
-    PrivilegeLevel? IAppEditDialogState.SelectedPrivilegeLevel =>
-        PrivilegeLevelComboHelper.IndexToMode(_privilegeLevelComboBox.SelectedIndex);
-    bool IAppEditDialogState.OverrideIpcCallers => _overrideIpcCallersCheckBox.Checked;
-    string IAppEditDialogState.DefaultArgsText => _defaultArgsTextBox.Text;
-    bool IAppEditDialogState.AllowPassArgs => _allowPassArgsCheckBox.Checked;
-    string IAppEditDialogState.WorkingDirText => _workingDirTextBox.Text;
-    bool IAppEditDialogState.AllowPassWorkDir => _allowPassWorkDirCheckBox.Checked;
+    public void SetAssociations(IReadOnlyList<HandlerAssociationItem>? associations)
+        => _associationsSection.SetAssociations(associations?.ToList());
 
-    string IAppEditDialogState.StatusText
-    {
-        set => _statusLabel.Text = value;
-    }
-
-    string? IAppEditDialogState.ArgumentsTemplateText => string.IsNullOrEmpty(_argsTemplateTextBox.Text) ? null : _argsTemplateTextBox.Text;
-
-    IReadOnlyList<string>? IAppEditDialogState.AppPathPrefixes => _appPrefixesSection.GetPrefixes();
-
-    public event Func<Task>? ApplyRequested;
-    public event Func<Task>? RemoveRequested;
-
-    internal AppEditDialog(
+    public AppEditDialog(
         IAppConfigService appConfigService,
         AclConfigSection aclSection,
         AppEditBrowseHelper browseHelper,
-        AppEditAssociationHandler associationHandler,
-        AppEditDialogSaveHandler saveHandler,
         AppEditAccountSwitchHandler switchHandler,
         AppEditDialogController controller,
+        AppEditDialogSubmitController submitController,
         IExecutablePathResolver executablePathResolver,
-        ISidResolver sidResolver,
-        IProfilePathResolver profilePathResolver,
-        AppEditDialogPopulator populator,
-        AppEditDialogInitializer initializer,
         HandlerAssociationsSection associationsSection,
-        Func<IpcCallerSection> ipcCallerSectionFactory)
+        AppEditDialogInitializationBinder initializationBinder,
+        IUserConfirmationService userConfirmationService)
     {
         _appConfigService = appConfigService;
         _aclSection = aclSection;
         _browseHelper = browseHelper;
-        _associationHandler = associationHandler;
-        _saveHandler = saveHandler;
         _switchHandler = switchHandler;
         _controller = controller;
+        _submitController = submitController;
         _executablePathResolver = executablePathResolver;
-        _sidResolver = sidResolver;
-        _profilePathResolver = profilePathResolver;
-        _populator = populator;
-        _initializer = initializer;
         _associationsSection = associationsSection;
-        _ipcCallerSectionFactory = ipcCallerSectionFactory;
+        _initializationBinder = initializationBinder;
+        _userConfirmationService = userConfirmationService;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
     }
@@ -146,6 +114,7 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         AppEntry? existing,
         List<CredentialEntry> credentials,
         List<AppEntry> existingApps,
+        AppEditDialogCommandContext commandContext,
         AppEditDialogOptions? options = null,
         IReadOnlyDictionary<string, string>? sidNames = null,
         AppDatabase? database = null)
@@ -155,11 +124,62 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _existing = existing;
         _credentials = credentials;
         _existingApps = existingApps;
+        _commandContext = commandContext;
         _sidNames = sidNames;
         _database = database;
 
-        _ipcSection = CreateIpcSection(sidNames, database);
+        _initializationBinder.BuildDynamicContent(this, options);
+        if (_existing != null)
+            _initializationBinder.BindExistingApp(this);
+        else
+            _initializationBinder.BindNewApp(this, options);
+    }
 
+    public AppEditDialogInputSnapshot CaptureInputSnapshot()
+    {
+        var selectedAccountSid = _accountComboBox.SelectedItem switch
+        {
+            CredentialDisplayItem cdi => cdi.Credential.Sid,
+            _ => null
+        };
+        var selectedContainerName = _accountComboBox.SelectedItem switch
+        {
+            AppContainerDisplayItem acdi => acdi.Container.Name,
+            _ => null
+        };
+
+        return new AppEditDialogInputSnapshot(
+            NameText: _nameTextBox.Text,
+            FilePathText: _filePathTextBox.Text,
+            IsFolder: _isFolder,
+            SelectedAccountSid: selectedAccountSid,
+            SelectedAppContainerName: selectedContainerName,
+            ManageShortcuts: _manageShortcutsCheckBox.Checked,
+            SelectedPrivilegeLevel: PrivilegeLevelComboHelper.IndexToMode(_privilegeLevelComboBox.SelectedIndex),
+            OverrideIpcCallers: _overrideIpcCallersCheckBox.Checked,
+            DefaultArgsText: _defaultArgsTextBox.Text,
+            AllowPassArgs: _allowPassArgsCheckBox.Checked,
+            WorkingDirText: _workingDirTextBox.Text,
+            AllowPassWorkDir: _allowPassWorkDirCheckBox.Checked,
+            ExistingApps: [.. _existingApps],
+            ExistingApp: _existing,
+            PreGeneratedId: _preGeneratedId,
+            ArgumentsTemplateText: string.IsNullOrEmpty(_argsTemplateTextBox.Text) ? null : _argsTemplateTextBox.Text,
+            AppPathPrefixes: _appPrefixesSection.GetPrefixes(),
+            DuplicateEnvironmentVariableName: _envVarsSection.GetFirstDuplicateName(),
+            EnvironmentVariables: _envVarsSection.GetItems(),
+            IpcCallers: _ipcSection.GetCallers(),
+            AclConfig: _aclSection.CaptureSnapshot());
+    }
+
+    public void BuildDynamicContentCore(
+        AppEditDialogOptions options,
+        IReadOnlyList<object> accountItems,
+        IReadOnlyList<ConfigComboItem> configItems,
+        IpcCallerSection ipcSection)
+    {
+        _ipcSection = ipcSection;
+        _ipcSection.SetSidNames(_sidNames, _database != null ? (sid, name) => _database.UpdateSidName(sid, name) : null);
         _switchHandler.Initialize(_privilegeLevelComboBox, _aclSection);
         _controller.Initialize(_switchHandler);
 
@@ -196,14 +216,14 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _privilegeLevelComboBox.Items.Clear();
         _privilegeLevelComboBox.Items.Add("(Account default)");
         _privilegeLevelComboBox.Items.Add("Highest Allowed");
-        _privilegeLevelComboBox.Items.Add("Above Basic");
         _privilegeLevelComboBox.Items.Add("Basic");
+        _privilegeLevelComboBox.Items.Add("Isolated");
         _privilegeLevelComboBox.Items.Add("Low Integrity");
         _privilegeLevelComboBox.SelectedIndex = 0;
 
         // Populate account and config combo boxes
-        PopulateAccountCombo(database);
-        PopulateConfigCombo();
+        PopulateAccountCombo(accountItems);
+        PopulateConfigCombo(configItems);
 
         // Skip the divider if selected
         _accountComboBox.SelectedIndexChanged += OnAccountComboSelectedIndexChanged;
@@ -216,7 +236,6 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _configToolTip ??= new ToolTip();
         if (!_hasLoadedConfigs)
             _configToolTip.SetToolTip(_configComboBox, "Load additional configs in Options to save to a different file");
-        _configToolTip.SetToolTip(_privilegeLevelComboBox, LaunchUiConstants.PrivilegeLevelTooltip);
 
         // Runtime-dependent values
         Text = _existing != null ? "Edit Application" : "Add Application";
@@ -249,40 +268,25 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
             CurrentAppId: _existing?.Id,
             SidNames: _sidNames));
 
-        if (_existing != null)
-            PopulateFromExisting();
-        else
-        {
-            PreGenerateId();
-            if (options.ConfigPath != null && _hasLoadedConfigs)
-                SelectComboItem<ConfigComboItem>(_configComboBox,
-                    item => string.Equals(item.Path, options.ConfigPath, StringComparison.OrdinalIgnoreCase),
-                    startIndex: 1);
+        RegisterContextHelp();
+    }
 
-            if (options.ExePath != null)
-            {
-                _filePathTextBox.Text = options.ExePath;
-                _nameTextBox.Text = Path.GetFileNameWithoutExtension(options.ExePath);
-            }
+    private void RegisterContextHelp()
+    {
+        SetContextHelp(_configComboBox, ContextHelpTextCatalog.AppEdit_ExtraConfigStore);
+        SetContextHelp(_privilegeLevelComboBox, ContextHelpTextCatalog.Launch_PrivilegeLevel);
+        SetContextHelp(_manageShortcutsCheckBox, ContextHelpTextCatalog.RunAs_Shortcut);
 
-            if (options.AccountSid != null)
-            {
-                SelectComboItem<CredentialDisplayItem>(_accountComboBox,
-                    ci => SidComparer.SidEquals(ci.Credential.Sid, options.AccountSid));
-            }
-            else if (options.ContainerName != null)
-            {
-                SelectComboItem<AppContainerDisplayItem>(_accountComboBox,
-                    acdi => string.Equals(acdi.Container.Name, options.ContainerName, StringComparison.OrdinalIgnoreCase));
-            }
+        SetContextHelp(_defaultArgsTextBox, ContextHelpTextCatalog.Launch_Arguments);
+        SetContextHelp(_allowPassArgsCheckBox, ContextHelpTextCatalog.Launch_Arguments);
+        SetContextHelp(_argsTemplateTextBox, ContextHelpTextCatalog.Launch_Arguments);
+        // Launcher access override details are provided by the nested caller section as a whole.
+        SetContextHelp(_associationsSection, ContextHelpTextCatalog.App_HandlerMappings);
+        SetContextHelp(_appPrefixesSection, ContextHelpTextCatalog.App_PathPrefixes);
+        SetContextHelp(_envVarsContainer, ContextHelpTextCatalog.App_EnvironmentVariables);
 
-            _aclSection.RestrictAcl = options.RestrictAcl;
-            _manageShortcutsCheckBox.Checked = options.ManageShortcuts;
-            _privilegeLevelComboBox.SelectedIndex = PrivilegeLevelComboHelper.ModeToIndex(options.PrivilegeLevel);
-
-            // Populate associations section for new app (uses pre-generated ID)
-            _associationsSection.SetAssociations(_initializer.GetAssociations(_database, _preGeneratedId)?.ToList());
-        }
+        _aclSection.RegisterContextHelp(this);
+        _ipcSection.RegisterContextHelp(this, ContextHelpTextCatalog.AppEdit_LauncherAccessOverride);
     }
 
     // TabControl does not size its TabPages until the handle is created, so Anchor=Right on controls
@@ -319,17 +323,17 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
             _allowPassArgsCheckBox.Checked = true;
     }
 
-    private void PopulateAccountCombo(AppDatabase? database)
+    private void PopulateAccountCombo(IReadOnlyList<object> accountItems)
     {
         _accountComboBox.Items.Clear();
-        foreach (var item in _populator.BuildAccountItems(_credentials, _sidNames, _existing, database))
+        foreach (var item in accountItems)
             _accountComboBox.Items.Add(item);
     }
 
-    private void PopulateConfigCombo()
+    private void PopulateConfigCombo(IReadOnlyList<ConfigComboItem> configItems)
     {
         _configComboBox.Items.Clear();
-        foreach (var item in _populator.BuildConfigItems())
+        foreach (var item in configItems)
             _configComboBox.Items.Add(item);
         _configComboBox.SelectedIndex = 0;
     }
@@ -351,9 +355,9 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
 
     private string? _preGeneratedId;
 
-    private void PreGenerateId()
+    public void SetPreGeneratedId(string appId)
     {
-        _preGeneratedId = _initializer.PreGenerateId(_existingApps.Select(a => a.Id));
+        _preGeneratedId = appId;
         _launcherArgsTextBox.Text = _preGeneratedId;
         _launcherArgsTextBox.ForeColor = SystemColors.ControlText;
     }
@@ -417,19 +421,19 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
             _defaultArgsTextBox.Text = args;
     }
 
-    bool IAppEditBrowseResultReceiver.CanSuggestAboveBasicPrivilegeLevel()
+    bool IAppEditBrowseResultReceiver.CanSuggestBasicPrivilegeLevel()
     {
         if (!_privilegeLevelComboBox.Enabled)
             return false;
         var selected = PrivilegeLevelComboHelper.IndexToMode(_privilegeLevelComboBox.SelectedIndex);
-        if (selected is PrivilegeLevel.HighestAllowed or PrivilegeLevel.AboveBasic)
+        if (selected is PrivilegeLevel.HighestAllowed or PrivilegeLevel.Basic)
             return false;
         // "(Account default)" — also check what the account default resolves to
         if (selected == null)
         {
             var sid = (_accountComboBox.SelectedItem as CredentialDisplayItem)?.Credential.Sid;
             var accountDefault = sid != null ? _database?.GetAccount(sid)?.PrivilegeLevel : null;
-            if (accountDefault is PrivilegeLevel.HighestAllowed or PrivilegeLevel.AboveBasic)
+            if (accountDefault is PrivilegeLevel.HighestAllowed or PrivilegeLevel.Basic)
                 return false;
         }
         return true;
@@ -453,32 +457,12 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
 
     private async void OnDiscoverClick(object? sender, EventArgs e)
     {
-        Cursor = Cursors.WaitCursor;
-        _discoverButton.Enabled = false;
-        try
-        {
-            if (!IsDisposed)
-                await _browseHelper.DiscoverAndApplyAsync(this);
-        }
-        finally
-        {
-            if (!IsDisposed)
-            {
-                Cursor = Cursors.Default;
-                _discoverButton.Enabled = true;
-            }
-        }
+        await HandleDiscoverAsync();
     }
 
     private async void OnRemoveClick(object? sender, EventArgs e)
     {
-        if (_existing == null)
-            return;
-        var removeMessage = AppEntryHelper.GetRemoveConfirmationMessage(_existing);
-        if (MessageBox.Show(removeMessage, "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
-            return;
-        if (RemoveRequested != null)
-            await RemoveRequested.Invoke();
+        await HandleRemoveAsync();
     }
 
     private void OnIpcOverrideChanged(object? sender, EventArgs e)
@@ -486,14 +470,7 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _ipcSection.SetEnabled(_overrideIpcCallersCheckBox.Checked);
     }
 
-    private IpcCallerSection CreateIpcSection(IReadOnlyDictionary<string, string>? sidNames, AppDatabase? database)
-    {
-        var ipcSection = _ipcCallerSectionFactory();
-        ipcSection.SetSidNames(sidNames, database != null ? (sid, name) => database.UpdateSidName(sid, name) : null);
-        return ipcSection;
-    }
-
-    private void ApplyExistingInitialization(AppEditInitializationModel model)
+    public void ApplyExistingInitializationCore(AppEditInitializationModel model)
     {
         ApplyExistingState(model.State);
         LockFilePathControls();
@@ -511,8 +488,6 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
             _ipcSection.SetEnabled(true);
         }
 
-        SelectAccountComboForExisting(model.AccountSelection);
-        SelectConfigAndAclPath(model);
         _associationsSection.SetAssociations(model.Associations?.ToList());
         _appPrefixesSection.SetPrefixes(model.PathPrefixes);
         UpdateFolderState();
@@ -545,117 +520,261 @@ public partial class AppEditDialog : Form, IAppEditDialogState, IAclConfigContex
         _filePathTextBox.Width = _nameTextBox.Width;
     }
 
-    private void SelectAccountComboForExisting(AppEditExistingAccountSelection selection)
+    public bool SelectAccountComboForExisting(AppEditExistingAccountSelection selection)
     {
         _accountComboBox.SelectedIndex = -1;
 
         if (selection.AppContainerName != null)
         {
-            SelectComboItem<AppContainerDisplayItem>(_accountComboBox,
+            return SelectComboItem<AppContainerDisplayItem>(_accountComboBox,
                 ci => string.Equals(ci.Container.Name, selection.AppContainerName, StringComparison.OrdinalIgnoreCase));
-            return;
         }
 
-        var found = SelectComboItem<CredentialDisplayItem>(_accountComboBox,
+        return SelectComboItem<CredentialDisplayItem>(_accountComboBox,
             item => SidComparer.SidEquals(item.Credential.Sid, selection.AccountSid));
-
-        if (found)
-            return;
-
-        var fallbackEntry = new CredentialEntry { Sid = selection.AccountSid };
-        var fallbackItem = new CredentialDisplayItem(fallbackEntry, _sidResolver, _profilePathResolver, _sidNames);
-        _accountComboBox.Items.Add(fallbackItem);
-        _accountComboBox.SelectedItem = fallbackItem;
     }
 
-    private void SelectConfigAndAclPath(AppEditInitializationModel model)
+    public void SelectConfigAndAclPath(AppEditInitializationModel model)
     {
         // SetExePath rebuilds the folder depth combo and updates ACL state.
         // SelectFolderDepth must come after to override the default depth.
         _aclSection.SetExePath(model.State.ExePath, model.State.IsFolder);
         _aclSection.SelectFolderDepth(model.AclState.FolderAclDepth);
 
+        _configComboBox.SelectedIndex = 0;
+        if (model.SelectedConfigPath == null)
+            return;
+
+        var selected = SelectComboItem<ConfigComboItem>(_configComboBox,
+            item => string.Equals(item.Path, model.SelectedConfigPath, StringComparison.OrdinalIgnoreCase),
+            startIndex: 1);
+        if (!selected)
+        {
+            var currentConfigItem = new ConfigComboItem(model.SelectedConfigPath);
+            _configComboBox.Items.Add(currentConfigItem);
+            _configComboBox.SelectedItem = currentConfigItem;
+        }
+    }
+
+    public void SelectConfigPath(string? configPath)
+    {
         if (!_hasLoadedConfigs)
             return;
 
         _configComboBox.SelectedIndex = 0;
-        if (model.SelectedConfigPath != null)
+        if (configPath != null)
+        {
             SelectComboItem<ConfigComboItem>(_configComboBox,
-                item => string.Equals(item.Path, model.SelectedConfigPath, StringComparison.OrdinalIgnoreCase),
+                item => string.Equals(item.Path, configPath, StringComparison.OrdinalIgnoreCase),
                 startIndex: 1);
+        }
     }
 
-    private void PopulateFromExisting()
-        => ApplyExistingInitialization(_initializer.CreateExistingInitializationModel(_existing!, _database));
+    public void SelectAccountBySid(string sid)
+    {
+        SelectComboItem<CredentialDisplayItem>(_accountComboBox,
+            ci => SidComparer.SidEquals(ci.Credential.Sid, sid));
+    }
 
-    private void TryPromptAboveBasicForCurrentPath()
+    public void SelectAccountByContainerName(string containerName)
+    {
+        SelectComboItem<AppContainerDisplayItem>(_accountComboBox,
+            acdi => string.Equals(acdi.Container.Name, containerName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public void SetExePathAndDefaultName(string exePath)
+    {
+        _filePathTextBox.Text = exePath;
+        _nameTextBox.Text = Path.GetFileNameWithoutExtension(exePath);
+    }
+
+    public void ApplyNewOptions(AppEditDialogOptions options)
+    {
+        _aclSection.RestrictAcl = options.RestrictAcl;
+        _manageShortcutsCheckBox.Checked = options.ManageShortcuts;
+        _privilegeLevelComboBox.SelectedIndex = PrivilegeLevelComboHelper.ModeToIndex(options.PrivilegeLevel);
+    }
+
+    public void AddAccountItemAndSelect(CredentialDisplayItem item)
+    {
+        _accountComboBox.Items.Add(item);
+        _accountComboBox.SelectedItem = item;
+    }
+
+    private void TryPromptBasicForCurrentPath()
     {
         if (_existing != null || _isFolder)
             return;
         var path = _filePathTextBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(path) ||
-            string.Equals(path, _lastAboveBasicPromptedPath, StringComparison.OrdinalIgnoreCase))
+            string.Equals(path, _lastBasicPromptedPath, StringComparison.OrdinalIgnoreCase))
             return;
-        _lastAboveBasicPromptedPath = path;
+        _lastBasicPromptedPath = path;
         var sid = (_accountComboBox.SelectedItem as CredentialDisplayItem)?.Credential.Sid;
         var resolvedPath = _executablePathResolver.TryResolvePath(
             path,
             ExecutablePathResolutionContext.CurrentProcess(sid));
-        _browseHelper.PromptAboveBasicIfNeeded(resolvedPath ?? path, this);
+        _browseHelper.PromptBasicIfNeeded(resolvedPath ?? path, this);
     }
 
     private async void OnOkClick(object? sender, EventArgs e)
     {
-        TryPromptAboveBasicForCurrentPath();
+        await HandleOkAsync();
+    }
 
-        var result = _controller.ValidateAndBuild(
-            this, _aclSection, _ipcSection, _envVarsSection,
-            _existingApps, _existing, _preGeneratedId);
-
-        if (result == null)
-            return;
-
-        Result = result;
-        if (ApplyRequested != null)
+    private async Task HandleDiscoverAsync()
+    {
+        try
         {
-            Enabled = false;
-            _statusLabel.ForeColor = SystemColors.ControlText;
-            _statusLabel.Text = "Applying ACLs and shortcuts...";
+            if (IsDisposed || Disposing)
+                return;
 
-            // Apply in-memory handler mapping changes before invoking ApplyRequested so they
-            // are included in the save. Registry sync is deferred until after save succeeds to
-            // avoid a diverged registry state if the save throws.
-            var currentAssociations = _associationsSection.GetAssociations() ?? [];
-            await _saveHandler.TrySaveAndApply(
-                result,
-                SelectedConfigPath,
-                _database,
-                currentAssociations,
-                ApplyRequested.Invoke,
-                errorMessage =>
-                {
-                    Enabled = true;
-                    _statusLabel.ForeColor = Color.Red;
-                    _statusLabel.Text = $"Failed: {errorMessage}";
-                },
-                // Registry sync is best-effort post-save; log to status bar but do not roll back.
-                warningMessage =>
-                {
-                    _statusLabel.ForeColor = Color.DarkOrange;
-                    _statusLabel.Text = $"Saved, but handler sync failed: {warningMessage}";
-                });
+            Cursor = Cursors.WaitCursor;
+            _discoverButton.Enabled = false;
+            await _browseHelper.DiscoverAndApplyAsync(this, () => !IsDisposed && !Disposing);
         }
-        else
+        catch (Exception ex)
         {
-            if (_database != null)
+            if (!IsDisposed && !Disposing)
+                ShowStatusError(ex.Message);
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing)
             {
-                // Pre-assign the app to its config so SetHandlerMapping writes to the correct config file.
-                _appConfigService.AssignApp(result.Id, SelectedConfigPath);
-                _associationHandler.ApplyAndSync(result.Id, _associationsSection.GetAssociations() ?? []);
+                Cursor = Cursors.Default;
+                _discoverButton.Enabled = true;
             }
-
-            DialogResult = DialogResult.OK;
-            Close();
         }
     }
+
+    private async Task HandleRemoveAsync()
+    {
+        try
+        {
+            if (IsDisposed || Disposing || _existing == null || _commandContext.RemoveAsync == null)
+                return;
+
+            var removeMessage = AppEntryHelper.GetRemoveConfirmationMessage(_existing);
+            if (!_userConfirmationService.Confirm(removeMessage, "Confirm"))
+                return;
+
+            Enabled = false;
+            await _commandContext.RemoveAsync.Invoke();
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
+                ShowStatusError(ex.Message);
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing)
+                Enabled = true;
+        }
+    }
+
+    private async Task HandleOkAsync()
+    {
+        try
+        {
+            if (IsDisposed || Disposing)
+                return;
+
+            TryPromptBasicForCurrentPath();
+            if (IsDisposed || Disposing)
+                return;
+
+            ClearStatus();
+            var submitResult = await _submitController.SubmitAsync(new AppEditDialogSubmitRequest(
+                Input: CaptureInputSnapshot()));
+            ApplySubmitResult(submitResult);
+
+            if (submitResult.Result == null || IsDisposed || Disposing)
+                return;
+
+            var currentAssociations = _associationsSection.GetAssociations() ?? [];
+            Enabled = false;
+            await ApplyCurrentResultAsync(submitResult.Result, currentAssociations);
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing)
+                ShowStatusError(ex.Message);
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing && Visible)
+                Enabled = true;
+        }
+    }
+
+    private async Task ApplyCurrentResultAsync(AppEntry result, IReadOnlyList<HandlerAssociationItem> currentAssociations)
+    {
+        _statusLabel.ForeColor = SystemColors.ControlText;
+        _statusLabel.Text = "Saving...";
+        var submitResult = await _submitController.ApplyExistingResultAsync(new AppEditDialogApplyRequest(
+            Result: result,
+            Database: _database,
+            SelectedConfigPath: SelectedConfigPath,
+            CurrentAssociations: currentAssociations,
+            ApplyAsync: _commandContext.ApplyAsync));
+
+        if (IsDisposed)
+            return;
+
+        ApplySubmitResult(submitResult);
+    }
+
+    private void ApplySubmitResult(AppEditDialogSubmitResult submitResult)
+    {
+        if (submitResult.Result != null)
+            Result = submitResult.Result;
+
+        HasUnsavedInMemoryMutations = submitResult.HasUnsavedMutations;
+
+        if (submitResult.StatusText != null)
+        {
+            if (submitResult.StatusText.Length == 0)
+                ClearStatus();
+            else
+            {
+                if (submitResult.StatusIsError)
+                    _statusLabel.ForeColor = Color.Red;
+                else if (_statusLabel.ForeColor.ToArgb() == Color.Red.ToArgb())
+                    _statusLabel.ForeColor = SystemColors.ControlText;
+                _statusLabel.Text = submitResult.StatusText;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(submitResult.NotificationMessage))
+        {
+            MessageBox.Show(
+                this,
+                submitResult.NotificationMessage,
+                submitResult.NotificationIsWarning ? "Saved With Warning" : "Notification",
+                MessageBoxButtons.OK,
+                submitResult.NotificationIsWarning ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+        }
+
+        if (submitResult.DialogResult == null)
+            return;
+
+        DialogResult = submitResult.DialogResult.Value;
+        Close();
+    }
+
+    private void ClearStatus()
+    {
+        _statusLabel.ForeColor = SystemColors.ControlText;
+        _statusLabel.Text = string.Empty;
+    }
+
+    private void ShowStatusError(string? message)
+    {
+        Enabled = true;
+        _statusLabel.ForeColor = Color.Red;
+        _statusLabel.Text = $"Failed: {message}";
+    }
+
 }

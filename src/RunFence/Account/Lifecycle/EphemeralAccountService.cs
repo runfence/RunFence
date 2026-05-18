@@ -6,7 +6,6 @@ using RunFence.Infrastructure;
 namespace RunFence.Account.Lifecycle;
 
 public class EphemeralAccountService(
-    IAccountLifecycleManager lifecycleManager,
     IAccountDeletionService accountDeletion,
     SessionPersistenceHelper persistenceHelper,
     ILocalUserProvider localUserProvider,
@@ -14,6 +13,7 @@ public class EphemeralAccountService(
     IAccountValidationService accountValidation,
     ISessionProvider sessionProvider,
     IUiThreadInvoker uiThreadInvoker,
+    ITrayBalloonService trayBalloon,
     ISidResolver sidResolver,
     IPathGrantService pathGrantService)
     : IDisposable, IBackgroundService, IEphemeralAccountChangeSource
@@ -25,12 +25,12 @@ public class EphemeralAccountService(
     public void Start()
     {
         log.Info("EphemeralAccountService: starting.");
-        _timer = new EphemeralTimerHelper(uiThreadInvoker, () => { ProcessExpiredAccounts(); return Task.CompletedTask; });
+        _timer = new EphemeralTimerHelper(uiThreadInvoker, ProcessExpiredAccountsAsync);
         _timer.Start();
         log.Info("EphemeralAccountService: started.");
     }
 
-    public void ProcessExpiredAccounts()
+    public async Task ProcessExpiredAccountsAsync()
     {
         var session = sessionProvider.GetSession();
         var database = session.Database;
@@ -43,29 +43,20 @@ public class EphemeralAccountService(
         log.Info($"EphemeralAccountService: processing expired accounts ({orphaned.Count} orphaned, {expired.Count} expired).");
         changed |= RemoveOrphanedEntries(orphaned, database);
 
-        changed |= ProcessExpiredEntries(expired, database,
+        changed |= await ProcessExpiredEntriesAsync(expired, database,
             logContext: null,
-            deleteEntry: (entry, username) =>
+            deleteEntry: async (entry, username) =>
             {
                 try
                 {
-                    accountDeletion.DeleteAccount(entry.Sid, username, credentialStore);
+                    var deleteResult = await accountDeletion.DeleteAccountAsync(entry.Sid, username, credentialStore);
+                    ShowCleanupWarnings(deleteResult.Warnings);
                 }
                 catch (Exception ex)
                 {
                     log.Warn($"Failed to delete ephemeral account {entry.Sid}: {ex.Message}");
                     return false;
                 }
-
-                // Profile deletion is fire-and-forget: failure leaves an orphaned profile on disk,
-                // which is detected and offered for cleanup during the next startup sequence.
-                _ = lifecycleManager.DeleteProfileAsync(entry.Sid)
-                    .ContinueWith(t =>
-                    {
-                        if (t.IsFaulted)
-                            log.Warn($"Failed to delete profile for ephemeral account {entry.Sid}: {(t.Exception!.InnerException ?? t.Exception).Message}. " +
-                                      "The orphaned profile will be detected and offered for cleanup on next startup.");
-                    }, TaskContinuationOptions.OnlyOnFaulted);
                 return true;
             });
 
@@ -84,11 +75,11 @@ public class EphemeralAccountService(
     /// Calls <paramref name="deleteEntry"/> for each entry ready for deletion.
     /// Returns true if any changes were made.
     /// </summary>
-    private bool ProcessExpiredEntries(
+    private async Task<bool> ProcessExpiredEntriesAsync(
         List<AccountEntry> expired,
         AppDatabase database,
         string? logContext,
-        Func<AccountEntry, string, bool> deleteEntry)
+        Func<AccountEntry, string, Task<bool>> deleteEntry)
     {
         bool changed = false;
         var contextSuffix = logContext != null ? $" {logContext}" : "";
@@ -109,13 +100,14 @@ public class EphemeralAccountService(
             {
                 log.Info($"EphemeralAccountService: permanentizing expired entry for SID {entry.Sid} (username not resolvable); clearing grants to prevent stale state.");
                 entry.DeleteAfterUtc = null;
-                pathGrantService.RemoveAll(entry.Sid, updateFileSystem: false);
+                var untrackResult = pathGrantService.UntrackAll(entry.Sid);
                 database.RemoveAccountIfEmpty(entry.Sid);
+                ShowCleanupWarnings(untrackResult.Warnings.Select(GrantApplyFailureFormatter.Format).ToList());
                 changed = true;
                 continue;
             }
 
-            if (deleteEntry(entry, username))
+            if (await deleteEntry(entry, username))
                 changed = true;
         }
 
@@ -128,11 +120,21 @@ public class EphemeralAccountService(
         {
             log.Info($"EphemeralAccountService: permanentizing orphaned entry for SID {entry.Sid} (account not found on system and no credentials); clearing grants to prevent stale state.");
             entry.DeleteAfterUtc = null;
-            pathGrantService.RemoveAll(entry.Sid, updateFileSystem: false);
+            var untrackResult = pathGrantService.UntrackAll(entry.Sid);
+            ShowCleanupWarnings(untrackResult.Warnings.Select(GrantApplyFailureFormatter.Format).ToList());
             database.RemoveAccountIfEmpty(entry.Sid);
         }
 
         return orphaned.Count > 0;
+    }
+
+    private void ShowCleanupWarnings(IReadOnlyList<string> warnings)
+    {
+        foreach (var warning in warnings)
+        {
+            log.Warn(warning);
+            uiThreadInvoker.BeginInvoke(() => trayBalloon.ShowWarning(warning));
+        }
     }
 
     private (List<AccountEntry> orphaned, List<AccountEntry> expired) ClassifyEntries(

@@ -18,7 +18,8 @@ partial class StartupSecurityDialog
     private Button _openLocationButton;
     private Button _copyButton;
     private Button _dismissButton;
-    private Panel _bottomPanel;
+    private TableLayoutPanel _bottomPanel;
+    private Panel _buttonPanel;
     private Panel _topPanel;
 
     private StartupSecurityDialog() { InitializeComponent(); }
@@ -42,7 +43,8 @@ partial class StartupSecurityDialog
         _openLocationButton = new Button();
         _copyButton = new Button();
         _dismissButton = new Button();
-        _bottomPanel = new Panel();
+        _bottomPanel = new TableLayoutPanel();
+        _buttonPanel = new Panel();
         _topPanel = new Panel();
 
         SuspendLayout();
@@ -75,12 +77,23 @@ partial class StartupSecurityDialog
 
         // _bottomPanel
         _bottomPanel.Dock = DockStyle.Bottom;
-        _bottomPanel.Height = 44;
+        _bottomPanel.AutoSize = true;
+        _bottomPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _bottomPanel.ColumnCount = 1;
+        _bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
         _bottomPanel.Padding = new Padding(12, 8, 12, 8);
-        _bottomPanel.Controls.Add(_dismissButton);
-        _bottomPanel.Controls.Add(_copyButton);
-        _bottomPanel.Controls.Add(_openLocationButton);
-        _bottomPanel.Controls.Add(_remediationLabel);
+        _bottomPanel.RowCount = 2;
+        _bottomPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
+        _bottomPanel.RowStyles.Add(new RowStyle());
+        _bottomPanel.Controls.Add(_buttonPanel, 0, 0);
+        _bottomPanel.Controls.Add(_remediationLabel, 0, 1);
+
+        // _buttonPanel
+        _buttonPanel.Dock = DockStyle.Fill;
+        _buttonPanel.Margin = new Padding(0);
+        _buttonPanel.Controls.Add(_dismissButton);
+        _buttonPanel.Controls.Add(_copyButton);
+        _buttonPanel.Controls.Add(_openLocationButton);
 
         // _openLocationButton
         _openLocationButton.Text = "Open Location";
@@ -107,9 +120,10 @@ partial class StartupSecurityDialog
         // _remediationLabel
         _remediationLabel.Text = "Recommended fix: Remove this principal from the drive root ACL. " +
                                  "Then use allow-mode permissions on specific subfolders to grant only the access they actually need.";
+        _remediationLabel.AutoSize = true;
         _remediationLabel.Dock = DockStyle.Fill;
-        _remediationLabel.AutoSize = false;
         _remediationLabel.ForeColor = SystemColors.GrayText;
+        _remediationLabel.Margin = new Padding(0, 8, 0, 0);
         _remediationLabel.Visible = false;
 
         // _listView

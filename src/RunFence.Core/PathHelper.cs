@@ -119,7 +119,7 @@ public static class PathHelper
         return false;
     }
 
-    private static string NormalizeComparablePath(string path) =>
+    public static string NormalizeComparablePath(string path) =>
         Path.GetFullPath(path)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 }

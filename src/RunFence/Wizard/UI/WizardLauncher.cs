@@ -10,7 +10,7 @@ namespace RunFence.Wizard.UI;
 /// Post-wizard actions queued by individual templates (e.g., opening the firewall allowlist dialog
 /// for AI Agent) are executed sequentially after the dialog closes, before <see cref="WizardCompleted"/>.
 /// </summary>
-public class WizardLauncher(Func<WizardDialog> dialogFactory, IEnumerable<IWizardTemplate> templates) : IWizardLauncher
+public class WizardLauncher(Func<WizardDialog> dialogFactory) : IWizardLauncher
 {
     /// <summary>
     /// Fired after the wizard dialog closes and all post-wizard actions have executed,
@@ -20,15 +20,12 @@ public class WizardLauncher(Func<WizardDialog> dialogFactory, IEnumerable<IWizar
     public event Action? WizardCompleted;
 
     /// <summary>
-    /// Opens the wizard dialog modally. Concurrently invokes each template's
-    /// <see cref="IWizardTemplate.WarmCacheAsync"/> before constructing the dialog so that
-    /// availability checks never block the UI thread.
+    /// Opens the wizard dialog modally. The dialog appears immediately and handles template warm-up
+    /// internally while keeping template advancement blocked until loading completes.
     /// Executes any post-wizard actions queued by completed templates, then fires <see cref="WizardCompleted"/>.
     /// </summary>
     public async Task OpenWizardAsync(IWin32Window owner)
     {
-        await Task.WhenAll(templates.Select(t => t.WarmCacheAsync()));
-
         using var dlg = dialogFactory();
         await dlg.ShowDialogAsync(owner);
 

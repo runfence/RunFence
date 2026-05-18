@@ -73,8 +73,34 @@ public class DirectHandlerEntrySerializationTests
         Assert.Equal("txtfile", clone.DirectHandlerMappings[".txt"].ClassName);
         Assert.Equal(@"""C:\python.exe"" ""%1""", clone.DirectHandlerMappings[".py"].Command);
 
-        // Verify deep copy — modifying clone does not affect original
+        // Verify deep copy - modifying clone does not affect original
         clone.DirectHandlerMappings[".txt"] = new DirectHandlerEntry { Command = "changed" };
         Assert.Equal("txtfile", settings.DirectHandlerMappings[".txt"].ClassName);
+    }
+
+    [Fact]
+    public void AppSettings_Clone_DeepCopiesHandlerMappingPrefixes()
+    {
+        var settings = new AppSettings
+        {
+            HandlerMappings = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
+            {
+                [".txt"] = new("app-1", null, ["C:\\Allowed"], true)
+            }
+        };
+
+        var clone = settings.Clone();
+
+        var originalEntry = settings.HandlerMappings[".txt"];
+        var cloneEntry = clone.HandlerMappings![".txt"];
+        Assert.NotNull(originalEntry.PathPrefixes);
+        Assert.NotNull(cloneEntry.PathPrefixes);
+        Assert.NotSame(originalEntry.PathPrefixes, cloneEntry.PathPrefixes);
+
+        cloneEntry.PathPrefixes.Add("C:\\Other");
+        clone.HandlerMappings![".txt"] = cloneEntry;
+
+        Assert.Single(originalEntry.PathPrefixes);
+        Assert.Equal("C:\\Allowed", originalEntry.PathPrefixes[0]);
     }
 }

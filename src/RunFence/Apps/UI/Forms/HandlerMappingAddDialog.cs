@@ -1,5 +1,8 @@
+using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.UI;
+using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI.Forms;
 
@@ -12,7 +15,31 @@ namespace RunFence.Apps.UI.Forms;
 /// <see cref="SelectedApp"/>, <see cref="DirectHandlerValue"/>, <see cref="ArgumentsTemplate"/>,
 /// <see cref="AppPrefixes"/>, <see cref="PathPrefixes"/>, and <see cref="ReplacePrefixes"/>.
 /// </summary>
-public partial class HandlerMappingAddDialog : Form
+public interface IHandlerMappingAddDialog : IWin32Window, IDisposable
+{
+    bool HasUnresolvedSubmitFailure { get; }
+    bool IsDirectMode { get; }
+    IReadOnlyList<string> ResolvedKeys { get; }
+    AppEntry? SelectedApp { get; }
+    string? DirectHandlerValue { get; }
+    string? ArgumentsTemplate { get; }
+    IReadOnlyList<string>? AppPrefixes { get; }
+    IReadOnlyList<string>? PathPrefixes { get; }
+    bool ReplacePrefixes { get; }
+    void Initialize(IReadOnlyList<AppEntry> apps, IHandlerMappingDialogPersistence persistence);
+    void InitializeForEditApp(string key, IReadOnlyList<AppEntry> apps, AppEntry? currentApp,
+        string currentAppId, string? currentTemplate, IHandlerMappingDialogPersistence persistence,
+        IReadOnlyList<string>? currentAppPrefixes = null,
+        IReadOnlyList<string>? currentAssocPrefixes = null, bool currentReplacePrefixes = false);
+    void InitializeForEditDirect(
+        string key,
+        string currentValue,
+        DirectHandlerEntry currentEntry,
+        IHandlerMappingDialogPersistence persistence);
+    DialogResult ShowDialog(IWin32Window owner);
+}
+
+public partial class HandlerMappingAddDialog : RunFence.UI.Forms.ContextHelpForm, IHandlerMappingAddDialog
 {
     public const int AppMappingHeight = 580;
     public const int AppEditHeight = 500;
@@ -21,47 +48,56 @@ public partial class HandlerMappingAddDialog : Form
     private readonly HandlerMappingAppModePresenter _appPresenter;
     private readonly HandlerMappingDirectModePresenter _directPresenter;
     private readonly HandlerMappingLayoutController _layoutController;
-
-    private bool _isEditMode;
-    private bool _isDirectEditMode;
-    private string _originalDirectValue = string.Empty;
-    private string _editKey = string.Empty;
+    private readonly HandlerMappingDialogHelper _dialogHelper;
+    private readonly HandlerMappingDialogSubmissionCoordinator _submissionCoordinator;
+    private readonly HandlerMappingAddDialogSubmissionState _submissionState;
+    private readonly IMessageBoxService _messageBoxService;
 
     /// <summary>True when the user selected the Direct Handler mode (add mode only).</summary>
-    public bool IsDirectMode { get; private set; }
+    public bool IsDirectMode => _submissionState.IsDirectMode;
 
     /// <summary>
     /// The resolved association keys (add mode only). "Browser" is expanded to http/https/.htm/.html.
     /// Empty until OK is accepted with a valid key.
     /// </summary>
-    public IReadOnlyList<string> ResolvedKeys { get; private set; } = [];
+    public IReadOnlyList<string> ResolvedKeys => _submissionState.ResolvedKeys;
 
     /// <summary>The selected application (app mode). Null until OK is accepted.</summary>
-    public AppEntry? SelectedApp { get; private set; }
+    public AppEntry? SelectedApp => _submissionState.SelectedApp;
 
     /// <summary>
     /// The trimmed handler value (direct handler mode). Null until OK is accepted.
     /// In edit direct mode, null means the value was unchanged.
     /// </summary>
-    public string? DirectHandlerValue { get; private set; }
+    public string? DirectHandlerValue => _submissionState.DirectHandlerValue;
 
     /// <summary>The arguments template (app mode), or null if blank. Null until OK is accepted.</summary>
-    public string? ArgumentsTemplate { get; private set; }
+    public string? ArgumentsTemplate => _submissionState.ArgumentsTemplate;
 
     /// <summary>The updated app-level path prefixes (app mode). Null until OK is accepted.</summary>
-    public IReadOnlyList<string>? AppPrefixes { get; private set; }
+    public IReadOnlyList<string>? AppPrefixes => _submissionState.AppPrefixes;
 
     /// <summary>The per-association path prefix overrides (app mode). Null until OK is accepted.</summary>
-    public IReadOnlyList<string>? PathPrefixes { get; private set; }
+    public IReadOnlyList<string>? PathPrefixes => _submissionState.PathPrefixes;
 
     /// <summary>True when the association prefixes replace (rather than add to) the app-level prefixes.</summary>
-    public bool ReplacePrefixes { get; private set; }
+    public bool ReplacePrefixes => _submissionState.ReplacePrefixes;
+
+    public bool HasUnresolvedSubmitFailure { get; private set; }
 
     public HandlerMappingAddDialog(
         IExeAssociationRegistryReader reader,
-        IInteractiveUserAssociationReader interactiveReader)
+        IInteractiveUserAssociationReader interactiveReader,
+        HandlerMappingDialogHelper dialogHelper,
+        HandlerMappingDialogSubmissionCoordinator submissionCoordinator,
+        HandlerMappingAddDialogSubmissionState submissionState,
+        IMessageBoxService messageBoxService)
     {
         InitializeComponent();
+        _dialogHelper = dialogHelper;
+        _submissionCoordinator = submissionCoordinator;
+        _submissionState = submissionState;
+        _messageBoxService = messageBoxService;
         _appPresenter = new HandlerMappingAppModePresenter(
             reader, _appCombo, _keyCombo, _templateTextBox, _combinedPrefixesSection);
         _directPresenter = new HandlerMappingDirectModePresenter(
@@ -73,14 +109,25 @@ public partial class HandlerMappingAddDialog : Form
             _handlerLabel, _handlerTextBox,
             _templateLabel, _templateTextBox,
             _combinedPrefixesSection);
+        _okButton.DialogResult = DialogResult.None;
+        _okButton.Click += OnOkClick;
+        RegisterContextHelp();
+    }
+
+    private void RegisterContextHelp()
+    {
+        SetContextHelp(_templateTextBox, ContextHelpTextCatalog.Launch_Arguments);
+        _combinedPrefixesSection.RegisterContextHelp(this);
     }
 
     /// <summary>
     /// Populates the app combo with available apps for add mode.
     /// Must be called before <see cref="Form.ShowDialog()"/>.
     /// </summary>
-    public void Initialize(IReadOnlyList<AppEntry> apps)
+    public void Initialize(IReadOnlyList<AppEntry> apps, IHandlerMappingDialogPersistence persistence)
     {
+        _submissionState.InitializeAdd(persistence);
+        HasUnresolvedSubmitFailure = false;
         _appPresenter.PopulateApps(apps);
         _combinedPrefixesSection.SetAssociationPrefixes(null, false);
         _appPresenter.RebuildKeyComboSuggestions();
@@ -92,12 +139,19 @@ public partial class HandlerMappingAddDialog : Form
     /// Must be called before <see cref="Form.ShowDialog()"/>.
     /// </summary>
     public void InitializeForEditApp(string key, IReadOnlyList<AppEntry> apps, AppEntry? currentApp,
-        string? currentTemplate, IReadOnlyList<string>? currentAppPrefixes = null,
+        string currentAppId, string? currentTemplate, IHandlerMappingDialogPersistence persistence,
+        IReadOnlyList<string>? currentAppPrefixes = null,
         IReadOnlyList<string>? currentAssocPrefixes = null, bool currentReplacePrefixes = false)
     {
-        _isEditMode = true;
-        _editKey = key;
-        Text = $"Edit Association — {key}";
+        _submissionState.InitializeEditApp(
+            key,
+            currentAppId,
+            currentTemplate,
+            persistence,
+            currentAssocPrefixes,
+            currentReplacePrefixes);
+        HasUnresolvedSubmitFailure = false;
+        Text = $"Edit Association \u2014 {key}";
         _appLabel.Text = $"Application for \"{key}\":";
 
         _appPresenter.PopulateAppsForEdit(apps, currentApp);
@@ -111,82 +165,20 @@ public partial class HandlerMappingAddDialog : Form
     /// Populates the dialog for editing an existing direct handler mapping.
     /// Must be called before <see cref="Form.ShowDialog()"/>.
     /// </summary>
-    public void InitializeForEditDirect(string key, string currentValue)
+    public void InitializeForEditDirect(
+        string key,
+        string currentValue,
+        DirectHandlerEntry currentEntry,
+        IHandlerMappingDialogPersistence persistence)
     {
-        _isEditMode = true;
-        _isDirectEditMode = true;
-        _originalDirectValue = currentValue;
-        Text = $"Edit Direct Handler — {key}";
+        _submissionState.InitializeEditDirect(key, currentValue, currentEntry, persistence);
+        HasUnresolvedSubmitFailure = false;
+        Text = $"Edit Direct Handler \u2014 {key}";
         _handlerLabel.Text = $"Handler for \"{key}\" (class name or command):";
         _handlerTextBox.Text = currentValue;
 
         _layoutController.ApplyEditLayout(directMode: true);
         UpdateEditDirectOkState();
-    }
-
-    protected override void OnFormClosing(FormClosingEventArgs e)
-    {
-        base.OnFormClosing(e);
-        if (DialogResult != DialogResult.OK)
-            return;
-
-        if (_isEditMode)
-        {
-            if (_isDirectEditMode)
-            {
-                var newValue = _handlerTextBox.Text.Trim();
-                if (!string.IsNullOrEmpty(newValue) &&
-                    !string.Equals(newValue, _originalDirectValue, StringComparison.OrdinalIgnoreCase))
-                    DirectHandlerValue = newValue;
-            }
-            else
-            {
-                if (_appPresenter.SelectedApp is not { } selected)
-                {
-                    e.Cancel = true;
-                    return;
-                }
-                SelectedApp = selected;
-                ArgumentsTemplate = _appPresenter.NormalizedTemplate;
-                AppPrefixes = _appPresenter.AppPrefixes;
-                PathPrefixes = _appPresenter.AssociationPrefixes;
-                ReplacePrefixes = _appPresenter.IsReplace;
-            }
-        }
-        else
-        {
-            var rawKey = HandlerAssociationDialogValueHelper.NormalizeKey(_keyCombo.Text);
-            if (string.IsNullOrEmpty(rawKey))
-            {
-                e.Cancel = true;
-                return;
-            }
-
-            ResolvedKeys = string.Equals(
-                    rawKey, HandlerAssociationDialogValueHelper.CommonOptions[0],
-                    StringComparison.OrdinalIgnoreCase)
-                ? EvaluationConstants.BrowserAssociations.ToArray()
-                : [rawKey];
-            IsDirectMode = _radioDirect.Checked;
-
-            if (IsDirectMode)
-            {
-                DirectHandlerValue = _directPresenter.HandlerValue;
-            }
-            else
-            {
-                if (_appPresenter.SelectedApp is not { } selectedApp)
-                {
-                    e.Cancel = true;
-                    return;
-                }
-                SelectedApp = selectedApp;
-                ArgumentsTemplate = _appPresenter.NormalizedTemplate;
-                AppPrefixes = _appPresenter.AppPrefixes;
-                PathPrefixes = _appPresenter.AssociationPrefixes;
-                ReplacePrefixes = _appPresenter.IsReplace;
-            }
-        }
     }
 
     private void OnRadioAppCheckedChanged(object? sender, EventArgs e)
@@ -214,7 +206,7 @@ public partial class HandlerMappingAddDialog : Form
     {
         if (_radioApp.Checked)
         {
-            if (!_isEditMode)
+            if (!_submissionState.IsEditMode)
                 _appPresenter.RebuildKeyComboSuggestions();
             UpdateTemplate();
         }
@@ -234,9 +226,11 @@ public partial class HandlerMappingAddDialog : Form
 
     private void OnHandlerTextChanged(object? sender, EventArgs e)
     {
-        if (_isEditMode && _isDirectEditMode)
+        _directPresenter.NotifyHandlerTextEditedByUser();
+
+        if (_submissionState.IsEditMode && _submissionState.IsDirectEditMode)
             UpdateEditDirectOkState();
-        else if (!_isEditMode)
+        else if (!_submissionState.IsEditMode)
             UpdateAddModeOkState();
     }
 
@@ -247,7 +241,9 @@ public partial class HandlerMappingAddDialog : Form
 
     private void UpdateAddModeOkState()
     {
-        if (_isEditMode) return;
+        if (_submissionState.IsEditMode)
+            return;
+
         var hasKey = !string.IsNullOrWhiteSpace(_keyCombo.Text);
         var hasTarget = _radioApp.Checked
             ? _appPresenter.SelectedApp != null
@@ -257,7 +253,126 @@ public partial class HandlerMappingAddDialog : Form
 
     private void UpdateTemplate()
     {
-        var keyText = _isEditMode ? _editKey : _keyCombo.Text;
+        var keyText = _submissionState.IsEditMode ? _submissionState.EditKey : _keyCombo.Text;
         _appPresenter.UpdateTemplate(keyText);
+    }
+
+    private string? TryCaptureAcceptedValues()
+    {
+        var capture = _dialogHelper.CaptureAcceptedValues(_submissionState.CreateCaptureRequest(
+            rawKey: _keyCombo.Text,
+            isDirectModeSelected: _radioDirect.Checked,
+            selectedApp: _appPresenter.SelectedApp,
+            directHandlerValue: _submissionState.IsEditMode ? _handlerTextBox.Text : _directPresenter.HandlerValue,
+            argumentsTemplate: _appPresenter.NormalizedTemplate,
+            appPrefixes: _appPresenter.AppPrefixes,
+            associationPrefixes: _appPresenter.AssociationPrefixes,
+            replacePrefixes: _appPresenter.IsReplace));
+        _submissionState.ApplyCapture(capture);
+        return capture.ValidationError;
+    }
+
+    private void ShowValidationError(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            return;
+
+        _messageBoxService.Show(this, message, "Invalid", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        _keyCombo.Focus();
+    }
+
+    private async void OnOkClick(object? sender, EventArgs e)
+    {
+        await HandleOkAsync();
+    }
+
+    private async Task HandleOkAsync()
+    {
+        if (IsDisposed || Disposing)
+            return;
+
+        var validationError = TryCaptureAcceptedValues();
+        if (validationError != null)
+        {
+            ShowValidationError(validationError);
+            return;
+        }
+
+        HasUnresolvedSubmitFailure = false;
+
+        try
+        {
+            Enabled = false;
+            var result = await SubmitAsync();
+            if (IsDisposed || Disposing)
+                return;
+
+            ApplySubmitResult(result);
+        }
+        finally
+        {
+            if (!IsDisposed && !Disposing)
+                Enabled = true;
+        }
+    }
+
+    private Task<HandlerMappingDialogSubmitResult> SubmitAsync()
+    {
+        var persistence = _submissionState.Persistence;
+        if (!_submissionState.IsEditMode)
+            return _submissionCoordinator.SubmitAddAsync(_submissionState.CreateAddRequest(), persistence);
+
+        return _submissionState.IsDirectEditMode
+            ? _submissionCoordinator.SubmitEditDirectAsync(_submissionState.CreateEditDirectRequest(), persistence)
+            : _submissionCoordinator.SubmitEditAppAsync(_submissionState.CreateEditAppRequest(), persistence);
+    }
+
+    private void ApplySubmitResult(HandlerMappingDialogSubmitResult result)
+    {
+        if (!string.IsNullOrWhiteSpace(result.ValidationMessage))
+        {
+            ShowValidationError(result.ValidationMessage);
+            return;
+        }
+
+        HasUnresolvedSubmitFailure = result.HasUnresolvedFailure;
+
+        if (!string.IsNullOrWhiteSpace(result.UnresolvedFailureText))
+        {
+            ShowSaveFailure(result.UnresolvedFailureText);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.UnexpectedErrorMessage))
+        {
+            ShowSaveFailure(result.UnexpectedErrorMessage);
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.WarningMessage))
+        {
+            _messageBoxService.Show(
+                this,
+                result.WarningMessage,
+                "Handler Associations",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+
+        if (result.DialogResult == System.Windows.Forms.DialogResult.OK)
+        {
+            DialogResult = System.Windows.Forms.DialogResult.OK;
+            Close();
+        }
+    }
+
+    private void ShowSaveFailure(string message)
+    {
+        _messageBoxService.Show(
+            this,
+            message,
+            "Save Failed",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error);
     }
 }

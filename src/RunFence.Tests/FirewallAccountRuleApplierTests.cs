@@ -78,15 +78,16 @@ public class FirewallAccountRuleApplierTests
         _ruleManager.Setup(r => r.RemoveRule(It.IsAny<string>()))
             .Callback<string>(name => currentRules.RemoveAll(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)));
 
-        var ex = Assert.Throws<FirewallApplyException>(() => BuildApplier().ApplyFirewallRules(
+        var result = BuildApplier().ApplyFirewallRules(
             Sid,
             Username,
             new FirewallAccountSettings { AllowInternet = false },
             previousSettings: null,
-            resolvedDomainsCache: new Dictionary<string, IReadOnlyList<string>>()));
+            resolvedDomainsCache: new Dictionary<string, IReadOnlyList<string>>());
 
-        Assert.Equal(FirewallApplyPhase.AccountRules, ex.Phase);
-        Assert.IsType<InvalidOperationException>(ex.InnerException);
+        Assert.False(result.Succeeded);
+        Assert.Equal(FirewallEnforcementLayer.AccountRules, result.FailedLayer);
+        Assert.Equal("add failed", result.ErrorMessage);
         Assert.Empty(currentRules);
         _wfpBlocker.Verify(w => w.Apply(
             Sid,
@@ -115,17 +116,18 @@ public class FirewallAccountRuleApplierTests
             .Callback<FirewallRuleInfo>(currentRules.Add);
         _ruleManager.Setup(r => r.RemoveRule(It.IsAny<string>()))
             .Callback<string>(name => currentRules.RemoveAll(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)));
-        _wfpIcmpBlocker.Setup(w => w.Apply(Sid, true)).Throws(new InvalidOperationException("icmp failed"));
+        _wfpIcmpBlocker.Setup(w => w.Apply(Sid, true)).Throws(new WfpFilterHelperException("icmp failed"));
 
-        var ex = Assert.Throws<FirewallApplyException>(() => BuildApplier().ApplyFirewallRules(
+        var result = BuildApplier().ApplyFirewallRules(
             Sid,
             Username,
             new FirewallAccountSettings { AllowInternet = false },
             previousSettings: new FirewallAccountSettings { AllowInternet = true, AllowLocalhost = false },
-            resolvedDomainsCache: new Dictionary<string, IReadOnlyList<string>>()));
+            resolvedDomainsCache: new Dictionary<string, IReadOnlyList<string>>());
 
-        Assert.Equal(FirewallApplyPhase.AccountRules, ex.Phase);
-        Assert.IsType<InvalidOperationException>(ex.InnerException);
+        Assert.False(result.Succeeded);
+        Assert.Equal(FirewallEnforcementLayer.WfpFilters, result.FailedLayer);
+        Assert.Equal("icmp failed", result.ErrorMessage);
         var restoredRule = Assert.Single(currentRules);
         Assert.Equal(capturedRule, restoredRule);
         _wfpBlocker.Verify(w => w.Apply(

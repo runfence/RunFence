@@ -2,12 +2,13 @@ using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Helpers;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Security;
 
 namespace RunFence.Account;
 
 public class AccountCredentialManager(
-    ICredentialEncryptionService encryptionService)
+    ICredentialEncryptionSpanService encryptionService)
     : IAccountCredentialManager
 {
     /// <summary>
@@ -16,15 +17,13 @@ public class AccountCredentialManager(
     /// </summary>
     public Guid? StoreCreatedUserCredential(
         string sid, ProtectedString password,
-        CredentialStore credStore, ProtectedBuffer pinKey)
+        CredentialStore credStore, ISecureSecretSnapshotSource pinKey)
     {
         if (credStore.Credentials.Any(c => SidComparer.SidEquals(c.Sid, sid)))
             return null;
 
         var id = Guid.NewGuid();
-        byte[] encryptedPassword;
-        using (var scope = pinKey.Unprotect())
-            encryptedPassword = encryptionService.Encrypt(password, scope.Data);
+        var encryptedPassword = pinKey.TransformSnapshot(key => encryptionService.Encrypt(password, key));
 
         credStore.Credentials.Add(new CredentialEntry
         {
@@ -42,7 +41,7 @@ public class AccountCredentialManager(
     /// </summary>
     public (bool Success, Guid? CredentialId, string? Error) AddNewCredential(
         string sid, ProtectedString? password,
-        CredentialStore credStore, ProtectedBuffer pinKey)
+        CredentialStore credStore, ISecureSecretSnapshotSource pinKey)
     {
         if (credStore.Credentials.Any(c =>
                 SidComparer.SidEquals(c.Sid, sid)))
@@ -54,10 +53,7 @@ public class AccountCredentialManager(
         byte[] encryptedPassword = Array.Empty<byte>();
 
         if (password != null)
-        {
-            using var scope = pinKey.Unprotect();
-            encryptedPassword = encryptionService.Encrypt(password, scope.Data);
-        }
+            encryptedPassword = pinKey.TransformSnapshot(key => encryptionService.Encrypt(password, key));
 
         credStore.Credentials.Add(new CredentialEntry
         {
@@ -69,11 +65,8 @@ public class AccountCredentialManager(
         return (true, id, null);
     }
 
-    public void UpdateCredentialPassword(CredentialEntry credEntry, ProtectedString password, ProtectedBuffer pinKey)
-    {
-        using var scope = pinKey.Unprotect();
-        credEntry.EncryptedPassword = encryptionService.Encrypt(password, scope.Data);
-    }
+    public void UpdateCredentialPassword(CredentialEntry credEntry, ProtectedString password, ISecureSecretSnapshotSource pinKey)
+        => credEntry.EncryptedPassword = pinKey.TransformSnapshot(key => encryptionService.Encrypt(password, key));
 
     public void RemoveCredential(Guid credentialId, CredentialStore credStore)
     {
@@ -87,7 +80,7 @@ public class AccountCredentialManager(
     }
 
     public bool TryDecryptStoredPassword(
-        string accountSid, CredentialStore credStore, ProtectedBuffer pinKey,
+        string accountSid, CredentialStore credStore, ISecureSecretSnapshotSource pinKey,
         out ProtectedString? password)
     {
         var credential = credStore.Credentials.FirstOrDefault(c =>
@@ -99,16 +92,19 @@ public class AccountCredentialManager(
             return false;
         }
 
-        using var scope = pinKey.Unprotect();
-        try
+        var result = pinKey.TransformSnapshot(key =>
         {
-            password = encryptionService.Decrypt(credential.EncryptedPassword, scope.Data);
-            return true;
-        }
-        catch (CryptographicException)
-        {
-            password = null;
-            return false;
-        }
+            try
+            {
+                return (success: true, password: encryptionService.Decrypt(credential.EncryptedPassword, key));
+            }
+            catch (CryptographicException)
+            {
+                return (success: false, password: (ProtectedString?)null);
+            }
+        });
+        password = result.password;
+        return result.success;
     }
+
 }

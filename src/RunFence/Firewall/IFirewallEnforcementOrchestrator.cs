@@ -4,5 +4,5 @@ namespace RunFence.Firewall;
 
 public interface IFirewallEnforcementOrchestrator
 {
-    void EnforceAll(AppDatabase database);
+    EnforceAllResult EnforceAll(AppDatabase database);
 }

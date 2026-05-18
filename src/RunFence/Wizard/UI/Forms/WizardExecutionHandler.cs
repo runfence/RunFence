@@ -9,6 +9,7 @@ namespace RunFence.Wizard.UI.Forms;
 public class WizardExecutionHandler
 {
     private IWizardExecutionContext _ctx = null!;
+    private CancellationTokenSource? _executionCts;
 
     /// <summary>
     /// Binds the handler to the per-dialog execution context. Must be called before any operations.
@@ -16,6 +17,18 @@ public class WizardExecutionHandler
     public void Initialize(IWizardExecutionContext ctx)
     {
         _ctx = ctx;
+    }
+
+    public void CancelExecution()
+    {
+        if (_executionCts == null)
+            return;
+        if (_executionCts.IsCancellationRequested)
+            return;
+
+        _ctx.SetCancelEnabled(false);
+        _ctx.SetStatusText("Cancelling...");
+        _executionCts.Cancel();
     }
 
     /// <summary>
@@ -26,16 +39,31 @@ public class WizardExecutionHandler
         _ctx.IsExecuting = true;
         _ctx.SetTitleText(_ctx.SelectedTemplate!.DisplayName);
         _ctx.SetProgressVisible(true);
-        _ctx.SetNavigationEnabled(false);
+        _ctx.SetBackEnabled(false);
+        _ctx.SetNextEnabled(false);
+        _ctx.SetCancelEnabled(true);
+        _ctx.SetCancelText("Cancel");
+        _ctx.HideError();
 
         var errors = new List<string>();
+        var warnings = new List<string>();
         var statusMessages = new List<string>();
+        bool wasCancelled = false;
+
+        using var executionCts = new CancellationTokenSource();
+        _executionCts = executionCts;
 
         var reporter = new WizardProgressReporter(
+            executionCts.Token,
             msg =>
             {
                 statusMessages.Add(msg);
                 _ctx.SetStatusText(msg);
+            },
+            msg =>
+            {
+                warnings.Add(msg);
+                _ctx.SetStatusText($"Warning: {msg}");
             },
             msg =>
             {
@@ -46,16 +74,22 @@ public class WizardExecutionHandler
         try
         {
             await _ctx.SelectedTemplate!.ExecuteAsync(reporter);
+            executionCts.Token.ThrowIfCancellationRequested();
 
             // TemplateCompletedCount is incremented regardless of whether the template reported
-            // errors via progress.ReportError (non-throwing path). Intentional: CompletionStep
-            // shows the errors, and the user can run another template or close. Only unhandled
-            // exceptions (caught below) skip the count increment.
+            // warnings or errors through the progress reporter (non-throwing path). Intentional:
+            // CompletionStep shows those details, and the user can run another template or close.
+            // Only unhandled exceptions (caught below) skip the count increment.
             _ctx.TemplateCompletedCount++;
 
             var postAction = _ctx.SelectedTemplate!.PostWizardAction;
             if (postAction != null)
                 _ctx.PostWizardActions.Add(postAction);
+        }
+        catch (OperationCanceledException)
+        {
+            wasCancelled = true;
+            errors.Add("Wizard execution was cancelled.");
         }
         catch (Exception ex)
         {
@@ -63,12 +97,14 @@ public class WizardExecutionHandler
         }
         finally
         {
+            _executionCts = null;
             _ctx.IsExecuting = false;
             _ctx.SetProgressVisible(false);
             _ctx.SetNavigationEnabled(true);
+            _ctx.SetCancelText("Cancel");
         }
 
-        ShowCompletionStep(errors, statusMessages);
+        ShowCompletionStep(errors, warnings, statusMessages, wasCancelled);
     }
 
     /// <summary>
@@ -77,14 +113,22 @@ public class WizardExecutionHandler
     /// </summary>
     public async Task<bool> CommitStepAsync(WizardStepPage step)
     {
+        _ctx.HideError();
+
         var reporter = new WizardProgressReporter(
+            CancellationToken.None,
             msg => _ctx.SetStatusText(msg),
+            msg => _ctx.SetStatusText($"Warning: {msg}"),
             msg => _ctx.ShowError(msg));
 
         Task task;
         try
         {
             task = step.OnCommitBeforeNextAsync(reporter);
+        }
+        catch (WizardReportedException)
+        {
+            return false; // error already reported by step/helper
         }
         catch (OperationCanceledException)
         {
@@ -102,11 +146,16 @@ public class WizardExecutionHandler
         _ctx.IsExecuting = true;
         _ctx.SetProgressVisible(true);
         _ctx.SetNavigationEnabled(false);
+        _ctx.SetCancelText("Cancel");
 
         try
         {
             await task;
             return true;
+        }
+        catch (WizardReportedException)
+        {
+            return false; // error already reported by step/helper
         }
         catch (OperationCanceledException)
         {
@@ -126,20 +175,30 @@ public class WizardExecutionHandler
         }
     }
 
-    private void ShowCompletionStep(List<string> errors, List<string> statusMessages)
+    private void ShowCompletionStep(
+        List<string> errors,
+        List<string> warnings,
+        List<string> statusMessages,
+        bool wasCancelled)
     {
         var summaryLines = new List<string>
         {
-            errors.Count == 0
+            wasCancelled
+                ? $"\u26A0\uFE0F {_ctx.SelectedTemplate!.DisplayName} was cancelled."
+                : errors.Count == 0 && warnings.Count == 0
                 ? $"\u2705 {_ctx.SelectedTemplate!.DisplayName} completed successfully."
-                : $"\u26A0\uFE0F {_ctx.SelectedTemplate!.DisplayName} completed with {errors.Count} error(s)."
+                : errors.Count == 0
+                    ? $"\u26A0\uFE0F {_ctx.SelectedTemplate!.DisplayName} completed with {warnings.Count} warning(s)."
+                    : warnings.Count == 0
+                        ? $"\u26A0\uFE0F {_ctx.SelectedTemplate!.DisplayName} completed with {errors.Count} error(s)."
+                        : $"\u26A0\uFE0F {_ctx.SelectedTemplate!.DisplayName} completed with {errors.Count} error(s) and {warnings.Count} warning(s)."
         };
 
         summaryLines.AddRange(statusMessages.Select(msg => $"\u2022 {msg}"));
 
         var summary = string.Join(Environment.NewLine, summaryLines);
 
-        var completionStep = new CompletionStep(summary, errors);
+        var completionStep = new CompletionStep(summary, warnings, errors);
         _ctx.Steps.Add(completionStep);
         _ctx.ShowStep(_ctx.Steps.Count - 1);
 
@@ -148,10 +207,14 @@ public class WizardExecutionHandler
     }
 
     private sealed class WizardProgressReporter(
+        CancellationToken cancellationToken,
         Action<string> onStatus,
+        Action<string> onWarning,
         Action<string> onError) : IWizardProgressReporter
     {
+        public CancellationToken CancellationToken => cancellationToken;
         public void ReportStatus(string message) => onStatus(message);
+        public void ReportWarning(string message) => onWarning(message);
         public void ReportError(string message) => onError(message);
     }
 }

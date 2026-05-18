@@ -1,4 +1,5 @@
 using Moq;
+using System.Dynamic;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Persistence;
@@ -9,11 +10,185 @@ namespace RunFence.Tests;
 
 public class AutoStartServiceTests
 {
+    private sealed class InMemoryShortcutDefinition : DynamicObject
+    {
+        public string? TargetPath { get; set; }
+        public string? Arguments { get; set; }
+        public string? WorkingDirectory { get; set; }
+        public string? Description { get; set; }
+        public int? WindowStyle { get; set; }
+        public string? IconLocation { get; set; }
+        public int SaveCallCount { get; private set; }
+
+        public void Save() => SaveCallCount++;
+
+        public override bool TrySetMember(SetMemberBinder binder, object? value)
+        {
+            if (string.Equals(binder.Name, nameof(TargetPath), StringComparison.OrdinalIgnoreCase))
+            {
+                TargetPath = value as string;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(Arguments), StringComparison.OrdinalIgnoreCase))
+            {
+                Arguments = value as string;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(WorkingDirectory), StringComparison.OrdinalIgnoreCase))
+            {
+                WorkingDirectory = value as string;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(Description), StringComparison.OrdinalIgnoreCase))
+            {
+                Description = value as string;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(WindowStyle), StringComparison.OrdinalIgnoreCase))
+            {
+                if (value == null)
+                {
+                    WindowStyle = null;
+                }
+                else if (value is int intValue)
+                {
+                    WindowStyle = intValue;
+                }
+                else
+                {
+                    try
+                    {
+                        WindowStyle = Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(IconLocation), StringComparison.OrdinalIgnoreCase))
+            {
+                IconLocation = value as string;
+                return true;
+            }
+
+            return false;
+        }
+
+        public override bool TryGetMember(GetMemberBinder binder, out object? result)
+        {
+            if (string.Equals(binder.Name, nameof(TargetPath), StringComparison.OrdinalIgnoreCase))
+            {
+                result = TargetPath;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(Arguments), StringComparison.OrdinalIgnoreCase))
+            {
+                result = Arguments;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(WorkingDirectory), StringComparison.OrdinalIgnoreCase))
+            {
+                result = WorkingDirectory;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(Description), StringComparison.OrdinalIgnoreCase))
+            {
+                result = Description;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(WindowStyle), StringComparison.OrdinalIgnoreCase))
+            {
+                result = WindowStyle;
+                return true;
+            }
+
+            if (string.Equals(binder.Name, nameof(IconLocation), StringComparison.OrdinalIgnoreCase))
+            {
+                result = IconLocation;
+                return true;
+            }
+
+            result = null;
+            return false;
+        }
+
+        public override bool TryInvokeMember(InvokeMemberBinder binder, object?[]? args, out object? result)
+        {
+            if (string.Equals(binder.Name, nameof(Save), StringComparison.OrdinalIgnoreCase) &&
+                args is { Length: 0 })
+            {
+                Save();
+                result = null;
+                return true;
+            }
+
+            result = null;
+            return base.TryInvokeMember(binder, args, out result);
+        }
+    }
+
+    private sealed class InMemoryShortcutComHelper : IShortcutComHelper
+    {
+        private readonly Dictionary<string, InMemoryShortcutDefinition> _shortcuts = new(StringComparer.OrdinalIgnoreCase);
+
+        public IReadOnlyDictionary<string, InMemoryShortcutDefinition> Shortcuts => _shortcuts;
+        public List<string> AccessedPaths { get; } = [];
+
+        public InMemoryShortcutDefinition GetShortcut(string path) =>
+            _shortcuts[path];
+
+        public void SeedShortcut(string path, string targetPath)
+        {
+            GetOrCreate(path).TargetPath = targetPath;
+        }
+
+        public T WithShortcut<T>(string shortcutPath, Func<dynamic, T> action)
+        {
+            AccessedPaths.Add(shortcutPath);
+            dynamic shortcut = GetOrCreate(shortcutPath);
+            return action(shortcut);
+        }
+
+        public void WithShortcut(string shortcutPath, Action<dynamic> action)
+        {
+            AccessedPaths.Add(shortcutPath);
+            dynamic shortcut = GetOrCreate(shortcutPath);
+            action(shortcut);
+        }
+
+        public ShortcutDefinition GetShortcutDefinition(string shortcutPath)
+        {
+            var shortcut = GetOrCreate(shortcutPath);
+            return new ShortcutDefinition(
+                shortcutPath,
+                shortcut.TargetPath,
+                shortcut.Arguments,
+                shortcut.WorkingDirectory);
+        }
+
+        private InMemoryShortcutDefinition GetOrCreate(string path) =>
+            _shortcuts.TryGetValue(path, out var shortcut)
+                ? shortcut
+                : _shortcuts[path] = new InMemoryShortcutDefinition();
+    }
+
     // Fake shortcut store that works entirely in-memory, never touching the real Startup folder.
     private sealed class FakeShortcutStore : IAutoStartShortcutStore
     {
         private readonly HashSet<string> _existingFiles = new(StringComparer.OrdinalIgnoreCase);
-        private readonly List<string> _deletedFiles = new();
+        private readonly List<string> _deletedFiles = [];
 
         public string RunFenceExePath { get; set; } = @"C:\RunFence\RunFence.exe";
         public string CmdWrapperPath { get; set; } = @"C:\RunFence\RunFence-autostart.cmd";
@@ -76,11 +251,10 @@ public class AutoStartServiceTests
         var store = new FakeShortcutStore();
         store.AddExistingFile(store.PrimaryShortcutPath);
         var timeoutRunner = new TimeoutOperationRunner();
-        var shortcutHelper = new Mock<IShortcutComHelper>();
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var service = BuildService(log.Object, shortcutHelper.Object, timeoutRunner, store);
+        var service = BuildService(log.Object, shortcutHelper, timeoutRunner, store);
 
-        // Act: shortcut file exists but reading its target times out
         var result = await service.IsAutoStartEnabled();
 
         Assert.False(result);
@@ -93,13 +267,14 @@ public class AutoStartServiceTests
         var log = new Mock<ILoggingService>();
         var store = new FakeShortcutStore();
         var runner = new PassthroughOperationRunner();
-        var shortcutHelper = new Mock<IShortcutComHelper>();
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
         var result = await service.IsAutoStartEnabled();
 
         Assert.False(result);
+        Assert.Empty(shortcutHelper.AccessedPaths);
     }
 
     [Fact]
@@ -109,17 +284,16 @@ public class AutoStartServiceTests
         var store = new FakeShortcutStore();
         store.AddExistingFile(store.PrimaryShortcutPath);
         var runner = new PassthroughOperationRunner();
+        var shortcutHelper = new InMemoryShortcutComHelper();
+        shortcutHelper.SeedShortcut(store.PrimaryShortcutPath, @"C:\Other\App.exe");
 
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper
-            .Setup(h => h.WithShortcut(store.PrimaryShortcutPath, It.IsAny<Func<dynamic, string?>>()))
-            .Returns((string _, Func<dynamic, string?> action) => @"C:\Other\App.exe");
-
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
         var result = await service.IsAutoStartEnabled();
 
         Assert.False(result);
+        Assert.Single(shortcutHelper.AccessedPaths);
+        Assert.Equal(store.PrimaryShortcutPath, shortcutHelper.AccessedPaths[0]);
     }
 
     // ---- EnableAutoStart ----
@@ -131,12 +305,13 @@ public class AutoStartServiceTests
         var store = new FakeShortcutStore();
         store.AddExistingFile(store.CmdWrapperPath);
         var timeoutRunner = new TimeoutOperationRunner();
-        var shortcutHelper = new Mock<IShortcutComHelper>();
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var service = BuildService(log.Object, shortcutHelper.Object, timeoutRunner, store);
+        var service = BuildService(log.Object, shortcutHelper, timeoutRunner, store);
 
-        // EnableAutoStart should not hang; it surfaces the TimeoutException quickly
         await Assert.ThrowsAsync<TimeoutException>(() => service.EnableAutoStart());
+        Assert.True(timeoutRunner.WasCalled);
+        Assert.Empty(shortcutHelper.AccessedPaths);
     }
 
     [Fact]
@@ -146,15 +321,22 @@ public class AutoStartServiceTests
         var store = new FakeShortcutStore();
         store.AddExistingFile(store.CmdWrapperPath);
         var runner = new PassthroughOperationRunner();
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper
-            .Setup(h => h.WithShortcut(store.PrimaryShortcutPath, It.IsAny<Action<dynamic>>()));
-
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
         await service.EnableAutoStart();
 
+        var created = shortcutHelper.GetShortcut(store.PrimaryShortcutPath);
+        Assert.Equal(store.CmdWrapperPath, created.TargetPath);
+        Assert.Equal(string.Empty, created.Arguments);
+        Assert.Equal(AppContext.BaseDirectory, created.WorkingDirectory);
+        Assert.Equal("RunFence auto-start", created.Description);
+        Assert.Equal(7, created.WindowStyle);
+        Assert.Equal($"{store.RunFenceExePath},0", created.IconLocation);
+        Assert.Equal(1, created.SaveCallCount);
+        Assert.Single(shortcutHelper.AccessedPaths);
+        Assert.Equal(store.PrimaryShortcutPath, shortcutHelper.AccessedPaths[0]);
         log.Verify(l => l.Info(It.Is<string>(s => s.Contains(store.PrimaryShortcutPath))), Times.Once);
     }
 
@@ -163,13 +345,13 @@ public class AutoStartServiceTests
     {
         var log = new Mock<ILoggingService>();
         var store = new FakeShortcutStore();
-        // CmdWrapperPath file does NOT exist
         var runner = new PassthroughOperationRunner();
-        var shortcutHelper = new Mock<IShortcutComHelper>();
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
         await Assert.ThrowsAsync<FileNotFoundException>(() => service.EnableAutoStart());
+        Assert.Empty(shortcutHelper.AccessedPaths);
     }
 
     // ---- DisableAutoStart ----
@@ -180,13 +362,13 @@ public class AutoStartServiceTests
         var log = new Mock<ILoggingService>();
         var store = new FakeShortcutStore();
         var runner = new PassthroughOperationRunner();
-        var shortcutHelper = new Mock<IShortcutComHelper>();
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
-        // Should complete immediately without hanging
         await service.DisableAutoStart();
 
+        Assert.Empty(store.DeletedFiles);
         log.Verify(l => l.Info(It.IsAny<string>()), Times.Never);
     }
 
@@ -197,9 +379,9 @@ public class AutoStartServiceTests
         var store = new FakeShortcutStore();
         store.AddExistingFile(store.PrimaryShortcutPath);
         var runner = new PassthroughOperationRunner();
-        var shortcutHelper = new Mock<IShortcutComHelper>();
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
         await service.DisableAutoStart();
 
@@ -210,22 +392,20 @@ public class AutoStartServiceTests
     // ---- Backward-compatible shortcut target acceptance ----
 
     [Theory]
-    [InlineData(true)]   // target is CmdWrapperPath
-    [InlineData(false)]  // target is RunFenceExePath (legacy direct shortcut)
+    [InlineData(true)] // target is CmdWrapperPath
+    [InlineData(false)] // target is RunFenceExePath (legacy direct shortcut)
     public async Task IsAutoStartEnabled_AcceptsBothCmdWrapperAndLegacyExeTarget(bool targetIsCmd)
     {
         var log = new Mock<ILoggingService>();
         var store = new FakeShortcutStore();
         store.AddExistingFile(store.PrimaryShortcutPath);
         var runner = new PassthroughOperationRunner();
+        var shortcutHelper = new InMemoryShortcutComHelper();
+        shortcutHelper.SeedShortcut(
+            store.PrimaryShortcutPath,
+            targetIsCmd ? store.CmdWrapperPath : store.RunFenceExePath);
 
-        var expectedTarget = targetIsCmd ? store.CmdWrapperPath : store.RunFenceExePath;
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper
-            .Setup(h => h.WithShortcut(store.PrimaryShortcutPath, It.IsAny<Func<dynamic, string?>>()))
-            .Returns((string _, Func<dynamic, string?> _2) => expectedTarget);
-
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
         var result = await service.IsAutoStartEnabled();
 
@@ -244,18 +424,14 @@ public class AutoStartServiceTests
         };
 
         var runner = new PassthroughOperationRunner();
-        var shortcutHelper = new Mock<IShortcutComHelper>();
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
-        // No files exist in the fake store
         var result = await service.IsAutoStartEnabled();
 
         Assert.False(result);
-        // Verify the shortcut helper was NOT called (file did not exist)
-        shortcutHelper.Verify(
-            h => h.WithShortcut(It.IsAny<string>(), It.IsAny<Func<dynamic, string?>>()),
-            Times.Never);
+        Assert.Empty(shortcutHelper.AccessedPaths);
     }
 
     [Fact]
@@ -271,16 +447,13 @@ public class AutoStartServiceTests
         store.AddExistingFile(store.CmdWrapperPath);
 
         var runner = new PassthroughOperationRunner();
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper
-            .Setup(h => h.WithShortcut(store.PrimaryShortcutPath, It.IsAny<Action<dynamic>>()));
+        var shortcutHelper = new InMemoryShortcutComHelper();
 
-        var service = BuildService(log.Object, shortcutHelper.Object, runner, store);
+        var service = BuildService(log.Object, shortcutHelper, runner, store);
 
         await service.EnableAutoStart();
 
-        shortcutHelper.Verify(
-            h => h.WithShortcut(store.PrimaryShortcutPath, It.IsAny<Action<dynamic>>()),
-            Times.Once);
+        Assert.Single(shortcutHelper.AccessedPaths);
+        Assert.Equal(store.PrimaryShortcutPath, shortcutHelper.AccessedPaths[0]);
     }
 }

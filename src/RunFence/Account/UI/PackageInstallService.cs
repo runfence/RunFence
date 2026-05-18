@@ -1,16 +1,21 @@
-using System.Security.AccessControl;
-using System.Security.Principal;
 using RunFence.Core;
 using RunFence.Launch;
 
 namespace RunFence.Account.UI;
 
 /// <summary>
-/// Installs packages for an account by launching a PowerShell script via <see cref="ILaunchFacade"/>,
-/// and detects installed packages for a given account SID.
+/// Installs packages for an account by creating a PowerShell script, launching it, and
+/// tracking the launched process until completion.
 /// </summary>
-public class PackageInstallService(ILaunchFacade launchFacade, AccountToolResolver toolResolver, ILoggingService log)
+public class PackageInstallService(
+    IPackageInstallLauncher packageInstallLauncher,
+    IPackageInstallScriptStore packageInstallScriptStore,
+    AccountToolResolver toolResolver)
+    : IPackageInstallService
 {
+    private readonly object _pendingInstallLock = new();
+    private readonly Dictionary<string, PendingInstallOperation> _pendingInstallsBySid = new(StringComparer.OrdinalIgnoreCase);
+
     public bool IsPackageInstalled(InstallablePackage package, string sid)
     {
         if (package.DetectExeName != null)
@@ -25,79 +30,86 @@ public class PackageInstallService(ILaunchFacade launchFacade, AccountToolResolv
         return false;
     }
 
-    public void InstallPackages(IReadOnlyList<InstallablePackage> packages, AccountLaunchIdentity identity)
+    public IReadOnlyList<string> InstallPackages(IReadOnlyList<InstallablePackage> packages, AccountLaunchIdentity identity)
     {
         if (packages.Count == 0)
-            return;
-        var body = string.Join("\n", packages.Select(p => p.PowerShellCommand));
+            return [];
 
+        var operation = ReservePendingInstall(identity.Sid);
+        var packagesToInstall = KnownPackages.ExpandWithDependencies(packages);
+        var body = string.Join("\n", packagesToInstall.Select(p => p.PowerShellCommand));
         var cmd = $"try {{\n{body}\n}} finally {{\n" +
-                  "New-Item -Path \"$env:TEMP\\runfence-install-done.marker\" -Force | Out-Null\n" +
                   "Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n}";
 
-        if (GetMarkerPath(identity.Sid, out var markerPath))
-        {
-            try
-            {
-                File.Delete(markerPath);
-            }
-            catch
-            {
-            }
-        }
-
-        var scriptPath = WriteInstallScript(cmd, identity.Sid);
+        string? scriptPath = null;
         try
         {
-            var powershellTarget = new ProcessLaunchTarget("powershell.exe",
-                Arguments: CommandLineHelper.JoinArgs(["-NoExit", "-ExecutionPolicy", "Bypass", "-File", scriptPath]));
-            launchFacade.LaunchFile(powershellTarget, identity, permissionPrompt: (_, _) => true);
+            scriptPath = packageInstallScriptStore.CreateScript(cmd, identity.Sid);
+            operation.AttachScriptPath(scriptPath);
+
+            var launchResult = packageInstallLauncher.Launch(scriptPath, identity);
+            operation.AttachProcess(launchResult.Process);
+            return launchResult.MaintenanceWarnings;
         }
         catch
         {
-            TryDeleteFile(scriptPath);
+            CleanupReservation(identity.Sid, operation, scriptPath);
             throw;
         }
     }
 
     /// <summary>
     /// Waits for the install script launched by <see cref="InstallPackages"/> to complete by polling
-    /// for a sentinel marker file written at the end of the script. Deletes the marker on detection.
-    /// Returns when the marker is found, when <paramref name="timeout"/> elapses, or when
+    /// the launched PowerShell process. Returns when the process exits, when <paramref name="timeout"/> elapses (if specified), or when
     /// <paramref name="ct"/> is cancelled (user clicked Cancel on the progress form).
     /// </summary>
-    public async Task WaitForInstallCompletionAsync(string sid, TimeSpan timeout, CancellationToken ct = default)
+    public async Task WaitForInstallCompletionAsync(string sid, TimeSpan? timeout = null, CancellationToken ct = default)
     {
-        if (!GetMarkerPath(sid, out var markerPath))
-            return;
+        var deadline = timeout.HasValue ? DateTime.UtcNow + timeout.Value : (DateTime?)null;
+        PendingInstallOperation? observedOperation = null;
 
-        var deadline = DateTime.UtcNow + timeout;
-
-        while (DateTime.UtcNow < deadline)
+        while (true)
         {
             ct.ThrowIfCancellationRequested();
 
-            if (File.Exists(markerPath))
+            lock (_pendingInstallLock)
             {
-                TryDeleteFile(markerPath);
+                if (observedOperation == null)
+                {
+                    if (!_pendingInstallsBySid.TryGetValue(sid, out observedOperation))
+                        return;
+                }
+                else if (!_pendingInstallsBySid.TryGetValue(sid, out var currentOperation)
+                         || !ReferenceEquals(currentOperation, observedOperation))
+                {
+                    if (!observedOperation.HasProcessAttachedOrCompleted)
+                        return;
+                }
+            }
+
+            if (observedOperation.TryGetCompletionExitCode(out var exitCode))
+            {
+                CompletePendingInstall(sid, observedOperation);
+                if (exitCode != 0)
+                    throw new InvalidOperationException(
+                        $"The package install window closed with exit code {exitCode}.");
                 return;
             }
 
-            await Task.Delay(1000, ct);
-        }
-    }
+            if (!observedOperation.HasProcessAttached)
+            {
+                if (deadline.HasValue && DateTime.UtcNow >= deadline.Value)
+                    return;
 
-    private bool GetMarkerPath(string sid, out string markerPath)
-    {
-        var profilePath = toolResolver.GetProfileRoot(sid);
-        if (profilePath == null)
-        {
-            markerPath = null!;
-            return false;
-        }
+                await Task.Delay(200, ct);
+                continue;
+            }
 
-        markerPath = Path.Combine(profilePath, "AppData", "Local", "Temp", "runfence-install-done.marker");
-        return true;
+            if (deadline.HasValue && DateTime.UtcNow >= deadline.Value)
+                return;
+
+            await Task.Delay(200, ct);
+        }
     }
 
     /// <summary>
@@ -105,74 +117,150 @@ public class PackageInstallService(ILaunchFacade launchFacade, AccountToolResolv
     /// Called at startup to clean up scripts left behind by previous crashes.
     /// </summary>
     public void CleanupStaleScripts()
+        => packageInstallScriptStore.CleanupStaleScripts();
+
+    private void CompletePendingInstall(string sid, PendingInstallOperation operation)
     {
-        var dir = PathConstants.ProgramDataDir;
-        if (!Directory.Exists(dir))
+        if (RemovePendingInstallIfSame(sid, operation))
+            CompleteRemovedOperation(operation);
+    }
+
+    private PendingInstallOperation ReservePendingInstall(string sid)
+    {
+        PendingInstallOperation? completedOperation = null;
+        PendingInstallOperation reservation;
+        lock (_pendingInstallLock)
+        {
+            if (_pendingInstallsBySid.TryGetValue(sid, out var existingOperation))
+            {
+                if (existingOperation.IsActiveOrLaunching)
+                {
+                    throw new InvalidOperationException(
+                        $"A package install is already running for SID '{sid}'.");
+                }
+
+                if (ReferenceEquals(existingOperation, _pendingInstallsBySid.GetValueOrDefault(sid)))
+                {
+                    _pendingInstallsBySid.Remove(sid);
+                    completedOperation = existingOperation;
+                }
+            }
+
+            reservation = new PendingInstallOperation();
+            _pendingInstallsBySid.Add(sid, reservation);
+        }
+
+        if (completedOperation != null)
+            CompleteRemovedOperation(completedOperation);
+
+        return reservation;
+    }
+
+    private void CleanupReservation(string sid, PendingInstallOperation operation, string? fallbackScriptPath)
+    {
+        if (!RemovePendingInstallIfSame(sid, operation))
             return;
-        foreach (var stale in Directory.GetFiles(dir, "install-*.ps1"))
-            try
+
+        CompleteRemovedOperation(operation, fallbackScriptPath);
+    }
+
+    private bool RemovePendingInstallIfSame(string sid, PendingInstallOperation operation)
+    {
+        lock (_pendingInstallLock)
+        {
+            if (!_pendingInstallsBySid.TryGetValue(sid, out var currentOperation) || !ReferenceEquals(currentOperation, operation))
+                return false;
+
+            _pendingInstallsBySid.Remove(sid);
+            return true;
+        }
+    }
+
+    private void CompleteRemovedOperation(PendingInstallOperation operation, string? fallbackScriptPath = null)
+    {
+        operation.TryGetCompletionExitCode(out _);
+        operation.Dispose();
+        var scriptPath = operation.ScriptPath ?? fallbackScriptPath;
+        if (!string.IsNullOrEmpty(scriptPath))
+            packageInstallScriptStore.Delete(scriptPath);
+    }
+
+    private sealed class PendingInstallOperation : IDisposable
+    {
+        private readonly object _lock = new();
+        private int? _completionExitCode;
+
+        public string? ScriptPath { get; private set; }
+        public IInstallProcess? Process { get; private set; }
+        public bool HasProcessAttached
+        {
+            get
             {
-                if (File.GetCreationTimeUtc(stale) > DateTime.UtcNow.AddHours(-1)) continue;
-                File.Delete(stale);
+                lock (_lock)
+                    return Process != null;
             }
-            catch
+        }
+
+        public bool HasProcessAttachedOrCompleted
+        {
+            get
             {
+                lock (_lock)
+                    return Process != null || _completionExitCode.HasValue;
             }
-    }
-
-    private string WriteInstallScript(string command, string userSid)
-    {
-        var dir = PathConstants.ProgramDataDir;
-        Directory.CreateDirectory(dir);
-
-        CleanupStaleScripts();
-
-        var scriptPath = Path.Combine(dir, $"install-{Guid.NewGuid():N}.ps1");
-        CreateScriptFileWithRestrictedAccess(scriptPath, command, userSid);
-        return scriptPath;
-    }
-
-    private void TryDeleteFile(string path)
-    {
-        try
-        {
-            File.Delete(path);
         }
-        catch
+
+        public bool IsActiveOrLaunching
         {
+            get
+            {
+                lock (_lock)
+                {
+                    if (_completionExitCode.HasValue)
+                        return false;
+
+                    return Process == null || !Process.HasExited;
+                }
+            }
         }
-    }
 
-    private void CreateScriptFileWithRestrictedAccess(string filePath, string command, string userSid)
-    {
-        try
+        public void AttachScriptPath(string scriptPath)
         {
-            var security = new FileSecurity();
-            security.SetAccessRuleProtection(true, false);
-
-            var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-            security.AddAccessRule(new FileSystemAccessRule(
-                administrators, FileSystemRights.FullControl, AccessControlType.Allow));
-
-            var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-            security.AddAccessRule(new FileSystemAccessRule(
-                system, FileSystemRights.FullControl, AccessControlType.Allow));
-
-            var user = new SecurityIdentifier(userSid);
-            security.AddAccessRule(new FileSystemAccessRule(
-                user, FileSystemRights.ReadAndExecute | FileSystemRights.Delete, AccessControlType.Allow));
-
-            var fileInfo = new FileInfo(filePath);
-            using var fs = fileInfo.Create(FileMode.CreateNew, FileSystemRights.Write | FileSystemRights.ReadData,
-                FileShare.None, 4096, FileOptions.None, security);
-            using var writer = new StreamWriter(fs, System.Text.Encoding.UTF8);
-            writer.Write(command);
+            ScriptPath = scriptPath;
         }
-        catch (Exception ex)
+
+        public void AttachProcess(IInstallProcess process)
         {
-            log.Error("Failed to create restricted script file", ex);
-            TryDeleteFile(filePath);
-            throw new InvalidOperationException("Failed to secure install script", ex);
+            lock (_lock)
+                Process = process;
+        }
+
+        public bool TryGetCompletionExitCode(out int exitCode)
+        {
+            lock (_lock)
+            {
+                if (_completionExitCode.HasValue)
+                {
+                    exitCode = _completionExitCode.Value;
+                    return true;
+                }
+
+                if (Process == null || !Process.HasExited)
+                {
+                    exitCode = default;
+                    return false;
+                }
+
+                _completionExitCode = Process.ExitCode;
+                exitCode = _completionExitCode.Value;
+                return true;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_lock)
+                Process?.Dispose();
         }
     }
 }

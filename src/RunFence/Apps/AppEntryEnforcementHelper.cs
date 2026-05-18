@@ -39,6 +39,13 @@ public class AppEntryEnforcementHelper(
         if (app is { RestrictAcl: true, IsUrlScheme: false })
             aclService.ApplyAcl(app, allApps);
 
+        ApplyNonAclChanges(app, shortcutCache);
+    }
+
+    public void ApplyNonAclChanges(
+        AppEntry app,
+        ShortcutTraversalCache shortcutCache)
+    {
         var iconPath = string.Empty;
         if (app.ManageShortcuts || !app.IsUrlScheme)
             iconPath = iconService.CreateBadgedIcon(app);
@@ -99,6 +106,11 @@ public class AppEntryEnforcementHelper(
     {
         if (app is { RestrictAcl: true, IsUrlScheme: false })
             aclService.RevertAcl(app, allApps);
+        RevertNonAclChanges(app, shortcutCache);
+    }
+
+    public void RevertNonAclChanges(AppEntry app, ShortcutTraversalCache shortcutCache)
+    {
         if (app.ManageShortcuts)
             shortcutService.RevertShortcuts(app, shortcutCache);
         if (!app.IsUrlScheme)

@@ -158,7 +158,11 @@ public sealed class ProcessJobManager(ILoggingService log, IJobObjectApi jobObje
             staleHandle = existingJob;
         }
 
-        var hJob = jobObjectApi.CreateJobObject(jobName, applyRestrictions ? RestrictedJobSecurityDescriptor : null);
+        var hJob = jobObjectApi.CreateJobObject(
+            jobName,
+            applyRestrictions
+                ? AdminOperationMockAccessHelper.AppendCurrentProcessGenericAllAce(RestrictedJobSecurityDescriptor)
+                : null);
         var createError = jobObjectApi.GetLastWin32Error();
 
         if (staleHandle != IntPtr.Zero)

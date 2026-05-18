@@ -87,4 +87,47 @@ public class AppEntry
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public List<string>? PathPrefixes { get; set; }
+
+    /// <summary>
+    /// Retryable app-enforcement failure state (ACL/shortcut/beside-target) recorded when the app
+    /// save succeeds but side-effect enforcement fails.
+    /// Null when no retry is pending.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public AppEnforcementRetryStatus? EnforcementRetryStatus { get; set; }
+
+    public AppEntry Clone() => new()
+    {
+        Id = Id,
+        Name = Name,
+        ExePath = ExePath,
+        IsUrlScheme = IsUrlScheme,
+        IsFolder = IsFolder,
+        DefaultArguments = DefaultArguments,
+        AllowPassingArguments = AllowPassingArguments,
+        AllowPassingWorkingDirectory = AllowPassingWorkingDirectory,
+        WorkingDirectory = WorkingDirectory,
+        PrivilegeLevel = PrivilegeLevel,
+        AccountSid = AccountSid,
+        RestrictAcl = RestrictAcl,
+        AclMode = AclMode,
+        DeniedRights = DeniedRights,
+        AllowedAclEntries = AllowedAclEntries?.ToList(),
+        AclTarget = AclTarget,
+        FolderAclDepth = FolderAclDepth,
+        ManageShortcuts = ManageShortcuts,
+        LastKnownExeTimestamp = LastKnownExeTimestamp,
+        AllowedIpcCallers = AllowedIpcCallers?.ToList(),
+        AppContainerName = AppContainerName,
+        EnvironmentVariables = EnvironmentVariables != null
+            ? new Dictionary<string, string>(EnvironmentVariables, StringComparer.OrdinalIgnoreCase)
+            : null,
+        ArgumentsTemplate = ArgumentsTemplate,
+        PathPrefixes = PathPrefixes?.ToList(),
+        EnforcementRetryStatus = EnforcementRetryStatus == null
+                ? null
+                : new AppEnforcementRetryStatus(
+                EnforcementRetryStatus.FailureMessage,
+                EnforcementRetryStatus.LastFailedUtc),
+    };
 }

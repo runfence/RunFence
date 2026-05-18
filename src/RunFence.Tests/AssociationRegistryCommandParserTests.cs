@@ -29,6 +29,10 @@ public class AssociationRegistryCommandParserTests
         Assert.Equal(@"C:\app.exe", AssociationRegistryCommandParser.ExtractExeFromCommand(@"C:\app.exe %1"));
 
     [Fact]
+    public void ExtractExeFromCommand_QuotedUncPath_ReturnsUnquotedPath() =>
+        Assert.Equal(@"\\server\share\viewer.exe", AssociationRegistryCommandParser.ExtractExeFromCommand(@"""\\server\share\viewer.exe"" --x"));
+
+    [Fact]
     public void ExtractExeFromCommand_Null_ReturnsNull() =>
         Assert.Null(AssociationRegistryCommandParser.ExtractExeFromCommand(null));
 
@@ -43,6 +47,13 @@ public class AssociationRegistryCommandParserTests
     {
         var result = AssociationRegistryCommandParser.ExtractNonDefaultArgs(@"""C:\app.exe"" -- ""%1""");
         Assert.Equal("-- \"%1\"", result);
+    }
+
+    [Fact]
+    public void ExtractNonDefaultArgs_PreservesTrailingSpacesInRemainder()
+    {
+        var result = AssociationRegistryCommandParser.ExtractNonDefaultArgs(@"""C:\app.exe"" --x ""%1""   ");
+        Assert.Equal("--x \"%1\"", result);
     }
 
     [Fact]

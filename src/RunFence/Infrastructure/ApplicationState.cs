@@ -3,7 +3,11 @@ using RunFence.Startup.UI;
 
 namespace RunFence.Infrastructure;
 
-public class ApplicationState(ISessionProvider sessionProvider, ILockManager lockManager, IModalTracker modalTracker)
+public class ApplicationState(
+    ISessionProvider sessionProvider,
+    ILockManager lockManager,
+    IModalTracker modalTracker,
+    UiThreadDatabaseAccessor dbAccessor)
     : IAppStateProvider, IAppLockControl, IDataChangeNotifier, IApplicationDataChangeSource
 {
     private volatile bool _isShuttingDown;
@@ -27,6 +31,14 @@ public class ApplicationState(ISessionProvider sessionProvider, ILockManager loc
     public bool IsModalOpen => modalTracker.AnyModalOpen;
 
     public AppDatabase Database => sessionProvider.GetSession().Database;
+    public T ReadDatabase<T>(Func<AppDatabase, T> reader)
+        => dbAccessor.Read(reader);
+
+    public void ReadDatabase(Action<AppDatabase> reader)
+        => dbAccessor.Read(reader);
+
+    public AppDatabase CreateDatabaseSnapshot()
+        => dbAccessor.CreateSnapshot();
 
     // IAppLockControl
     public bool IsLocked => lockManager.IsLocked;
@@ -35,6 +47,8 @@ public class ApplicationState(ISessionProvider sessionProvider, ILockManager loc
     public void Unlock() => lockManager.Unlock();
     public Task<bool> TryUnlockAsync(bool isAdmin) => lockManager.TryUnlockAsync(isAdmin);
     public Task<bool> TryUnlockForOperationAsync(bool isAdmin) => lockManager.TryUnlockForOperationAsync(isAdmin);
+    public Task<OperationUnlockResult> TryUnlockForOperationWithResultAsync(bool isAdmin) =>
+        lockManager.TryUnlockForOperationWithResultAsync(isAdmin);
 
     // IDataChangeNotifier
     public event Action? DataChanged;

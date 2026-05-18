@@ -53,9 +53,11 @@ public static class ProcessLaunchHelper
     /// <c>cmd.exe /c</c>; .ps1 via <c>powershell.exe -ExecutionPolicy Bypass -File</c>),
     /// or <c>null</c> when the target is not a recognised script extension.
     /// </summary>
-    public static ProcessLaunchTarget? TryWrapForScriptLaunch(ProcessLaunchTarget target)
+    public static ProcessLaunchTarget? TryWrapForScriptLaunch(ProcessLaunchTarget target, string? extension = null)
     {
-        var ext = Path.GetExtension(target.ExePath);
+        var ext = string.IsNullOrEmpty(extension)
+            ? Path.GetExtension(target.ExePath)
+            : extension;
         var filePath = target.ExePath;
 
         if (ScriptExtensions.Contains(ext))
@@ -77,8 +79,10 @@ public static class ProcessLaunchHelper
                 ExePath: "cmd.exe",
                 Arguments: $"/c \"{filePath}\"{argsString}",
                 HideWindow: target.HideWindow,
+                SuppressStartupFeedback: target.SuppressStartupFeedback,
                 WorkingDirectory: EnsureWorkingDirectory(filePath, target.WorkingDirectory),
-                EnvironmentVariables: target.EnvironmentVariables
+                EnvironmentVariables: target.EnvironmentVariables,
+                IsPathApproved: target.IsPathApproved
             );
         }
 
@@ -96,8 +100,10 @@ public static class ProcessLaunchHelper
                 ExePath: "powershell.exe",
                 Arguments: $"-ExecutionPolicy Bypass -File \"{filePath}\"{argsString}",
                 HideWindow: target.HideWindow,
+                SuppressStartupFeedback: target.SuppressStartupFeedback,
                 WorkingDirectory: EnsureWorkingDirectory(filePath, target.WorkingDirectory),
-                EnvironmentVariables: target.EnvironmentVariables
+                EnvironmentVariables: target.EnvironmentVariables,
+                IsPathApproved: target.IsPathApproved
             );
         }
 
@@ -109,7 +115,10 @@ public static class ProcessLaunchHelper
     /// executable or a script (.cmd, .bat, .ps1) that is wrapped by <see cref="TryWrapForScriptLaunch"/>.
     /// Returns <c>false</c> for all other file types that require Windows association resolution.
     /// </summary>
-    public static bool CanLaunchDirect(ProcessLaunchTarget target) => ExeExtensions.Contains(Path.GetExtension(target.ExePath));
+    public static bool CanLaunchDirect(ProcessLaunchTarget target, string? extension = null)
+        => ExeExtensions.Contains(string.IsNullOrEmpty(extension)
+            ? Path.GetExtension(target.ExePath)
+            : extension);
 
     /// <summary>
     /// Wraps the target via <c>rundll32.exe shell32.dll,ShellExec_RunDLL</c>.
@@ -124,7 +133,9 @@ public static class ProcessLaunchHelper
             ExePath: "rundll32.exe",
             Arguments: "shell32.dll,ShellExec_RunDLL " + filePath,
             WorkingDirectory: EnsureWorkingDirectory(filePath, target.WorkingDirectory),
-            EnvironmentVariables: target.EnvironmentVariables
+            EnvironmentVariables: target.EnvironmentVariables,
+            SuppressStartupFeedback: target.SuppressStartupFeedback,
+            IsPathApproved: target.IsPathApproved
         );
     }
 
@@ -175,10 +186,7 @@ public static class ProcessLaunchHelper
             if (!string.IsNullOrEmpty(template))
             {
                 if (template.Contains("%1"))
-                {
-                    var sanitized = SanitizeForSubstitution(launcherArguments);
-                    return SubstituteIntoTemplate(template, sanitized);
-                }
+                    return ApplySingleArgumentTemplate(template, launcherArguments);
 
                 // Append mode: add space when template ends with alphanumeric or closing quote
                 var last = template[^1];
@@ -191,6 +199,12 @@ public static class ProcessLaunchHelper
         }
 
         return string.IsNullOrEmpty(app.DefaultArguments) ? null : app.DefaultArguments;
+    }
+
+    public static string ApplySingleArgumentTemplate(string template, string value)
+    {
+        var sanitized = SanitizeForSubstitution(value);
+        return SubstituteIntoTemplate(template, sanitized);
     }
 
     // Substitutes sanitized into every %1 occurrence in template.
@@ -351,7 +365,7 @@ public static class ProcessLaunchHelper
     public static string BuildCommandLine(ProcessLaunchTarget psi)
     {
         var sb = new StringBuilder();
-        AppendQuotedArg(sb, psi.ExePath);
+        sb.Append(CommandLineHelper.QuoteProcessArgument(psi.ExePath));
         if (!string.IsNullOrEmpty(psi.Arguments))
         {
             sb.Append(' ');
@@ -362,43 +376,5 @@ public static class ProcessLaunchHelper
     }
 
     public static void AppendQuotedArg(StringBuilder sb, string arg)
-    {
-        if (arg.Length > 0 && !arg.Contains(' ') && !arg.Contains('"') && !arg.Contains('\t'))
-        {
-            sb.Append(arg);
-            return;
-        }
-
-        // CommandLineToArgvW-compatible quoting: handle backslash sequences before quotes
-        sb.Append('"');
-        var backslashes = 0;
-        foreach (var c in arg)
-        {
-            switch (c)
-            {
-                case '\\':
-                    backslashes++;
-                    break;
-                case '"':
-                    sb.Append('\\', backslashes * 2 + 1);
-                    sb.Append('"');
-                    backslashes = 0;
-                    break;
-                default:
-                {
-                    if (backslashes > 0)
-                    {
-                        sb.Append('\\', backslashes);
-                        backslashes = 0;
-                    }
-
-                    sb.Append(c);
-                    break;
-                }
-            }
-        }
-
-        sb.Append('\\', backslashes * 2);
-        sb.Append('"');
-    }
+        => sb.Append(CommandLineHelper.QuoteProcessArgument(arg));
 }

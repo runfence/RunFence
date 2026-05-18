@@ -17,6 +17,7 @@ public class RunAsAppShortcutCreator(
     IBesideTargetShortcutService besideTargetShortcutService,
     ISessionProvider sessionProvider,
     IInteractiveUserSidResolver interactiveUserSidResolver,
+    IRunFenceLauncherPathProvider launcherPathProvider,
     ILoggingService log)
 {
     /// <summary>
@@ -27,41 +28,34 @@ public class RunAsAppShortcutCreator(
     /// </summary>
     public void CreateBesideTargetShortcut(AppEntry app)
     {
-        try
+        var session = sessionProvider.GetSession();
+        var iconPath = iconService.CreateBadgedIcon(app);
+        if (!launcherPathProvider.Exists())
+            return;
+        var launcherPath = launcherPathProvider.GetLauncherPath();
+
+        string? effectiveSid;
+        if (app.AppContainerName != null)
         {
-            var session = sessionProvider.GetSession();
-            var iconPath = iconService.CreateBadgedIcon(app);
-            var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
-            if (!File.Exists(launcherPath))
-                return;
-
-            string? effectiveSid;
-            if (app.AppContainerName != null)
-            {
-                effectiveSid = interactiveUserSidResolver.GetInteractiveUserSid();
-                if (string.IsNullOrEmpty(effectiveSid))
-                    log.Warn($"RunAsAppShortcutCreator: interactive user SID unavailable; skipping AppContainer beside-target shortcut for '{app.Name}'.");
-            }
-            else
-            {
-                var credential = session.CredentialStore.Credentials
-                    .FirstOrDefault(c => string.Equals(c.Sid, app.AccountSid, StringComparison.OrdinalIgnoreCase));
-                if (credential == null)
-                    return;
-                effectiveSid = credential.Sid;
-            }
-
+            effectiveSid = interactiveUserSidResolver.GetInteractiveUserSid();
             if (string.IsNullOrEmpty(effectiveSid))
-                return;
-            var username = sidNameCache.GetDisplayName(effectiveSid);
-            // Only create the shortcut when a real name was resolved (not just the raw SID)
-            if (!string.Equals(username, effectiveSid, StringComparison.OrdinalIgnoreCase))
-                besideTargetShortcutService.CreateBesideTargetShortcut(app, launcherPath, iconPath, username);
+                log.Warn($"RunAsAppShortcutCreator: interactive user SID unavailable; skipping AppContainer beside-target shortcut for '{app.Name}'.");
         }
-        catch (Exception ex)
+        else
         {
-            log.Error("Failed to create shortcuts for RunAs app", ex);
+            var credential = session.CredentialStore.Credentials
+                .FirstOrDefault(c => string.Equals(c.Sid, app.AccountSid, StringComparison.OrdinalIgnoreCase));
+            if (credential == null)
+                return;
+            effectiveSid = credential.Sid;
         }
+
+        if (string.IsNullOrEmpty(effectiveSid))
+            return;
+        var username = sidNameCache.GetDisplayName(effectiveSid);
+        // Only create the shortcut when a real name was resolved (not just the raw SID)
+        if (!string.Equals(username, effectiveSid, StringComparison.OrdinalIgnoreCase))
+            besideTargetShortcutService.CreateBesideTargetShortcut(app, launcherPath, iconPath, username);
     }
 
     /// <summary>
@@ -87,8 +81,8 @@ public class RunAsAppShortcutCreator(
     {
         try
         {
-            var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
-            var iconPath = Path.Combine(PathConstants.ProgramDataIconDir, $"{appId}.ico");
+            var launcherPath = launcherPathProvider.GetLauncherPath();
+            var iconPath = iconService.GetIconPath(appId);
             shortcutService.UpdateShortcutToLauncher(
                 originalLnkPath, appId, launcherPath,
                 File.Exists(iconPath) ? iconPath : null);

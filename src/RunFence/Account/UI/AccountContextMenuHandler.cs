@@ -14,7 +14,8 @@ namespace RunFence.Account.UI;
 public class AccountContextMenuHandler(
     AccountMenuStateConfigurator menuStateConfigurator,
     ISessionProvider sessionProvider,
-    IProcessTerminationService processTerminationService)
+    IProcessTerminationService processTerminationService,
+    IAccountMessageBoxService messageBoxService)
 {
     private DataGridView _grid = null!;
     private AccountProcessDisplayManager? _processDisplayManager;
@@ -86,44 +87,44 @@ public class AccountContextMenuHandler(
         i.NewApp.Visible = false;
     }
 
-    public void KillAllProcesses(AccountRow accountRow)
+    public async Task KillAllProcessesAsync(AccountRow accountRow)
     {
         if (string.IsNullOrEmpty(accountRow.Sid))
             return;
 
         var owner = _grid.FindForm();
-        if (MessageBox.Show(owner,
+        if (messageBoxService.Show(owner,
                 $"Kill all processes running under \"{accountRow.Username}\"?\n\nThis will forcefully terminate all processes owned by this account.",
                 "Kill All Processes", MessageBoxButtons.YesNo, MessageBoxIcon.Warning,
                 MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return;
 
-        int killed, failed;
-        Cursor.Current = Cursors.WaitCursor;
         try
         {
-            (killed, failed) = processTerminationService.KillProcesses(accountRow.Sid);
+            var result = await Task.Run(() => processTerminationService.KillProcesses(accountRow.Sid));
+            if (result.Killed == 0 && result.Failed == 0)
+            {
+                messageBoxService.Show(owner, "No processes found for this account.", "Kill All Processes",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else if (result.Failed == 0)
+            {
+                messageBoxService.Show(owner, $"Killed {result.Killed} process{(result.Killed == 1 ? "" : "es")}.", "Kill All Processes",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            else
+            {
+                messageBoxService.Show(owner,
+                    $"Killed {result.Killed} process{(result.Killed == 1 ? "" : "es")}. {result.Failed} could not be terminated.",
+                    "Kill All Processes", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
         catch (Exception ex)
         {
-            Cursor.Current = Cursors.Default;
-            MessageBox.Show(owner, $"Failed to enumerate processes: {ex.Message}", "Kill All Processes",
+            messageBoxService.Show(owner, $"Failed to enumerate processes: {ex.Message}", "Kill All Processes",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
-
-        Cursor.Current = Cursors.Default;
-
-        if (killed == 0 && failed == 0)
-            MessageBox.Show(owner, "No processes found for this account.", "Kill All Processes",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        else if (failed == 0)
-            MessageBox.Show(owner, $"Killed {killed} process{(killed == 1 ? "" : "es")}.", "Kill All Processes",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        else
-            MessageBox.Show(owner,
-                $"Killed {killed} process{(killed == 1 ? "" : "es")}. {failed} could not be terminated.",
-                "Kill All Processes", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
     public void RequestNewApp(string sid)

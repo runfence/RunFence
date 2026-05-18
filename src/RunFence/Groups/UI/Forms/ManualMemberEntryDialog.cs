@@ -1,6 +1,6 @@
 namespace RunFence.Groups.UI.Forms;
 
-internal partial class ManualMemberEntryDialog : Form
+internal partial class ManualMemberEntryDialog : RunFence.UI.Forms.ContextHelpForm
 {
     public string? EnteredValue { get; private set; }
 

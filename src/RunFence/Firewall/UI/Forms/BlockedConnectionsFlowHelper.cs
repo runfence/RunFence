@@ -11,6 +11,9 @@ namespace RunFence.Firewall.UI.Forms;
 public class BlockedConnectionsFlowHelper(
     BlockedConnectionAggregator aggregator,
     IBlockedConnectionReader blockedConnectionReader,
+    IAuditPolicyService auditPolicyService,
+    FirewallEnforcementRetryState retryState,
+    IFirewallDomainRefreshRequester refreshRequester,
     IDnsResolver dnsResolver)
 {
     /// <summary>
@@ -28,7 +31,7 @@ public class BlockedConnectionsFlowHelper(
         bool enableAuditLogging = false)
     {
         using var dlg = new BlockedConnectionsDialog(
-            blockedConnectionReader, dnsResolver,
+            blockedConnectionReader, auditPolicyService, retryState, refreshRequester, dnsResolver,
             aggregator, existingEntries,
             enableAuditLogging: enableAuditLogging);
 

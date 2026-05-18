@@ -82,30 +82,6 @@ public class AccountValidationServiceTests
 
     // --- ValidateNoRunningProcesses ---
 
-    [Fact]
-    public void ValidateNoRunningProcesses_UnknownSid_DoesNotThrow()
-    {
-        // No running process is owned by this synthetic SID.
-        var fakeSid = "S-1-5-21-0-0-0-99997";
-
-        _service.ValidateNoRunningProcesses(fakeSid, "test");
-        // No exception: no processes found for this SID
-    }
-
-    [Fact]
-    public void ValidateNoRunningProcesses_HasRunningProcesses_Throws()
-    {
-        // Arrange: process list service reports a running process for the target SID
-        var targetSid = "S-1-5-21-0-0-0-99993";
-        _processListService.Setup(s => s.GetProcessesForSid(targetSid))
-            .Returns([new ProcessInfo(1234, @"C:\Windows\System32\notepad.exe", null)]);
-
-        var ex = Assert.Throws<InvalidOperationException>(() => _service.ValidateNoRunningProcesses(targetSid, "delete"));
-
-        Assert.Contains("running processes", ex.Message);
-        Assert.Contains("notepad", ex.Message);
-    }
-
     // --- GetProcessesRunningAsSid ---
 
     [Fact]
@@ -130,5 +106,28 @@ public class AccountValidationServiceTests
 
         Assert.Single(result);
         Assert.Equal("test", result[0]);
+    }
+
+    [Fact]
+    public void GetRunningProcesses_SortsByDisplayNameThenPid()
+    {
+        var sid = "S-1-5-21-0-0-0-99994";
+        _processListService.Setup(s => s.GetProcessesForSid(sid))
+            .Returns(
+            [
+                new ProcessInfo(40, @"C:\Tools\zeta.exe", null),
+                new ProcessInfo(10, @"C:\Tools\alpha.exe", null),
+                new ProcessInfo(20, @"C:\Tools\alpha.exe", null),
+                new ProcessInfo(5, null, null)
+            ]);
+
+        var result = _service.GetRunningProcesses(sid);
+
+        Assert.Collection(
+            result,
+            process => Assert.Equal(10, process.Pid),
+            process => Assert.Equal(20, process.Pid),
+            process => Assert.Equal(5, process.Pid),
+            process => Assert.Equal(40, process.Pid));
     }
 }

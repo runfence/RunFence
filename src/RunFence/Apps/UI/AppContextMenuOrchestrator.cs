@@ -1,7 +1,9 @@
 using RunFence.Account;
+using RunFence.Acl;
 using RunFence.Acl.UI;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
+using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
@@ -15,6 +17,7 @@ namespace RunFence.Apps.UI;
 public class AppContextMenuOrchestrator(
     ILaunchFacade facade,
     ISidNameCacheService sidNameCache,
+    ILaunchFeedbackPresenter launchFeedbackPresenter,
     ILoggingService log,
     IInteractiveUserDesktopProvider interactiveUserDesktopProvider,
     IShortcutService shortcutService,
@@ -24,10 +27,8 @@ public class AppContextMenuOrchestrator(
     public event Action<string>? AccountNavigationRequested;
 
     /// <summary>
-    /// Fired when an action has modified in-memory app or database data that must be persisted and
-    /// reflected in the grid (e.g. grants added in <see cref="OpenInFolderBrowser"/>, or app args
-    /// changed in <see cref="SetDefaultBrowser"/>). Subscriber is responsible for saving all configs
-    /// and refreshing the grid.
+    /// Fired when an action has modified state that must be reflected in the grid.
+    /// Persistence is performed by the action itself when required.
     /// </summary>
     public event Action? DataSaveAndRefreshRequested;
 
@@ -47,16 +48,29 @@ public class AppContextMenuOrchestrator(
         var privilegeLevel = shiftHeld ? PrivilegeLevel.HighestAllowed : app.PrivilegeLevel;
         try
         {
-            facade.LaunchFolderBrowser(
+            using var launch = facade.LaunchFolderBrowser(
                 new AccountLaunchIdentity(app.AccountSid)
                 {
                     PrivilegeLevel = privilegeLevel,
                 },
                 parentDir,
                 folderPermissionPrompt: AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache, owner));
+            launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The folder browser", LaunchFeedbackSource.InteractiveUi)
+            {
+                Owner = owner,
+                SummaryName = app.Name
+            });
         }
         catch (OperationCanceledException)
         {
+        }
+        catch (GrantOperationException ex)
+        {
+            launchFeedbackPresenter.ShowGrantFailure(ex, new LaunchFeedbackContext("The folder browser", LaunchFeedbackSource.InteractiveUi)
+            {
+                Owner = owner,
+                SummaryName = app.Name
+            });
         }
         catch (Exception ex)
         {

@@ -58,31 +58,10 @@ public static class Program
         var safe = new SafeExecutor();
         var broadcast = new BroadcastHelper();
         var userProfileFilter = new UserProfileFilter();
-
-        var mouse = new MouseSettingsIO(safe, broadcast);
-        var keyboard = new KeyboardSettingsIO(safe, broadcast);
-        var scroll = new ScrollSettingsIO(safe, broadcast);
-        var explorer = new ExplorerSettingsIO(safe, broadcast);
-        var desktop = new DesktopSettingsIO(safe, broadcast);
-        var taskbar = new TaskbarSettingsIO(safe, broadcast, userProfileFilter);
-        var theme = new ThemeSettingsIO(safe, broadcast);
-        var screenSaver = new ScreenSaverSettingsIO(safe, broadcast);
-        var inputLanguage = new InputLanguageSettingsIO(safe, broadcast);
-        var accessibility = new AccessibilitySettingsIO(safe, broadcast);
-        var regional = new RegionalSettingsIO(safe, broadcast);
-        var trayIcons = new TrayIconsSettingsIO(safe, broadcast);
-        var notifications = new NotificationsSettingsIO(safe, broadcast);
-        var userFolders = new UserFoldersSettingsIO(safe, broadcast, userProfileFilter);
-        var environment = new EnvironmentSettingsIO(safe, broadcast);
-        var fileAssociations = new FileAssociationsSettingsIO(safe);
-        var nightLight = new NightLightSettingsIO(safe);
         var settingsFilter = new SettingsFilter(userProfileFilter);
-
-        ISettingsIO[] allIO = [mouse, keyboard, scroll, explorer, desktop, taskbar, theme,
-            screenSaver, inputLanguage, accessibility, regional, trayIcons,
-            notifications, userFolders, environment, fileAssociations, nightLight];
-        var reader = new SettingsReader(allIO, settingsFilter);
-        var writer = new SettingsWriter(allIO);
+        var allIo = SettingsIoCatalog.CreateAll(safe, broadcast, userProfileFilter);
+        var reader = new SettingsReader(allIo, settingsFilter);
+        var writer = new SettingsWriter(allIo);
 
         return (reader, writer);
     }

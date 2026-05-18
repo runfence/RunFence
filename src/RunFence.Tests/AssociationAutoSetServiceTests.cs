@@ -2,6 +2,7 @@ using Microsoft.Win32;
 using Moq;
 using RunFence.Apps;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Ipc;
@@ -75,10 +76,39 @@ public class AssociationAutoSetServiceTests : IDisposable
         _tempDir.Dispose();
     }
 
-    private AssociationAutoSetService CreateService()
-        => new(_hiveManager.Object, _sessionProvider.Object, _handlerMappingService.Object,
-            _callerAuthorizer.Object, _log.Object, new AssociationRegistryWriter(_log.Object),
-            _hkuRoot, _launcherPath);
+    private AssociationAutoSetService CreateService(RegistryKey? hkuRoot = null)
+    {
+        return new AssociationAutoSetService(
+            _hiveManager.Object,
+            _sessionProvider.Object,
+            () => new InlineUiThreadInvoker(action => action()),
+            () => _handlerMappingService.Object,
+            new AssociationPolicyService(_callerAuthorizer.Object),
+            _log.Object,
+            new AssociationRegistryWriter(
+                _log.Object,
+                _ => new AssociationFallbackRegistry(_),
+                registry => new AssociationFallbackRestoreService(registry)),
+            hkuRoot ?? _hkuRoot,
+            _launcherPath);
+    }
+
+    private AssociationAutoSetService CreateService(IUiThreadInvoker uiThreadInvoker, RegistryKey? hkuRoot = null)
+    {
+        return new AssociationAutoSetService(
+            _hiveManager.Object,
+            _sessionProvider.Object,
+            () => uiThreadInvoker,
+            () => _handlerMappingService.Object,
+            new AssociationPolicyService(_callerAuthorizer.Object),
+            _log.Object,
+            new AssociationRegistryWriter(
+                _log.Object,
+                _ => new AssociationFallbackRegistry(_),
+                registry => new AssociationFallbackRestoreService(registry)),
+            hkuRoot ?? _hkuRoot,
+            _launcherPath);
+    }
 
     private void SetMappings(Dictionary<string, HandlerMappingEntry> mappings)
         => _handlerMappingService
@@ -242,6 +272,42 @@ public class AssociationAutoSetServiceTests : IDisposable
         // Assert: RunFenceFallback removed
         var fallback = ReadValue($@"{TestSid}\Software\Classes\.doc", PathConstants.RunFenceFallbackValueName);
         Assert.Null(fallback);
+    }
+
+    [Fact]
+    public void AutoSetForUser_RestoreForUser_RestoresOriginalValue()
+    {
+        const string originalProgId = "OldApp.Document";
+        using (var extKey = _hkuRoot.CreateSubKey($@"{TestSid}\Software\Classes\.doc"))
+            extKey.SetValue(null, originalProgId);
+
+        SetMappings(new Dictionary<string, HandlerMappingEntry> { [".doc"] = new HandlerMappingEntry("app1") });
+
+        var service = CreateService();
+        service.AutoSetForUser(TestSid);
+
+        Assert.Equal(PathConstants.HandlerProgIdPrefix + ".doc", ReadDefaultValue($@"{TestSid}\Software\Classes\.doc"));
+
+        service.RestoreForUser(TestSid);
+
+        Assert.Equal(originalProgId, ReadDefaultValue($@"{TestSid}\Software\Classes\.doc"));
+        Assert.Null(ReadValue($@"{TestSid}\Software\Classes\.doc", PathConstants.RunFenceFallbackValueName));
+    }
+
+    [Fact]
+    public void AutoSetForUser_RestoreForUser_ClearsCreatedKeyValues()
+    {
+        SetMappings(new Dictionary<string, HandlerMappingEntry> { [".txt"] = new HandlerMappingEntry("app1") });
+
+        var service = CreateService();
+        service.AutoSetForUser(TestSid);
+
+        Assert.NotNull(_hkuRoot.OpenSubKey($@"{TestSid}\Software\Classes\.txt"));
+
+        service.RestoreForUser(TestSid);
+
+        Assert.Null(ReadDefaultValue($@"{TestSid}\Software\Classes\.txt"));
+        Assert.Null(ReadValue($@"{TestSid}\Software\Classes\.txt", PathConstants.RunFenceFallbackValueName));
     }
 
     // --- Stale ProgId cleanup ---
@@ -656,7 +722,7 @@ public class AssociationAutoSetServiceTests : IDisposable
 
         // callerAuthorizer returns false (no explicit per-app auth) — direct wins
         _callerAuthorizer.Setup(a => a.HasExplicitPerAppAuthorization(
-            TestSid, appEntry, It.IsAny<AppDatabase>())).Returns(false);
+            TestSid, It.Is<AppEntry>(app => app.Id == appEntry.Id), It.IsAny<AppDatabase>())).Returns(false);
 
         // Act
         CreateService().AutoSetForUser(TestSid);
@@ -681,7 +747,7 @@ public class AssociationAutoSetServiceTests : IDisposable
 
         // callerAuthorizer returns true (explicit per-app auth) — app wins
         _callerAuthorizer.Setup(a => a.HasExplicitPerAppAuthorization(
-            TestSid, appEntry, It.IsAny<AppDatabase>())).Returns(true);
+            TestSid, It.Is<AppEntry>(app => app.Id == appEntry.Id), It.IsAny<AppDatabase>())).Returns(true);
 
         // Act
         CreateService().AutoSetForUser(TestSid);
@@ -707,6 +773,23 @@ public class AssociationAutoSetServiceTests : IDisposable
 
         Assert.Null(_hkuRoot.OpenSubKey($@"{TestSid}\Software\Classes\.txt"));
         _hiveManager.Verify(h => h.EnsureHiveLoaded(TestSid), Times.Never);
+    }
+
+    [Fact]
+    public void AutoSetForUser_ReadOnlyHkuRoot_ReturnsWarningResult()
+    {
+        using var readOnlyRoot = Registry.CurrentUser.OpenSubKey(_testSubKey, writable: false);
+        Assert.NotNull(readOnlyRoot);
+        _session.Database.GetOrCreateAccount(TestSid).ManageAssociations = true;
+
+        SetMappings(new Dictionary<string, HandlerMappingEntry> { [".test"] = new HandlerMappingEntry("app1") });
+
+        var result = CreateService(readOnlyRoot).AutoSetForUser(TestSid);
+
+        Assert.Equal(AssociationAutoSetStatus.SucceededWithWarnings, result.Status);
+        Assert.Single(result.WarningMessages);
+        Assert.Contains("access denied", result.WarningMessages[0], StringComparison.OrdinalIgnoreCase);
+        Assert.True(_session.Database.GetAccount(TestSid)?.ManageAssociations);
     }
 
     // --- Class-based protocol entry is skipped ---
@@ -781,5 +864,33 @@ public class AssociationAutoSetServiceTests : IDisposable
 
         // Total: 1 (AutoSetForUser) + 1 (RestoreForAllUsers) + 1 (AutoSetForUser after restore) = 3
         _hiveManager.Verify(h => h.EnsureHiveLoaded(TestSid), Times.Exactly(3));
+    }
+
+    [Fact]
+    public async Task AutoSetForUser_WorkerThread_CapturesSessionStateOnUiThreadBeforeRegistryWork()
+    {
+        using var uiInvoker = new DedicatedThreadUiInvoker();
+        var sessionThreadId = 0;
+        var mappingThreadId = 0;
+        var hiveThreadId = 0;
+
+        _sessionProvider.Setup(p => p.GetSession())
+            .Callback(() => sessionThreadId = Environment.CurrentManagedThreadId)
+            .Returns(_session);
+        _handlerMappingService
+            .Setup(s => s.GetEffectiveHandlerMappings(It.IsAny<AppDatabase>()))
+            .Callback(() => mappingThreadId = Environment.CurrentManagedThreadId)
+            .Returns(new Dictionary<string, HandlerMappingEntry> { [".test"] = new HandlerMappingEntry("app1") });
+        _hiveManager.Setup(h => h.EnsureHiveLoaded(TestSid))
+            .Callback(() => hiveThreadId = Environment.CurrentManagedThreadId)
+            .Returns((IDisposable?)null);
+
+        var service = CreateService(uiInvoker);
+
+        await Task.Run(() => service.AutoSetForUser(TestSid));
+
+        Assert.Equal(uiInvoker.ThreadId, sessionThreadId);
+        Assert.Equal(uiInvoker.ThreadId, mappingThreadId);
+        Assert.NotEqual(uiInvoker.ThreadId, hiveThreadId);
     }
 }

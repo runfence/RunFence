@@ -127,7 +127,7 @@ public class QuickElevationTemplate(
             AllowBgAutorun: false,
             CurrentHiddenCount: hiddenCount);
 
-        EditAccountDialogCreateHandler.CreateAccountResult? result = null;
+        CreateAccountResult? result = null;
         try
         {
             result = await Task.Run(() => createHandler.Execute(request));
@@ -137,16 +137,52 @@ public class QuickElevationTemplate(
             request.Password.Dispose();
             request.ConfirmPassword.Dispose();
         }
-        if (result == null)
+        if (result.Status != CreateAccountStatus.Succeeded)
         {
-            progress.ReportError(createHandler.LastValidationError ?? "Account creation failed.");
+            progress.ReportError(result.ErrorMessage ?? createHandler.LastValidationError ?? "Account creation failed.");
             return;
         }
 
-        result.Password.Dispose();
+        result.Password!.Dispose();
 
-        foreach (var err in result.Errors)
+        var restrictionEntriesToReport = result.RestrictionEntries is { Count: > 0 } entries &&
+                                         entries.Any(entry => entry.Status != AccountRestrictionStatus.Succeeded)
+            ? entries
+            : [];
+        var restrictionFailureMessages = restrictionEntriesToReport
+            .Where(entry => entry.Status != AccountRestrictionStatus.Succeeded)
+            .Select(AccountRestrictionEntryFormatter.Format)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var err in result.Errors.Where(err => !restrictionFailureMessages.Contains(err)))
             progress.ReportError(err);
+
+        foreach (var entry in restrictionEntriesToReport)
+        {
+            var message = AccountRestrictionEntryFormatter.Format(entry);
+            if (entry.Status == AccountRestrictionStatus.Succeeded)
+                progress.ReportStatus(message);
+            else
+                progress.ReportError(message);
+        }
+
+        session.Database.GetOrCreateAccount(result.Sid).PrivilegeLevel = PrivilegeLevel.HighestAllowed;
+
+        try
+        {
+            if (session.Database.Settings.OriginalUacAdminEnumeration == null)
+            {
+                session.Database.Settings.OriginalUacAdminEnumeration = accountRestriction.GetCurrentUacAdminEnumeration();
+                session.Database.Settings.UacAdminEnumerationSid = result.Sid;
+            }
+
+            sessionSaver.SaveConfig();
+        }
+        catch (Exception ex)
+        {
+            progress.ReportError($"Save: {ex.Message}");
+            return;
+        }
 
         // Hide from logon screen
         progress.ReportStatus("Hiding account from logon screen...");
@@ -163,13 +199,6 @@ public class QuickElevationTemplate(
         progress.ReportStatus("Configuring UAC to hide admin list...");
         try
         {
-            // Store the original value only on the first wizard run so we can restore it later.
-            if (session.Database.Settings.OriginalUacAdminEnumeration == null)
-            {
-                session.Database.Settings.OriginalUacAdminEnumeration = accountRestriction.GetCurrentUacAdminEnumeration();
-                session.Database.Settings.UacAdminEnumerationSid = result.Sid;
-            }
-
             accountRestriction.SetUacAdminEnumeration(false);
         }
         catch (Exception ex)

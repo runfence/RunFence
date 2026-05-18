@@ -143,6 +143,7 @@ public static class AccountGridHelper
     /// </summary>
     public static DataGridViewRow AddAccountGridRow(
         DataGridView grid,
+        AccountGridIconLifetimeManager? iconLifetimeManager,
         AccountRow accountRow,
         Image icon,
         string displayName,
@@ -153,12 +154,13 @@ public static class AccountGridHelper
     {
         var idx = grid.Rows.Add(false, icon, displayName, logonValue, allowInternet, appsText, profilePath, accountRow.Sid);
         var row = grid.Rows[idx];
+        iconLifetimeManager?.TrackOwned(row, icon);
         row.Tag = accountRow;
         row.Cells["SID"].ToolTipText = accountRow.Sid;
         return row;
     }
 
-    public static void AddGroupHeaderRow(DataGridView grid, string title)
+    public static void AddGroupHeaderRow(DataGridView grid, AccountGridIconLifetimeManager? iconLifetimeManager, string title)
     {
         var colCount = grid.Columns.Count;
         var values = new object[colCount];
@@ -171,6 +173,7 @@ public static class AccountGridHelper
         values[grid.Columns["SID"]!.Index] = "";
         var idx = grid.Rows.Add(values);
         var row = grid.Rows[idx];
+        iconLifetimeManager?.TrackOwned(row, EmptyIcon);
         row.Tag = new AccountGroupHeader();
         row.DefaultCellStyle.BackColor = Color.FromArgb(0xE4, 0xEA, 0xF4);
         row.DefaultCellStyle.Font = GetOrCreateBoldFont(grid.Font);

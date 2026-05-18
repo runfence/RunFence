@@ -12,6 +12,9 @@ public interface IDragBridgeLauncher
     ProcessInfo LaunchManaged(string exePath, string accountSid, IReadOnlyList<string> args,
         PrivilegeLevel privilegeLevel);
 
+    /// <summary>Returns the <see cref="ProcessInfo"/> of the launched process.</summary>
+    ProcessInfo LaunchAppContainer(string exePath, AppContainerEntry entry, IReadOnlyList<string> args);
+
     /// <summary>Returns the <see cref="ProcessInfo"/> of the launched process, or null on failure.</summary>
     ProcessInfo? LaunchDeElevated(string exePath, IReadOnlyList<string> args,
         PrivilegeLevel? privilegeLevel = null);

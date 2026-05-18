@@ -3,6 +3,7 @@ using Moq;
 using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Security;
 using Xunit;
 
@@ -15,17 +16,25 @@ public class AccountCredentialManagerTests : IDisposable
 
     private readonly AccountCredentialManager _manager;
     private readonly ICredentialDecryptionService _credentialDecryption;
-    private readonly ProtectedBuffer _pinKey;
+    private readonly SecureSecret _pinKey;
 
     public AccountCredentialManagerTests()
     {
         var pinKeyBytes = new byte[32];
         new Random(42).NextBytes(pinKeyBytes);
-        _pinKey = new ProtectedBuffer(pinKeyBytes, protect: false);
+        _pinKey = new SecureSecret(
+            pinKeyBytes.Length,
+            span => pinKeyBytes.AsSpan().CopyTo(span),
+            NativeProtectedMemoryApi.Instance,
+            null);
 
-        var encryptionService = new CredentialEncryptionService();
+        var encryptionService = new CredentialEncryptionService(new NativeDpapiProtector());
         var sidResolver = new Mock<ISidResolver>();
-        _credentialDecryption = new CredentialDecryptionService(encryptionService, sidResolver.Object);
+        var interactiveUserSidResolver = new Mock<IInteractiveUserSidResolver>();
+        _credentialDecryption = new CredentialDecryptionService(
+            encryptionService,
+            sidResolver.Object,
+            interactiveUserSidResolver.Object);
         _manager = new AccountCredentialManager(encryptionService);
     }
 
@@ -241,11 +250,6 @@ public class AccountCredentialManagerTests : IDisposable
         Assert.NotEmpty(credEntry.EncryptedPassword);
     }
 
-    // Note: the InteractiveUser credential path (TryDecryptCredential returning InteractiveUser
-    // with null credEntry) cannot be tested under the non-admin test runner because resolving
-    // the interactive user SID requires an active desktop session (explorer.exe running as
-    // a different account). This path is covered by manual/integration testing only.
-
     // --- TryDecryptStoredPassword ---
 
     [Theory]
@@ -301,14 +305,17 @@ public class AccountCredentialManagerTests : IDisposable
         original.MakeReadOnly();
         _manager.StoreCreatedUserCredential(currentSid, original, store, _pinKey);
 
-        // Act: run TryDecryptCredential in its own scope so the buffer is re-protected before
-        // TryDecryptStoredPassword opens another scope (nested Unprotect is not supported).
+        // Act: run TryDecryptCredential in its own callback so the buffer is re-protected before
+        // TryDecryptStoredPassword opens another callback.
         CredentialLookupStatus regularStatus;
         ProtectedString? regularPassword;
+        var regularResult = _pinKey.TransformSnapshot(key =>
         {
-            using var scope = _pinKey.Unprotect();
-            regularStatus = _credentialDecryption.TryDecryptCredential(currentSid, store, scope.Data, out _, out regularPassword);
-        }
+            var status = _credentialDecryption.TryDecryptCredential(currentSid, store, key, out _, out var password);
+            return (status, password);
+        });
+        regularStatus = regularResult.status;
+        regularPassword = regularResult.password;
         var directResult = _manager.TryDecryptStoredPassword(currentSid, store, _pinKey, out var directPassword);
 
         // Assert: TryDecryptCredential short-circuits, TryDecryptStoredPassword does not
@@ -337,9 +344,6 @@ public class AccountCredentialManagerTests : IDisposable
     }
 
     private static string ProtectedStringToString(ProtectedString ss)
-    {
-        var bstr = ss.ToBSTR();
-        try { return Marshal.PtrToStringBSTR(bstr)!; }
-        finally { Marshal.ZeroFreeBSTR(bstr); }
-    }
+        => ss.UseUnicodeSnapshot(snapshot =>
+            Marshal.PtrToStringUni(snapshot.DangerousGetIntPtr(), snapshot.CharCount) ?? string.Empty);
 }

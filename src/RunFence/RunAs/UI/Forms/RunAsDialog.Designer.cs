@@ -133,7 +133,7 @@ partial class RunAsDialog
         _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _privilegeLevelComboBox.Size = new Size(200, 23);
         _privilegeLevelComboBox.Location = new Point(265, 295);
-        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Above Basic", "Basic", "Low Integrity" });
+        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Basic", "Isolated", "Low Integrity" });
 
         // _revertButton (shown when shortcutContext.IsAlreadyManaged && ManagedApp != null; position and anchor set in code)
         _revertButton.Text = "Revert Shortcut";

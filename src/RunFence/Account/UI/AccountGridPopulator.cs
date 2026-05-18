@@ -15,11 +15,12 @@ public record PopulateData(
     bool SortDescending);
 
 public class AccountGridPopulator(
-    IWindowsAccountService windowsAccountService,
+    IWindowsAccountQueryService windowsAccountQueryService,
     ILocalUserProvider localUserProvider,
     ILoggingService log,
     AccountGridSorter sorter,
-    AccountGridSupplementarySections supplementarySections)
+    AccountGridSupplementarySections supplementarySections,
+    AccountGridIconLifetimeManager iconLifetimeManager)
 {
     private DataGridView _grid = null!;
 
@@ -37,16 +38,14 @@ public class AccountGridPopulator(
             .Where(a => a.DeleteAfterUtc.HasValue)
             .ToDictionary(a => a.Sid, a => a, StringComparer.OrdinalIgnoreCase);
         var representedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var lockIcon = AccountGridHelper.CreateKeyIcon();
-
         var ephemeralCredRows = new List<CredentialEntry>();
         var ephemeralLocalRows = new List<LocalUserAccount>();
 
-        AddCredentialsSection(data, localAccounts, localSidSet, ephemeralLookup, representedSids, lockIcon, ephemeralCredRows);
-        AddLocalAccountsSection(data, localAccounts, ephemeralLookup, representedSids, ephemeralLocalRows, lockIcon);
-        supplementarySections.AddEphemeralSection(_grid, data, ephemeralCredRows, ephemeralLocalRows, ephemeralLookup, lockIcon);
+        AddCredentialsSection(data, localAccounts, localSidSet, ephemeralLookup, representedSids, ephemeralCredRows);
+        AddLocalAccountsSection(data, localAccounts, ephemeralLookup, representedSids, ephemeralLocalRows);
+        supplementarySections.AddEphemeralSection(_grid, data, ephemeralCredRows, ephemeralLocalRows, ephemeralLookup);
         supplementarySections.AddAppContainersSection(_grid, data.Database);
-        supplementarySections.AddUnavailableSection(_grid, data, localSidSet, representedSids, lockIcon, sorter);
+        supplementarySections.AddUnavailableSection(_grid, data, localSidSet, representedSids, sorter);
     }
 
     private IReadOnlyList<LocalUserAccount> GetLocalAccounts()
@@ -68,11 +67,10 @@ public class AccountGridPopulator(
         HashSet<string> localSidSet,
         Dictionary<string, AccountEntry> ephemeralLookup,
         HashSet<string> representedSids,
-        Image lockIcon,
         List<CredentialEntry> ephemeralCredRows)
     {
-        AccountGridHelper.AddGroupHeaderRow(_grid, "Credentials");
-        AddSystemRow(data, representedSids, lockIcon);
+        AccountGridHelper.AddGroupHeaderRow(_grid, iconLifetimeManager, "Credentials");
+        AddSystemRow(data, representedSids);
 
         // Interactive user with no stored credential: show in Credentials section regardless.
         // Pre-compute using the credential store directly (representedSids is not yet populated at this point).
@@ -91,7 +89,7 @@ public class AccountGridPopulator(
 
         void RenderSyntheticRow()
         {
-            AddSyntheticInteractiveUserRow(syntheticRow!.Value, lockIcon, data.Database, representedSids);
+            AddSyntheticInteractiveUserRow(syntheticRow!.Value, data.Database, representedSids);
             syntheticRendered = true;
         }
 
@@ -122,12 +120,12 @@ public class AccountGridPopulator(
                 displayName += " (interactive)";
 
             var accountRow = new AccountRow(cred, username, cred.Sid, hasStoredPassword);
-            Image credIcon = hasStoredPassword ? lockIcon : AccountGridHelper.EmptyIcon;
+            Image credIcon = hasStoredPassword ? AccountGridHelper.CreateKeyIcon() : AccountGridHelper.EmptyIcon;
             var appsText = supplementarySections.GetAppsText(data.Database, cred.Sid);
-            var profilePath = windowsAccountService.GetProfilePath(cred.Sid) ?? "";
+            var profilePath = windowsAccountQueryService.GetProfilePath(cred.Sid).ProfilePath ?? "";
             var logonValue = !isKnown || state.NoLogonState == false;
             var allowInternet = data.Database.GetAccount(cred.Sid)?.Firewall.AllowInternet ?? true;
-            var row = AccountGridHelper.AddAccountGridRow(_grid, accountRow, credIcon, displayName, logonValue, allowInternet, appsText, profilePath);
+            var row = AccountGridHelper.AddAccountGridRow(_grid, iconLifetimeManager, accountRow, credIcon, displayName, logonValue, allowInternet, appsText, profilePath);
             row.Cells["Credential"].ToolTipText = hasStoredPassword ? "Stored" : "No Password";
             row.Cells["Import"].ReadOnly = !canImport;
             row.Cells["Account"].ReadOnly = false;
@@ -163,20 +161,19 @@ public class AccountGridPopulator(
         var isKnown = localSidSet.Contains(sid);
         var canImport = SidResolutionHelper.CanLaunchWithoutPassword(sid);
         var appsText = supplementarySections.GetAppsText(data.Database, sid);
-        var profilePath = windowsAccountService.GetProfilePath(sid) ?? "";
+        var profilePath = windowsAccountQueryService.GetProfilePath(sid).ProfilePath ?? "";
         return new SyntheticInteractiveUserRow(sid, username, state, isKnown, canImport, appsText, profilePath);
     }
 
     private void AddSyntheticInteractiveUserRow(
         SyntheticInteractiveUserRow row,
-        Image lockIcon,
         AppDatabase database,
         HashSet<string> representedSids)
     {
         var logonValue = !row.IsKnown || row.State.NoLogonState == false;
         var allowInternet = database.GetAccount(row.Sid)?.Firewall.AllowInternet ?? true;
         var accountRow = new AccountRow(null, row.Username, row.Sid, false);
-        var gridRow = AccountGridHelper.AddAccountGridRow(_grid, accountRow, lockIcon,
+        var gridRow = AccountGridHelper.AddAccountGridRow(_grid, iconLifetimeManager, accountRow, AccountGridHelper.CreateKeyIcon(),
             row.Username + " (interactive)", logonValue, allowInternet, row.AppsText, row.ProfilePath);
         gridRow.Cells["Credential"].ToolTipText = "No Password";
         gridRow.Cells["Import"].ReadOnly = !row.CanImport;
@@ -190,13 +187,13 @@ public class AccountGridPopulator(
         representedSids.Add(row.Sid);
     }
 
-    private void AddSystemRow(PopulateData data, HashSet<string> representedSids, Image lockIcon)
+    private void AddSystemRow(PopulateData data, HashSet<string> representedSids)
     {
         var systemSid = Core.SidConstants.SystemSid;
         var allowInternet = data.Database.GetAccount(systemSid)?.Firewall.AllowInternet ?? true;
         var appsText = supplementarySections.GetAppsText(data.Database, systemSid);
         var systemAccountRow = new AccountRow(null, "SYSTEM", systemSid, hasStoredPassword: false);
-        var row = AccountGridHelper.AddAccountGridRow(_grid, systemAccountRow, lockIcon, "SYSTEM",
+        var row = AccountGridHelper.AddAccountGridRow(_grid, iconLifetimeManager, systemAccountRow, AccountGridHelper.CreateKeyIcon(), "SYSTEM",
             true, allowInternet, appsText, "");
         row.Cells["Credential"].ToolTipText = "System Account";
         row.Cells["Import"].ToolTipText = "Cannot import SYSTEM account";
@@ -214,8 +211,7 @@ public class AccountGridPopulator(
         IReadOnlyList<LocalUserAccount> localAccounts,
         Dictionary<string, AccountEntry> ephemeralLookup,
         HashSet<string> representedSids,
-        List<LocalUserAccount> ephemeralLocalRows,
-        Image lockIcon)
+        List<LocalUserAccount> ephemeralLocalRows)
     {
         var localOnlyAccounts = new List<LocalUserAccount>();
         foreach (var localUser in localAccounts.OrderBy(u => u.Username, StringComparer.OrdinalIgnoreCase))
@@ -236,18 +232,18 @@ public class AccountGridPopulator(
         if (localOnlyAccounts.Count == 0)
             return;
 
-        AccountGridHelper.AddGroupHeaderRow(_grid, "Local Accounts");
+        AccountGridHelper.AddGroupHeaderRow(_grid, iconLifetimeManager, "Local Accounts");
 
         foreach (var localUser in sorter.SortLocalAccounts(data, localOnlyAccounts))
         {
             var state = supplementarySections.LookupAccountState(localUser.Sid, localUser.Username, data.InteractiveUserSid);
             var accountRow = new AccountRow(null, localUser.Username, localUser.Sid, false);
             var localAppsText = supplementarySections.GetAppsText(data.Database, localUser.Sid);
-            var localProfilePath = windowsAccountService.GetProfilePath(localUser.Sid) ?? "";
+            var localProfilePath = windowsAccountQueryService.GetProfilePath(localUser.Sid).ProfilePath ?? "";
             var displayName = state.IsInteractive ? localUser.Username + " (interactive)" : localUser.Username;
             var localAllowInternet = data.Database.GetAccount(localUser.Sid)?.Firewall.AllowInternet ?? true;
-            Image localCredIcon = state.IsInteractive ? lockIcon : AccountGridHelper.EmptyIcon;
-            var row = AccountGridHelper.AddAccountGridRow(_grid, accountRow, localCredIcon, displayName,
+            Image localCredIcon = state.IsInteractive ? AccountGridHelper.CreateKeyIcon() : AccountGridHelper.EmptyIcon;
+            var row = AccountGridHelper.AddAccountGridRow(_grid, iconLifetimeManager, accountRow, localCredIcon, displayName,
                 state.NoLogonState == false, localAllowInternet, localAppsText, localProfilePath);
             row.Cells["Import"].ReadOnly = !state.IsInteractive;
             AccountGridSupplementarySections.SetLogonCellState(row, state);

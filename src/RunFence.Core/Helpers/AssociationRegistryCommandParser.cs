@@ -14,7 +14,7 @@ public static class AssociationRegistryCommandParser
     {
         if (string.IsNullOrEmpty(commandLine))
             return null;
-        return CommandLineHelper.SplitArgs(commandLine).FirstOrDefault();
+        return CommandLineHelper.ParseProcessCommandLine(commandLine).FirstOrDefault();
     }
 
     /// <summary>
@@ -38,7 +38,7 @@ public static class AssociationRegistryCommandParser
     {
         if (string.IsNullOrEmpty(commandLine))
             return null;
-        var remainder = CommandLineHelper.SkipArgs(commandLine, 1)?.Trim();
+        var remainder = CommandLineHelper.SliceVerbatimTail(commandLine, 1)?.Trim();
         return IsDefaultArgs(remainder) ? null : remainder;
     }
 }

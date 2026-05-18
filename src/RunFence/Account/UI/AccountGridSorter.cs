@@ -7,7 +7,7 @@ namespace RunFence.Account.UI;
 /// Extracted from AccountGridPopulator to separate the sorting responsibility.
 /// </summary>
 public class AccountGridSorter(
-    IWindowsAccountService windowsAccountService,
+    IWindowsAccountQueryService windowsAccountQueryService,
     IAccountAppsTextProvider appsTextProvider)
 {
     private DataGridView _grid = null!;
@@ -34,7 +34,7 @@ public class AccountGridSorter(
         Func<CredentialEntry, string> key = data.SortColumnIndex switch
         {
             var i when i == appsIdx && i >= 0 => c => appsTextProvider.GetAppsText(data.Database, c.Sid),
-            var i when i == profileIdx && i >= 0 => c => windowsAccountService.GetProfilePath(c.Sid) ?? "",
+            var i when i == profileIdx && i >= 0 => c => windowsAccountQueryService.GetProfilePath(c.Sid).ProfilePath ?? "",
             var i when i == sidIdx && i >= 0 => c => c.Sid,
             _ => c => data.DisplayNameCache.GetValueOrDefault(c.Id, "")
         };
@@ -52,7 +52,7 @@ public class AccountGridSorter(
         Func<LocalUserAccount, string> key = data.SortColumnIndex switch
         {
             var i when i == appsIdx && i >= 0 => u => appsTextProvider.GetAppsText(data.Database, u.Sid),
-            var i when i == profileIdx && i >= 0 => u => windowsAccountService.GetProfilePath(u.Sid) ?? "",
+            var i when i == profileIdx && i >= 0 => u => windowsAccountQueryService.GetProfilePath(u.Sid).ProfilePath ?? "",
             var i when i == sidIdx && i >= 0 => u => u.Sid,
             _ => u => u.Username
         };

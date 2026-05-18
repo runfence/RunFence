@@ -1,23 +1,24 @@
-using RunFence.Account.UI.Forms;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
 
 namespace RunFence.Account.UI;
 
-/// <summary>
-/// Encapsulates the OS mutation logic for saving an existing account's edit:
-/// rename, group changes, and account restrictions.
-/// Used exclusively by <see cref="EditAccountDialog"/> in edit mode.
-/// </summary>
 public class EditAccountDialogSaveHandler(
     IWindowsAccountService windowsAccountService,
-    ILocalGroupMembershipService groupMembership,
-    IAccountLoginRestrictionService loginRestriction,
+    ILocalGroupMutationService groupMembership,
     IAccountLsaRestrictionService lsaRestriction,
+    IAccountRestrictionCoordinator restrictionCoordinator,
     IAccountValidationService accountValidation,
     ILicenseService licenseService)
 {
+    public enum SaveAccountStatus
+    {
+        Saved,
+        SavedWithWarnings,
+        ValidationFailed
+    }
+
     public record SaveAccountRequest(
         string Sid,
         string CurrentUsername,
@@ -25,31 +26,20 @@ public class EditAccountDialogSaveHandler(
         List<string> GroupsToAdd,
         List<string> GroupsToRemove,
         string? AdminGroupSid,
-        /// <summary>New value to apply, or null if unchanged.</summary>
         bool? NewNetworkLogin,
-        /// <summary>New value to apply, or null if unchanged.</summary>
         bool? NewLogon,
-        /// <summary>New value to apply, or null if unchanged.</summary>
         bool? NewBgAutorun,
         int CurrentHiddenCount,
         bool? NoLogonState);
 
     public record SaveAccountResult(
-        /// <summary>Validation error that prevented save — show in status label, re-enable OK button.</summary>
+        SaveAccountStatus Status,
         string? ValidationError,
-        /// <summary>New username if renamed, or null if unchanged.</summary>
         string? NewUsername,
-        /// <summary>Non-fatal errors from individual OS mutations.</summary>
         List<string> Errors);
 
-    /// <summary>
-    /// Applies OS mutations for an edit-mode save. Validates admin group removal first.
-    /// Returns a result; check <see cref="SaveAccountResult.ValidationError"/> to determine
-    /// if the dialog should stay open.
-    /// </summary>
     public SaveAccountResult Execute(SaveAccountRequest request)
     {
-        // Validate admin group removal before any OS mutations
         if (request.AdminGroupSid != null && request.GroupsToRemove.Contains(request.AdminGroupSid))
         {
             try
@@ -59,14 +49,12 @@ public class EditAccountDialogSaveHandler(
             }
             catch (InvalidOperationException ex)
             {
-                return new SaveAccountResult(ex.Message, null, []);
+                return new SaveAccountResult(SaveAccountStatus.ValidationFailed, ex.Message, null, []);
             }
         }
 
         var errors = new List<string>();
         var effectiveName = request.CurrentUsername;
-
-        // Rename if changed
         var nameChanged = !string.Equals(request.NewName, request.CurrentUsername, StringComparison.OrdinalIgnoreCase);
         if (nameChanged)
         {
@@ -77,15 +65,10 @@ public class EditAccountDialogSaveHandler(
             }
             catch (Exception ex)
             {
-                return new SaveAccountResult(ex.Message, null, []);
+                return new SaveAccountResult(SaveAccountStatus.ValidationFailed, ex.Message, null, []);
             }
         }
 
-        // Note: OS mutations below (group changes, restrictions) are applied as independent operations.
-        // Partial success is by design — failures are collected in Errors and shown to the user after
-        // the dialog closes, rather than rolling back successful operations. Rollback would require
-        // tracking every change made, which adds complexity with little practical benefit given that
-        // these are non-destructive OS settings that can be manually corrected.
         if (request.GroupsToAdd.Count > 0)
         {
             try
@@ -110,52 +93,32 @@ public class EditAccountDialogSaveHandler(
             }
         }
 
-        // Restrictions — only apply if explicitly changed from initial state (null = not changed).
-        if (request.NewNetworkLogin.HasValue)
+        var hasRestrictionChange = request.NewNetworkLogin.HasValue || request.NewLogon.HasValue || request.NewBgAutorun.HasValue;
+        if (hasRestrictionChange)
         {
-            try
-            {
-                lsaRestriction.SetLocalOnlyBySid(request.Sid, localOnly: !request.NewNetworkLogin.Value);
-            }
-            catch (Exception ex)
-            {
-                errors.Add($"Network Login: {ex.Message}");
-            }
-        }
+            var currentNetworkAllowed = lsaRestriction.GetLocalOnlyState(request.Sid) != true;
+            var currentBgAutorunAllowed = lsaRestriction.GetNoBgAutostartState(request.Sid) != true;
+            var currentLogonAllowed = request.NoLogonState != true;
+            var targetLogonAllowed = request.NewLogon ?? currentLogonAllowed;
+            var canBlockLogon = targetLogonAllowed || request.NoLogonState == true ||
+                                licenseService.CanHideAccount(request.CurrentHiddenCount);
 
-        if (request.NewLogon.HasValue)
-        {
-            var settingBlocked = !request.NewLogon.Value;
-            if (settingBlocked && request.NoLogonState != true
-                               && !licenseService.CanHideAccount(request.CurrentHiddenCount))
+            if (!targetLogonAllowed && !canBlockLogon)
             {
                 errors.Add(licenseService.GetRestrictionMessage(EvaluationFeature.HiddenAccounts, request.CurrentHiddenCount)!);
             }
-            else
-            {
-                try
-                {
-                    loginRestriction.SetLoginBlockedBySid(request.Sid, effectiveName, blocked: settingBlocked);
-                }
-                catch (Exception ex)
-                {
-                    errors.Add($"Logon: {ex.Message}");
-                }
-            }
+
+            var restrictionResult = restrictionCoordinator.ApplyRestrictions(
+                request.Sid,
+                effectiveName,
+                logonBlocked: !targetLogonAllowed && canBlockLogon,
+                networkLoginBlocked: !(request.NewNetworkLogin ?? currentNetworkAllowed),
+                backgroundAutorunBlocked: !(request.NewBgAutorun ?? currentBgAutorunAllowed));
+            foreach (var entry in restrictionResult.Entries.Where(e => e.Status != AccountRestrictionStatus.Succeeded))
+                errors.Add(AccountRestrictionEntryFormatter.Format(entry));
         }
 
-        if (request.NewBgAutorun.HasValue)
-        {
-            try
-            {
-                lsaRestriction.SetNoBgAutostartBySid(request.Sid, blocked: !request.NewBgAutorun.Value);
-            }
-            catch (Exception ex)
-            {
-                errors.Add($"Bg Autorun: {ex.Message}");
-            }
-        }
-
-        return new SaveAccountResult(null, nameChanged ? effectiveName : null, errors);
+        var status = errors.Count == 0 ? SaveAccountStatus.Saved : SaveAccountStatus.SavedWithWarnings;
+        return new SaveAccountResult(status, null, nameChanged ? effectiveName : null, errors);
     }
 }

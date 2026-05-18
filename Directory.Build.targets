@@ -14,7 +14,7 @@
     <PropertyGroup>
         <_SigningPfxPath>$(MSBuildThisFileDirectory)..\RunFence.Private\codesign.pfx</_SigningPfxPath>
 
-        <SigningCertPassword Condition="'$(SigningCertPassword)' == ''">$(RUNASMGR_SIGN_PASSWORD)</SigningCertPassword>
+        <SigningCertPassword Condition="'$(SigningCertPassword)' == ''">$(RUNFENCE_SIGN_PASSWORD)</SigningCertPassword>
         <SigningTimestampUrl Condition="'$(SigningTimestampUrl)' == ''">http://timestamp.digicert.com</SigningTimestampUrl>
 
         <!-- signtool.exe resolution: explicit property → SIGNTOOL_PATH env → Windows SDK bin → NuGet package (see ItemGroup below) -->
@@ -59,15 +59,6 @@
         </PropertyGroup>
         <Error Condition="'$(SignToolPath)' == ''"
                Text="signtool.exe not found. Set SIGNTOOL_PATH or install Windows SDK Signing Tools."/>
-    </Target>
-
-    <Target Name="KillOutputProcesses" BeforeTargets="Build">
-        <PropertyGroup>
-            <_KillScript>Get-Process | ForEach-Object { try { if ($_.MainModule.FileName -like '$(TargetDir)*') { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue } } catch {} }</_KillScript>
-        </PropertyGroup>
-        <MakeDir Directories="$(IntermediateOutputPath)" />
-        <WriteLinesToFile File="$(IntermediateOutputPath)kill-output.ps1" Lines="$(_KillScript)" Overwrite="true" />
-        <Exec Command="powershell -NonInteractive -ExecutionPolicy Bypass -File &quot;$(IntermediateOutputPath)kill-output.ps1&quot;" IgnoreExitCode="true" />
     </Target>
 
     <Target Name="SignOutput" AfterTargets="Build" Condition="'$(_SigningEnabled)' == 'true'">

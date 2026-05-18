@@ -2,6 +2,7 @@ namespace RunFence.Persistence.UI;
 
 public interface IConfigManagementContext
 {
-    (bool success, string? errorMessage) LoadApps(string configPath);
+    LoadAppsResult LoadApps(string configPath);
+    LoadAppsResult LoadAppConfigBackup(string configPath);
     bool UnloadApps(string configPath);
 }

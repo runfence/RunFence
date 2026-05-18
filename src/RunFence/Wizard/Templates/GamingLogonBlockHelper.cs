@@ -2,6 +2,11 @@ using RunFence.Account;
 
 namespace RunFence.Wizard.Templates;
 
+public interface IGamingLogonBlockHelper
+{
+    void CheckAndPromptLogonUnblock(string sid, string username, IWin32Window? owner, IWizardProgressReporter progress);
+}
+
 /// <summary>
 /// Checks whether a gaming account's logon is blocked and prompts the user to enable it
 /// if needed. Gaming account setup requires interactive logon (Win+L) to install games.
@@ -9,6 +14,7 @@ namespace RunFence.Wizard.Templates;
 public class GamingLogonBlockHelper(
     IAccountLoginRestrictionService accountRestriction,
     IAccountToggleService accountToggle)
+    : IGamingLogonBlockHelper
 {
     /// <summary>
     /// Checks if the account's logon is blocked and, if so, prompts the user to enable it.

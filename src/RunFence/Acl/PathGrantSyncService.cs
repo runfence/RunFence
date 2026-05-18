@@ -3,23 +3,33 @@ using System.Security.Principal;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Persistence;
+using RunFence.Acl.Traverse;
 
 namespace RunFence.Acl;
 
 /// <summary>
 /// Synchronizes grant DB entries with NTFS state. Reads ACEs from the NTFS ACL for a given
-/// path and creates or updates matching <see cref="GrantedPathEntry"/> records in the database.
+/// path and creates or updates matching <see cref="GrantedPathEntry"/> records in tracked
+/// runtime/config intent state.
 /// </summary>
 public class PathGrantSyncService(
     UiThreadDatabaseAccessor dbAccessor,
     IGrantAceService grantAceService,
+    Func<IGrantIntentStoreProvider> grantIntentStoreProvider,
+    Func<IGrantIntentRepository> grantIntentRepository,
     ILoggingService log,
-    IFileSystemPathInfo pathInfo) : IGrantSyncService
+    IFileSystemPathInfo pathInfo,
+    ITraverseGrantOwnerResolver ownerResolver) : IGrantSyncService
 {
+    private IGrantIntentStoreProvider GrantIntentStoreProvider => grantIntentStoreProvider();
+
+    private IGrantIntentRepository GrantIntentRepository => grantIntentRepository();
+
     /// <summary>
     /// Reads actual NTFS ACEs for <paramref name="path"/> for a specific <paramref name="sid"/>
     /// (or all local-user SIDs if null). For each discovered ACE, creates or updates a matching
-    /// <see cref="GrantedPathEntry"/> in the DB. Traverse-only ACEs produce
+    /// <see cref="GrantedPathEntry"/> in tracked runtime/config intent state. Traverse-only ACEs produce
     /// <see cref="GrantedPathEntry.IsTraverseOnly"/> entries. Returns true if any DB entry was
     /// added or updated.
     /// </summary>
@@ -90,7 +100,7 @@ public class PathGrantSyncService(
 
     private bool UpdateGrantEntryFromPath(string sid, string path, bool isDeny, SavedRightsState rights)
     {
-        return dbAccessor.Write(database =>
+        var (modified, entry) = dbAccessor.Write(database =>
         {
             var grants = database.GetOrCreateAccount(sid).Grants;
             var entry = GrantCoreOperations.FindGrantEntryInList(grants, path, isDeny);
@@ -99,33 +109,42 @@ public class PathGrantSyncService(
                 if (entry.SavedRights != rights)
                 {
                     entry.SavedRights = rights;
-                    return true;
+                    return (true, entry);
                 }
-                return false;
+
+                return (false, entry);
             }
-            grants.Add(new GrantedPathEntry { Path = path, IsDeny = isDeny, SavedRights = rights });
-            return true;
+
+            entry = new GrantedPathEntry { Path = path, IsDeny = isDeny, SavedRights = rights };
+            grants.Add(entry);
+            return (true, entry);
         });
+
+        bool alreadyTrackedInMain = IsTrackedInMainConfig(sid, entry);
+        if (!alreadyTrackedInMain)
+            EnsureMainStoreMembership(sid, entry);
+        return modified || !alreadyTrackedInMain;
     }
 
     private bool UpdateTraverseEntryFromPath(string sid, string path)
     {
-        return dbAccessor.Write(database =>
+        var ownerSid = ownerResolver.ResolveStorageOwnerSid(sid);
+        var (modified, entry) = dbAccessor.Write(database =>
         {
-            if (string.Equals(sid, AclHelper.AllApplicationPackagesSid, StringComparison.OrdinalIgnoreCase) &&
-                database.SharedContainerTraverseGrants.Any(e =>
-                    e.IsTraverseOnly &&
-                    string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase)))
-                return false;
+            var existing = ownerResolver.FindTraverseEntry(database, ownerSid, path);
+            if (existing != null)
+                return (false, existing);
 
-            if (TraverseCoreOperations.FindTraverseEntryInDb(database, sid, path) != null)
-                return false;
-            var grants = string.Equals(sid, AclHelper.AllApplicationPackagesSid, StringComparison.OrdinalIgnoreCase)
-                ? database.SharedContainerTraverseGrants
-                : database.GetOrCreateAccount(sid).Grants;
-            grants.Add(new GrantedPathEntry { Path = path, IsTraverseOnly = true });
-            return true;
+            var grants = database.GetOrCreateAccount(ownerSid).Grants;
+            var entry = new GrantedPathEntry { Path = path, IsTraverseOnly = true };
+            grants.Add(entry);
+            return (true, entry);
         });
+
+        bool alreadyTrackedInMain = IsTrackedInMainConfig(ownerSid, entry);
+        if (!alreadyTrackedInMain)
+            EnsureMainStoreMembership(ownerSid, entry);
+        return modified || !alreadyTrackedInMain;
     }
 
     private readonly record struct AceAccumulator(
@@ -135,4 +154,23 @@ public class PathGrantSyncService(
         bool IsAdminOwner = false);
 
     private static readonly GrantPathKeyComparer SidDenyKeyComparer = new();
+
+    private bool IsTrackedInMainConfig(string ownerSid, GrantedPathEntry entry)
+    {
+        var locations = FindLocations(ownerSid, entry);
+        return locations.Any(location => location.Store.ConfigPath == null);
+    }
+
+    private void EnsureMainStoreMembership(string ownerSid, GrantedPathEntry entry)
+    {
+        if (IsTrackedInMainConfig(ownerSid, entry))
+            return;
+
+        GrantIntentStoreProvider.MainStore.AddEntry(ownerSid, entry);
+    }
+
+    private IReadOnlyList<GrantIntentLocation> FindLocations(string ownerSid, GrantedPathEntry entry)
+        => entry.IsTraverseOnly
+            ? GrantIntentRepository.FindTraverseLocations(ownerSid, entry)
+            : GrantIntentRepository.FindGrantLocations(ownerSid, entry);
 }

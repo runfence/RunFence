@@ -1,3 +1,4 @@
+using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Acl;
 using RunFence.Apps;
@@ -25,6 +26,18 @@ public class WizardTemplateExecutor(
     SessionContext session,
     WizardLicenseChecker licenseChecker)
 {
+    public WizardExecutionPlan BuildExecutionPlan(WizardStandardFlowParams flowParams, string resolvedSid)
+    {
+        var options = flowParams.BuildOptionsFactory?.Invoke(resolvedSid) ?? [];
+        var snapshot = options.ToList().AsReadOnly();
+        return new WizardExecutionPlan(
+            resolvedSid,
+            snapshot,
+            flowParams.PreEnforcementAction != null,
+            flowParams.PostEnforcementAction != null,
+            flowParams.CreateDesktopShortcut);
+    }
+
     /// <summary>
     /// Executes the standard wizard flow:
     /// <list type="number">
@@ -37,11 +50,13 @@ public class WizardTemplateExecutor(
     /// <item>Session save.</item>
     /// </list>
     /// Steps are skipped when the corresponding parameter is null or empty.
-    /// Returns early (without saving) only on fatal errors (account creation failure).
+    /// Returns early (without saving) on critical pre-app failures such as credential-license denial
+    /// or account creation failure. Non-critical per-app failures are reported and do not stop later app actions.
     /// </summary>
     public async Task ExecuteAsync(WizardStandardFlowParams flowParams, IWizardProgressReporter progress)
     {
         string sid;
+        CreateAccountResult? createdAccount = null;
 
         if (flowParams.Request != null)
         {
@@ -53,43 +68,34 @@ public class WizardTemplateExecutor(
             }
 
             // Account creation
-            var result = await Task.Run(() => createHandler.Execute(flowParams.Request));
-            if (result == null)
+            createdAccount = await Task.Run(() => createHandler.Execute(flowParams.Request));
+            if (createdAccount.Status != CreateAccountStatus.Succeeded)
             {
-                progress.ReportError(createHandler.LastValidationError ?? "Account creation failed.");
+                progress.ReportError(createdAccount.ErrorMessage ?? createHandler.LastValidationError ?? "Account creation failed.");
                 return;
             }
 
-            foreach (var err in result.Errors)
+            var restrictionEntriesToReport = ShouldReportRestrictionEntries(createdAccount.RestrictionEntries)
+                ? createdAccount.RestrictionEntries!
+                : [];
+            var restrictionFailureMessages = restrictionEntriesToReport
+                .Where(e => e.Status != AccountRestrictionStatus.Succeeded)
+                .Select(AccountRestrictionEntryFormatter.Format)
+                .ToHashSet(StringComparer.Ordinal);
+
+            foreach (var err in createdAccount.Errors.Where(err => !restrictionFailureMessages.Contains(err)))
                 progress.ReportError(err);
 
-            sid = result.Sid;
-
-            // Post-creation setup
-            try
+            foreach (var entry in restrictionEntriesToReport)
             {
-                if (flowParams.SetupOptions != null)
-                {
-                    var setupRequest = new WizardAccountSetupHelper.SetupRequest(
-                        Sid: sid,
-                        Username: result.Username,
-                        Password: result.Password,
-                        StoreCredential: flowParams.SetupOptions.StoreCredential,
-                        IsEphemeral: flowParams.SetupOptions.IsEphemeral,
-                        PrivilegeLevel: flowParams.SetupOptions.PrivilegeLevel,
-                        FirewallSettings: flowParams.SetupOptions.FirewallSettings,
-                        DesktopSettingsPath: flowParams.SetupOptions.DesktopSettingsPath,
-                        InstallPackages: flowParams.SetupOptions.InstallPackages,
-                        TrayTerminal: flowParams.SetupOptions.TrayTerminal);
+                var message = AccountRestrictionEntryFormatter.Format(entry);
+                if (entry.Status == AccountRestrictionStatus.Succeeded)
+                    progress.ReportStatus(message);
+                else
+                    progress.ReportError(message);
+            }
 
-                    var setupHelper = setupHelperFactory.Create(session);
-                    await setupHelper.SetupAsync(setupRequest, progress);
-                }
-            }
-            finally
-            {
-                result.Password.Dispose();
-            }
+            sid = createdAccount.Sid;
         }
         else
         {
@@ -97,33 +103,14 @@ public class WizardTemplateExecutor(
             sid = flowParams.AccountSid ?? string.Empty;
         }
 
-        // Resolve the list of app entries to build (factory called with the resolved SID)
-        var buildOptionsList = flowParams.BuildOptionsFactory?.Invoke(sid);
-
-        // Pre-enforcement hook (folder grants, etc.)
-        if (flowParams.PreEnforcementAction != null && !string.IsNullOrEmpty(sid))
+        try
         {
-            try
+            var executionPlan = BuildExecutionPlan(flowParams, sid);
+            var createdApps = new List<AppEntry>();
+            foreach (var opts in executionPlan.AppBuildOptions)
             {
-                await flowParams.PreEnforcementAction(session, sid);
-            }
-            catch (Exception ex)
-            {
-                progress.ReportError($"Pre-enforcement action: {ex.Message}");
-            }
-        }
-
-        // App entry build and enforcement
-        var createdApps = new List<AppEntry>();
-        if (buildOptionsList is { Count: > 0 })
-        {
-            ShortcutTraversalCache? shortcutCache = null;
-            HashSet<string>? managedSids = null;
-            foreach (var opts in buildOptionsList)
-            {
-                // Per-entry license check (app count grows as entries are added)
                 if (!licenseChecker.CheckCanAddApp(session, progress))
-                    break;
+                    continue;
 
                 progress.ReportStatus($"Creating app entry for {opts.Name}...");
                 try
@@ -131,22 +118,6 @@ public class WizardTemplateExecutor(
                     var app = appEntryBuilder.Build(opts with { ExistingApps = session.Database.Apps });
                     session.Database.Apps.Add(app);
                     createdApps.Add(app);
-
-                    // Capture managed SIDs on the UI thread before entering Task.Run to avoid
-                    // accessing the live database from the thread pool.
-                    if (app.ManageShortcuts && shortcutCache == null)
-                        managedSids ??= shortcutDiscovery.CaptureManagedSids();
-
-                    var capturedManagedSids = managedSids;
-                    await Task.Run(() =>
-                    {
-                        var appShortcutCache = app.ManageShortcuts
-                            ? shortcutCache ??= shortcutDiscovery.CreateTraversalCache(capturedManagedSids)
-                            : new ShortcutTraversalCache([]);
-                        enforcementHelper.ApplyChanges(app, session.Database.Apps, appShortcutCache);
-                        if (flowParams.CreateDesktopShortcut)
-                            enforcementHelper.CreateDesktopShortcut(app);
-                    });
                 }
                 catch (Exception ex)
                 {
@@ -155,33 +126,115 @@ public class WizardTemplateExecutor(
             }
 
             if (createdApps.Count > 0)
+                sessionSaver.SaveConfig();
+            else if (flowParams.Request == null && !string.IsNullOrEmpty(sid))
+                sessionSaver.SaveConfig();
+
+            if (createdAccount != null)
             {
-                progress.ReportStatus("Applying ACLs...");
+                if (flowParams.SetupOptions != null)
+                {
+                    if (createdAccount.Password == null)
+                    {
+                        progress.ReportError("Account creation did not return a password for post-creation setup.");
+                        return;
+                    }
+
+                    var setupRequest = new WizardAccountSetupHelper.SetupRequest(
+                        Sid: sid,
+                        Username: createdAccount.Username,
+                        Password: createdAccount.Password,
+                        StoreCredential: flowParams.SetupOptions.StoreCredential,
+                        IsEphemeral: flowParams.SetupOptions.IsEphemeral,
+                        PrivilegeLevel: flowParams.SetupOptions.PrivilegeLevel,
+                        FirewallSettings: flowParams.SetupOptions.FirewallSettings,
+                        DesktopSettingsPath: flowParams.SetupOptions.DesktopSettingsPath,
+                        InstallPackages: flowParams.SetupOptions.InstallPackages,
+                        TrayTerminal: flowParams.SetupOptions.TrayTerminal,
+                        WaitForInstallPackages: flowParams.SetupOptions.WaitForInstallPackages);
+
+                    var setupHelper = setupHelperFactory.Create(session);
+                    await setupHelper.SetupAsync(setupRequest, progress);
+                }
+            }
+
+            // Pre-enforcement hook (folder grants, etc.)
+            if (flowParams.PreEnforcementAction != null && !string.IsNullOrEmpty(sid))
+            {
                 try
                 {
-                    await Task.Run(() => aclService.RecomputeAllAncestorAcls(session.Database.Apps));
+                    await flowParams.PreEnforcementAction(session, sid);
                 }
                 catch (Exception ex)
                 {
-                    progress.ReportError($"ACL recompute: {ex.Message}");
+                    progress.ReportError($"Pre-enforcement action: {ex.Message}");
                 }
             }
-        }
 
-        // Post-enforcement hook (handler registration, etc.)
-        if (flowParams.PostEnforcementAction != null && createdApps.Count > 0)
+            // App entry build and enforcement
+            if (createdApps.Count > 0)
+            {
+                ShortcutTraversalCache? shortcutCache = null;
+                HashSet<string>? managedSids = null;
+                foreach (var app in createdApps)
+                {
+                    try
+                    {
+                        if (app.ManageShortcuts && shortcutCache == null)
+                            managedSids ??= shortcutDiscovery.CaptureManagedSids();
+
+                        var capturedManagedSids = managedSids;
+                        await Task.Run(() =>
+                        {
+                            var appShortcutCache = app.ManageShortcuts
+                                ? shortcutCache ??= shortcutDiscovery.CreateTraversalCache(capturedManagedSids)
+                                : new ShortcutTraversalCache([]);
+                            enforcementHelper.ApplyChanges(app, session.Database.Apps, appShortcutCache);
+                            if (executionPlan.CreateDesktopShortcut)
+                                enforcementHelper.CreateDesktopShortcut(app);
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        progress.ReportError($"App entry for {app.Name}: {ex.Message}");
+                    }
+                }
+
+                if (createdApps.Count > 0)
+                {
+                    progress.ReportStatus("Applying ACLs...");
+                    try
+                    {
+                        await Task.Run(() => aclService.RecomputeAllAncestorAcls(session.Database.Apps));
+                    }
+                    catch (Exception ex)
+                    {
+                        progress.ReportError($"ACL recompute: {ex.Message}");
+                    }
+                }
+            }
+
+            if (flowParams.PostEnforcementAction != null && createdApps.Count > 0)
+            {
+                try
+                {
+                    await flowParams.PostEnforcementAction(session, createdApps.AsReadOnly());
+                }
+                catch (Exception ex)
+                {
+                    progress.ReportError($"Post-enforcement action: {ex.Message}");
+                }
+            }
+
+            progress.ReportStatus("Done.");
+            sessionSaver.SaveAndRefresh();
+        }
+        finally
         {
-            try
-            {
-                await flowParams.PostEnforcementAction(session, createdApps.AsReadOnly());
-            }
-            catch (Exception ex)
-            {
-                progress.ReportError($"Post-enforcement action: {ex.Message}");
-            }
+            createdAccount?.Password?.Dispose();
         }
-
-        progress.ReportStatus("Done.");
-        sessionSaver.SaveAndRefresh();
     }
+
+    private static bool ShouldReportRestrictionEntries(IReadOnlyList<AccountRestrictionEntry>? entries) =>
+        entries is { Count: > 0 } && entries.Any(entry => entry.Status != AccountRestrictionStatus.Succeeded);
 }

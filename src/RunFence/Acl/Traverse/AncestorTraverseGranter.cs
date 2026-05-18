@@ -109,17 +109,10 @@ public class AncestorTraverseGranter(
     /// </summary>
     public void RemoveAce(string dirPath, SecurityIdentifier identity)
     {
-        try
+        if (traverseAcl.HasExplicitTraverseAceOrThrow(dirPath, identity))
         {
-            if (traverseAcl.HasExplicitTraverseAce(dirPath, identity))
-            {
-                traverseAcl.RemoveTraverseOnlyAce(dirPath, identity);
-                log.Info($"Removed traverse ACE on '{dirPath}'");
-            }
-        }
-        catch (Exception ex)
-        {
-            log.Warn($"Failed to remove traverse ACE on '{dirPath}': {ex.Message}");
+            traverseAcl.RemoveTraverseOnlyAce(dirPath, identity);
+            log.Info($"Removed traverse ACE on '{dirPath}'");
         }
     }
 

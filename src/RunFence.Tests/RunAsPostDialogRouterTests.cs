@@ -40,7 +40,7 @@ public class RunAsPostDialogRouterTests
             SelectedContainer: null,
             PermissionGrant: null,
             CreateAppEntryOnly: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             UpdateOriginalShortcut: false,
             RevertShortcutRequested: false,
             EditExistingApp: null,
@@ -52,7 +52,7 @@ public class RunAsPostDialogRouterTests
             SelectedContainer: container,
             PermissionGrant: null,
             CreateAppEntryOnly: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             UpdateOriginalShortcut: false,
             RevertShortcutRequested: false,
             EditExistingApp: null,
@@ -64,7 +64,7 @@ public class RunAsPostDialogRouterTests
             SelectedContainer: null,
             PermissionGrant: null,
             CreateAppEntryOnly: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             UpdateOriginalShortcut: false,
             RevertShortcutRequested: true,
             EditExistingApp: null,
@@ -74,20 +74,20 @@ public class RunAsPostDialogRouterTests
 
     private static RunAsDialogResult MakeEmptyCapturedResult() =>
         new(Credential: null, SelectedContainer: null, PermissionGrant: null,
-            CreateAppEntryOnly: false, PrivilegeLevel: PrivilegeLevel.Basic,
+            CreateAppEntryOnly: false, PrivilegeLevel: PrivilegeLevel.Isolated,
             UpdateOriginalShortcut: false, RevertShortcutRequested: false,
             EditExistingApp: null, ExistingAppForLaunch: null);
 
     // ── DialogResult.Cancel ──────────────────────────────────────────────────
 
     [Fact]
-    public void Route_DialogResultCancel_ReturnsEmptyResult()
+    public async Task Route_DialogResultCancel_ReturnsEmptyResult()
     {
         // Arrange
         var capturedResult = MakeCredentialResult();
 
         // Act
-        var result = _router.Route(DialogResult.Cancel, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.Cancel, capturedResult,
             createNewAccountRequested: false, createNewContainerRequested: false,
             FilePath, EmptyCredentials());
 
@@ -97,10 +97,10 @@ public class RunAsPostDialogRouterTests
     }
 
     [Fact]
-    public void Route_NullCapturedResult_ReturnsEmptyResult()
+    public async Task Route_NullCapturedResult_ReturnsEmptyResult()
     {
         // Act
-        var result = _router.Route(DialogResult.OK, null,
+        var result = await _router.RouteAsync(DialogResult.OK, null,
             createNewAccountRequested: false, createNewContainerRequested: false,
             FilePath, EmptyCredentials());
 
@@ -112,13 +112,13 @@ public class RunAsPostDialogRouterTests
     // ── RevertShortcutRequested ──────────────────────────────────────────────
 
     [Fact]
-    public void Route_RevertShortcutRequested_ReturnsCapturedResultDirectly()
+    public async Task Route_RevertShortcutRequested_ReturnsCapturedResultDirectly()
     {
         // Arrange
         var capturedResult = MakeRevertResult();
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: false, createNewContainerRequested: false,
             FilePath, EmptyCredentials());
 
@@ -130,14 +130,14 @@ public class RunAsPostDialogRouterTests
     // ── SelectedContainer already set ────────────────────────────────────────
 
     [Fact]
-    public void Route_SelectedContainerAlreadySet_ReturnsCapturedResultDirectly()
+    public async Task Route_SelectedContainerAlreadySet_ReturnsCapturedResultDirectly()
     {
         // Arrange
         var container = new AppContainerEntry { Name = "TestContainer" };
         var capturedResult = MakeContainerResult(container);
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: false, createNewContainerRequested: false,
             FilePath, EmptyCredentials());
 
@@ -149,14 +149,14 @@ public class RunAsPostDialogRouterTests
     // ── Existing credential selected ─────────────────────────────────────────
 
     [Fact]
-    public void Route_ExistingCredentialSelected_ReturnsCapturedResult()
+    public async Task Route_ExistingCredentialSelected_ReturnsCapturedResult()
     {
         // Arrange
         var credential = new CredentialEntry { Sid = TestSid };
         var capturedResult = MakeCredentialResult(credential);
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: false, createNewContainerRequested: false,
             FilePath, EmptyCredentials());
 
@@ -166,13 +166,13 @@ public class RunAsPostDialogRouterTests
     }
 
     [Fact]
-    public void Route_NullCredentialAndNoNewAccountOrContainer_ReturnsEmpty()
+    public async Task Route_NullCredentialAndNoNewAccountOrContainer_ReturnsEmpty()
     {
         // Arrange — result with no credential, no container, no new account
         var capturedResult = MakeEmptyCapturedResult();
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: false, createNewContainerRequested: false,
             FilePath, EmptyCredentials());
 
@@ -184,7 +184,7 @@ public class RunAsPostDialogRouterTests
     // ── CreateNewAccount: license guard ──────────────────────────────────────
 
     [Fact]
-    public void Route_CreateNewAccountRequested_LicenseLimitExceeded_ReturnsEmptyWithoutAccountCreation()
+    public async Task Route_CreateNewAccountRequested_LicenseLimitExceeded_ReturnsEmptyWithoutAccountCreation()
     {
         // Arrange — license check fails before CreateNewAccount is called
         _evaluationLimitHelper.Setup(e => e.CheckCredentialLimit(
@@ -194,7 +194,7 @@ public class RunAsPostDialogRouterTests
         var capturedResult = MakeEmptyCapturedResult();
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: true, createNewContainerRequested: false,
             FilePath, EmptyCredentials());
 
@@ -202,26 +202,25 @@ public class RunAsPostDialogRouterTests
         Assert.Null(result.Credential);
         Assert.Null(result.SelectedContainer);
         _userAccountCreator.Verify(
-            x => x.CreateNewAccount(It.IsAny<string>(), out It.Ref<AncestorPermissionResult?>.IsAny),
+            x => x.CreateNewAccountAsync(It.IsAny<string>()),
             Times.Never);
     }
 
     [Fact]
-    public void Route_CreateNewAccountRequested_LicenseOk_AccountCreationCancelled_ReturnsEmpty()
+    public async Task Route_CreateNewAccountRequested_LicenseOk_AccountCreationCancelled_ReturnsEmpty()
     {
         // Arrange — license check passes, but account creation is cancelled by user
         _evaluationLimitHelper.Setup(e => e.CheckCredentialLimit(
             It.IsAny<List<CredentialEntry>>(), It.IsAny<IWin32Window?>(), It.IsAny<string?>()))
             .Returns(true);
-        AncestorPermissionResult? outGrant = null;
         _userAccountCreator
-            .Setup(x => x.CreateNewAccount(It.IsAny<string>(), out outGrant))
-            .Returns((CredentialEntry?)null);
+            .Setup(x => x.CreateNewAccountAsync(It.IsAny<string>()))
+            .ReturnsAsync((RunAsCreatedAccountResult?)null);
 
         var capturedResult = MakeEmptyCapturedResult();
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: true, createNewContainerRequested: false,
             FilePath, EmptyCredentials());
 
@@ -229,14 +228,40 @@ public class RunAsPostDialogRouterTests
         Assert.Null(result.Credential);
         Assert.Null(result.SelectedContainer);
         _userAccountCreator.Verify(
-            x => x.CreateNewAccount(It.IsAny<string>(), out It.Ref<AncestorPermissionResult?>.IsAny),
+            x => x.CreateNewAccountAsync(It.IsAny<string>()),
             Times.Once);
     }
 
     // ── CreateNewContainer ────────────────────────────────────────────────────
 
     [Fact]
-    public void Route_CreateNewContainerRequested_CreatesContainerAndReturnsItInResult()
+    public async Task Route_CreateNewAccountRequested_LicenseOk_ReturnsCreatedCredentialAndGrant()
+    {
+        _evaluationLimitHelper.Setup(e => e.CheckCredentialLimit(
+            It.IsAny<List<CredentialEntry>>(), It.IsAny<IWin32Window?>(), It.IsAny<string?>()))
+            .Returns(true);
+        var credential = new CredentialEntry { Sid = TestSid };
+        var grant = new AncestorPermissionResult(
+            @"C:\Apps",
+            System.Security.AccessControl.FileSystemRights.ReadAndExecute);
+        _userAccountCreator
+            .Setup(x => x.CreateNewAccountAsync(FilePath))
+            .ReturnsAsync(new RunAsCreatedAccountResult(credential, grant));
+
+        var capturedResult = MakeEmptyCapturedResult();
+
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
+            createNewAccountRequested: true, createNewContainerRequested: false,
+            FilePath, EmptyCredentials());
+
+        Assert.Same(credential, result.Credential);
+        Assert.Same(grant, result.PermissionGrant);
+        Assert.Null(result.SelectedContainer);
+        _userAccountCreator.Verify(x => x.CreateNewAccountAsync(FilePath), Times.Once);
+    }
+
+    [Fact]
+    public async Task Route_CreateNewContainerRequested_CreatesContainerAndReturnsItInResult()
     {
         // Arrange
         var newContainer = new AppContainerEntry { Name = "NewContainer" };
@@ -245,7 +270,7 @@ public class RunAsPostDialogRouterTests
         var capturedResult = MakeEmptyCapturedResult();
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: false, createNewContainerRequested: true,
             FilePath, EmptyCredentials());
 
@@ -256,7 +281,7 @@ public class RunAsPostDialogRouterTests
     }
 
     [Fact]
-    public void Route_CreateNewContainerRequested_ContainerCreationCancelled_ReturnsEmpty()
+    public async Task Route_CreateNewContainerRequested_ContainerCreationCancelled_ReturnsEmpty()
     {
         // Arrange — CreateNewContainer returns null (user cancelled)
         _containerCreator.Setup(c => c.CreateNewContainer()).Returns((AppContainerEntry?)null);
@@ -264,7 +289,7 @@ public class RunAsPostDialogRouterTests
         var capturedResult = MakeEmptyCapturedResult();
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: false, createNewContainerRequested: true,
             FilePath, EmptyCredentials());
 
@@ -276,13 +301,13 @@ public class RunAsPostDialogRouterTests
     // ── Ordering: RevertShortcut takes priority over createNewContainer ───────
 
     [Fact]
-    public void Route_RevertRequested_TakesPriorityOverContainerRequested()
+    public async Task Route_RevertRequested_TakesPriorityOverContainerRequested()
     {
         // Arrange — both revert and new container flags set; revert wins
         var capturedResult = MakeRevertResult();
 
         // Act
-        var result = _router.Route(DialogResult.OK, capturedResult,
+        var result = await _router.RouteAsync(DialogResult.OK, capturedResult,
             createNewAccountRequested: false, createNewContainerRequested: true,
             FilePath, EmptyCredentials());
 

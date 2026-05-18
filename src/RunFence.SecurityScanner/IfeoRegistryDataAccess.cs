@@ -8,12 +8,14 @@ namespace RunFence.SecurityScanner;
 /// </summary>
 public class IfeoRegistryDataAccess : IIfeoRegistryAccess
 {
+    private const string NativeRootPath = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
+    private const string Wow6432RootPath = @"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
+
     public RegistrySecurity? GetIfeoRegistryKeySecurity()
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options",
+            using var key = Registry.LocalMachine.OpenSubKey(NativeRootPath,
                 RegistryKeyPermissionCheck.ReadSubTree, RegistryRights.ReadPermissions);
             return key?.GetAccessControl();
         }
@@ -27,8 +29,7 @@ public class IfeoRegistryDataAccess : IIfeoRegistryAccess
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                @"SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options",
+            using var key = Registry.LocalMachine.OpenSubKey(Wow6432RootPath,
                 RegistryKeyPermissionCheck.ReadSubTree, RegistryRights.ReadPermissions);
             return key?.GetAccessControl();
         }
@@ -38,52 +39,72 @@ public class IfeoRegistryDataAccess : IIfeoRegistryAccess
         }
     }
 
-    public List<string> GetIfeoSubkeyNames()
+    public List<IfeoSubkeyInfo> GetIfeoSubkeys()
     {
-        var names = new List<string>();
+        var subkeys = new List<IfeoSubkeyInfo>();
+        CollectSubkeys(NativeRootPath, @"HKLM\...\Image File Execution Options",
+            @"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options", subkeys);
+        CollectSubkeys(Wow6432RootPath, @"HKLM\...\Wow6432Node\Image File Execution Options",
+            @"HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options", subkeys);
+        return subkeys;
+    }
+
+    private static void CollectSubkeys(
+        string rootPath,
+        string displayRoot,
+        string navigationRoot,
+        List<IfeoSubkeyInfo> subkeys)
+    {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options");
-            if (key != null)
-                names.AddRange(key.GetSubKeyNames());
+            using var rootKey = Registry.LocalMachine.OpenSubKey(rootPath);
+            if (rootKey == null)
+                return;
+
+            foreach (var exeName in rootKey.GetSubKeyNames())
+            {
+                try
+                {
+                    using var subkey = rootKey.OpenSubKey(exeName);
+                    if (subkey == null)
+                        continue;
+
+                    RegistrySecurity? security = null;
+                    try
+                    {
+                        using var secKey = Registry.LocalMachine.OpenSubKey(
+                            $@"{rootPath}\{exeName}",
+                            RegistryKeyPermissionCheck.ReadSubTree, RegistryRights.ReadPermissions);
+                        security = secKey?.GetAccessControl();
+                    }
+                    catch
+                    {
+                        /* best effort */
+                    }
+
+                    var debuggerValue = subkey.GetValue("Debugger") as string;
+                    var verifierDlls = subkey.GetValue("VerifierDlls") as string;
+                    var debuggerPath = string.IsNullOrWhiteSpace(debuggerValue)
+                        ? null
+                        : CommandLineParser.ExtractExecutablePath(debuggerValue);
+
+                    subkeys.Add(new IfeoSubkeyInfo(
+                        exeName,
+                        $@"{displayRoot}\{exeName}",
+                        $@"{navigationRoot}\{exeName}",
+                        security,
+                        debuggerPath,
+                        verifierDlls));
+                }
+                catch
+                {
+                    /* skip individual subkey */
+                }
+            }
         }
         catch
         {
             /* not accessible */
-        }
-
-        return names;
-    }
-
-    public string? GetIfeoDebuggerPath(string exeName)
-    {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                $@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\{exeName}");
-            var debugger = key?.GetValue("Debugger") as string;
-            if (string.IsNullOrWhiteSpace(debugger))
-                return null;
-            return CommandLineParser.ExtractExecutablePath(debugger);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    public string? GetIfeoVerifierDlls(string exeName)
-    {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                $@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\{exeName}");
-            return key?.GetValue("VerifierDlls") as string;
-        }
-        catch
-        {
-            return null;
         }
     }
 }

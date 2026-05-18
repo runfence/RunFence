@@ -64,9 +64,10 @@ public class WindowOwnerDetector(IProcessJobManager processJobManager) : IWindow
         var sid = NativeTokenHelper.TryGetProcessOwnerSid(pid);
         if (sid == null)
             return null;
+        var appContainerSid = NativeTokenHelper.TryGetProcessAppContainerSid(pid);
         var il = NativeTokenHelper.TryGetProcessIntegrityLevel(pid) ?? NativeTokenHelper.MandatoryLevelMedium;
         var inRestrictedJob = processJobManager.TryGetRestrictedJobForPid((int)pid) != IntPtr.Zero;
-        return new WindowOwnerInfo(sid, il, inRestrictedJob);
+        return new WindowOwnerInfo(sid, il, inRestrictedJob, appContainerSid);
     }
 
     private WindowOwnerInfo? TryGetWindowAtCursorInfo()

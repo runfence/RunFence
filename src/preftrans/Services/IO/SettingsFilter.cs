@@ -17,20 +17,6 @@ public class SettingsFilter : ISettingsFilter
         if (profilePaths.Length == 0)
             return;
 
-        // Environment: remove entries whose raw value contains literal profile or WindowsApps path
-        if (settings.Environment?.Variables != null)
-        {
-            var toRemove = settings.Environment.Variables
-                .Where(kv => _userProfileFilter.ContainsUserProfilePath(kv.Value.Value, profilePaths)
-                             || _userProfileFilter.ContainsWindowsAppsPath(kv.Value.Value))
-                .Select(kv => kv.Key)
-                .ToList();
-            foreach (var key in toRemove)
-                settings.Environment.Variables.Remove(key);
-            if (settings.Environment.Variables.Count == 0)
-                settings.Environment.Variables = null;
-        }
-
         // TrayIcons: remove entries with ExecutablePath inside profile or in WindowsApps
         if (settings.TrayIcons?.PerAppVisibility != null)
         {

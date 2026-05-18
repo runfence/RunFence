@@ -4,5 +4,5 @@ namespace RunFence.Account;
 
 public interface IAccountCreationCommitService
 {
-    AccountCreationCommitResult? Commit(AccountCreationData data, AppDatabase database);
+    AccountCreationCommitOutcome Commit(AccountCreationData data, AppDatabase database);
 }

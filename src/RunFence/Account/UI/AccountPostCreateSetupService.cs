@@ -1,4 +1,3 @@
-using RunFence.Account.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Firewall.UI;
@@ -15,8 +14,9 @@ namespace RunFence.Account.UI;
 public class AccountPostCreateSetupService(
     ISettingsTransferService settingsTransferService,
     FirewallApplyHelper firewallApplyHelper,
-    PackageInstallService packageInstallService,
+    IPackageInstallService packageInstallService,
     ISessionProvider sessionProvider,
+    IAccountCreationProgressRunner progressRunner,
     ILoggingService log)
 {
     /// <summary>
@@ -35,21 +35,20 @@ public class AccountPostCreateSetupService(
 
         if (needsProgress)
         {
-            using var progressForm = new AccountCreationProgressForm();
-            progressForm.Shown += async (_, _) =>
+            await progressRunner.RunAsync(async progress =>
             {
                 try
                 {
                     if (request.SettingsImportPath != null)
                     {
-                        progressForm.SetStatus($"Importing desktop settings for {request.NewUsername}...");
+                        progress.SetStatus($"Importing desktop settings for {request.NewUsername}...");
                         try
                         {
-                            var (error, _) = await SettingsImportHelper.ImportAsync(
+                            var importResult = await SettingsImportHelper.ImportAsync(
                                 request.SettingsImportPath, request.CreatedSid,
                                 settingsTransferService);
-                            if (error != null)
-                                request.Errors.Add($"Settings import: {error}");
+                            if (importResult.Status != SettingsImportStatus.Succeeded)
+                                request.Errors.Add($"Settings import: {string.Join("; ", importResult.Errors)}");
                         }
                         catch (Exception ex)
                         {
@@ -59,20 +58,25 @@ public class AccountPostCreateSetupService(
 
                     saveAndRefresh();
 
-                    if (hasPackages && internetBlocked && !progressForm.CancellationToken.IsCancellationRequested)
+                    if (hasPackages && internetBlocked && !progress.CancellationToken.IsCancellationRequested)
                     {
                         var refreshedSession = sessionProvider.GetSession();
                         var credEntry = refreshedSession.CredentialStore.Credentials.FirstOrDefault(c =>
                             string.Equals(c.Sid, request.CreatedSid, StringComparison.OrdinalIgnoreCase));
                         if (credEntry != null)
                         {
-                            progressForm.SetStatus($"Installing packages for {request.NewUsername}...");
+                            progress.SetStatus($"Installing packages for {request.NewUsername}...");
                             try
                             {
-                                packageInstallService.InstallPackages(request.SelectedInstallPackages, new AccountLaunchIdentity(request.CreatedSid));
-                                progressForm.SetStatus($"Waiting for install scripts to complete for {request.NewUsername}...");
+                                var warning = packageInstallService.InstallPackages(
+                                    request.SelectedInstallPackages,
+                                    new AccountLaunchIdentity(request.CreatedSid));
+                                var formattedWarning = LaunchExecutionWarningFormatter.Format("The package installer", warning);
+                                if (formattedWarning != null)
+                                    request.Warnings.Add(formattedWarning);
+                                progress.SetStatus($"Waiting for install scripts to complete for {request.NewUsername}...");
                                 await packageInstallService.WaitForInstallCompletionAsync(
-                                    request.CreatedSid, TimeSpan.FromMinutes(10), progressForm.CancellationToken);
+                                    request.CreatedSid, ct: progress.CancellationToken);
                             }
                             catch (OperationCanceledException)
                             {
@@ -87,7 +91,7 @@ public class AccountPostCreateSetupService(
 
                     if (request.FirewallSettingsChanged)
                     {
-                        progressForm.SetStatus($"Applying firewall rules for {request.NewUsername}...");
+                        progress.SetStatus($"Applying firewall rules for {request.NewUsername}...");
                         var refreshedSession = sessionProvider.GetSession();
                         var username = refreshedSession.Database.SidNames.GetValueOrDefault(request.CreatedSid) ?? request.NewUsername;
                         var fwSettings = refreshedSession.Database.GetAccount(request.CreatedSid)?.Firewall ?? new FirewallAccountSettings();
@@ -107,12 +111,7 @@ public class AccountPostCreateSetupService(
                     request.Errors.Add($"Account setup: {ex.Message}");
                     log.Error("Unexpected error during post-create setup", ex);
                 }
-                finally
-                {
-                    progressForm.DialogResult = DialogResult.OK;
-                }
-            };
-            await progressForm.ShowDialogAsync();
+            });
         }
         else
         {

@@ -2,6 +2,7 @@ using Moq;
 using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Security;
 using Xunit;
@@ -10,14 +11,18 @@ namespace RunFence.Tests;
 
 public class CredentialHelperTests
 {
-    private readonly Mock<ICredentialEncryptionService> _encryptionService = new();
+    private readonly Mock<IByteArrayCredentialEncryptionService> _encryptionService = new();
     private readonly Mock<ISidResolver> _sidResolver = new();
+    private readonly Mock<IInteractiveUserSidResolver> _interactiveUserSidResolver = new();
     private readonly byte[] _pinDerivedKey = new byte[32];
     private readonly CredentialDecryptionService _service;
 
     public CredentialHelperTests()
     {
-        _service = new CredentialDecryptionService(_encryptionService.Object, _sidResolver.Object);
+        _service = new CredentialDecryptionService(
+            new ByteArrayCredentialEncryptionSpanAdapter(_encryptionService.Object),
+            _sidResolver.Object,
+            _interactiveUserSidResolver.Object);
     }
 
     [Fact]
@@ -198,32 +203,66 @@ public class CredentialHelperTests
         Assert.Equal("user1", result.Value.Username);
     }
 
-    // --- InteractiveUser status ---
-    //
-    // Both code paths that return InteractiveUser rely on SidResolutionHelper.GetInteractiveUserSid(),
-    // which is a static value initialized only during RunFence startup (null in test environments).
-    // The two paths differ in whether credEntry is null:
-    //   (a) No stored credential + SID == GetInteractiveUserSid() → InteractiveUser, credEntry = null
-    //   (b) Stored credential + credEntry.IsInteractiveUser == true → InteractiveUser, credEntry != null
-    // Callers must handle null credEntry for InteractiveUser status (documented in CLAUDE.md).
-    //
-    // Since GetInteractiveUserSid() returns null in tests, neither branch is directly reachable.
-    // The tests below verify the fallthrough behavior: when the interactive SID is unset,
-    // the code must not accidentally return InteractiveUser for unrelated SIDs.
+    [Fact]
+    public void DecryptAndResolve_InteractiveUserWithStoredPassword_DecryptsFallbackPassword()
+    {
+        var interactiveSid = "S-1-5-21-1234567890-1234567890-1234567890-9999";
+        var encryptedBytes = new byte[] { 9, 8, 7 };
+        var store = new CredentialStore
+        {
+            Credentials = [new() { Id = Guid.NewGuid(), Sid = interactiveSid, EncryptedPassword = encryptedBytes }]
+        };
+
+        var expectedPassword = new ProtectedString();
+        expectedPassword.AppendChar('p');
+        expectedPassword.MakeReadOnly();
+        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
+        _encryptionService.Setup(e => e.Decrypt(encryptedBytes, _pinDerivedKey)).Returns(expectedPassword);
+        _sidResolver.Setup(r => r.TryResolveName(interactiveSid)).Returns(@"DOMAIN\user1");
+
+        var result = _service.DecryptAndResolve(
+            interactiveSid, store, _pinDerivedKey, null, out var status);
+
+        Assert.NotNull(result);
+        Assert.Equal(CredentialLookupStatus.InteractiveUser, status);
+        Assert.Equal(LaunchTokenSource.InteractiveUser, result.Value.TokenSource);
+        Assert.Same(expectedPassword, result.Value.Password);
+        Assert.Equal("DOMAIN", result.Value.Domain);
+        Assert.Equal("user1", result.Value.Username);
+    }
 
     [Fact]
-    public void TryDecryptCredential_NoStoredCredential_WhenInteractiveSidUninitialized_ReturnsNotFound()
+    public void TryDecryptCredential_NoStoredCredential_WhenSidMatchesResolvedInteractiveUser_ReturnsInteractiveUser()
     {
-        // In a test process GetInteractiveUserSid() returns null → the InteractiveUser guard is
-        // skipped → any SID not in the store returns NotFound (not InteractiveUser).
-        var nonCurrentSid = "S-1-5-21-1234567890-1234567890-1234567890-9999";
+        var interactiveSid = "S-1-5-21-1234567890-1234567890-1234567890-9999";
         var store = new CredentialStore();
+        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
 
         var status = _service.TryDecryptCredential(
-            nonCurrentSid, store, _pinDerivedKey, out var credEntry, out var password);
+            interactiveSid, store, _pinDerivedKey, out var credEntry, out var password);
 
-        Assert.Equal(CredentialLookupStatus.NotFound, status);
+        Assert.Equal(CredentialLookupStatus.InteractiveUser, status);
         Assert.Null(credEntry);
+        Assert.Null(password);
+        _encryptionService.Verify(e => e.Decrypt(It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+    }
+
+    [Fact]
+    public void TryDecryptCredential_StoredCredentialMatchingResolvedInteractiveUser_ReturnsInteractiveUser()
+    {
+        var interactiveSid = "S-1-5-21-1234567890-1234567890-1234567890-9998";
+        var store = new CredentialStore
+        {
+            Credentials = [new() { Id = Guid.NewGuid(), Sid = interactiveSid, EncryptedPassword = [] }]
+        };
+        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
+
+        var status = _service.TryDecryptCredential(
+            interactiveSid, store, _pinDerivedKey, out var credEntry, out var password);
+
+        Assert.Equal(CredentialLookupStatus.InteractiveUser, status);
+        Assert.NotNull(credEntry);
+        Assert.Equal(interactiveSid, credEntry!.Sid);
         Assert.Null(password);
         _encryptionService.Verify(e => e.Decrypt(It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
     }
@@ -362,5 +401,56 @@ public class CredentialHelperTests
 
         Assert.Equal(CredentialLookupStatus.SystemAccount, status);
         _encryptionService.Verify(e => e.Decrypt(It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+    }
+
+    [Fact]
+    public void TryDecryptCredential_SpanPath_UsesSpanEncryptionService()
+    {
+        var accountSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
+        var encryptedBytes = new byte[] { 1, 2, 3 };
+        var store = new CredentialStore
+        {
+            Credentials = [new() { Id = Guid.NewGuid(), Sid = accountSid, EncryptedPassword = encryptedBytes }]
+        };
+        using var expectedPassword = new ProtectedString();
+        expectedPassword.AppendChar('p');
+        expectedPassword.MakeReadOnly();
+
+        var byteArrayEncryption = new Mock<IByteArrayCredentialEncryptionService>();
+        var spanEncryption = new TrackingSpanEncryptionService(expectedPassword);
+
+        var service = new CredentialDecryptionService(
+            spanEncryption,
+            _sidResolver.Object,
+            _interactiveUserSidResolver.Object);
+
+        var status = service.TryDecryptCredential(
+            accountSid,
+            store,
+            _pinDerivedKey.AsSpan(),
+            out _,
+            out var password);
+
+        Assert.Equal(CredentialLookupStatus.Success, status);
+        Assert.Same(expectedPassword, password);
+        byteArrayEncryption.Verify(e => e.Decrypt(It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+        Assert.Equal(1, spanEncryption.DecryptCallCount);
+        Assert.True(spanEncryption.LastEncryptedPassword!.SequenceEqual(encryptedBytes));
+    }
+
+    private sealed class TrackingSpanEncryptionService(ProtectedString decryptResult) : ICredentialEncryptionSpanService
+    {
+        public int DecryptCallCount { get; private set; }
+        public byte[]? LastEncryptedPassword { get; private set; }
+
+        public byte[] Encrypt(ProtectedString password, ReadOnlySpan<byte> pinDerivedKey)
+            => throw new NotSupportedException();
+
+        public ProtectedString Decrypt(byte[] encryptedPassword, ReadOnlySpan<byte> pinDerivedKey)
+        {
+            DecryptCallCount++;
+            LastEncryptedPassword = encryptedPassword.ToArray();
+            return decryptResult;
+        }
     }
 }

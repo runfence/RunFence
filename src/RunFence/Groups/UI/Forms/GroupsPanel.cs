@@ -92,17 +92,31 @@ public partial class GroupsPanel : DataPanel
             _isMembersLoading = isMembersLoading;
             UpdateButtonState();
         };
-        _refreshController.RefreshCompleted += async currentSid =>
+        _refreshController.RefreshCompleted += async info =>
         {
-            // If selection changed during refresh, reload members for the new selection
-            var sidBeforeDescription = GetSelectedGroupSid();
-            if (currentSid != sidBeforeDescription)
-                RefreshMembersGrid();
-            await LoadDescriptionAsync(GetSelectedGroupSid());
+            try
+            {
+                if (info.SelectedSidAfterRefresh == null)
+                {
+                    _gridPopulator.ClearMembers();
+                }
+                else if (!info.MembersWereRefreshed || info.SelectedSidBeforeRefresh != info.SelectedSidAfterRefresh)
+                {
+                    await RefreshMembersGridAsync(info.SelectedSidAfterRefresh);
+                }
+            }
+            finally
+            {
+                _isMembersLoading = false;
+                UpdateButtonState();
+            }
+
+            await LoadDescriptionAsync(info.SelectedSidAfterRefresh);
+            return;
         };
 
         EnableThreeStateSorting(_groupsGrid, RefreshGridAndDescription);
-        _membersSortHelper.EnableThreeStateSorting(_membersGrid, RefreshMembersGrid);
+        _membersSortHelper.EnableThreeStateSorting(_membersGrid, BeginRefreshMembersGrid);
 
         // Toolbar events
         _refreshButton.Click += (_, _) => RefreshGridAndDescription();
@@ -203,12 +217,19 @@ public partial class GroupsPanel : DataPanel
         var wasMinimized = _lastFormWindowState == FormWindowState.Minimized;
         _lastFormWindowState = newState;
         if (wasMinimized && newState != FormWindowState.Minimized)
-            RefreshMembersGrid();
+            BeginRefreshMembersGrid();
     }
 
-    private void RefreshGridAndDescription()
+    private async void RefreshGridAndDescription()
     {
-        _ = _refreshController.RefreshNow();
+        try
+        {
+            await _refreshController.RefreshNow();
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Groups refresh failed.", ex);
+        }
     }
 
     private bool IsParentFormVisible()
@@ -238,22 +259,48 @@ public partial class GroupsPanel : DataPanel
         }
     }
 
-    private async void RefreshMembersGrid()
-    {
-        var sid = GetSelectedGroupSid();
-        if (sid == null)
-        {
-            _gridPopulator.ClearMembers();
-            return;
-        }
+    private async Task RefreshMembersGridAsync()
+        => await RefreshMembersGridAsync(GetSelectedGroupSid());
 
+    private async void BeginRefreshMembersGrid()
+    {
+        try
+        {
+            await RefreshMembersGridAsync();
+        }
+        catch (Exception ex)
+        {
+            _log.Error("Group members refresh failed.", ex);
+        }
+    }
+
+    private async Task RefreshMembersGridAsync(string? sid)
+    {
         _isMembersLoading = true;
         UpdateButtonState();
-        await _gridPopulator.PopulateMembers(sid);
-        if (sid == GetSelectedGroupSid())
+        try
         {
-            _isMembersLoading = false;
-            UpdateButtonState();
+            if (sid == null)
+            {
+                _gridPopulator.ClearMembers();
+                return;
+            }
+
+            await _gridPopulator.PopulateMembers(sid);
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"Failed to refresh members for group {sid}", ex);
+            if (!IsDisposed && sid == GetSelectedGroupSid())
+                _gridPopulator.ClearMembers();
+        }
+        finally
+        {
+            if (!IsDisposed && sid == GetSelectedGroupSid())
+            {
+                _isMembersLoading = false;
+                UpdateButtonState();
+            }
         }
     }
 
@@ -290,6 +337,8 @@ public partial class GroupsPanel : DataPanel
         if (sid == null)
         {
             _gridPopulator.ClearMembers();
+            _isMembersLoading = false;
+            UpdateButtonState();
             return;
         }
 
@@ -299,6 +348,7 @@ public partial class GroupsPanel : DataPanel
 
         string? desc = null;
         bool descFailed = false;
+        bool membersFailed = false;
         try { desc = await descTask; }
         catch (Exception ex)
         {
@@ -306,11 +356,21 @@ public partial class GroupsPanel : DataPanel
             descFailed = true;
         }
 
-        await membersTask;
+        try
+        {
+            await membersTask;
+        }
+        catch (Exception ex)
+        {
+            _log.Error($"Failed to load members for group {sid}", ex);
+            membersFailed = true;
+        }
 
         // Only update UI if this group is still selected
         if (sid == GetSelectedGroupSid())
         {
+            if (membersFailed)
+                _gridPopulator.ClearMembers();
             _descriptionEditor.CompleteLoad(sid, desc, descFailed);
             _isMembersLoading = false;
             UpdateButtonState();
@@ -387,7 +447,7 @@ public partial class GroupsPanel : DataPanel
             .Select(s => s!)
             .ToList();
         if (_membershipHandler.AddMembers(sid, groupName, existingMemberSids, FindForm()))
-            RefreshMembersGrid();
+            BeginRefreshMembersGrid();
     }
 
     private void OnRemoveMemberClick(object? sender, EventArgs e)
@@ -400,7 +460,7 @@ public partial class GroupsPanel : DataPanel
         var memberSid = _membersGrid.SelectedRows[0].Tag as string ?? "";
         var memberName = _membersGrid.SelectedRows[0].Cells[0].Value as string ?? memberSid;
         if (_membershipHandler.RemoveMember(groupSid, memberSid, memberName, FindForm()))
-            RefreshMembersGrid();
+            BeginRefreshMembersGrid();
     }
 
     private async Task LoadDescriptionAsync(string? groupSid)
@@ -436,10 +496,11 @@ public partial class GroupsPanel : DataPanel
 
     private void OnMigrateSidsClick(object? sender, EventArgs e)
     {
-        if (_sidMigrationLauncher.Launch(Session, FindForm()))
+        if (_sidMigrationLauncher.Launch(FindForm()))
         {
             GroupsChanged?.Invoke();
             RefreshGridAndDescription();
         }
     }
+
 }

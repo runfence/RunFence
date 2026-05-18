@@ -14,13 +14,20 @@ public class PrefTransLauncher(ILaunchFacade facade, ILoggingService log) : IPre
         string accountSid, int timeoutMs, Action? pollCallback)
     {
         var logFilePath = MakeLogFilePath(accountSid);
+        if (logFilePath == null)
+            return new SettingsTransferResult(false, "Secure log workspace verification failed. Transfer aborted.");
         ProcessInfo process;
         try
         {
             var identity = new AccountLaunchIdentity(accountSid);
             var target = new ProcessLaunchTarget(prefTransPath,
-                [command, filePath, "--logfile", logFilePath], HideWindow: true);
-            process = facade.LaunchFile(target, identity)!;
+                [command, filePath, "--logfile", logFilePath], HideWindow: true, SuppressStartupFeedback: true);
+            using var launch = facade.LaunchFile(target, identity);
+            var warning = LaunchExecutionWarningFormatter.Format("The transfer helper", launch);
+            if (warning != null)
+                log.Warn(warning);
+            process = launch.DetachProcess()
+                      ?? throw new InvalidOperationException($"PrefTrans launch did not return a process handle for '{prefTransPath}'.");
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
         {
@@ -75,53 +82,95 @@ public class PrefTransLauncher(ILaunchFacade facade, ILoggingService log) : IPre
         }
     }
 
-    private string MakeLogFilePath(string accountSid)
+    private string? MakeLogFilePath(string accountSid)
     {
-        var sharedTempDir = SettingsTransferService.GetSharedTempDir();
-        Directory.CreateDirectory(sharedTempDir);
-        var logFilePath = Path.Combine(sharedTempDir, $"rfn_preftrans_{Guid.NewGuid():N}.log");
-        CreateRestrictedLogFile(logFilePath, accountSid);
-        return logFilePath;
+        var workspace = Path.Combine(PathConstants.ProgramDataDir, "RunFence", "PrefTransLogs");
+        try
+        {
+            Directory.CreateDirectory(workspace);
+            VerifySecureWorkspace(workspace);
+            EnsureWorkspaceAcl(workspace);
+            var logFilePath = Path.Combine(workspace, $"rfn_preftrans_{Guid.NewGuid():N}.log");
+            CreateRestrictedLogFile(logFilePath, accountSid);
+            return logFilePath;
+        }
+        catch (Exception ex)
+        {
+            log.Error("PrefTransLauncher: secure log workspace creation failed", ex);
+            return null;
+        }
     }
 
     /// <summary>
     /// Creates the log file with a restrictive ACL: Administrators full control,
     /// the target account write access only, inheritance disabled.
+    /// In admin-operation mock mode, the current process SID also gets FullControl so the
+    /// non-elevated debug process can still access the log file it created.
     /// Prevents unrelated users from reading potentially sensitive transfer data
     /// while allowing the preftrans process (running as <paramref name="accountSid"/>)
     /// to write its output, and preserving admin read access for troubleshooting.
-    /// Falls back to an unprotected file on ACL failure — the operation continues.
+    /// Fail-closed: ACL failure aborts the operation.
     /// </summary>
     private void CreateRestrictedLogFile(string path, string accountSid)
     {
-        File.WriteAllBytes(path, []);
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
 
-        try
-        {
-            var security = new FileSecurity();
-            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        security.AddAccessRule(new FileSystemAccessRule(admins, FileSystemRights.FullControl, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
+        AdminOperationMockAccessHelper.AddCurrentProcessFileSystemAccess(security, FileSystemRights.FullControl);
 
-            var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-            security.AddAccessRule(new FileSystemAccessRule(
-                admins,
-                FileSystemRights.FullControl,
-                AccessControlType.Allow));
+        var targetAccount = new SecurityIdentifier(accountSid);
+        security.AddAccessRule(new FileSystemAccessRule(
+            targetAccount,
+            FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.ReadAttributes | FileSystemRights.Synchronize,
+            AccessControlType.Allow));
+        using var _ = FileSystemAclExtensions.Create(
+            new FileInfo(path),
+            FileMode.CreateNew,
+            FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.ReadAttributes | FileSystemRights.Synchronize,
+            FileShare.ReadWrite,
+            4096,
+            FileOptions.None,
+            security);
+    }
 
-            // Grant the target account write-only access so preftrans can write its log output.
-            // ReadAttributes and Synchronize are required for basic file open/close operations.
-            var targetAccount = new SecurityIdentifier(accountSid);
-            security.AddAccessRule(new FileSystemAccessRule(
-                targetAccount,
-                FileSystemRights.WriteData | FileSystemRights.AppendData
-                    | FileSystemRights.ReadAttributes | FileSystemRights.Synchronize,
-                AccessControlType.Allow));
+    private static void EnsureWorkspaceAcl(string workspacePath)
+    {
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        security.AddAccessRule(new FileSystemAccessRule(admins, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        AdminOperationMockAccessHelper.AddCurrentProcessFileSystemAccess(
+            security,
+            FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None);
+        new DirectoryInfo(workspacePath).SetAccessControl(security);
 
-            new FileInfo(path).SetAccessControl(security);
-        }
-        catch (Exception ex)
-        {
-            log.Warn($"PrefTransLauncher: Failed to set restrictive ACL on log file: {ex.Message}");
-        }
+        var applied = new DirectoryInfo(workspacePath).GetAccessControl(AccessControlSections.Access);
+        if (!applied.AreAccessRulesProtected)
+            throw new InvalidOperationException("Log workspace ACL is not protected.");
+    }
+
+    private static void VerifySecureWorkspace(string workspacePath)
+    {
+        var expectedRoot = Path.Combine(PathConstants.ProgramDataDir, "RunFence");
+        var fullWorkspacePath = Path.GetFullPath(workspacePath);
+        var fullExpectedRoot = Path.GetFullPath(expectedRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        var candidate = fullWorkspacePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        if (!candidate.StartsWith(fullExpectedRoot, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Log workspace is outside the RunFence ProgramData root.");
+
+        var info = new DirectoryInfo(fullWorkspacePath);
+        if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("Log workspace must not be a reparse point.");
     }
 
     private void TryDeleteLogFile(string path)

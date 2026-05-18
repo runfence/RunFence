@@ -1,25 +1,21 @@
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Security;
-using RunFence.Startup.UI.Forms;
 
 namespace RunFence.Startup.UI;
 
 public class LockManager(
     SessionContext session,
-    IPinService pinService,
     ILoggingService log,
-    ISecureDesktopRunner secureDesktop,
-    IWindowsHelloService windowsHello,
     IAutoLockTimerService autoLockTimerService,
-    IUnlockProcessLauncher unlockProcessLauncher)
+    IUnlockProcessLauncher unlockProcessLauncher,
+    ILockStateService lockState,
+    ICredentialUnlockService credentialUnlockService,
+    IUiThreadInvoker uiThreadInvoker,
+    TimeSpan operationUnlockTimeout)
     : ILockManager, ILockUiEventSource
 {
-    private static readonly TimeSpan OperationUnlockTimeout = TimeSpan.FromMinutes(5);
-
     private readonly object _operationUnlockLock = new();
-    private volatile bool _isLocked;
     private volatile bool _unlockPolling;
     private int _credentialUnlockInProgress;
     private bool _operationUnlockPending;
@@ -28,69 +24,39 @@ public class LockManager(
     public event Action? ShowWindowRequested;
     public event Action? ShowWindowUnlockedRequested;
     public event Action? WindowlessUnlockCompleted;
-    /// <remarks>Single subscriber expected. If multiple subscribers are needed, change to an event with aggregated result.</remarks>
-    public event Func<bool>? WindowsHelloUnavailableConfirmRequested;
-    /// <remarks>Single subscriber expected. If multiple subscribers are needed, change to an event with aggregated result.</remarks>
-    public event Func<bool>? WindowsHelloFailedConfirmRequested;
 
-    public bool IsLocked => _isLocked;
+    public bool IsLocked => lockState.IsLocked;
     public bool IsUnlockPolling => _unlockPolling;
     public bool IsUnlocking { get; private set; }
 
     public void LockWindow()
     {
-        _isLocked = true;
+        lockState.Lock();
         log.Info("Window locked");
     }
 
     public async Task TryShowWindowAsync()
     {
-        if (!_isLocked)
+        if (!IsLocked)
         {
             StopAutoLockTimer();
             ShowWindowRequested?.Invoke();
             return;
         }
 
-        switch (session.Database.Settings.UnlockMode)
-        {
-            case UnlockMode.Admin:
-            case UnlockMode.AdminAndPin:
-                CancelPendingOperationUnlock();
-                unlockProcessLauncher.LaunchUnlockProcess(operationUnlock: false);
-                break;
-            case UnlockMode.Pin:
-                await TryUnlockWith(UnlockMode.Pin, showWindow: true);
-                break;
-            case UnlockMode.WindowsHello:
-                await TryUnlockWith(UnlockMode.WindowsHello, showWindow: true);
-                break;
-        }
+        await TryUnlockCoreAsync(isAdmin: false, showWindow: true, operationUnlock: false);
     }
 
-    public void Unlock()
-    {
-        Unlock(showWindow: true);
-    }
+    public void Unlock() => Unlock(showWindow: true);
 
     private void Unlock(bool showWindow)
     {
         if (showWindow)
             CancelPendingOperationUnlock();
 
-        if (session.Database.Settings.UnlockMode == UnlockMode.AdminAndPin)
-        {
-            bool verified = false;
-            var store = session.CredentialStore;
-            secureDesktop.Run(() =>
-            {
-                using var dlg = new PinDialog(PinDialogMode.Verify);
-                dlg.VerifyCallback = (ProtectedString pin) => pinService.VerifyPin(pin, store, out _);
-                verified = dlg.ShowDialog() == DialogResult.OK;
-            });
-            if (!verified)
-                return;
-        }
+        if (session.Database.Settings.UnlockMode == UnlockMode.AdminAndPin &&
+            credentialUnlockService.VerifyPin() != CredentialUnlockResult.Succeeded)
+            return;
 
         CompleteUnlock("Window unlocked via IPC", showWindow);
     }
@@ -102,14 +68,13 @@ public class LockManager(
         {
             if (!_operationUnlockPending)
                 return false;
-
             completion = _operationUnlockCompletion;
             _operationUnlockPending = false;
             _operationUnlockCompletion = null;
             _unlockPolling = false;
         }
 
-        if (!_isLocked)
+        if (!IsLocked)
         {
             completion?.TrySetResult(true);
             return true;
@@ -120,9 +85,9 @@ public class LockManager(
         return true;
     }
 
-    private void CompleteUnlock(string logMessage, bool showWindow = true)
+    private void CompleteUnlock(string logMessage, bool showWindow)
     {
-        _isLocked = false;
+        lockState.Unlock();
         IsUnlocking = true;
         try
         {
@@ -136,79 +101,112 @@ public class LockManager(
         {
             IsUnlocking = false;
         }
-
         log.Info(logMessage);
     }
 
-    public Task<bool> TryUnlockAsync(bool isAdmin) => TryUnlockCoreAsync(isAdmin, showWindow: true, operationUnlock: false);
+    public async Task<bool> TryUnlockAsync(bool isAdmin) =>
+        await TryUnlockCoreAsync(isAdmin, showWindow: true, operationUnlock: false) == OperationUnlockResult.Succeeded;
 
-    public Task<bool> TryUnlockForOperationAsync(bool isAdmin) =>
+    public async Task<bool> TryUnlockForOperationAsync(bool isAdmin) =>
+        await TryUnlockForOperationWithResultAsync(isAdmin) == OperationUnlockResult.Succeeded;
+
+    public Task<OperationUnlockResult> TryUnlockForOperationWithResultAsync(bool isAdmin) =>
         TryUnlockCoreAsync(isAdmin, showWindow: false, operationUnlock: true);
 
-    private async Task<bool> TryUnlockCoreAsync(bool isAdmin, bool showWindow, bool operationUnlock)
+    private async Task<OperationUnlockResult> TryUnlockCoreAsync(bool isAdmin, bool showWindow, bool operationUnlock)
     {
-        if (!_isLocked)
-            return true;
+        if (!IsLocked)
+            return OperationUnlockResult.Succeeded;
 
-        return await TryUnlockModeAsync(isAdmin, showWindow, operationUnlock);
-    }
-
-    private async Task<bool> TryUnlockModeAsync(bool isAdmin, bool showWindow, bool operationUnlock)
-    {
-        if (!_isLocked)
-            return true;
-
-        var mode = session.Database.Settings.UnlockMode;
-        switch (mode)
+        var configuredMode = session.Database.Settings.UnlockMode;
+        if (configuredMode == UnlockMode.Admin && isAdmin)
         {
-            case UnlockMode.Admin when isAdmin:
-            case UnlockMode.AdminAndPin when isAdmin:
-                Unlock(showWindow);
-                break;
-            case UnlockMode.Pin:
-                return await TryUnlockWith(UnlockMode.Pin, showWindow);
-            case UnlockMode.WindowsHello:
-                return await TryUnlockWith(UnlockMode.WindowsHello, showWindow);
-            case UnlockMode.Admin when !isAdmin:
-                if (!operationUnlock)
-                {
-                    CancelPendingOperationUnlock();
-                    unlockProcessLauncher.LaunchUnlockProcess(operationUnlock: false);
-                    return false;
-                }
-
-                var operationUnlockCompletion = BeginPendingOperationUnlock();
-                unlockProcessLauncher.LaunchUnlockProcess(operationUnlock);
-                try
-                {
-                    return await operationUnlockCompletion.Task.WaitAsync(OperationUnlockTimeout);
-                }
-                catch (TimeoutException)
-                {
-                    CancelPendingOperationUnlock(operationUnlockCompletion);
-                    return false;
-                }
-            case UnlockMode.AdminAndPin when !isAdmin:
-                return false;
+            Unlock(showWindow);
+            return IsLocked ? OperationUnlockResult.Unavailable : OperationUnlockResult.Succeeded;
         }
 
-        return !_isLocked;
-    }
-
-    private TaskCompletionSource<bool> BeginPendingOperationUnlock()
-    {
-        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        TaskCompletionSource<bool>? previousCompletion;
-        lock (_operationUnlockLock)
+        if (configuredMode == UnlockMode.Admin || (configuredMode == UnlockMode.AdminAndPin && !isAdmin))
         {
-            previousCompletion = _operationUnlockCompletion;
-            _operationUnlockCompletion = completion;
-            _operationUnlockPending = true;
-            _unlockPolling = true;
+            if (!operationUnlock)
+            {
+                CancelPendingOperationUnlock();
+                unlockProcessLauncher.LaunchUnlockProcess(operationUnlock: false);
+                return OperationUnlockResult.Unavailable;
+            }
+
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TaskCompletionSource<bool>? previousCompletion;
+            lock (_operationUnlockLock)
+            {
+                previousCompletion = _operationUnlockCompletion;
+                _operationUnlockCompletion = completion;
+                _operationUnlockPending = true;
+                _unlockPolling = true;
+            }
+            previousCompletion?.TrySetResult(false);
+
+            try
+            {
+                unlockProcessLauncher.LaunchUnlockProcess(operationUnlock: true);
+            }
+            catch
+            {
+                CancelPendingOperationUnlock(completion);
+                throw;
+            }
+
+            try
+            {
+                return await completion.Task.WaitAsync(operationUnlockTimeout)
+                    ? OperationUnlockResult.Succeeded
+                    : OperationUnlockResult.Unavailable;
+            }
+            catch (TimeoutException)
+            {
+                CancelPendingOperationUnlock(completion);
+                return OperationUnlockResult.Unavailable;
+            }
         }
 
-        previousCompletion?.TrySetResult(false);
-        return completion;
+        CredentialUnlockMode credentialMode;
+        if (configuredMode == UnlockMode.Pin || configuredMode == UnlockMode.AdminAndPin)
+            credentialMode = CredentialUnlockMode.Pin;
+        else if (configuredMode == UnlockMode.WindowsHello)
+            credentialMode = CredentialUnlockMode.WindowsHelloThenPin;
+        else
+            return OperationUnlockResult.Unavailable;
+
+        if (Interlocked.CompareExchange(ref _credentialUnlockInProgress, 1, 0) != 0)
+            return OperationUnlockResult.Unavailable;
+
+        _unlockPolling = true;
+        try
+        {
+            var result = await credentialUnlockService.VerifyAsync(credentialMode).ConfigureAwait(false);
+
+            if (result != CredentialUnlockResult.Succeeded)
+            {
+                return result switch
+                {
+                    CredentialUnlockResult.Canceled => OperationUnlockResult.Declined,
+                    CredentialUnlockResult.Failed => OperationUnlockResult.Failed,
+                    _ => OperationUnlockResult.Unavailable
+                };
+            }
+
+            var unlocked = uiThreadInvoker.Invoke(() =>
+            {
+                session.LastPinVerifiedAt = DateTime.UtcNow;
+                CompleteUnlock("Window unlocked", showWindow);
+                return true;
+            });
+            return unlocked ? OperationUnlockResult.Succeeded : OperationUnlockResult.Unavailable;
+        }
+        finally
+        {
+            _unlockPolling = false;
+            Interlocked.Exchange(ref _credentialUnlockInProgress, 0);
+        }
     }
 
     private void CancelPendingOperationUnlock(TaskCompletionSource<bool>? expectedCompletion = null)
@@ -218,107 +216,46 @@ public class LockManager(
         {
             if (expectedCompletion != null && !ReferenceEquals(_operationUnlockCompletion, expectedCompletion))
                 return;
-
             completion = _operationUnlockCompletion;
             _operationUnlockCompletion = null;
             _operationUnlockPending = false;
             _unlockPolling = false;
         }
-
         completion?.TrySetResult(false);
     }
 
-    public void StartAutoLockTimer(bool immediateOnZero = true, Action? postLockAction = null)
+    public void StartAutoLockTimer(bool immediateOnZero = true, Action? onTimeout = null, int? timeoutOverrideSeconds = null)
     {
-        if (!session.Database.Settings.AutoLockInBackground)
+        if (!lockState.AutoLockEnabled)
             return;
 
-        var clampedMinutes = Math.Clamp(session.Database.Settings.AutoLockTimeoutMinutes, 0, 999);
-        var timeoutSeconds = clampedMinutes * 60;
+        var timeoutSeconds = timeoutOverrideSeconds ?? Math.Clamp(session.Database.Settings.AutoLockTimeoutMinutes, 0, 999) * 60;
+
         if (timeoutSeconds <= 0)
         {
-            autoLockTimerService.Stop();
             if (immediateOnZero)
             {
-                LockWindow();
-                postLockAction?.Invoke();
+                autoLockTimerService.Stop();
+                ExecuteAutoLockTimeout(onTimeout);
                 return;
             }
+
             timeoutSeconds = 60;
         }
 
-        autoLockTimerService.Start(timeoutSeconds, () => { LockWindow(); postLockAction?.Invoke(); });
+        autoLockTimerService.Start(timeoutSeconds, () => ExecuteAutoLockTimeout(onTimeout));
     }
 
     public void StopAutoLockTimer() => autoLockTimerService.Stop();
 
-    private async Task<bool> TryUnlockWith(UnlockMode mode, bool showWindow)
+    private void ExecuteAutoLockTimeout(Action? onTimeout)
     {
-        if (Interlocked.CompareExchange(ref _credentialUnlockInProgress, 1, 0) != 0)
-            return false;
-
-        _unlockPolling = true;
-        try
+        if (onTimeout != null)
         {
-            if (mode == UnlockMode.Pin)
-                PromptPinForUnlock(showWindow);
-            else
-                await PromptWindowsHelloForUnlockAsync(showWindow);
+            onTimeout();
+            return;
+        }
 
-            return !_isLocked;
-        }
-        finally
-        {
-            _unlockPolling = false;
-            Interlocked.Exchange(ref _credentialUnlockInProgress, 0);
-        }
+        LockWindow();
     }
-
-    private async Task PromptWindowsHelloForUnlockAsync(bool showWindow)
-    {
-        var result = await windowsHello.VerifyAsync("Verify your identity to unlock RunFence");
-
-        switch (result)
-        {
-            case HelloVerificationResult.Verified:
-                session.LastPinVerifiedAt = DateTime.UtcNow;
-                log.Info("Unlocked via Windows Hello");
-                CompleteUnlock("Window unlocked via Windows Hello", showWindow);
-                break;
-            case HelloVerificationResult.Canceled:
-                log.Info("Windows Hello verification canceled by user");
-                break;
-            case HelloVerificationResult.NotAvailable:
-                log.Warn("Windows Hello not available for unlock, falling back to PIN");
-                if (WindowsHelloUnavailableConfirmRequested?.Invoke() ?? false)
-                    PromptPinForUnlock(showWindow);
-                break;
-            case HelloVerificationResult.Failed:
-                log.Error("Windows Hello verification failed for unlock, falling back to PIN");
-                if (WindowsHelloFailedConfirmRequested?.Invoke() ?? false)
-                    PromptPinForUnlock(showWindow);
-                break;
-        }
-    }
-
-    private void PromptPinForUnlock(bool showWindow)
-    {
-        bool verified = false;
-        var store = session.CredentialStore;
-
-        secureDesktop.Run(() =>
-        {
-            using var dlg = new PinDialog(PinDialogMode.Verify, allowReset: false);
-            dlg.VerifyCallback = (ProtectedString pin) => pinService.VerifyPin(pin, store, out _);
-            if (dlg.ShowDialog() == DialogResult.OK)
-                verified = true;
-        });
-
-        if (verified)
-        {
-            session.LastPinVerifiedAt = DateTime.UtcNow;
-            CompleteUnlock("Window unlocked via PIN", showWindow);
-        }
-    }
-
 }

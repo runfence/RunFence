@@ -14,7 +14,8 @@ public class FirewallDialogFactory(
     FirewallPortValidator portValidator,
     FirewallDomainResolver domainResolver,
     BlockedConnectionsFlowHelper blockedConnectionsFlow,
-    FirewallAllowlistImportExportService importExportService)
+    FirewallAllowlistImportExportService importExportService,
+    FirewallDialogApplyPresenter applyPresenter) : IFirewallDialogFactory
 {
     /// <summary>Whether firewall network info is available (i.e. firewall is configured).</summary>
     public bool IsAvailable => firewallNetworkInfo != null;
@@ -23,7 +24,7 @@ public class FirewallDialogFactory(
     /// Creates a new <see cref="FirewallAllowlistDialog"/> for the given account.
     /// Returns <c>null</c> when firewall network info is unavailable.
     /// </summary>
-    public FirewallAllowlistDialog? CreateAllowlistDialog(
+    public IFirewallAllowlistDialog? CreateAllowlistDialog(
         List<FirewallAllowlistEntry> current,
         string? displayName,
         bool allowInternet,
@@ -43,6 +44,7 @@ public class FirewallDialogFactory(
             domainResolver: domainResolver,
             blockedConnectionsFlow: blockedConnectionsFlow,
             importExportService: importExportService,
+            applyPresenter: applyPresenter,
             displayName: displayName,
             allowInternet: allowInternet,
             allowLan: allowLan,

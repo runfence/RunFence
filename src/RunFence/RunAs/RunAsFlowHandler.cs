@@ -34,16 +34,22 @@ public class RunAsFlowHandler(
 
     public void TriggerFromUI(string filePath, string? initialAccountSid = null)
     {
+        _ = TriggerFromUIAsync(filePath, initialAccountSid);
+    }
+
+    public Task TriggerFromUIAsync(string filePath, string? initialAccountSid = null)
+    {
         if (appState.IsShuttingDown || appState.IsModalOpen || appState.IsOperationInProgress)
-            return;
+            return Task.CompletedTask;
         if (Interlocked.CompareExchange(ref _runAsInProgress, 1, 0) != 0)
-            return;
+            return Task.CompletedTask;
         if (dosProtection.IsBlocked())
         {
             Interlocked.Exchange(ref _runAsInProgress, 0);
-            return;
+            return Task.CompletedTask;
         }
-        _ = HandleRunAsOnUIThreadAsync(filePath, null, null, initialAccountSid, isAdmin: true, useSecureDesktop: false);
+
+        return HandleRunAsOnUIThreadAsync(filePath, null, null, initialAccountSid, isAdmin: true, useSecureDesktop: false);
     }
 
     public IpcResponse HandleRunAs(IpcMessage message, IpcCallerContext context)

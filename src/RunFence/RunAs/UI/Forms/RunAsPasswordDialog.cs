@@ -5,9 +5,9 @@ using RunFence.Core;
 
 namespace RunFence.RunAs.UI.Forms;
 
-public partial class RunAsPasswordDialog : Form
+public partial class RunAsPasswordDialog : RunFence.UI.Forms.ContextHelpForm
 {
-    private readonly IWindowsAccountService _accountService;
+    private readonly IAccountPasswordService _accountService;
     private readonly string _sid;
     private readonly string _usernameFallback;
     private readonly SecurePasswordBox _passwordSecure;
@@ -15,7 +15,7 @@ public partial class RunAsPasswordDialog : Form
     public ProtectedString? Password { get; private set; }
     public bool RememberPassword => _rememberCheckBox.Checked;
 
-    public RunAsPasswordDialog(string accountDisplayName, IWindowsAccountService accountService,
+    public RunAsPasswordDialog(string accountDisplayName, IAccountPasswordService accountService,
         string sid, string usernameFallback)
     {
         _accountService = accountService;
@@ -40,11 +40,13 @@ public partial class RunAsPasswordDialog : Form
 
         var pwd = _passwordSecure.GetPassword();
 
-        var error = _accountService.ValidatePassword(_sid, pwd, _usernameFallback);
-        if (error != null)
+        var result = _accountService.ValidatePassword(_sid, pwd, _usernameFallback);
+        if (result.Status != AccountPasswordStatus.Succeeded)
         {
             pwd.Dispose();
-            _statusLabel.Text = error;
+            _statusLabel.Text = result.Error is string errorText
+                ? errorText
+                : "Credential validation failed.";
             return;
         }
 

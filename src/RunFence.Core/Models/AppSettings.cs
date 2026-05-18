@@ -76,6 +76,12 @@ public class AppSettings
     /// </summary>
     public string LastInteractiveUserSid { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Once true, the startup evaluation nag remains eligible until license is acquired.
+    /// Set when the runtime threshold is met and persisted through the encrypted app database.
+    /// </summary>
+    public bool NagEligible { get; set; }
+
     // Drag Bridge
     public bool EnableDragBridge { get; set; }
 
@@ -89,9 +95,9 @@ public class AppSettings
     public bool BlockInputInjection { get; set; } = true;
 
     /// <summary>
-    /// Returns a shallow copy of this settings object. Primitive and string properties
-    /// are value-copied; <see cref="SeenDiskRootAclKeys"/> is list-cloned so the snapshot
-    /// and the live database do not share the same list reference.
+    /// Returns a settings snapshot. Primitive and string properties are copied, and
+    /// mutable list properties are duplicated so callers can mutate the clone without
+    /// affecting the source settings.
     /// </summary>
     public AppSettings Clone() => new()
     {
@@ -113,12 +119,19 @@ public class AppSettings
         LastUsedRunAsAccountSid = LastUsedRunAsAccountSid,
         LastUsedRunAsContainerName = LastUsedRunAsContainerName,
         LastInteractiveUserSid = LastInteractiveUserSid,
+        NagEligible = NagEligible,
         EnableDragBridge = EnableDragBridge,
         DragBridgeCopyHotkey = DragBridgeCopyHotkey,
         BlockIcmpWhenInternetBlocked = BlockIcmpWhenInternetBlocked,
         BlockInputInjection = BlockInputInjection,
         HandlerMappings = HandlerMappings != null
-            ? new Dictionary<string, HandlerMappingEntry>(HandlerMappings, StringComparer.OrdinalIgnoreCase)
+            ? HandlerMappings.ToDictionary(
+                kv => kv.Key,
+                kv => kv.Value with
+                {
+                    PathPrefixes = kv.Value.PathPrefixes?.ToList()
+                },
+                StringComparer.OrdinalIgnoreCase)
             : null,
         DirectHandlerMappings = DirectHandlerMappings != null
             ? new Dictionary<string, DirectHandlerEntry>(DirectHandlerMappings, StringComparer.OrdinalIgnoreCase)

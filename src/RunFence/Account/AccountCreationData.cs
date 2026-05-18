@@ -17,4 +17,5 @@ public record AccountCreationData(
     bool AllowLocalhost,
     bool AllowLan,
     bool UsersGroupUnchecked,
-    bool AdminGroupChecked);
+    bool AdminGroupChecked,
+    CreatedAccountRollbackState? CreationRollbackState = null);

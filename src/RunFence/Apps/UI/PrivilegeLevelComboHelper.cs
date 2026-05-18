@@ -5,7 +5,7 @@ namespace RunFence.Apps.UI;
 /// <summary>
 /// Conversion helpers between the PrivilegeLevel combobox index and <see cref="PrivilegeLevel"/> value.
 /// The combobox items are ordered for UX clarity (not enum value order):
-/// index 0 = null (Account default), 1 = HighestAllowed, 2 = AboveBasic, 3 = Basic, 4 = LowIntegrity.
+/// index 0 = null (Account default), 1 = HighestAllowed, 2 = Basic, 3 = Isolated, 4 = LowIntegrity.
 /// </summary>
 public static class PrivilegeLevelComboHelper
 {
@@ -16,8 +16,8 @@ public static class PrivilegeLevelComboHelper
     public static PrivilegeLevel? IndexToMode(int index) => index switch
     {
         1 => PrivilegeLevel.HighestAllowed,
-        2 => PrivilegeLevel.AboveBasic,
-        3 => PrivilegeLevel.Basic,
+        2 => PrivilegeLevel.Basic,
+        3 => PrivilegeLevel.Isolated,
         4 => PrivilegeLevel.LowIntegrity,
         _ => null
     };
@@ -29,8 +29,8 @@ public static class PrivilegeLevelComboHelper
     public static int ModeToIndex(PrivilegeLevel? mode) => mode switch
     {
         PrivilegeLevel.HighestAllowed => 1,
-        PrivilegeLevel.AboveBasic => 2,
-        PrivilegeLevel.Basic => 3,
+        PrivilegeLevel.Basic => 2,
+        PrivilegeLevel.Isolated => 3,
         PrivilegeLevel.LowIntegrity => 4,
         _ => 0
     };

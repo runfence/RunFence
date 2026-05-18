@@ -1,9 +1,10 @@
 using Microsoft.Win32;
+using System.ComponentModel;
+using System.Security;
 using RunFence.Core;
 using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Ipc;
 using RunFence.Persistence;
 
 namespace RunFence.Apps;
@@ -24,8 +25,9 @@ namespace RunFence.Apps;
 public class AssociationAutoSetService(
     IUserHiveManager hiveManager,
     ISessionProvider sessionProvider,
-    IHandlerMappingService handlerMappingService,
-    IIpcCallerAuthorizer callerAuthorizer,
+    Func<IUiThreadInvoker> uiThreadInvokerFactory,
+    Func<IHandlerMappingService> handlerMappingService,
+    IAssociationPolicyService associationPolicyService,
     ILoggingService log,
     AssociationRegistryWriter registryWriter,
     RegistryKey? hkuOverride = null,
@@ -33,53 +35,64 @@ public class AssociationAutoSetService(
     : IAssociationAutoSetService
 {
     private readonly RegistryKey _hku = hkuOverride ?? Registry.Users;
+    private IHandlerMappingService HandlerMappingService => handlerMappingService();
 
     private readonly HashSet<string> _cleanedSids = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _completedSids = new(StringComparer.OrdinalIgnoreCase);
 
-    public void AutoSetForAllUsers()
+    public AssociationAutoSetResult AutoSetForAllUsers()
     {
         _completedSids.Clear();
 
-        var session = sessionProvider.GetSession();
-        var filteredMappings = GetEffectiveAutoSetMappings(session);
-        var filteredDirectMappings = GetEffectiveAutoSetDirectMappings(session);
+        var snapshot = CaptureAutoSetSnapshot();
+        var filteredMappings = snapshot.HandlerMappings;
+        var filteredDirectMappings = snapshot.DirectHandlerMappings;
         if (filteredMappings.Count == 0 && filteredDirectMappings.Count == 0)
-            return;
+            return AssociationAutoSetResult.Success;
 
         var launcherPath = filteredMappings.Count > 0 ? GetLauncherPath() : null;
-        var database = session.Database;
+        var database = snapshot.Database;
+        var warnings = new List<string>();
 
-        foreach (var sid in GetTargetUserSids(session))
+        foreach (var sid in snapshot.TargetUserSids)
         {
             var sidMappings = new Dictionary<string, HandlerMappingEntry>(filteredMappings, StringComparer.OrdinalIgnoreCase);
             var sidDirectMappings = new Dictionary<string, DirectHandlerEntry>(filteredDirectMappings, StringComparer.OrdinalIgnoreCase);
-            ResolveConflictsForSid(sid, sidMappings, sidDirectMappings, database);
-            AutoSetForUserInternal(sid, sidMappings, sidDirectMappings, launcherPath, session);
+            associationPolicyService.ResolveConflictsForSid(sid, sidMappings, sidDirectMappings, database);
+            warnings.AddRange(AutoSetForUserInternal(sid, sidMappings, sidDirectMappings, launcherPath, database));
         }
+
+        return CreateResult(warnings);
     }
 
-    public void AutoSetForUser(string sid)
+    public AssociationAutoSetResult AutoSetForUser(string sid)
     {
-        if (SidResolutionHelper.IsSystemSid(sid)) return;
+        if (SidResolutionHelper.IsSystemSid(sid))
+            return AssociationAutoSetResult.Success;
 
-        var session = sessionProvider.GetSession();
-        var filteredMappings = GetEffectiveAutoSetMappings(session);
-        var filteredDirectMappings = GetEffectiveAutoSetDirectMappings(session);
+        var snapshot = CaptureAutoSetSnapshot();
+        var filteredMappings = snapshot.HandlerMappings;
+        var filteredDirectMappings = snapshot.DirectHandlerMappings;
         if (filteredMappings.Count == 0 && filteredDirectMappings.Count == 0)
-            return;
+            return AssociationAutoSetResult.Success;
 
         var launcherPath = filteredMappings.Count > 0 ? GetLauncherPath() : null;
-        var database = session.Database;
+        var database = snapshot.Database;
+        associationPolicyService.ResolveConflictsForSid(sid, filteredMappings, filteredDirectMappings, database);
 
-        ResolveConflictsForSid(sid, filteredMappings, filteredDirectMappings, database);
-        AutoSetForUserInternal(sid, filteredMappings, filteredDirectMappings, launcherPath, session);
+        var warnings = AutoSetForUserInternal(
+            sid,
+            filteredMappings,
+            filteredDirectMappings,
+            launcherPath,
+            database);
+        return CreateResult(warnings);
     }
 
-    public void ForceAutoSetForUser(string sid)
+    public AssociationAutoSetResult ForceAutoSetForUser(string sid)
     {
         _completedSids.Remove(sid);
-        AutoSetForUser(sid);
+        return AutoSetForUser(sid);
     }
 
     /// <remarks>
@@ -88,7 +101,7 @@ public class AssociationAutoSetService(
     /// </remarks>
     public void RestoreForAllUsers()
     {
-        var credentialSids = sessionProvider.GetSession().CredentialStore.Credentials.Select(c => c.Sid).ToList();
+        var credentialSids = CaptureCredentialSids();
 
         ForEachLoadedUserHive(credentialSids, sidSubKey =>
         {
@@ -97,7 +110,6 @@ public class AssociationAutoSetService(
             if (classesKey == null)
                 return;
 
-            // Find all keys with RunFenceFallback value and restore them
             foreach (var subKeyName in classesKey.GetSubKeyNames().ToList())
             {
                 using var subKey = classesKey.OpenSubKey(subKeyName, writable: false);
@@ -105,7 +117,6 @@ public class AssociationAutoSetService(
                     registryWriter.RestoreKey(_hku, sidSubKey, subKeyName);
             }
 
-            // Clean up stale per-user RunFence ProgIds (backward compat migration from per-user ProgIds to HKLM)
             registryWriter.CleanStalePerUserProgIds(classesKey, sidSubKey);
         });
 
@@ -117,7 +128,7 @@ public class AssociationAutoSetService(
 
     public void RestoreKeyForAllUsers(string key)
     {
-        var credentialSids = sessionProvider.GetSession().CredentialStore.Credentials.Select(c => c.Sid).ToList();
+        var credentialSids = CaptureCredentialSids();
 
         ForEachLoadedUserHive(credentialSids, sidSubKey =>
         {
@@ -153,23 +164,17 @@ public class AssociationAutoSetService(
         ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
     }
 
-    private Dictionary<string, HandlerMappingEntry> GetEffectiveAutoSetMappings(SessionContext session)
+    private Dictionary<string, HandlerMappingEntry> GetEffectiveAutoSetMappings(AppDatabase databaseSnapshot)
     {
-        var effectiveMappings = handlerMappingService.GetEffectiveHandlerMappings(session.Database);
-
-        // DefaultAppsOnly associations (http, https, .htm, .html, .pdf, ftp) are excluded because
-        // Windows ignores HKCU overrides for these — they can only be changed via Default Apps UI.
-        // HKLM capabilities registration (AppHandlerRegistrationService) is sufficient to make
-        // RunFence appear in Default Apps. Note: license enforcement is not applied here —
-        // see class remarks for the rationale.
+        var effectiveMappings = HandlerMappingService.GetEffectiveHandlerMappings(databaseSnapshot);
         return effectiveMappings
             .Where(kvp => !PathConstants.DefaultAppsOnlyAssociations.Contains(kvp.Key))
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase);
     }
 
-    private Dictionary<string, DirectHandlerEntry> GetEffectiveAutoSetDirectMappings(SessionContext session)
+    private Dictionary<string, DirectHandlerEntry> GetEffectiveAutoSetDirectMappings(AppDatabase databaseSnapshot)
     {
-        var directMappings = session.Database.Settings.DirectHandlerMappings;
+        var directMappings = databaseSnapshot.Settings.DirectHandlerMappings;
 
         if (directMappings == null || directMappings.Count == 0)
             return new Dictionary<string, DirectHandlerEntry>(StringComparer.OrdinalIgnoreCase);
@@ -179,7 +184,7 @@ public class AssociationAutoSetService(
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value, StringComparer.OrdinalIgnoreCase);
     }
 
-    private List<string> GetTargetUserSids(SessionContext session)
+    private static List<string> GetTargetUserSids(IEnumerable<string?> credentialSids)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -187,10 +192,10 @@ public class AssociationAutoSetService(
         if (!string.IsNullOrEmpty(interactiveSid))
             result.Add(interactiveSid);
 
-        foreach (var credential in session.CredentialStore.Credentials)
+        foreach (var sid in credentialSids)
         {
-            if (!string.IsNullOrEmpty(credential.Sid))
-                result.Add(credential.Sid);
+            if (!string.IsNullOrEmpty(sid))
+                result.Add(sid);
         }
 
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
@@ -208,48 +213,32 @@ public class AssociationAutoSetService(
             log.Warn($"AssociationAutoSetService: launcher not found at {launcherPath}");
             return null;
         }
+
         return launcherPath;
     }
 
-    /// <summary>
-    /// When both app-based and direct handlers are configured for the same key, resolves which
-    /// wins for this SID. App-based wins when the account has explicit per-app IPC authorization;
-    /// otherwise direct wins. Mutates both dictionaries in place.
-    /// </summary>
-    private void ResolveConflictsForSid(
+    private IReadOnlyList<string> AutoSetForUserInternal(
         string sid,
-        Dictionary<string, HandlerMappingEntry> appMappings,
+        Dictionary<string, HandlerMappingEntry> mappings,
         Dictionary<string, DirectHandlerEntry> directMappings,
-        AppDatabase database)
+        string? launcherPath,
+        AppDatabase databaseSnapshot)
     {
-        foreach (var key in appMappings.Keys.Where(directMappings.ContainsKey).ToList())
-        {
-            var app = database.Apps.FirstOrDefault(a =>
-                string.Equals(a.Id, appMappings[key].AppId, StringComparison.OrdinalIgnoreCase));
-            if (app != null && callerAuthorizer.HasExplicitPerAppAuthorization(sid, app, database))
-                directMappings.Remove(key); // app wins — explicit IPC override for this account
-            else
-                appMappings.Remove(key); // direct wins
-        }
-    }
+        var warnings = new List<string>();
 
-    private void AutoSetForUserInternal(string sid, Dictionary<string, HandlerMappingEntry> mappings,
-        Dictionary<string, DirectHandlerEntry> directMappings, string? launcherPath, SessionContext session)
-    {
-        if (session.Database.GetAccount(sid)?.ManageAssociations == false)
-            return;
+        if (databaseSnapshot.GetAccount(sid)?.ManageAssociations == false)
+            return warnings;
 
         if (_completedSids.Contains(sid))
-            return;
+            return warnings;
 
         using var hiveHandle = hiveManager.EnsureHiveLoaded(sid);
         if (hiveHandle == null && !hiveManager.IsHiveLoaded(sid))
         {
             log.Warn($"AssociationAutoSetService: could not load hive for SID {sid}, skipping");
-            return;
+            return warnings;
         }
 
-        // Clean up stale per-user RunFence ProgIds (backward compat migration from per-user to HKLM)
         if (!_cleanedSids.Contains(sid))
         {
             var classesPath = $@"{sid}\Software\Classes";
@@ -269,12 +258,29 @@ public class AssociationAutoSetService(
                 try
                 {
                     if (key.StartsWith('.'))
+                    {
+                        if (!NeedsExtensionAutoSet(sid, key))
+                            continue;
+
                         registryWriter.AutoSetExtension(_hku, sid, key);
+                    }
                     else
+                    {
+                        if (!NeedsProtocolAutoSet(sid, key, launcherPath))
+                            continue;
+
                         registryWriter.AutoSetProtocol(_hku, sid, key, launcherPath);
+                    }
                 }
                 catch (Exception ex)
                 {
+                    if (TryCreateExpectedAccessDeniedWarning(sid, key, ex, out var warning))
+                    {
+                        warnings.Add(warning);
+                        log.Warn(warning);
+                        continue;
+                    }
+
                     log.Warn($"AssociationAutoSetService: failed to auto-set '{key}' for {sid}: {ex.Message}");
                 }
             }
@@ -287,30 +293,78 @@ public class AssociationAutoSetService(
 
             try
             {
-                if (key.StartsWith('.'))
-                {
-                    if (entry.ClassName != null)
-                        registryWriter.AutoSetDirectClassExtension(_hku, sid, key, entry.ClassName);
-                    else if (entry.Command != null)
-                        registryWriter.AutoSetDirectCommandExtension(_hku, sid, key, entry.Command);
-                }
-                else
-                {
-                    if (entry.Command != null)
-                        registryWriter.AutoSetDirectCommandProtocol(_hku, sid, key, entry.Command);
+                    if (key.StartsWith('.'))
+                    {
+                        if (entry.ClassName != null)
+                        {
+                            if (!NeedsDirectClassExtensionAutoSet(sid, key, entry.ClassName))
+                                continue;
+
+                            registryWriter.AutoSetDirectClassExtension(_hku, sid, key, entry.ClassName);
+                        }
+                        else if (entry.Command != null)
+                        {
+                            if (!NeedsDirectCommandExtensionAutoSet(sid, key, entry.Command))
+                                continue;
+
+                            registryWriter.AutoSetDirectCommandExtension(_hku, sid, key, entry.Command);
+                        }
+                    }
                     else
+                    {
+                        if (entry.Command != null)
+                        {
+                            if (!NeedsDirectCommandProtocolAutoSet(sid, key, entry.Command))
+                                continue;
+
+                            registryWriter.AutoSetDirectCommandProtocol(_hku, sid, key, entry.Command);
+                        }
+                        else
+                    {
                         log.Warn($"AssociationAutoSetService: class-based protocol '{key}' is invalid, skipping");
+                    }
                 }
             }
             catch (Exception ex)
             {
+                if (TryCreateExpectedAccessDeniedWarning(sid, key, ex, out var warning))
+                {
+                    warnings.Add(warning);
+                    log.Warn(warning);
+                    continue;
+                }
+
                 log.Warn($"AssociationAutoSetService: failed to auto-set direct handler '{key}' for {sid}: {ex.Message}");
             }
         }
 
         _completedSids.Add(sid);
         ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
+        return warnings;
     }
+
+    private AutoSetSnapshot CaptureAutoSetSnapshot()
+        => uiThreadInvokerFactory().Invoke(() =>
+        {
+            var session = sessionProvider.GetSession();
+            var databaseSnapshot = session.Database.CreateSnapshot();
+            var credentialSids = session.CredentialStore.Credentials
+                .Select(c => c.Sid)
+                .OfType<string>()
+                .ToList();
+            return new AutoSetSnapshot(
+                databaseSnapshot,
+                GetEffectiveAutoSetMappings(databaseSnapshot),
+                GetEffectiveAutoSetDirectMappings(databaseSnapshot),
+                GetTargetUserSids(credentialSids));
+        });
+
+    private List<string> CaptureCredentialSids()
+        => uiThreadInvokerFactory().Invoke(() =>
+            sessionProvider.GetSession().CredentialStore.Credentials
+                .Select(c => c.Sid)
+                .OfType<string>()
+                .ToList());
 
     /// <summary>
     /// Loads hives for all credential SIDs, iterates all target SID subkeys in HKU,
@@ -334,4 +388,66 @@ public class AssociationAutoSetService(
                 handle?.Dispose();
         }
     }
+
+    private bool NeedsExtensionAutoSet(string sid, string key)
+    {
+        using var extKey = _hku.OpenSubKey($@"{sid}\Software\Classes\{key}");
+        var currentDefault = extKey?.GetValue(null) as string;
+        var expectedProgId = PathConstants.HandlerProgIdPrefix + key;
+        return !string.Equals(currentDefault, expectedProgId, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool NeedsProtocolAutoSet(string sid, string key, string launcherPath)
+    {
+        using var commandKey = _hku.OpenSubKey($@"{sid}\Software\Classes\{key}\shell\open\command");
+        var currentCommand = commandKey?.GetValue(null) as string;
+        var expectedCommand = $"\"{launcherPath}\" --resolve \"{key}\" %1";
+        return !string.Equals(currentCommand, expectedCommand, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool NeedsDirectClassExtensionAutoSet(string sid, string key, string className)
+    {
+        using var extKey = _hku.OpenSubKey($@"{sid}\Software\Classes\{key}");
+        var currentDefault = extKey?.GetValue(null) as string;
+        return !string.Equals(currentDefault, className, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool NeedsDirectCommandExtensionAutoSet(string sid, string key, string command)
+    {
+        using var commandKey = _hku.OpenSubKey($@"{sid}\Software\Classes\{key}\shell\open\command");
+        var currentCommand = commandKey?.GetValue(null) as string;
+        return !string.Equals(currentCommand, command, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool NeedsDirectCommandProtocolAutoSet(string sid, string key, string command)
+        => NeedsDirectCommandExtensionAutoSet(sid, key, command);
+
+    private static AssociationAutoSetResult CreateResult(IReadOnlyList<string> warnings)
+        => warnings.Count == 0
+            ? AssociationAutoSetResult.Success
+            : new AssociationAutoSetResult(AssociationAutoSetStatus.SucceededWithWarnings, warnings);
+
+    private static bool TryCreateExpectedAccessDeniedWarning(string sid, string key, Exception ex, out string warning)
+    {
+        if (!IsExpectedAccessDenied(ex))
+        {
+            warning = string.Empty;
+            return false;
+        }
+
+        warning = $"AssociationAutoSetService: access denied while auto-setting '{key}' for {sid}; keeping ManageAssociations enabled.";
+        return true;
+    }
+
+    private static bool IsExpectedAccessDenied(Exception ex)
+        => ex is UnauthorizedAccessException
+           or SecurityException
+           or Win32Exception { NativeErrorCode: 5 };
+
+    private sealed record AutoSetSnapshot(
+        AppDatabase Database,
+        Dictionary<string, HandlerMappingEntry> HandlerMappings,
+        Dictionary<string, DirectHandlerEntry> DirectHandlerMappings,
+        List<string> TargetUserSids);
+
 }

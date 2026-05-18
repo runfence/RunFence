@@ -5,7 +5,7 @@ using RunFence.Core.Models;
 
 namespace RunFence.Infrastructure;
 
-public class IconService(ILoggingService log, string iconDir) : IIconService
+public class IconService(ILoggingService log, string iconDir, AppIdValidator appIdValidator) : IIconService
 {
     private readonly string _iconDir = iconDir;
 
@@ -137,9 +137,18 @@ public class IconService(ILoggingService log, string iconDir) : IIconService
         return bmp;
     }
 
-    private string GetIconPath(string appId)
+    public string GetIconPath(string appId)
     {
-        return Path.Combine(_iconDir, $"{appId}.ico");
+        appIdValidator.EnsureValidAppId(appId, "App ID");
+        var fullIconDir = Path.GetFullPath(_iconDir);
+        var iconPath = Path.GetFullPath(Path.Combine(fullIconDir, $"{appId}.ico"));
+        var dirWithSeparator = fullIconDir.EndsWith(Path.DirectorySeparatorChar)
+            ? fullIconDir
+            : fullIconDir + Path.DirectorySeparatorChar;
+        if (!iconPath.StartsWith(dirWithSeparator, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidAppIdException(appId, "App ID would escape the icon directory.");
+
+        return iconPath;
     }
 
     private void EnsureIconDirectory()

@@ -23,6 +23,7 @@ public class RunAsLaunchDispatcherTests : IDisposable
     private const string ContainerSid = "S-1-15-2-1-2-3-4-5-6-7";
     private const string ContainerName = "rfn_testcontainer";
     private const string FilePath = @"C:\Apps\test.exe";
+    private const string LauncherWorkingDirectory = @"D:\LaunchFrom";
 
     private readonly Mock<IAppStateProvider> _appState = new();
     private readonly Mock<IAppEntryLauncher> _entryLauncher = new();
@@ -34,26 +35,41 @@ public class RunAsLaunchDispatcherTests : IDisposable
 
     private readonly AppDatabase _database = new();
     private readonly CredentialStore _credentialStore = new();
-    private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
     private readonly FakeRunAsAppEditDialogHandler _fakeDialogHandler;
+    private readonly List<SessionContext> _sessions = [];
 
     public RunAsLaunchDispatcherTests()
     {
         _appState.Setup(a => a.Database).Returns(_database);
         _launchErrorHandler
-            .Setup(h => h.RunWithErrorHandling(It.IsAny<Action>(), It.IsAny<string>()))
-            .Callback<Action, string>((action, _) => action());
+            .Setup(h => h.RunWithErrorHandling(It.IsAny<Func<LaunchExecutionResult>>(), It.IsAny<string>()))
+            .Callback<Func<LaunchExecutionResult>, string>((action, _) =>
+            {
+                using var launch = action();
+            });
         _fakeDialogHandler = new FakeRunAsAppEditDialogHandler(_pinKey);
     }
 
-    public void Dispose() => _pinKey.Dispose();
-
-    private SessionContext CreateSession() => new()
+    public void Dispose()
     {
-        Database = _database,
-        CredentialStore = _credentialStore,
-        PinDerivedKey = _pinKey
-    };
+        _fakeDialogHandler.Dispose();
+        foreach (var session in _sessions)
+            session.Dispose();
+
+        _pinKey.Dispose();
+    }
+
+    private SessionContext CreateSession()
+    {
+        var session = new SessionContext
+{
+            Database = _database,
+            CredentialStore = _credentialStore,
+        }.WithOwnedPinDerivedKey(_pinKey);
+        _sessions.Add(session);
+        return session;
+    }
 
     private RunAsAppShortcutCreator CreateShortcutCreator()
     {
@@ -67,6 +83,7 @@ public class RunAsLaunchDispatcherTests : IDisposable
             new Mock<IBesideTargetShortcutService>().Object,
             sessionProvider,
             new Mock<IInteractiveUserSidResolver>().Object,
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: false),
             _log.Object);
     }
 
@@ -111,7 +128,7 @@ public class RunAsLaunchDispatcherTests : IDisposable
             SelectedContainer: null,
             PermissionGrant: null,
             CreateAppEntryOnly: createAppEntryOnly,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             UpdateOriginalShortcut: false,
             RevertShortcutRequested: false,
             EditExistingApp: null,
@@ -213,6 +230,57 @@ public class RunAsLaunchDispatcherTests : IDisposable
             It.IsAny<Func<string, string, bool>?>()), Times.Once);
     }
 
+    [Fact]
+    public void DispatchCredentialResult_NoExistingApp_PreservesExplicitLauncherWorkingDirectory()
+    {
+        var credential = new CredentialEntry { Sid = UserSid };
+        using var result = MakeCredentialResult(credential);
+        var dispatcher = CreateDispatcher();
+
+        dispatcher.DispatchCredentialResult(result, FilePath, null, LauncherWorkingDirectory, false, null);
+
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == FilePath &&
+                t.WorkingDirectory == LauncherWorkingDirectory),
+            It.IsAny<LaunchIdentity>(),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
+    [Fact]
+    public void DispatchCredentialResult_NoExistingApp_WithNullLauncherWorkingDirectory_UsesFilePathFallback()
+    {
+        var credential = new CredentialEntry { Sid = UserSid };
+        using var result = MakeCredentialResult(credential);
+        var dispatcher = CreateDispatcher();
+
+        dispatcher.DispatchCredentialResult(result, FilePath, null, null, false, null);
+
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == FilePath &&
+                t.WorkingDirectory == @"C:\Apps"),
+            It.IsAny<LaunchIdentity>(),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
+    [Fact]
+    public void DispatchContainerResult_NoExistingApp_PreservesExplicitLauncherWorkingDirectory()
+    {
+        var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
+        using var result = MakeContainerResult(container);
+        var dispatcher = CreateDispatcher();
+
+        dispatcher.DispatchContainerResult(result, FilePath, null, LauncherWorkingDirectory, false, null);
+
+        _directLauncherFacade.Verify(f => f.LaunchFile(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == FilePath &&
+                t.WorkingDirectory == LauncherWorkingDirectory),
+            It.IsAny<LaunchIdentity>(),
+            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+    }
+
     // ── TC-28: adHocPassword forwarding ──────────────────────────────────────
 
     [Fact]
@@ -232,7 +300,7 @@ public class RunAsLaunchDispatcherTests : IDisposable
             SelectedContainer: null,
             PermissionGrant: null,
             CreateAppEntryOnly: false,
-            PrivilegeLevel: PrivilegeLevel.Basic,
+            PrivilegeLevel: PrivilegeLevel.Isolated,
             UpdateOriginalShortcut: false,
             RevertShortcutRequested: false,
             EditExistingApp: null,
@@ -292,7 +360,8 @@ public class RunAsLaunchDispatcherTests : IDisposable
         _directLauncherFacade.Verify(f => f.LaunchFolderBrowser(
             It.Is<AccountLaunchIdentity>(a => a.Sid == UserSid),
             FilePath,
-            It.IsAny<Func<string, string, bool>?>()), Times.Once);
+            It.IsAny<Func<string, string, bool>?>(),
+            true), Times.Once);
         _directLauncherFacade.Verify(f => f.LaunchFile(
             It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(),
             It.IsAny<Func<string, string, bool>?>()), Times.Never);

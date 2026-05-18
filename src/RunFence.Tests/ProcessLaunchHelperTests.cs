@@ -6,6 +6,14 @@ namespace RunFence.Tests;
 
 public class ProcessLaunchHelperTests
 {
+    [Fact]
+    public void ProcessLaunchTarget_CombineArguments_UsesSharedCommandLineMaterializer()
+    {
+        var combined = ProcessLaunchTarget.CombineArguments(["plain", "tab\targ", @"C:\my path\", "\"q\""]);
+
+        Assert.Equal("plain \"tab\targ\" \"C:\\my path\\\\\" \"\\\"q\\\"\"", combined);
+    }
+
     [Theory]
     [InlineData("--default", false, "--launcher-args", "--default")] // AllowPassing=false ignores launcher args
     [InlineData("--default", true, "--launcher-args", "--launcher-args")] // AllowPassing=true uses launcher args
@@ -134,6 +142,15 @@ public class ProcessLaunchHelperTests
     }
 
     [Fact]
+    public void WrapForShellLaunch_PreservesSuppressStartupFeedback()
+    {
+        var wrappedTarget = ProcessLaunchHelper.WrapForShellLaunch(
+            new ProcessLaunchTarget(@"C:\docs\report.pdf", SuppressStartupFeedback: true));
+
+        Assert.True(wrappedTarget.SuppressStartupFeedback);
+    }
+
+    [Fact]
     public void WrapForShellLaunch_PathPassedVerbatim()
     {
         var wrappedTarget = ProcessLaunchHelper.WrapForShellLaunch(
@@ -155,11 +172,36 @@ public class ProcessLaunchHelperTests
         Assert.StartsWith("/c ", wrappedTarget.Arguments);
     }
 
+    [Theory]
+    [InlineData(".cmd")]
+    [InlineData(".bat")]
+    public void TryWrapForScriptLaunch_PreservesSuppressStartupFeedback(string ext)
+    {
+        var wrappedTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(
+            new ProcessLaunchTarget($@"C:\scripts\run{ext}", SuppressStartupFeedback: true));
+
+        Assert.NotNull(wrappedTarget);
+        Assert.True(wrappedTarget.SuppressStartupFeedback);
+    }
+
     [Fact]
     public void TryWrapForScriptLaunch_NonScript_ReturnsNull()
     {
         Assert.Null(ProcessLaunchHelper.TryWrapForScriptLaunch(new ProcessLaunchTarget(@"C:\app.exe")));
         Assert.Null(ProcessLaunchHelper.TryWrapForScriptLaunch(new ProcessLaunchTarget(@"C:\docs\report.pdf")));
+    }
+
+    [Fact]
+    public void TryWrapForScriptLaunch_UsesPassedExtensionForScriptDetection()
+    {
+        var wrappedTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(
+            new ProcessLaunchTarget(
+                @"C:\targets\final.exe"),
+            ".ps1");
+
+        Assert.NotNull(wrappedTarget);
+        Assert.Equal("powershell.exe", wrappedTarget.ExePath);
+        Assert.Equal(@"-ExecutionPolicy Bypass -File ""C:\targets\final.exe""", wrappedTarget.Arguments);
     }
 
     [Theory]
@@ -177,6 +219,15 @@ public class ProcessLaunchHelperTests
     public void CanLaunchDirect_ReturnsExpected(string ext, bool expected)
     {
         Assert.Equal(expected, ProcessLaunchHelper.CanLaunchDirect(new ProcessLaunchTarget($@"C:\app{ext}")));
+    }
+
+    [Fact]
+    public void CanLaunchDirect_UsesPassedExtension()
+    {
+        var target = new ProcessLaunchTarget(
+            @"C:\targets\final.pdf");
+
+        Assert.True(ProcessLaunchHelper.CanLaunchDirect(target, ".exe"));
     }
 
     // --- ArgumentsTemplate tests ---

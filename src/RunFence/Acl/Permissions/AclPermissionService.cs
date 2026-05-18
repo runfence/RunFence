@@ -10,37 +10,24 @@ namespace RunFence.Acl.Permissions;
 /// Injectable service for ACL permission checks and write operations: restricting access
 /// and querying effective permissions.
 /// </summary>
-public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi groupMembership, ILocalGroupMembershipService localGroupMembership, IAclAccessor aclAccessor) : IAclPermissionService
+public class AclPermissionService(
+    NTTranslateApi ntTranslate,
+    GroupMembershipApi groupMembership,
+    ILocalGroupQueryService localGroupQueryService,
+    IAclAccessor aclAccessor,
+    IAclAccessEvaluator accessEvaluator) : IAclPermissionService
 {
-    // Note: HasEffectiveRights has a cross-SID deny limitation. AclComputeHelper.ComputeEffectiveFileRights
-    // subtracts Deny rights from Allow rights only within the same SID. As a result, a Deny ACE on
-    // SID X (e.g. a group) does NOT subtract from a separate Allow ACE on the account SID directly,
-    // even if the account is a member of both. True effective-rights computation accounting for
-    // cross-SID denials would require AuthzAccessCheck. The practical impact is low: such cross-SID
-    // deny setups are rare. Callers using this for UI indicators (NeedsPermissionGrant) may show a
-    // false "access OK" result, but the actual launch will fail clearly if access is truly denied.
     public bool HasEffectiveRights(
         FileSystemSecurity security,
         string accountSid,
         IReadOnlyList<string> accountGroupSids,
         FileSystemRights requiredRights)
     {
-        // Compute effective rights with skipTrustedSids=false so we see all SIDs
-        var effective = AclComputeHelper.ComputeEffectiveFileRights(security, (string?)null, skipTrustedSids: false);
-
-        var aggregated = (FileSystemRights)0;
-
-        // Aggregate rights from account SID + all group SIDs
-        if (effective.TryGetValue(accountSid, out var accountRights))
-            aggregated |= accountRights;
-
-        foreach (var groupSid in accountGroupSids)
-        {
-            if (effective.TryGetValue(groupSid, out var groupRights))
-                aggregated |= groupRights;
-        }
-
-        return (aggregated & requiredRights) == requiredRights;
+        var evaluation = accessEvaluator.Evaluate(security, accountSid, accountGroupSids, requiredRights);
+        if (evaluation.Status == AclAccessEvaluationStatus.Failed)
+            return false;
+        return (evaluation.GrantedRights & requiredRights) == requiredRights &&
+               (evaluation.DeniedRights & requiredRights) == 0;
     }
 
     public List<string> ResolveAccountGroupSids(string accountSid)
@@ -77,13 +64,12 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
     {
         try
         {
-            if (localGroupMembership.IsLocalGroup(accountSid))
+            if (localGroupQueryService.IsLocalGroup(accountSid))
                 return [];
 
             var ntAccount = ntTranslate.TranslateName(accountSid);
 
-            var netApiResult = groupMembership.NetUserGetLocalGroups(ntAccount.Value,
-                () => CallNetUserGetLocalGroups(ntAccount.Value));
+            var netApiResult = groupMembership.NetUserGetLocalGroups(ntAccount.Value);
 
             if (netApiResult.ReturnCode != 0 || netApiResult.BufPtr == IntPtr.Zero)
                 return [];
@@ -117,14 +103,6 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
         {
             return [];
         }
-    }
-
-
-    private static NetUserGroupsResult CallNetUserGetLocalGroups(string username)
-    {
-        var ret = GroupMembershipNative.NetUserGetLocalGroups(null, username, 0, GroupMembershipNative.LgIncludeIndirect,
-            out var bufPtr, -1, out var entriesRead, out _);
-        return new NetUserGroupsResult(ret, bufPtr, entriesRead);
     }
 
     public bool NeedsPermissionGrant(string filePath, string accountSid,
@@ -191,7 +169,9 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
 
     /// <summary>
     /// Disables inheritance on a file and restricts access to SYSTEM (FullControl) and
-    /// Administrators (FullControl) only. All other ACEs are removed.
+    /// Administrators (FullControl). In admin-operation mock mode, the current process SID
+    /// also gets FullControl so the non-elevated debug process can still access the file.
+    /// All other ACEs are removed.
     /// </summary>
     public void RestrictToAdmins(string filePath)
     {
@@ -208,6 +188,7 @@ public class AclPermissionService(NTTranslateApi ntTranslate, GroupMembershipApi
 
         security.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
         security.AddAccessRule(new FileSystemAccessRule(adminsSid, FileSystemRights.FullControl, AccessControlType.Allow));
+        AdminOperationMockAccessHelper.AddCurrentProcessFileSystemAccess(security, FileSystemRights.FullControl);
         fileInfo.SetAccessControl(security);
     }
 }

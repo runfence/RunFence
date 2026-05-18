@@ -41,16 +41,18 @@ public class AccountLifecycleManagerTests
     // ── ValidateDeleteAsync ──────────────────────────────────────────────────
 
     [Fact]
-    public async Task ValidateDeleteAsync_AllChecksPass_ReturnsNull()
+    public async Task ValidateDeleteAsync_AllChecksPass_ReturnsSuccess()
     {
         // Arrange: all validation methods succeed (no exception thrown)
+        _accountValidation.Setup(v => v.GetRunningProcesses(Sid)).Returns([]);
         var manager = CreateManager();
 
         // Act
-        var error = await manager.ValidateDeleteAsync(Sid);
+        var result = await manager.ValidateDeleteAsync(Sid);
 
         // Assert
-        Assert.Null(error);
+        Assert.Null(result.ErrorMessage);
+        Assert.Empty(result.RunningProcesses);
     }
 
     [Fact]
@@ -62,11 +64,12 @@ public class AccountLifecycleManagerTests
         var manager = CreateManager();
 
         // Act
-        var error = await manager.ValidateDeleteAsync(Sid);
+        var result = await manager.ValidateDeleteAsync(Sid);
 
         // Assert
-        Assert.NotNull(error);
-        Assert.Contains("interactive", error, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(result.ErrorMessage);
+        Assert.Contains("interactive", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(result.RunningProcesses);
     }
 
     [Fact]
@@ -78,27 +81,34 @@ public class AccountLifecycleManagerTests
         var manager = CreateManager();
 
         // Act
-        var error = await manager.ValidateDeleteAsync(Sid);
+        var result = await manager.ValidateDeleteAsync(Sid);
 
         // Assert
-        Assert.NotNull(error);
-        Assert.Contains("administrator", error, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(result.ErrorMessage);
+        Assert.Contains("administrator", result.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(result.RunningProcesses);
     }
 
     [Fact]
-    public async Task ValidateDeleteAsync_HasRunningProcesses_ReturnsErrorMessage()
+    public async Task ValidateDeleteAsync_HasRunningProcesses_ReturnsProcessList()
     {
         // Arrange
-        _accountValidation.Setup(v => v.ValidateNoRunningProcesses(Sid, "delete"))
-            .Throws(new InvalidOperationException("Account has running processes."));
+        _accountValidation.Setup(v => v.GetRunningProcesses(Sid))
+            .Returns(
+            [
+                new ProcessInfo(11, @"C:\Apps\alpha.exe", null),
+                new ProcessInfo(22, @"C:\Apps\beta.exe", null)
+            ]);
         var manager = CreateManager();
 
         // Act
-        var error = await manager.ValidateDeleteAsync(Sid);
+        var result = await manager.ValidateDeleteAsync(Sid);
 
         // Assert
-        Assert.NotNull(error);
-        Assert.Contains("processes", error, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(result.ErrorMessage);
+        Assert.Equal(2, result.RunningProcesses.Count);
+        Assert.Contains(result.RunningProcesses, p => p.Pid == 11);
+        Assert.Contains(result.RunningProcesses, p => p.Pid == 22);
     }
 
     // ── ClearAccountRestrictions ─────────────────────────────────────────────
@@ -166,11 +176,11 @@ public class AccountLifecycleManagerTests
     public void DeleteUser_Success_ReturnsTrueWithNullError()
     {
         // Arrange
-        _windowsAccountService.Setup(s => s.DeleteUser(Sid));
+        _windowsAccountService.Setup(s => s.DeleteSamAccount(Sid));
         var manager = CreateManager();
 
         // Act
-        var (success, error) = manager.DeleteUser(Sid);
+        var (success, error) = manager.DeleteSamAccount(Sid);
 
         // Assert
         Assert.True(success);
@@ -181,17 +191,30 @@ public class AccountLifecycleManagerTests
     public void DeleteUser_ServiceThrows_ReturnsFalseWithErrorMessage()
     {
         // Arrange
-        _windowsAccountService.Setup(s => s.DeleteUser(Sid))
+        _windowsAccountService.Setup(s => s.DeleteSamAccount(Sid))
             .Throws(new InvalidOperationException("Account not found."));
         var manager = CreateManager();
 
         // Act
-        var (success, error) = manager.DeleteUser(Sid);
+        var (success, error) = manager.DeleteSamAccount(Sid);
 
         // Assert
         Assert.False(success);
         Assert.NotNull(error);
         Assert.Contains("Account not found", error);
+    }
+
+    [Fact]
+    public void DeleteUser_DoesNotDeleteProfile()
+    {
+        _windowsAccountService.Setup(s => s.DeleteSamAccount(Sid));
+        var manager = CreateManager();
+
+        _ = manager.DeleteSamAccount(Sid);
+
+        _orphanedProfileService.Verify(
+            s => s.DeleteProfiles(It.IsAny<IEnumerable<OrphanedProfile>>()),
+            Times.Never);
     }
 
     // ── DeleteProfileAsync ────────────────────────────────────────────────────

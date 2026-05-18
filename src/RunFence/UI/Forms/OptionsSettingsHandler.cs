@@ -34,8 +34,10 @@ public class OptionsSettingsHandler(IConfigRepository configRepository, ISession
     private void Save()
     {
         var session = sessionProvider.GetSession();
-        using var scope = session.PinDerivedKey.Unprotect();
-        configRepository.SaveConfig(session.Database, scope.Data, session.CredentialStore.ArgonSalt);
+        configRepository.SaveConfig(
+            session.Database,
+            session.PinDerivedKey,
+            session.CredentialStore.ArgonSalt);
     }
 
     /// <summary>

@@ -14,6 +14,7 @@ public class MainFormBackgroundAutoLockCoordinator(
 {
     private IMainFormVisibility _form = null!;
     private bool _backgroundTimerActive;
+    private const int VisibleAutoLockGracePeriodSeconds = 10;
 
     public void Initialize(IMainFormVisibility form)
     {
@@ -39,9 +40,29 @@ public class MainFormBackgroundAutoLockCoordinator(
         if (lockManager.IsUnlocking || windowRequestHandler.IsShowingWindow)
             return;
         _backgroundTimerActive = false;
+        if (!_form.Visible)
+        {
+            if (licenseService.IsLicensed)
+                lockManager.StartAutoLockTimer(immediateOnZero: true);
+            return;
+        }
+
         _form.Hide();
         if (licenseService.IsLicensed)
             lockManager.StartAutoLockTimer(immediateOnZero: true);
+    }
+
+    public void LockToTrayImmediately()
+    {
+        if (lockManager.IsUnlocking || windowRequestHandler.IsShowingWindow)
+            return;
+
+        _backgroundTimerActive = false;
+        lockManager.StopAutoLockTimer();
+        if (_form.Visible)
+            _form.Hide();
+        if (!lockManager.IsLocked)
+            lockManager.LockWindow();
     }
 
     public void HandleAppDeactivated()
@@ -51,7 +72,9 @@ public class MainFormBackgroundAutoLockCoordinator(
         if (_form.IsModalActive || _form.HasOtherWindowsOpen || !licenseService.IsLicensed || !_form.Visible)
             return;
         _backgroundTimerActive = true;
-        lockManager.StartAutoLockTimer(immediateOnZero: false, postLockAction: HideToTrayFromLock);
+        lockManager.StartAutoLockTimer(
+            immediateOnZero: true,
+            onTimeout: HandleVisibleWindowAutoLockTimeout);
     }
 
     public void HandleAppActivated()
@@ -81,12 +104,34 @@ public class MainFormBackgroundAutoLockCoordinator(
         else if (!_form.Visible)
             lockManager.StartAutoLockTimer(immediateOnZero: true);
         else if (_backgroundTimerActive)
-            lockManager.StartAutoLockTimer(immediateOnZero: false, postLockAction: HideToTrayFromLock);
+            lockManager.StartAutoLockTimer(
+                immediateOnZero: true,
+                onTimeout: HandleVisibleWindowAutoLockTimeout);
     }
 
     private void HideToTrayFromLock()
     {
         _backgroundTimerActive = false;
         _form.Hide();
+    }
+
+    private void HandleVisibleWindowAutoLockTimeout()
+    {
+        if (!_backgroundTimerActive || lockManager.IsLocked)
+            return;
+
+        if (_form.Visible)
+        {
+            _form.Hide();
+            lockManager.StartAutoLockTimer(
+                immediateOnZero: false,
+                onTimeout: HandleVisibleWindowAutoLockTimeout,
+                timeoutOverrideSeconds: VisibleAutoLockGracePeriodSeconds);
+            return;
+        }
+
+        _backgroundTimerActive = false;
+        lockManager.LockWindow();
+        HideToTrayFromLock();
     }
 }

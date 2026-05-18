@@ -4,7 +4,7 @@ using RunFence.UI;
 
 namespace RunFence.RunAs.UI.Forms;
 
-public partial class CallerIdentityDialog : Form
+public partial class CallerIdentityDialog : RunFence.UI.Forms.ContextHelpForm
 {
     public string? Result { get; private set; }
     public string? ResolvedName { get; private set; }

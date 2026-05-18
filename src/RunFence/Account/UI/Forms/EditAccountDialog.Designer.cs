@@ -32,7 +32,7 @@ partial class EditAccountDialog
     private Label _settingsLabel;
     private TextBox _settingsPathTextBox;
     private Button _browseButton;
-    private Panel _bottomPanel;
+    private TableLayoutPanel _bottomPanel;
     private Label _statusLabel;
     private Button _deleteButton;
     private Button _okButton;
@@ -78,7 +78,7 @@ partial class EditAccountDialog
         _settingsLabel = new Label();
         _settingsPathTextBox = new TextBox();
         _browseButton = new Button();
-        _bottomPanel = new Panel();
+        _bottomPanel = new TableLayoutPanel();
         _statusLabel = new Label();
         _deleteButton = new Button();
         _okButton = new Button();
@@ -191,7 +191,7 @@ partial class EditAccountDialog
         _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _privilegeLevelComboBox.Location = new Point(305, 207);
         _privilegeLevelComboBox.Size = new Size(200, 23);
-        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Above Basic", "Basic", "Low Integrity" });
+        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Basic", "Isolated", "Low Integrity" });
 
         // _ephemeralCheckBox
         _ephemeralCheckBox.Text = "Ephemeral (auto-delete after 24h)";
@@ -215,41 +215,50 @@ partial class EditAccountDialog
         _bottomPanel.Dock = DockStyle.Bottom;
         _bottomPanel.Location = new Point(0, 392);
         _bottomPanel.Size = new Size(590, 42);
+        _bottomPanel.ColumnCount = 4;
+        _bottomPanel.RowCount = 1;
+        _bottomPanel.Padding = new Padding(12, 7, 12, 7);
+        _bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120F));
+        _bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+        _bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84F));
+        _bottomPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84F));
+        _bottomPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 28F));
 
         // _statusLabel
-        _statusLabel.Location = new Point(15, 11);
-        _statusLabel.Size = new Size(380, 20);
-        _statusLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        _statusLabel.Dock = DockStyle.Fill;
+        _statusLabel.Margin = new Padding(12, 4, 12, 0);
+        _statusLabel.Size = new Size(258, 28);
         _statusLabel.ForeColor = Color.Red;
+        _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
 
         // _deleteButton
         _deleteButton.Text = "Delete Account";
-        _deleteButton.Location = new Point(15, 7);
         _deleteButton.Size = new Size(120, 28);
-        _deleteButton.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+        _deleteButton.Dock = DockStyle.Left;
+        _deleteButton.Margin = new Padding(0);
         _deleteButton.FlatStyle = FlatStyle.System;
         _deleteButton.Click += OnDeleteClick;
 
         // _okButton
         _okButton.Text = "OK";
-        _okButton.Location = new Point(415, 7);
+        _okButton.Dock = DockStyle.Fill;
         _okButton.Size = new Size(75, 28);
-        _okButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _okButton.Margin = new Padding(0, 0, 8, 0);
         _okButton.FlatStyle = FlatStyle.System;
         _okButton.Click += OnOkClick;
 
         // _cancelButton
         _cancelButton.Text = "Cancel";
         _cancelButton.DialogResult = DialogResult.Cancel;
-        _cancelButton.Location = new Point(500, 7);
+        _cancelButton.Dock = DockStyle.Fill;
         _cancelButton.Size = new Size(75, 28);
-        _cancelButton.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _cancelButton.Margin = new Padding(0);
         _cancelButton.FlatStyle = FlatStyle.System;
 
-        _bottomPanel.Controls.AddRange(new Control[]
-        {
-            _statusLabel, _deleteButton, _okButton, _cancelButton
-        });
+        _bottomPanel.Controls.Add(_deleteButton, 0, 0);
+        _bottomPanel.Controls.Add(_statusLabel, 1, 0);
+        _bottomPanel.Controls.Add(_okButton, 2, 0);
+        _bottomPanel.Controls.Add(_cancelButton, 3, 0);
 
         // EditAccountDialog
         AutoScaleDimensions = new SizeF(7F, 15F);

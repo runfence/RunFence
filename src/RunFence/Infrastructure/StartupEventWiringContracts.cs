@@ -46,11 +46,23 @@ public interface IStartupFormLifetime
     event FormClosedEventHandler? FormClosed;
 }
 
+public interface IStartupIpcHost
+{
+    event EventHandler? HandleCreated;
+    event FormClosingEventHandler? FormClosing;
+    void BeginInvokeOnUiThread(Action action);
+    void SetStartupComplete();
+}
+
 public interface ILockUiEventSource
 {
     event Action? ShowWindowRequested;
     event Action? ShowWindowUnlockedRequested;
     event Action? WindowlessUnlockCompleted;
+}
+
+public interface IWindowsHelloPinFallbackPromptEventSource
+{
     event Func<bool>? WindowsHelloUnavailableConfirmRequested;
     event Func<bool>? WindowsHelloFailedConfirmRequested;
 }

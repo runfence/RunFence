@@ -9,6 +9,6 @@ public interface ILaunchAccessManager
     /// Grants <paramref name="rights"/> to <paramref name="identity"/> on <paramref name="path"/>.
     /// For Low Integrity accounts, also grants to S-1-16-4096 using the same rights.
     /// </summary>
-    GrantOperationResult EnsureAccess(LaunchIdentity identity, string path, FileSystemRights rights,
+    GrantApplyResult EnsureAccess(LaunchIdentity identity, string path, FileSystemRights rights,
         Func<string, string, bool>? confirm, bool unelevated);
 }

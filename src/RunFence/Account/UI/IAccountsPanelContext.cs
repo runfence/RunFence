@@ -11,7 +11,6 @@ public interface IAccountsPanelDataContext
 {
     AppDatabase Database { get; }
     CredentialStore CredentialStore { get; }
-    ProtectedBuffer PinDerivedKey { get; }
     bool IsRefreshing { get; }
 }
 
@@ -25,12 +24,14 @@ public interface IAccountsPanelOperationContext
     bool RenameInProgress { set; }
     DialogResult ShowModal(Form dialog);
     void SaveAndRefresh(Guid? selectCredentialId = null, int fallbackIndex = -1);
+    void RefreshAndNotifyDataChanged(Guid? selectCredentialId = null, int fallbackIndex = -1);
     void UpdateStatus(string text);
     void UpdateButtonState();
     void SetControlsEnabled(bool enabled);
     void SaveLastPrefsPath(string path);
     void RefreshGrid();
-    void TriggerProcessRefresh(int delayMs = 0);
+    long BeginProcessRefreshGeneration();
+    void TriggerProcessRefresh(long generation, int delayMs = 0);
 }
 
 /// <summary>

@@ -10,6 +10,7 @@ namespace RunFence.Persistence;
 public class DatabaseService(
     ILoggingService log,
     IConfigPaths configPaths,
+    IPersistenceAtomicFileWriter atomicFileWriter,
     IAppFilter? appFilter,
     bool allowPlaintextConfig)
     : IDatabaseService
@@ -21,13 +22,31 @@ public class DatabaseService(
 
     // --- IConfigRepository ---
 
-    public AppDatabase LoadConfig(byte[] pinDerivedKey)
-    {
-        var path = ConfigFilePath;
+    public AppDatabase LoadConfig(ISecureSecretSnapshotSource pinDerivedKey)
+        => LoadConfigCore(
+            ConfigFilePath,
+            raw => pinDerivedKey.TransformSnapshot(
+                key => ConfigEncryptionHelper.DecryptConfig(raw, key, ConfigFileType.MainConfig)),
+            allowMissingAsFirstRun: true);
 
+    public AppDatabase LoadConfigFromPath(string configPath, ISecureSecretSnapshotSource pinDerivedKey)
+        => LoadConfigCore(
+            configPath,
+            raw => pinDerivedKey.TransformSnapshot(
+                key => ConfigEncryptionHelper.DecryptConfig(raw, key, ConfigFileType.MainConfig)),
+            allowMissingAsFirstRun: false);
+
+    private AppDatabase LoadConfigCore(
+        string path,
+        Func<byte[], byte[]> decryptConfig,
+        bool allowMissingAsFirstRun)
+    {
         AppDatabase db;
         if (!File.Exists(path))
         {
+            if (!allowMissingAsFirstRun)
+                throw new FileNotFoundException("Config file not found.", path);
+
             log.Info("Config file not found, returning empty database.");
             db = new AppDatabase();
         }
@@ -35,43 +54,54 @@ public class DatabaseService(
         {
             var raw = File.ReadAllBytes(path);
 
-            byte[] json;
-            if (ConfigEncryptionHelper.HasEncryptionHeader(raw))
-            {
-                json = ConfigEncryptionHelper.DecryptConfig(raw, pinDerivedKey, ConfigFileType.MainConfig);
-            }
-            else if (allowPlaintextConfig)
-            {
-                json = raw;
-            }
-            else
+            byte[]? json = null;
+            var isEncrypted = ConfigEncryptionHelper.HasEncryptionHeader(raw);
+            if (!isEncrypted && !allowPlaintextConfig)
             {
                 throw new CryptographicException("Config file is not encrypted.");
             }
 
-            db = JsonSerializer.Deserialize<AppDatabase>(json, JsonDefaults.Options) ?? new AppDatabase();
-            db.Apps ??= [];
-            db.Accounts ??= [];
-            db.Settings ??= new();
+            try
+            {
+                json = isEncrypted ? decryptConfig(raw) : raw;
+                db = JsonSerializer.Deserialize<AppDatabase>(json, JsonDefaults.Options) ?? new AppDatabase();
+                db.Apps ??= [];
+                db.Accounts ??= [];
+                db.AppContainers ??= [];
+                db.Settings ??= new();
+                db.SidNames ??= new(StringComparer.OrdinalIgnoreCase);
+            }
+            finally
+            {
+                if (isEncrypted && json != null)
+                    CryptographicOperations.ZeroMemory(json);
+            }
         }
 
         WellKnownAccountDefaults.Apply(db);
         return db;
     }
 
-    public void SaveConfig(AppDatabase database, byte[] pinDerivedKey, byte[] argonSalt)
+    public void SaveConfig(AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
+        => SaveConfigCore(database, argonSalt, json => pinDerivedKey.TransformSnapshot(
+            key => ConfigEncryptionHelper.EncryptConfig(json, key, ConfigFileType.MainConfig, argonSalt)));
+
+    private void SaveConfigCore(AppDatabase database, byte[] argonSalt, Func<byte[], byte[]> encryptConfig)
     {
         lock (_saveLock)
         {
             var dbToSave = ApplyFilter(database);
-            var json = SerializeToBytes(dbToSave);
-            var encrypted = ConfigEncryptionHelper.EncryptConfig(json, pinDerivedKey, ConfigFileType.MainConfig, argonSalt);
+            var encrypted = SerializeAndEncrypt(dbToSave, encryptConfig);
             AtomicWrite(ConfigFilePath, encrypted);
             log.Info("Config saved (encrypted).");
         }
     }
 
-    public ConfigIntegrityResult VerifyConfigIntegrity(byte[] pinDerivedKey)
+    public ConfigIntegrityResult VerifyConfigIntegrity(ISecureSecretSnapshotSource pinDerivedKey)
+        => VerifyConfigIntegrityCore(raw => pinDerivedKey.TransformSnapshot(
+            key => ConfigEncryptionHelper.DecryptConfig(raw, key, ConfigFileType.MainConfig)));
+
+    private ConfigIntegrityResult VerifyConfigIntegrityCore(Func<byte[], byte[]> decryptConfig)
     {
         var configPath = ConfigFilePath;
 
@@ -87,7 +117,17 @@ public class DatabaseService(
 
         try
         {
-            ConfigEncryptionHelper.DecryptConfig(raw, pinDerivedKey, ConfigFileType.MainConfig);
+            byte[]? json = null;
+            try
+            {
+                json = decryptConfig(raw);
+            }
+            finally
+            {
+                if (json != null)
+                    CryptographicOperations.ZeroMemory(json);
+            }
+
             return ConfigIntegrityResult.Valid;
         }
         catch (CryptographicException ex)
@@ -100,13 +140,18 @@ public class DatabaseService(
     // --- ICredentialRepository ---
 
     public CredentialStore LoadCredentialStore()
-    {
-        var path = CredentialsFilePath;
+        => LoadCredentialStoreCore(CredentialsFilePath);
 
+    public CredentialStore LoadCredentialStoreFromPath(string credentialStorePath)
+        => LoadCredentialStoreCore(credentialStorePath);
+
+    private CredentialStore LoadCredentialStoreCore(string path)
+    {
         if (!File.Exists(path))
             throw new FileNotFoundException("Credential store not found.", path);
 
-        var json = File.ReadAllText(path);
+        var raw = File.ReadAllBytes(path);
+        var json = Encoding.UTF8.GetString(raw);
         var store = JsonSerializer.Deserialize<CredentialStore>(json, JsonDefaults.Options)
                     ?? throw new JsonException("Failed to deserialize credential store.");
 
@@ -128,15 +173,24 @@ public class DatabaseService(
         }
     }
 
-    public void SaveCredentialStoreAndConfig(CredentialStore store, AppDatabase database, byte[] pinDerivedKey)
+    public void SaveCredentialStoreAndConfig(CredentialStore store, AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey)
+        => SaveCredentialStoreAndConfigCore(
+            store,
+            database,
+            json => pinDerivedKey.TransformSnapshot(
+                key => ConfigEncryptionHelper.EncryptConfig(json, key, ConfigFileType.MainConfig, store.ArgonSalt)));
+
+    private void SaveCredentialStoreAndConfigCore(
+        CredentialStore store,
+        AppDatabase database,
+        Func<byte[], byte[]> encryptConfig)
     {
         lock (_saveLock)
         {
             var dbToSave = ApplyFilter(database);
-            var configEncrypted = ConfigEncryptionHelper.EncryptConfig(
-                SerializeToBytes(dbToSave), pinDerivedKey, ConfigFileType.MainConfig, store.ArgonSalt);
+            var configEncrypted = SerializeAndEncrypt(dbToSave, encryptConfig);
 
-            AtomicWriteBatch([
+            atomicFileWriter.AtomicWriteBatch([
                 (CredentialsFilePath, SerializeToBytes(store)),
                 (ConfigFilePath, configEncrypted)
             ]);
@@ -146,53 +200,99 @@ public class DatabaseService(
 
     // --- IDatabaseService ---
 
-    public AppConfig LoadAppConfig(string configPath, byte[] pinDerivedKey)
+    public AppConfig LoadAppConfigFromPath(string configPath, ISecureSecretSnapshotSource pinDerivedKey)
+        => LoadAppConfigCore(
+            configPath,
+            raw => pinDerivedKey.TransformSnapshot(
+                key => ConfigEncryptionHelper.DecryptConfig(raw, key, ConfigFileType.AppConfig)));
+
+    private AppConfig LoadAppConfigCore(
+        string configPath,
+        Func<byte[], byte[]> decryptConfig)
     {
         var raw = File.ReadAllBytes(configPath);
-        var json = ConfigEncryptionHelper.DecryptConfig(raw, pinDerivedKey, ConfigFileType.AppConfig);
-        var config = JsonSerializer.Deserialize<AppConfig>(json, JsonDefaults.Options) ?? new AppConfig();
-        config.Apps ??= [];
+        AppConfig config;
+        byte[]? json = null;
+        try
+        {
+            json = decryptConfig(raw);
+            config = JsonSerializer.Deserialize<AppConfig>(json, JsonDefaults.Options) ?? new AppConfig();
+            config.Apps ??= [];
+        }
+        finally
+        {
+            if (json != null)
+                CryptographicOperations.ZeroMemory(json);
+        }
+
         return config;
     }
 
-    public void SaveAppConfig(AppConfig config, string configPath, byte[] pinDerivedKey, byte[] argonSalt)
+    public void SaveAppConfig(AppConfig config, string configPath, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
+        => SaveAppConfigCore(config, configPath, json => pinDerivedKey.TransformSnapshot(
+            key => ConfigEncryptionHelper.EncryptConfig(json, key, ConfigFileType.AppConfig, argonSalt)));
+
+    private void SaveAppConfigCore(AppConfig config, string configPath, Func<byte[], byte[]> encryptConfig)
     {
         lock (_saveLock)
         {
-            var json = SerializeToBytes(config);
-            var encrypted = ConfigEncryptionHelper.EncryptConfig(json, pinDerivedKey, ConfigFileType.AppConfig, argonSalt);
+            var encrypted = SerializeAndEncrypt(config, encryptConfig);
             AtomicWrite(configPath, encrypted);
         }
     }
 
-    public void SaveCredentialStoreAndAllConfigs(CredentialStore store, AppDatabase database,
-        byte[] pinDerivedKey, List<(string path, AppConfig config)> additionalConfigs)
+    public void SaveCredentialStoreAndAllConfigs(
+        CredentialStore store,
+        AppDatabase database,
+        ISecureSecretSnapshotSource pinDerivedKey,
+        List<(string path, AppConfig config)> additionalConfigs)
+        => SaveCredentialStoreAndAllConfigsCore(
+            store,
+            database,
+            additionalConfigs,
+            json => pinDerivedKey.TransformSnapshot(
+                key => ConfigEncryptionHelper.EncryptConfig(json, key, ConfigFileType.MainConfig, store.ArgonSalt)),
+            json => pinDerivedKey.TransformSnapshot(
+                key => ConfigEncryptionHelper.EncryptConfig(json, key, ConfigFileType.AppConfig, store.ArgonSalt)));
+
+    private void SaveCredentialStoreAndAllConfigsCore(
+        CredentialStore store,
+        AppDatabase database,
+        List<(string path, AppConfig config)> additionalConfigs,
+        Func<byte[], byte[]> encryptMainConfig,
+        Func<byte[], byte[]> encryptAdditionalConfig)
     {
         lock (_saveLock)
         {
-            var files = new List<(string path, byte[] data)> {
-                // Credentials FIRST — if Phase 2 fails after credentials but before configs,
-                // new PIN works against credential store, and old configs fail with DecryptionFailed
-                // which is the existing recoverable startup flow ("Start Fresh" / "Exit").
-                (CredentialsFilePath, SerializeToBytes(store)) };
+            var files = new List<(string path, byte[] data)>
+            {
+                (CredentialsFilePath, SerializeToBytes(store))
+            };
 
-            // Main config (filtered) — uses new store's salt
             var mainDb = ApplyFilter(database);
-            files.Add((ConfigFilePath, ConfigEncryptionHelper.EncryptConfig(
-                SerializeToBytes(mainDb), pinDerivedKey, ConfigFileType.MainConfig, store.ArgonSalt)));
+            files.Add((ConfigFilePath, SerializeAndEncrypt(mainDb, encryptMainConfig)));
 
-            // Additional configs — use new store's salt
             foreach (var (path, config) in additionalConfigs)
-                files.Add((path, ConfigEncryptionHelper.EncryptConfig(
-                    SerializeToBytes(config), pinDerivedKey, ConfigFileType.AppConfig, store.ArgonSalt)));
+            {
+                files.Add((path, SerializeAndEncrypt(config, encryptAdditionalConfig)));
+            }
 
-            AtomicWriteBatch(files);
+            atomicFileWriter.AtomicWriteBatch(files);
         }
     }
 
-    public byte[]? TryGetConfigSalt() => TryGetAppConfigSalt(ConfigFilePath);
+    public byte[]? TryGetConfigSalt() => TryGetConfigSaltFromPath(ConfigFilePath);
+
+    public byte[]? TryGetConfigSaltFromPath(string configPath)
+        => TryGetSaltFromPath(configPath);
 
     public byte[]? TryGetAppConfigSalt(string configPath)
+        => TryGetAppConfigSaltFromPath(configPath);
+
+    public byte[]? TryGetAppConfigSaltFromPath(string configPath)
+        => TryGetSaltFromPath(configPath);
+
+    private static byte[]? TryGetSaltFromPath(string configPath)
     {
         try
         {
@@ -212,118 +312,21 @@ public class DatabaseService(
     private static byte[] SerializeToBytes<T>(T data)
         => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(data, JsonDefaults.Options));
 
-    /// <summary>
-    /// Two-phase atomic write with rollback.
-    /// Phase 1: Write all .tmp files.
-    /// Phase 2: Replace all atomically per-file (in provided order).
-    /// Rollback: On Phase 2 failure, restore already-replaced files from .bak
-    /// and delete any newly-created files (those that had no prior target).
-    /// </summary>
-    private static void AtomicWriteBatch(List<(string path, byte[] data)> files)
+    private static byte[] SerializeAndEncrypt<T>(T data, Func<byte[], byte[]> encrypt)
     {
-        var tmpFiles = new List<(string tmpPath, string targetPath)>();
-        var replacedFiles = new List<(string targetPath, string bakPath)>();
-        var createdFiles = new List<string>();
+        byte[]? json = null;
         try
         {
-            // Phase 1: Write all .tmp files
-            foreach (var (path, data) in files)
-            {
-                EnsureDirectory(path);
-                var dir = Path.GetDirectoryName(path)!;
-                var tmpPath = Path.Combine(dir, $"{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
-                File.WriteAllBytes(tmpPath, data);
-                tmpFiles.Add((tmpPath, path));
-            }
-
-            // Phase 2: Replace all atomically per-file
-            foreach (var (tmpPath, targetPath) in tmpFiles)
-            {
-                var bakPath = targetPath + ".bak";
-                if (File.Exists(targetPath))
-                {
-                    File.Replace(tmpPath, targetPath, bakPath);
-                    replacedFiles.Add((targetPath, bakPath));
-                }
-                else
-                {
-                    File.Move(tmpPath, targetPath);
-                    createdFiles.Add(targetPath);
-                }
-            }
-
-            // All files written successfully — clean up .bak files (no longer needed for rollback)
-            foreach (var (_, bakPath) in replacedFiles)
-                try { File.Delete(bakPath); } catch { }
+            json = SerializeToBytes(data);
+            return encrypt(json);
         }
-        catch
+        finally
         {
-            // Rollback: restore already-replaced files from .bak
-            foreach (var (targetPath, bakPath) in replacedFiles)
-            {
-                try
-                {
-                    if (File.Exists(bakPath))
-                        File.Move(bakPath, targetPath, overwrite: true);
-                }
-                catch
-                {
-                } // best-effort restore; continue rollback of remaining files
-            }
-
-            // Rollback: delete newly-created files (no backup to restore)
-            foreach (var createdPath in createdFiles)
-            {
-                try
-                {
-                    File.Delete(createdPath);
-                }
-                catch
-                {
-                } // best-effort cleanup
-            }
-
-            // Cleanup: delete remaining .tmp files
-            foreach (var (tmpPath, _) in tmpFiles)
-            {
-                try
-                {
-                    if (File.Exists(tmpPath))
-                        File.Delete(tmpPath);
-                }
-                catch
-                {
-                } // best-effort cleanup
-            }
-
-            throw;
+            if (json != null)
+                CryptographicOperations.ZeroMemory(json);
         }
     }
 
-    private static void AtomicWrite(string targetPath, byte[] data)
-    {
-        EnsureDirectory(targetPath);
-        var dir = Path.GetDirectoryName(targetPath)!;
-        var tmpPath = Path.Combine(dir, $"{Path.GetFileName(targetPath)}.{Guid.NewGuid():N}.tmp");
-        var bakPath = targetPath + ".bak";
-
-        File.WriteAllBytes(tmpPath, data);
-
-        if (File.Exists(targetPath))
-        {
-            File.Replace(tmpPath, targetPath, bakPath);
-            try { File.Delete(bakPath); } catch { }
-        }
-        else
-        {
-            File.Move(tmpPath, targetPath);
-        }
-    }
-
-    private static void EnsureDirectory(string filePath)
-    {
-        var dir = Path.GetDirectoryName(filePath);
-        if (dir != null && !Directory.Exists(dir))
-            Directory.CreateDirectory(dir);
-    }
+    private void AtomicWrite(string targetPath, byte[] data)
+        => atomicFileWriter.AtomicWrite(targetPath, data);
 }

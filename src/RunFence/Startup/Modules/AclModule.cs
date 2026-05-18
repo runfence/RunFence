@@ -7,6 +7,8 @@ using RunFence.Acl.UI;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Persistence;
+using RunFence.Startup;
 using RunFence.Startup.NonElevatedMocks;
 
 namespace RunFence.Startup.Modules;
@@ -15,15 +17,25 @@ public class AclModule : Module
 {
     protected override void Load(ContainerBuilder builder)
     {
-        // LocalGroupMembershipService is registered as both its interface and concrete type so
-        // callers that need group ops inject ILocalGroupMembershipService directly.
-        // Registered here (foundation scope) so AclPermissionService can inject it.
+        builder.RegisterType<LocalGroupQueryService>()
+            .As<ILocalGroupQueryService>()
+            .As<ILocalGroupQueryMaintenanceService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<LocalGroupMutationService>()
+            .As<ILocalGroupMutationService>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<LocalGroupMembershipService>()
             .As<ILocalGroupMembershipService>()
             .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<ContainerLookupHelper>().AsSelf().SingleInstance();
+        builder.RegisterType<BackupPrivilegeSecurityNative>().As<IBackupPrivilegeSecurityNative>().SingleInstance();
+        builder.RegisterType<BackupPrivilegeSecurityDescriptorAccessor>().AsSelf().SingleInstance();
         builder.RegisterType<AclAccessor>().As<IAclAccessor>().SingleInstance();
         builder.RegisterType<FileSystemPathInfo>().As<IFileSystemPathInfo>().SingleInstance();
         builder.RegisterType<AclPathIconProvider>().As<IAclPathIconProvider>().SingleInstance();
@@ -36,25 +48,65 @@ public class AclModule : Module
         builder.RegisterType<AclDenyModeService>().As<IAclDenyModeService>().AsSelf().SingleInstance();
         builder.RegisterType<AclAllowModeService>().As<IAclAllowModeService>().AsSelf().SingleInstance();
         builder.RegisterType<AclService>().As<IAclService>().SingleInstance();
+        builder.RegisterType<DeterministicAclAccessEvaluator>().As<IAclAccessEvaluator>().SingleInstance();
         builder.RegisterType<AclPermissionService>().As<IAclPermissionService>().SingleInstance();
         builder.RegisterType<DefaultInteractiveUserResolver>().As<IInteractiveUserResolver>().SingleInstance();
         builder.RegisterType<AncestorTraverseGranter>().AsSelf().SingleInstance();
-        builder.RegisterType<LogonScriptTraverseGranter>().AsSelf().SingleInstance();
+        builder.RegisterType<LogonScriptTraverseGranter>()
+            .As<ILogonScriptTraverseGranter>()
+            .AsSelf()
+            .SingleInstance();
         builder.RegisterType<DriveAclReplacer>().AsSelf().SingleInstance();
         builder.RegisterType<GrantAceService>()
             .As<IGrantAceService>()
             .As<IGrantInspectionService>()
             .SingleInstance();
         builder.RegisterType<FileOwnerService>().As<IFileOwnerService>().SingleInstance();
-        builder.RegisterType<PathExistenceService>().As<IPathExistenceService>().SingleInstance();
         builder.RegisterType<SpecificContainerAceConflictDetector>()
             .As<ISpecificContainerAceConflictDetector>()
             .SingleInstance();
         builder.RegisterType<MandatoryLabelService>().As<IMandatoryLabelService>().SingleInstance();
         builder.RegisterType<GrantCoreOperations>().As<IGrantCoreOperations>().SingleInstance();
+        builder.RegisterType<TraverseGrantOwnerResolver>()
+            .As<ITraverseGrantOwnerResolver>()
+            .SingleInstance();
+        builder.RegisterType<TraverseIntentStoreCoordinator>()
+            .As<ITraverseIntentStoreCoordinator>()
+            .SingleInstance();
+        builder.RegisterType<TraverseGrantStateService>().AsSelf().SingleInstance();
         builder.RegisterType<TraverseCoreOperations>().As<ITraverseCoreOperations>().SingleInstance();
+        builder.RegisterType<GrantIntentStoreSaveService>()
+            .As<IGrantIntentStoreSaveService>()
+            .SingleInstance();
         builder.RegisterType<ContainerInteractiveUserSync>().AsSelf().SingleInstance();
         builder.RegisterType<LowIntegrityGrantSync>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantFileSystemOperations>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantAccessEnsurer>().AsSelf().SingleInstance();
+        builder.RegisterType<TraverseRestoreWorkflow>().AsSelf().SingleInstance();
+        builder.Register(ctx =>
+            {
+                var sessionProvider = ctx.Resolve<SessionProvider>();
+                return new Func<IGrantIntentRepository>(() => sessionProvider.GetSessionScope().Resolve<IGrantIntentRepository>());
+            })
+            .SingleInstance();
+        builder.Register(ctx =>
+            {
+                var sessionProvider = ctx.Resolve<SessionProvider>();
+                return new Func<IGrantIntentStoreProvider>(() => sessionProvider.GetSessionScope().Resolve<IGrantIntentStoreProvider>());
+            })
+            .SingleInstance();
+        builder.Register(ctx =>
+            {
+                var sessionProvider = ctx.Resolve<SessionProvider>();
+                return new Func<IGrantIntentStore>(() => sessionProvider.GetSessionScope().Resolve<IGrantIntentStore>());
+            })
+            .SingleInstance();
+        builder.Register(ctx =>
+            {
+                var sessionProvider = ctx.Resolve<SessionProvider>();
+                return new Func<ISessionSaver>(() => sessionProvider.GetSessionScope().Resolve<ISessionSaver>());
+            })
+            .SingleInstance();
         builder.RegisterType<PathGrantSyncService>()
             .AsSelf()
             .As<IGrantSyncService>()
@@ -64,7 +116,9 @@ public class AclModule : Module
             .As<IGrantMutatorService>()
             .As<ITraverseService>()
             .SingleInstance();
-        builder.RegisterType<AclManagerScanService>().As<IAclManagerScanService>().SingleInstance();
+        builder.RegisterType<AclManagerScanService>()
+            .As<IAclManagerScanService>()
+            .SingleInstance();
         builder.RegisterType<QuickAccessPinService>().As<IQuickAccessPinService>().SingleInstance();
 
         // AclManagerDialog handlers — InstancePerOwned<AclManagerDialog> so each dialog gets its own
@@ -79,6 +133,9 @@ public class AclModule : Module
         builder.RegisterType<AclManagerTraverseHelper>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerDragDropHandler>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerActionOrchestrator>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclApplyPlanBuilder>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclApplyExecutor>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclApplyPostProcessor>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerApplyOrchestrator>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclImportProcessor>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerExportImport>().AsSelf().InstancePerOwned<AclManagerDialog>();
@@ -86,6 +143,7 @@ public class AclModule : Module
         builder.RegisterType<AclManagerSelectionHandler>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerMouseEventHandler>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerModificationHandler>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclDialogApplyPresenter>().AsSelf().SingleInstance();
         builder.RegisterType<AclManagerDialog>().AsSelf().InstancePerOwned<AclManagerDialog>();
 
         // AppEditDialog handlers — InstancePerDependency so each dialog gets its own set
@@ -97,7 +155,8 @@ public class AclModule : Module
         if (DebugHelper.UseAdminOperationMocks)
         {
             builder.RegisterType<NonElevatedMockStore>().SingleInstance();
-            builder.RegisterDecorator<MockLocalGroupMembershipService, ILocalGroupMembershipService>();
+            builder.RegisterDecorator<MockLocalGroupQueryService, ILocalGroupQueryService>();
+            builder.RegisterDecorator<MockLocalGroupMutationService, ILocalGroupMutationService>();
             builder.RegisterDecorator<MockLocalUserProvider, ILocalUserProvider>();
         }
     }

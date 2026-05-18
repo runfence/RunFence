@@ -3,7 +3,6 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.DragBridge.UI.Forms;
 using RunFence.Infrastructure;
-using RunFence.Launch;
 using RunFence.Persistence.UI.Forms;
 using RunFence.Startup;
 using RunFence.Startup.UI;
@@ -27,7 +26,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
     private readonly OptionsSettingsHandler _settingsHandler;
     private readonly IContextMenuService _contextMenuService;
     private readonly ILoggingService _log;
-    private readonly ILaunchFacade _launchFacade;
+    private readonly OptionsMaintenanceLaunchHandler _maintenanceLaunchHandler;
     private readonly OperationGuard _operationGuard = new();
     private readonly PinChangeOrchestrator _pinChangeHandler;
     private readonly SecurityCheckRunner _securityCheckHandler;
@@ -46,7 +45,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
 
     public event Action? SettingsChanged;
     public event Action? DataChanged;
-    public event Action<ProtectedBuffer, CredentialStore, ProtectedBuffer>? PinDerivedKeyChanged;
+    public event Action? PinDerivedKeyChanged;
     public event Action? CleanupRequested;
     public event Action? MigrationExitRequested;
     public event Action<string>? ConfigLoadRequested;
@@ -62,7 +61,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         ILoggingService log,
         IAutoStartService autoStartService,
         OptionsStartWithoutPinHandler startWithoutPinHandler,
-        ILaunchFacade launchFacade,
+        OptionsMaintenanceLaunchHandler maintenanceLaunchHandler,
         OptionsPanelDataLoader dataLoader,
         OptionsIcmpSection icmpSection,
         OptionsFolderBrowserSection folderBrowserSection,
@@ -77,7 +76,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         _settingsHandler = settingsHandler;
         _contextMenuService = contextMenuService;
         _log = log;
-        _launchFacade = launchFacade;
+        _maintenanceLaunchHandler = maintenanceLaunchHandler;
         _pinChangeHandler = pinChangeOrchestrator;
         _securityCheckHandler = securityCheckRunner;
         _autoStartService = autoStartService;
@@ -102,7 +101,11 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         _dragBridgeSection.Changed += OnDragBridgeSettingsChanged;
 
         InitializeComponent();
+        BuildDynamicContent();
+    }
 
+    private void BuildDynamicContent()
+    {
         _logVerbosityComboBox.Items.AddRange(LogVerbosityComboValues.Cast<object>().ToArray());
 
         // Set inline browse button heights to match adjacent text boxes for DPI correctness
@@ -118,11 +121,10 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         _migrateAccountBtn.Image = UiIconFactory.CreateToolbarIcon("\u2794", Color.FromArgb(0x33, 0x66, 0x99), 16);
 
         // Tooltips
-        _tooltip.SetToolTip(_cleanupBtn, "Reverts all ACLs and shortcuts for all managed apps, then exits");
+        _tooltip.SetToolTip(_cleanupBtn, "Revert all firewall rules, app-managed ACLs, launcher shortcut changes, and associations for saved apps, then exit RunFence");
         _tooltip.SetToolTip(_securityCheckBtn, "Scan startup folders and registry for security issues");
-        _tooltip.SetToolTip(_migrateAccountBtn, "Copy config and credentials to another admin account");
+        _tooltip.SetToolTip(_migrateAccountBtn, "Move the complete RunFence configuration and encrypted credentials to another administrator account");
         _tooltip.SetToolTip(_autoLockTimeoutUpDown, "Minutes after being sent to tray before RunFence GUI is hidden. IPC remains active. Set to 0 to lock immediately.");
-        _blockIcmpCheckBoxTooltip.SetToolTip(_blockIcmpCheckBox, "ICMP tunneling can be potentially used to escape Internet restrictions");
         _callerSection.SetGroupTitle("Launcher Access Control");
         _callerSection.SetDescription("Restrict which accounts can launch apps via IPC. Empty = unrestricted.");
         _tooltip.SetToolTip(_exportSettingsButton, "Export current session's desktop settings to a file");
@@ -165,6 +167,19 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         // to thin delegators below. Checkbox/numericupdown handlers (autoStart, idleTimeout, autoLock,
         // unlockMode, contextMenu, log verbosity, startWithoutPin) are wired only in OnDataSet (remove → set value
         // → re-add pattern) — do not wire here.
+    }
+
+    public void RegisterContextHelp(ContextHelpForm host)
+    {
+        _callerSection.RegisterContextHelp(host, ContextHelpTextCatalog.Launcher_LauncherAccessGlobal);
+
+        _dragBridgeSection.RegisterContextHelp(host);
+
+        host.SetContextHelp(_folderBrowserGroup, ContextHelpTextCatalog.Options_FolderBrowser);
+        host.SetContextHelp(_desktopSettingsGroup, ContextHelpTextCatalog.Options_DesktopSettingsTransfer);
+        host.SetContextHelp(_blockIcmpCheckBox, ContextHelpTextCatalog.Options_FirewallIcmp);
+
+        _configSection.RegisterContextHelp(host);
     }
 
     protected override async void OnDataSet()
@@ -242,6 +257,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         catch (Exception ex)
         {
             _log.Error("OptionsPanel.OnDataSet failed", ex);
+            _log.Warn($"OptionsPanel load presentation error: {ex.Message}");
         }
     }
 
@@ -291,7 +307,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
             }
             _startWithoutPinHandler.SetStartWithoutPin(
                 requested,
-                (oldBuffer, newStore, newKey) => PinDerivedKeyChanged?.Invoke(oldBuffer, newStore, newKey));
+                () => PinDerivedKeyChanged?.Invoke());
         }
         finally
         {
@@ -365,25 +381,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
     }
 
     private void OnOpenLogClick(object? sender, EventArgs e)
-    {
-        _log.Info($"OpenLog: identity={System.Security.Principal.WindowsIdentity.GetCurrent().Name}, logPath={_log.LogFilePath}, constantsPath={PathConstants.LogFilePath}");
-        try
-        {
-            // on some configs it doesn't work with basic
-            // but changing it to elevated enables redirection to interactive user explorer
-            // which can only be disabled by deleting HKLM\Software\Classes\AppID\{CDCBCFCA-3CDC-436f-A4E2-0E02075250C2}\RunAs
-            _launchFacade.LaunchFile(
-                _log.LogFilePath,
-                AccountLaunchIdentity.CurrentAccountBasic with
-                {
-                    AssociationResolutionPolicy = AssociationResolutionPolicy.AllowAccountRedirection
-                })?.Dispose();
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Failed to open log file: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
+        => _maintenanceLaunchHandler.OpenLogFile();
 
     private void OnFolderBrowserArgsChanged(object? sender, EventArgs e)
         => _folderBrowserSection.SetArguments(_folderBrowserArgsTextBox.Text);
@@ -416,8 +414,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
 
     private void OnChangePinClick(object? sender, EventArgs e)
     {
-        _pinChangeHandler.Run(Session, (oldBuffer, newStore, newKey) =>
-            PinDerivedKeyChanged?.Invoke(oldBuffer, newStore, newKey));
+        _pinChangeHandler.Run(Session, () => PinDerivedKeyChanged?.Invoke());
     }
 
     private void OnMigrateAccountClick(object? sender, EventArgs e)
@@ -442,7 +439,7 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
                 _migrateAccountBtn.Enabled = false;
                 try
                 {
-                    await _migrateOrchestrator.RunAsync(Session, sid, displayName, () =>
+                    await _migrateOrchestrator.RunAsync(Session, sid, () =>
                     {
                         _settingsHandler.CancelPendingSave();
                         MigrationExitRequested?.Invoke();

@@ -13,7 +13,8 @@ namespace RunFence.Acl.UI;
 /// </summary>
 public class AclManagerGrantsHelper(
     IAppConfigService appConfigService,
-    IGrantConfigTracker grantConfigTracker,
+    IGrantIntentRepository grantIntentRepository,
+    IGrantIntentStoreProvider grantIntentStoreProvider,
     IDatabaseProvider databaseProvider,
     ISessionSaver sessionSaver,
     TraverseAutoManager traverseAutoManager,
@@ -44,6 +45,12 @@ public class AclManagerGrantsHelper(
     public bool IsSuppressed { get; private set; }
 
     public HashSet<GrantedPathEntry> FixableEntries => _renderer.FixableEntries;
+
+    public bool TargetsDifferentConfigSection(GrantedPathEntry entry, string? targetConfigPath)
+        => !string.Equals(
+            GetEffectiveConfigPath(entry),
+            NormalizeConfigPath(targetConfigPath),
+            StringComparison.OrdinalIgnoreCase);
 
     public void Initialize(
         DataGridView grid, string sid, bool isContainer,
@@ -95,11 +102,19 @@ public class AclManagerGrantsHelper(
             if (populated.Count > 0)
                 sessionSaver.SaveConfig();
 
-            // All entries to display: DB entries + pending adds (pending adds not yet in DB).
-            var allEntriesToShow = grantEntries.Concat(_pending.PendingAdds.Values).ToList();
+            // Pending adds may already be durably saved after a partial apply failure. Avoid
+            // rendering a duplicate row when the same entry is now present in the DB as well.
+            var pendingNewAdds = _pending.PendingAdds.Values
+                .Where(e => !grantEntries.Any(existing =>
+                    string.Equals(existing.Path, e.Path, StringComparison.OrdinalIgnoreCase) &&
+                    existing.IsDeny == e.IsDeny &&
+                    !existing.IsTraverseOnly))
+                .ToList();
+
+            var allEntriesToShow = grantEntries.Concat(pendingNewAdds).ToList();
 
             var mainEntries = allEntriesToShow
-                .Where(e => _pending.GetEffectiveConfigPath(e, grantConfigTracker, _sid) == null)
+                .Where(e => GetEffectiveConfigPath(e) == null)
                 .ToList();
             AddGrantRows(mainEntries, "Main Config", configPath: null, showIfEmpty: hasLoadedConfigs);
 
@@ -107,7 +122,7 @@ public class AclManagerGrantsHelper(
             {
                 var configEntries = allEntriesToShow
                     .Where(e => string.Equals(
-                        _pending.GetEffectiveConfigPath(e, grantConfigTracker, _sid), configPath, StringComparison.OrdinalIgnoreCase))
+                        GetEffectiveConfigPath(e), configPath, StringComparison.OrdinalIgnoreCase))
                     .ToList();
                 AddGrantRows(configEntries, Path.GetFileName(configPath), configPath, showIfEmpty: true);
             }
@@ -195,12 +210,12 @@ public class AclManagerGrantsHelper(
         }
 
         bool wasAllow = !effectiveIsDeny;
-
-        // Preserve Own from existing pending rights or original DB rights when the target can own paths.
+        bool revertingToCommittedMode = newIsDeny == entry.IsDeny;
         bool ownValue = AclHelper.CanAssignGrantOwner(_sid, _isContainer) &&
                         (_pending.GetEffectiveRights(entry)?.Own ?? false);
-
-        var newSavedRights = SavedRightsState.DefaultForMode(newIsDeny, own: ownValue);
+        var newSavedRights = revertingToCommittedMode
+            ? entry.SavedRights ?? SavedRightsState.DefaultForMode(newIsDeny, own: ownValue)
+            : SavedRightsState.DefaultForMode(newIsDeny, own: ownValue);
 
         // The original DB key is (entry.Path, entry.IsDeny) — entry.IsDeny is NOT mutated.
         var dbKey = (entry.Path, entry.IsDeny);
@@ -216,10 +231,23 @@ public class AclManagerGrantsHelper(
             entry.SavedRights = newSavedRights;
             _pending.PendingAdds[newPendingAddKey] = entry;
             if (_pending.PendingConfigMoves.Remove(dbKey, out var configTarget))
-                _pending.PendingConfigMoves[newPendingAddKey] = configTarget;
+                _pending.PendingConfigMoves[newPendingAddKey] =
+                    new PendingConfigMove(entry, configTarget.TargetConfigPath);
         }
         else
         {
+            _pending.PendingGrantFixes.Remove(dbKey);
+
+            if (revertingToCommittedMode)
+            {
+                _pending.PendingModifications.Remove(dbKey);
+                if (_pending.PendingConfigMoves.Remove((entry.Path, effectiveIsDeny), out var configTarget))
+                    _pending.PendingConfigMoves[dbKey] =
+                        new PendingConfigMove(entry, configTarget.TargetConfigPath);
+                _renderer.RefreshRow(row, entry, isPendingChange: _pending.IsPendingGrantChange(entry.Path, entry.IsDeny), v => IsSuppressed = v);
+                return false;
+            }
+
             // DB entry — delegate pending modification tracking and config-move re-keying to the helper.
             pendingStateHelper.ComputePendingModification(entry, newIsDeny, newSavedRights);
             pendingStateHelper.TrackModeChange(entry, newIsDeny);
@@ -293,6 +321,7 @@ public class AclManagerGrantsHelper(
 
         // DB entry: check if the change has been reverted (new rights match NTFS state for the effective mode).
         // Use a temporary entry to pass effective IsDeny + new rights to MatchesSavedRights without mutating.
+        _pending.PendingGrantFixes.Remove((entry.Path, entry.IsDeny));
         var ntfsState = _renderer.TryReadRightsForEntry(entry);
         bool isFolder = Directory.Exists(entry.Path);
         if (ntfsState != null)
@@ -317,7 +346,10 @@ public class AclManagerGrantsHelper(
         bool wasOwn = existingMod?.WasOwn ?? originalOwn;
         _pending.PendingModifications[dbKey] = new PendingModification(
             entry, WasIsDeny: wasIsDeny, WasOwn: wasOwn,
-            NewIsDeny: newIsDeny, NewRights: newSavedRights);
+            NewIsDeny: newIsDeny,
+            NewRights: newSavedRights,
+            WasRights: existingMod?.WasRights ?? entry.SavedRights,
+            WasPreviousSaclLabel: existingMod?.WasPreviousSaclLabel ?? entry.PreviousSaclLabel);
         _renderer.RefreshRowBackground(row, entry);
     }
 
@@ -359,6 +391,8 @@ public class AclManagerGrantsHelper(
             // Preserve WasIsDeny from any existing modification — it reflects the true NTFS mode and must
             // not be overwritten when only ownership (not mode) changes after a prior mode switch.
             // Preserve WasOwn from existing mod if already tracked; otherwise use originalOwn.
+            _pending.PendingGrantFixes.Remove(dbKey);
+
             bool wasIsDeny = _pending.PendingModifications.TryGetValue(dbKey, out var existingMod)
                 ? existingMod.WasIsDeny
                 : entry.IsDeny;
@@ -371,7 +405,10 @@ public class AclManagerGrantsHelper(
 
             _pending.PendingModifications[dbKey] = new PendingModification(
                 entry, WasIsDeny: wasIsDeny, WasOwn: wasOwn,
-                NewIsDeny: newIsDeny, NewRights: newSavedRights);
+                NewIsDeny: newIsDeny,
+                NewRights: newSavedRights,
+                WasRights: existingMod?.WasRights ?? entry.SavedRights,
+                WasPreviousSaclLabel: existingMod?.WasPreviousSaclLabel ?? entry.PreviousSaclLabel);
         }
 
         AclManagerGrantRowRenderer.SetPendingRowColor(row);
@@ -384,6 +421,18 @@ public class AclManagerGrantsHelper(
 
     public void FixBrokenGrant(GrantedPathEntry entry, DataGridViewRow row)
         => _renderer.FixBrokenGrant(entry, row);
+
+    private string? GetEffectiveConfigPath(GrantedPathEntry entry)
+    {
+        var pendingKey = (Path.GetFullPath(entry.Path), _pending.GetEffectiveIsDeny(entry));
+        if (_pending.PendingConfigMoves.TryGetValue(pendingKey, out var pendingTarget))
+            return NormalizeConfigPath(pendingTarget.TargetConfigPath);
+
+        return grantIntentRepository.FindGrant(_sid, entry)?.Store.ConfigPath;
+    }
+
+    private string? NormalizeConfigPath(string? configPath)
+        => grantIntentStoreProvider.ResolveStore(configPath).ConfigPath;
 
     private static RightCheckState GetCheck(DataGridViewRow row, string colName)
     {

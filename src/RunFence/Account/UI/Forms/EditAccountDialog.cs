@@ -3,17 +3,21 @@
 using RunFence.Account.UI;
 using RunFence.Apps.UI;
 using RunFence.Core;
+using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.UI;
+using RunFence.UI.Forms;
 
 #endregion
 
 namespace RunFence.Account.UI.Forms;
 
-public partial class EditAccountDialog : Form, IAccountEditResult
+public partial class EditAccountDialog : RunFence.UI.Forms.ContextHelpForm, IAccountEditResult, IAccountCreationDialog, RunAs.IShowCreateAccountResultDialog
 {
+    public event Func<Task<bool>>? CreateConfirmRequested;
+
     public string? NewUsername { get; private set; }
     public ProtectedString? NewPassword { get; private set; }
     public bool IsEphemeral { get; private set; }
@@ -21,9 +25,9 @@ public partial class EditAccountDialog : Form, IAccountEditResult
     public PrivilegeLevel SelectedPrivilegeLevel => _privilegeLevelComboBox.SelectedIndex switch
     {
         0 => PrivilegeLevel.HighestAllowed,
-        1 => PrivilegeLevel.AboveBasic,
+        1 => PrivilegeLevel.Basic,
         3 => PrivilegeLevel.LowIntegrity,
-        _ => PrivilegeLevel.Basic,
+        _ => PrivilegeLevel.Isolated,
     };
     public bool DeleteRequested { get; private set; }
     public bool AllowInternet { get; private set; } = true;
@@ -35,6 +39,9 @@ public partial class EditAccountDialog : Form, IAccountEditResult
     // Create mode output properties
     public string? CreatedSid { get; private set; }
     public ProtectedString? CreatedPassword { get; private set; }
+    public CreateAccountStatus CreatedAccountStatus { get; private set; }
+    public string? CreatedAccountErrorMessage { get; private set; }
+    public CreatedAccountRollbackState? CreatedRollbackState { get; private set; }
     public bool UsersGroupUnchecked { get; private set; }
     public bool AdminGroupChecked { get; private set; }
     public IReadOnlyList<InstallablePackage> SelectedInstallPackages { get; private set; } = [];
@@ -60,6 +67,7 @@ public partial class EditAccountDialog : Form, IAccountEditResult
     private bool _originalAllowLocalhost;
     private bool _originalAllowLan;
     private bool _isCreating;
+    private bool _createAttemptOutputOwnershipTransferred;
     private readonly InstallPackageSelector _packageSelector = new();
     private SecurePasswordBox _passwordSecure = null!;
     private SecurePasswordBox _confirmPasswordSecure = null!;
@@ -85,6 +93,8 @@ public partial class EditAccountDialog : Form, IAccountEditResult
         _databaseProvider = databaseProvider;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
+        FormClosed += (_, _) => CleanupOwnedCreateAttemptOutput();
+        Disposed += (_, _) => CleanupOwnedCreateAttemptOutput();
     }
 
     /// <summary>
@@ -96,10 +106,10 @@ public partial class EditAccountDialog : Form, IAccountEditResult
         string username,
         bool isEphemeral,
         bool isCurrentAccount = false,
-        PrivilegeLevel privilegeLevel = PrivilegeLevel.Basic,
+        PrivilegeLevel privilegeLevel = PrivilegeLevel.Isolated,
         int currentHiddenCount = 0,
         FirewallAccountSettings? firewallSettings = null,
-        PackageInstallService? packageInstallService = null,
+        IPackageInstallService? packageInstallService = null,
         bool canInstall = true)
     {
         _isCreating = false;
@@ -164,6 +174,7 @@ public partial class EditAccountDialog : Form, IAccountEditResult
         }
 
         ConfigureInstallList(canInstall, packageInstallService != null ? p => packageInstallService.IsPackageInstalled(p, sid) : null);
+        RegisterContextHelp();
     }
 
     /// <summary>
@@ -182,6 +193,7 @@ public partial class EditAccountDialog : Form, IAccountEditResult
         _currentHiddenCount = currentHiddenCount;
         _currentGroupSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         _groups = GroupFilterHelper.FilterForCreateDialog(_groupMembership.GetLocalGroups()).ToList();
+        ResetCreateAttemptOutput();
 
         using var defaults = AccountCreationDefaults.Create(_databaseProvider.GetDatabase());
 
@@ -225,6 +237,44 @@ public partial class EditAccountDialog : Form, IAccountEditResult
         _ephemeralCheckBox.Checked = defaults.IsEphemeral;
 
         ConfigureInstallList(canInstall: true, isPackageInstalled: null);
+        RegisterContextHelp();
+    }
+
+    private void RegisterContextHelp()
+    {
+        SetContextHelp(_groupsListBox, ContextHelpTextCatalog.Account_Groups);
+        SetContextHelp(_logonCheckBox, ContextHelpTextCatalog.Account_LogonRestriction);
+        SetContextHelp(_networkLoginCheckBox, ContextHelpTextCatalog.Account_NetworkLoginRestriction);
+        SetContextHelp(_bgAutorunCheckBox, ContextHelpTextCatalog.Account_BgAutorunRestriction);
+        SetContextHelp(_privilegeLevelComboBox, ContextHelpTextCatalog.Launch_PrivilegeLevel);
+        SetContextHelp(_settingsPathTextBox, ContextHelpTextCatalog.Account_DesktopSettingsImport);
+        SetContextHelp(_browseButton, ContextHelpTextCatalog.Account_DesktopSettingsImport);
+        SetContextHelp(_ephemeralCheckBox, ContextHelpTextCatalog.EphemeralIdentity);
+    }
+
+    public Task<DialogResult> ShowCreateDialogAsync(IWin32Window owner)
+        => ShowDialogAsync(owner);
+
+    public void ResetCreateAttemptOutput()
+    {
+        _createAttemptOutputOwnershipTransferred = false;
+        CreatedPassword?.Dispose();
+        CreatedSid = null;
+        CreatedPassword = null;
+        CreatedAccountStatus = CreateAccountStatus.ValidationFailed;
+        CreatedAccountErrorMessage = null;
+        CreatedRollbackState = null;
+        NewUsername = null;
+        IsEphemeral = false;
+        Errors.Clear();
+        SettingsImportPath = null;
+        FirewallSettingsChanged = false;
+        AllowInternet = true;
+        AllowLocalhost = true;
+        AllowLan = true;
+        UsersGroupUnchecked = false;
+        AdminGroupChecked = false;
+        SelectedInstallPackages = [];
     }
 
     private void ConfigureInstallList(bool canInstall, Func<InstallablePackage, bool>? isPackageInstalled)
@@ -355,7 +405,7 @@ public partial class EditAccountDialog : Form, IAccountEditResult
             return;
         }
 
-        if (saveResult.ValidationError != null)
+        if (saveResult.Status == EditAccountDialogSaveHandler.SaveAccountStatus.ValidationFailed || saveResult.ValidationError != null)
         {
             newPassword?.Dispose();
             _statusLabel.Text = saveResult.ValidationError;
@@ -393,10 +443,10 @@ public partial class EditAccountDialog : Form, IAccountEditResult
     /// <remarks>OS calls (CreateLocalUser, AddUserToGroups, LSA) are thread-safe; UI state is captured before Task.Run.</remarks>
     private async Task OnCreateClick()
     {
+        ResetCreateAttemptOutput();
         _okButton.Enabled = false;
         _cancelButton.Enabled = false;
         _statusLabel.Text = "";
-        Errors.Clear();
 
         // Validate username
         var name = _usernameTextBox.Text.Trim();
@@ -460,11 +510,35 @@ public partial class EditAccountDialog : Form, IAccountEditResult
         if (IsDisposed)
             return;
 
-        if (result == null)
+        if (result.Status is CreateAccountStatus.ValidationFailed or CreateAccountStatus.WindowsAccountCreationFailed)
         {
-            _statusLabel.Text = _createHandler.LastValidationError;
+            _statusLabel.Text = result.ErrorMessage ?? _createHandler.LastValidationError;
             _okButton.Enabled = true;
             _cancelButton.Enabled = true;
+            return;
+        }
+
+        CreatedAccountStatus = result.Status;
+        CreatedAccountErrorMessage = result.ErrorMessage;
+        CreatedRollbackState = result.RollbackState;
+
+        if (result.Status == CreateAccountStatus.CleanupStateSaveFailed)
+        {
+            CreatedSid = result.Sid;
+            CreatedPassword = null;
+            NewUsername = result.Username;
+            IsEphemeral = result.IsEphemeral;
+            var shouldCloseAfterWarning = await RequestCreateConfirmAsync();
+            if (!shouldCloseAfterWarning)
+            {
+                _okButton.Enabled = true;
+                _cancelButton.Enabled = true;
+                return;
+            }
+
+            _createAttemptOutputOwnershipTransferred = true;
+            DialogResult = DialogResult.OK;
+            Close();
             return;
         }
 
@@ -491,6 +565,15 @@ public partial class EditAccountDialog : Form, IAccountEditResult
 
         SelectedInstallPackages = installPackages;
 
+        var shouldClose = await RequestCreateConfirmAsync();
+        if (!shouldClose)
+        {
+            _okButton.Enabled = true;
+            _cancelButton.Enabled = true;
+            return;
+        }
+
+        _createAttemptOutputOwnershipTransferred = true;
         DialogResult = DialogResult.OK;
         Close();
     }
@@ -507,11 +590,10 @@ public partial class EditAccountDialog : Form, IAccountEditResult
         _privilegeLevelComboBox.SelectedIndex = mode switch
         {
             PrivilegeLevel.HighestAllowed => 0,
-            PrivilegeLevel.AboveBasic => 1,
+            PrivilegeLevel.Basic => 1,
             PrivilegeLevel.LowIntegrity => 3,
             _ => 2,
         };
-        _toolTip.SetToolTip(_privilegeLevelComboBox, LaunchUiConstants.PrivilegeLevelTooltip);
     }
 
     private static bool? Invert(bool? v) => !v;
@@ -522,4 +604,30 @@ public partial class EditAccountDialog : Form, IAccountEditResult
         false => CheckState.Unchecked,
         null => CheckState.Indeterminate
     };
+
+    private async Task<bool> RequestCreateConfirmAsync()
+    {
+        var createConfirmRequested = CreateConfirmRequested;
+        if (createConfirmRequested == null)
+            return true;
+
+        foreach (Func<Task<bool>> handler in createConfirmRequested.GetInvocationList())
+        {
+            if (!await handler())
+                return false;
+        }
+
+        return true;
+    }
+
+    private void CleanupOwnedCreateAttemptOutput()
+    {
+        if (!_isCreating)
+            return;
+
+        if (_createAttemptOutputOwnershipTransferred)
+            return;
+
+        ResetCreateAttemptOutput();
+    }
 }

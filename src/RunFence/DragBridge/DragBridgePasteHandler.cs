@@ -3,7 +3,9 @@ using System.Security.Principal;
 using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Persistence;
 
 namespace RunFence.DragBridge;
 
@@ -11,12 +13,17 @@ namespace RunFence.DragBridge;
 /// Result of <see cref="DragBridgePasteHandler.ResolveFileAccessAsync"/>. Null <see cref="Paths"/> means abort.
 /// </summary>
 /// <param name="Paths">Final file paths to deliver; null if the operation was aborted.</param>
-/// <param name="DatabaseModified">True if any grant was tracked — caller must save config.</param>
-/// <param name="GrantedPaths">Paths where ACEs were applied for the target account (for quick-access pinning).</param>
+/// <param name="DatabaseModified">True if any persisted grant or traverse intent changed.</param>
+/// <param name="GrantedPaths">Durable paths where ACEs were applied for the target account.</param>
 public readonly record struct DragBridgeResolveResult(
     List<string>? Paths,
     bool DatabaseModified,
-    List<string> GrantedPaths);
+    List<string> GrantedPaths,
+    DragBridgeRollbackPlan? RollbackPlan)
+{
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+    public bool DurableSaveCompleted { get; init; }
+}
 
 /// <summary>
 /// Handles the paste side of the DragBridge flow: verifies file access, prompts about
@@ -36,166 +43,363 @@ public class DragBridgePasteHandler(
 {
     public async Task<DragBridgeResolveResult> ResolveFileAccessAsync(
         SecurityIdentifier targetSid,
+        SecurityIdentifier? targetContainerSid,
         List<string> filePaths,
         string sourceSid,
-        IReadOnlyDictionary<string, string>? sidNames,
+        string? sourceContainerSid,
+        AppDatabase? database,
         CancellationToken ct)
     {
-        // Step 0: Verify files still exist
-        var existingPaths = filePaths.Where(p => File.Exists(p) || Directory.Exists(p)).ToList();
+        if (ct.IsCancellationRequested)
+            return new DragBridgeResolveResult(null, false, [], null);
+
+        var targetSids = GetEffectiveTargetSids(targetSid, targetContainerSid);
+        var targetIdentityKey = GetTargetIdentityKey(targetSid, targetContainerSid);
+
+        var existingPaths = filePaths.Where(path => File.Exists(path) || Directory.Exists(path)).ToList();
         if (existingPaths.Count == 0)
         {
             uiThreadInvoker.Invoke(() => notifications.ShowWarning("Drag Bridge",
                 $"{filePaths.Count - existingPaths.Count} source file(s) no longer exist."));
-            return new DragBridgeResolveResult(null, false, []);
+            return new DragBridgeResolveResult(null, false, [], null);
         }
 
         filePaths = existingPaths;
 
-        // Step 1: Verify source user can read captured files
+        var sourceSids = GetEffectiveSourceSids(sourceSid, sourceContainerSid);
         var unreadableBySource = filePaths
-            .Where(p => aclPermission.NeedsPermissionGrant(p, sourceSid, FileSystemRights.Read))
+            .Where(path => sourceSids.Any(sid => aclPermission.NeedsPermissionGrant(path, sid, FileSystemRights.Read)))
             .ToList();
         if (unreadableBySource.Count > 0)
         {
             uiThreadInvoker.Invoke(() => notifications.ShowWarning("Drag Bridge",
-                $"Source account cannot read {unreadableBySource.Count} file(s). Cannot continue paste."));
-            return new DragBridgeResolveResult(null, false, []);
+                $"Source app cannot read {unreadableBySource.Count} file(s). Cannot continue paste."));
+            return new DragBridgeResolveResult(null, false, [], null);
         }
 
-        // Step 2: Check if target user can access the files
         var inaccessibleByTarget = filePaths
-            .Where(p => aclPermission.NeedsPermissionGrant(p, targetSid.Value, FileSystemRights.Read))
+            .Where(path => targetSids.Any(sid => aclPermission.NeedsPermissionGrant(path, sid, FileSystemRights.Read)))
             .ToList();
 
         var grantedPaths = new List<string>();
-        bool dbModified = false;
-        if (inaccessibleByTarget.Count > 0)
+        var grantRollbacks = new List<DragBridgeGrantRollbackEntry>();
+        var traverseRollbacks = new List<DragBridgeTraverseRollbackEntry>();
+        var warnings = new List<string>();
+        var dbModified = false;
+        var durableSaveCompleted = true;
+        if (inaccessibleByTarget.Count == 0)
         {
-            DragBridgeAccessAction action;
-            if (choiceCache.TryGetChoice(targetSid.Value, inaccessibleByTarget, out var remembered))
+            return new DragBridgeResolveResult(filePaths, dbModified, grantedPaths, null)
             {
-                action = remembered;
-            }
-            else
-            {
-                var chosen = await AskUserAboutAccessAsync(targetSid, inaccessibleByTarget, sidNames, ct);
-                if (chosen == null)
-                    return new DragBridgeResolveResult(null, false, []); // cancelled
-                action = chosen.Value;
-                if (action is DragBridgeAccessAction.CopyToTemp)
-                    choiceCache.RememberChoice(targetSid.Value, inaccessibleByTarget, action);
-            }
+                DurableSaveCompleted = durableSaveCompleted,
+                Warnings = warnings
+            };
+        }
 
-            switch (action)
+        DragBridgeAccessAction action;
+        if (choiceCache.TryGetChoice(targetIdentityKey, inaccessibleByTarget, out var remembered))
+        {
+            action = remembered;
+        }
+        else
+        {
+            var chosen = await AskUserAboutAccessAsync(targetSid, targetContainerSid, inaccessibleByTarget, database, ct);
+            if (chosen == null)
+                return new DragBridgeResolveResult(null, false, [], null);
+
+            action = chosen.Value;
+            if (action == DragBridgeAccessAction.CopyToTemp)
+                choiceCache.RememberChoice(targetIdentityKey, inaccessibleByTarget, action);
+        }
+
+        switch (action)
+        {
+            case DragBridgeAccessAction.GrantAccess:
             {
-                case DragBridgeAccessAction.GrantAccess:
+                var newlyGrantRollbacks = new List<DragBridgeGrantRollbackEntry>();
+                var newlyTraverseRollbacks = new List<DragBridgeTraverseRollbackEntry>();
+                foreach (var path in inaccessibleByTarget)
                 {
-                    foreach (var path in inaccessibleByTarget)
-                    {
-                        try
-                        {
-                            // Grants Read + Synchronize on the specific file (not ReadAndExecute on parent directory).
-                            // DragBridge only needs to read this exact file, not launch it.
-                            // Outer GrantAccess action selection is the user approval — silent confirm here.
-                            var r = pathGrantService.EnsureAccess(
-                                targetSid.Value, path,
-                                FileSystemRights.Read | FileSystemRights.Synchronize,
-                                confirm: null);
-                            dbModified |= r.DatabaseModified;
-                            if (r.GrantAdded)
-                                grantedPaths.Add(path);
-                        }
-                        catch (Exception ex)
-                        {
-                            log.Warn($"DragBridgePasteHandler: failed to grant access to '{path}': {ex.Message}");
-                        }
-                    }
-
-                    break;
-                }
-                case DragBridgeAccessAction.GrantFolderAccess:
-                {
-                    // Grants ReadAndExecute on each unique parent folder (or the folder itself for directory paths),
-                    // covering all contents via full inheritance. Returns original paths — no temp copies.
-                    var sourceDirs = inaccessibleByTarget
-                        .Select(p => Directory.Exists(p) ? p : Path.GetDirectoryName(p)!)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToList();
-                    foreach (var dir in sourceDirs)
-                    {
-                        try
-                        {
-                            var r = pathGrantService.EnsureAccess(
-                                targetSid.Value, dir, FileSystemRights.ReadAndExecute, confirm: null);
-                            dbModified |= r.DatabaseModified;
-                            if (r.GrantAdded)
-                                grantedPaths.Add(dir);
-                        }
-                        catch (Exception ex)
-                        {
-                            log.Warn($"DragBridgePasteHandler: failed to grant folder access to '{dir}': {ex.Message}");
-                        }
-                    }
-
-                    break;
-                }
-                case DragBridgeAccessAction.CopyToTemp:
                     try
                     {
-                        // Container SID resolution is not feasible: all container apps share the same owner SID
-                        // (the interactive user), so there is no reliable way to identify which container is
-                        // the target from the window owner SID alone. Users can manually grant access via "Copy SID".
-                        var tempFolder = tempManager.CreateTempFolder(targetSid.Value, containerSid: null);
-                        var tempPaths = tempManager.CopyFilesToTemp(tempFolder, inaccessibleByTarget);
-
-                        // Replace inaccessible paths with their actual temp copies (names may differ due to collision renaming)
-                        filePaths = filePaths.Except(inaccessibleByTarget).Concat(tempPaths).ToList();
+                        ApplyFileGrant(
+                            path,
+                            targetSid.Value,
+                            targetSids,
+                            grantRollbacks,
+                            newlyGrantRollbacks,
+                            traverseRollbacks,
+                            newlyTraverseRollbacks,
+                            grantedPaths,
+                            warnings,
+                            ref dbModified,
+                            ref durableSaveCompleted);
                     }
                     catch (Exception ex)
                     {
-                        log.Error("DragBridgePasteHandler: failed to create temp folder for paste", ex);
-                        uiThreadInvoker.Invoke(() => notifications.ShowError("Drag Bridge", "Failed to copy files to temp folder."));
-                        return new DragBridgeResolveResult(null, false, []);
+                        log.Warn($"DragBridgePasteHandler: failed to grant access to '{path}': {ex.Message}");
+                        RollBackGrantBatch(newlyGrantRollbacks, newlyTraverseRollbacks);
+                        return new DragBridgeResolveResult(null, false, [], null);
+                    }
+                }
+
+                break;
+            }
+            case DragBridgeAccessAction.GrantFolderAccess:
+            {
+                var sourceDirs = inaccessibleByTarget
+                    .Select(path => Directory.Exists(path) ? path : Path.GetDirectoryName(path)!)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var newlyGrantRollbacks = new List<DragBridgeGrantRollbackEntry>();
+                var newlyTraverseRollbacks = new List<DragBridgeTraverseRollbackEntry>();
+                foreach (var dir in sourceDirs)
+                {
+                    try
+                    {
+                        ApplyFolderGrant(
+                            dir,
+                            targetSid.Value,
+                            GetRequiredFolderGrantSids(dir, inaccessibleByTarget, targetSids),
+                            grantRollbacks,
+                            newlyGrantRollbacks,
+                            traverseRollbacks,
+                            newlyTraverseRollbacks,
+                            grantedPaths,
+                            warnings,
+                            ref dbModified,
+                            ref durableSaveCompleted);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.Warn($"DragBridgePasteHandler: failed to grant folder access to '{dir}': {ex.Message}");
+                        RollBackGrantBatch(newlyGrantRollbacks, newlyTraverseRollbacks);
+                        return new DragBridgeResolveResult(null, false, [], null);
+                    }
+                }
+
+                break;
+            }
+            case DragBridgeAccessAction.CopyToTemp:
+                try
+                {
+                    var tempFolderResult = tempManager.CreateTempFolder(targetSid.Value, targetContainerSid?.Value);
+                    if (!tempFolderResult.Succeeded || string.IsNullOrWhiteSpace(tempFolderResult.TempFolderPath))
+                    {
+                        ShowTempCopyError(tempFolderResult.ErrorMessage);
+                        return new DragBridgeResolveResult(null, false, [], null);
                     }
 
-                    break;
-            }
+                    var tempResult = tempManager.CopyFilesToTemp(tempFolderResult.TempFolderPath, inaccessibleByTarget);
+                    if (!tempResult.Succeeded)
+                    {
+                        foreach (var path in tempResult.TempPaths)
+                        {
+                            try
+                            {
+                                if (Directory.Exists(path))
+                                    Directory.Delete(path, recursive: true);
+                                else if (File.Exists(path))
+                                    File.Delete(path);
+                            }
+                            catch (Exception ex)
+                            {
+                                log.Warn($"DragBridgePasteHandler: temp rollback failed for '{path}': {ex.Message}");
+                            }
+                        }
+
+                        ShowTempCopyError(tempResult.Entries.FirstOrDefault(entry => !string.IsNullOrWhiteSpace(entry.ErrorText))?.ErrorText);
+                        return new DragBridgeResolveResult(null, false, [], null);
+                    }
+
+                    filePaths = filePaths.Except(inaccessibleByTarget).Concat(tempResult.TempPaths).ToList();
+                    return new DragBridgeResolveResult(
+                        filePaths,
+                        dbModified,
+                        grantedPaths,
+                        new DragBridgeRollbackPlan(grantRollbacks, traverseRollbacks, tempResult.TempPaths))
+                    {
+                        DurableSaveCompleted = durableSaveCompleted,
+                        Warnings = warnings
+                    };
+                }
+                catch (Exception ex)
+                {
+                    log.Error("DragBridgePasteHandler: failed to create temp folder for paste", ex);
+                    ShowTempCopyError(null);
+                    return new DragBridgeResolveResult(null, false, [], null);
+                }
         }
 
-        return new DragBridgeResolveResult(filePaths, dbModified, grantedPaths);
+        var rollbackPlan = grantRollbacks.Count == 0 && traverseRollbacks.Count == 0
+            ? null
+            : new DragBridgeRollbackPlan(grantRollbacks, traverseRollbacks, []);
+        return new DragBridgeResolveResult(filePaths, dbModified, grantedPaths, rollbackPlan)
+        {
+            DurableSaveCompleted = durableSaveCompleted,
+            Warnings = warnings
+        };
     }
 
-    /// <summary>
-    /// Returns true if any file is missing or inaccessible by the target account, indicating a
-    /// resolution dialog will be needed. Used as a pre-check before opening the DragBridge window
-    /// so that files already accessible start as resolved — no extra drag required.
-    /// </summary>
-    public bool NeedsAccessResolution(SecurityIdentifier targetSid, IReadOnlyList<string> filePaths)
-        => filePaths.Any(p =>
-            (!File.Exists(p) && !Directory.Exists(p)) ||
-            aclPermission.NeedsPermissionGrant(p, targetSid.Value, FileSystemRights.Read));
-
-    private async Task<DragBridgeAccessAction?> AskUserAboutAccessAsync(
-        SecurityIdentifier targetSid,
-        List<string> inaccessiblePaths,
-        IReadOnlyDictionary<string, string>? sidNames,
-        CancellationToken ct)
+    public bool NeedsAccessResolution(SecurityIdentifier targetSid, SecurityIdentifier? targetContainerSid, IReadOnlyList<string> filePaths)
     {
-        var tcs = new TaskCompletionSource<DragBridgeAccessAction?>();
+        var targetSids = GetEffectiveTargetSids(targetSid, targetContainerSid);
+        return filePaths.Any(path =>
+            (!File.Exists(path) && !Directory.Exists(path)) ||
+            targetSids.Any(sid => aclPermission.NeedsPermissionGrant(path, sid, FileSystemRights.Read)));
+    }
 
-        var targetDisplayName = displayNameResolver.GetDisplayName(targetSid.Value, null, sidNames);
-        var totalSize = inaccessiblePaths.Sum(p =>
+    private void ApplyFileGrant(
+        string path,
+        string primaryTargetSid,
+        IReadOnlyList<string> targetSids,
+        List<DragBridgeGrantRollbackEntry> grantRollbacks,
+        List<DragBridgeGrantRollbackEntry> newlyGrantRollbacks,
+        List<DragBridgeTraverseRollbackEntry> traverseRollbacks,
+        List<DragBridgeTraverseRollbackEntry> newlyTraverseRollbacks,
+        List<string> grantedPaths,
+        List<string> warnings,
+        ref bool dbModified,
+        ref bool durableSaveCompleted)
+    {
+        var traversePath = Path.GetDirectoryName(Path.GetFullPath(path));
+        foreach (var sid in targetSids.Where(targetSid => aclPermission.NeedsPermissionGrant(path, targetSid, FileSystemRights.Read)))
+        {
+            var previousGrantState = pathGrantService.CaptureGrantRestoreSnapshot(sid, path, isDeny: false);
+            var previousTraverseState = string.IsNullOrEmpty(traversePath)
+                ? new GrantIntentRestoreSnapshot(null, [])
+                : pathGrantService.CaptureTraverseRestoreSnapshot(sid, traversePath);
+            var result = pathGrantService.EnsureAccess(
+                sid,
+                path,
+                FileSystemRights.Read | FileSystemRights.Synchronize,
+                confirm: null);
+
+            dbModified |= result.DatabaseModified;
+            durableSaveCompleted &= !result.DatabaseModified || result.DurableSaveCompleted;
+            if (result.DatabaseModified)
+            {
+                var rollback = new DragBridgeGrantRollbackEntry(sid, path, previousGrantState);
+                grantRollbacks.Add(rollback);
+                newlyGrantRollbacks.Add(rollback);
+
+                if (!string.IsNullOrEmpty(traversePath))
+                {
+                    var traverseRollback = new DragBridgeTraverseRollbackEntry(sid, traversePath, previousTraverseState);
+                    traverseRollbacks.Add(traverseRollback);
+                    newlyTraverseRollbacks.Add(traverseRollback);
+                }
+            }
+
+            if (result.GrantApplied && string.Equals(sid, primaryTargetSid, StringComparison.OrdinalIgnoreCase))
+                grantedPaths.Add(path);
+
+            if (result.Warnings.Count > 0)
+                warnings.AddRange(result.Warnings.Select(GrantApplyFailureFormatter.Format));
+        }
+    }
+
+    private void ApplyFolderGrant(
+        string dir,
+        string primaryTargetSid,
+        IReadOnlyList<string> targetSids,
+        List<DragBridgeGrantRollbackEntry> grantRollbacks,
+        List<DragBridgeGrantRollbackEntry> newlyGrantRollbacks,
+        List<DragBridgeTraverseRollbackEntry> traverseRollbacks,
+        List<DragBridgeTraverseRollbackEntry> newlyTraverseRollbacks,
+        List<string> grantedPaths,
+        List<string> warnings,
+        ref bool dbModified,
+        ref bool durableSaveCompleted)
+    {
+        var normalizedDir = Path.GetFullPath(dir);
+        foreach (var sid in targetSids)
+        {
+            var previousGrantState = pathGrantService.CaptureGrantRestoreSnapshot(sid, normalizedDir, isDeny: false);
+            var previousTraverseState = pathGrantService.CaptureTraverseRestoreSnapshot(sid, normalizedDir);
+            var result = pathGrantService.EnsureAccess(
+                sid,
+                dir,
+                FileSystemRights.ReadAndExecute,
+                confirm: null);
+
+            dbModified |= result.DatabaseModified;
+            durableSaveCompleted &= !result.DatabaseModified || result.DurableSaveCompleted;
+            if (result.DatabaseModified)
+            {
+                var rollback = new DragBridgeGrantRollbackEntry(sid, dir, previousGrantState);
+                grantRollbacks.Add(rollback);
+                newlyGrantRollbacks.Add(rollback);
+
+                var traverseRollback = new DragBridgeTraverseRollbackEntry(sid, normalizedDir, previousTraverseState);
+                traverseRollbacks.Add(traverseRollback);
+                newlyTraverseRollbacks.Add(traverseRollback);
+            }
+
+            if (result.GrantApplied && string.Equals(sid, primaryTargetSid, StringComparison.OrdinalIgnoreCase))
+                grantedPaths.Add(dir);
+
+            if (result.Warnings.Count > 0)
+                warnings.AddRange(result.Warnings.Select(GrantApplyFailureFormatter.Format));
+        }
+    }
+
+    private void RollBackGrantBatch(
+        IReadOnlyList<DragBridgeGrantRollbackEntry> grantRollbacks,
+        IReadOnlyList<DragBridgeTraverseRollbackEntry> traverseRollbacks)
+    {
+        foreach (var rollback in grantRollbacks)
         {
             try
             {
-                if (File.Exists(p))
-                    return new FileInfo(p).Length;
-                if (Directory.Exists(p))
-                    return new DirectoryInfo(p).EnumerateFiles("*", SearchOption.AllDirectories).Sum(f => f.Length);
+                pathGrantService.RestoreGrant(
+                    rollback.Sid,
+                    rollback.Path,
+                    isDeny: false,
+                    rollback.PreviousState);
+            }
+            catch (Exception rollbackEx)
+            {
+                log.Warn($"DragBridgePasteHandler: rollback grant restore failed for '{rollback.Path}': {rollbackEx.Message}");
+            }
+        }
+
+        foreach (var traverseRollback in traverseRollbacks)
+        {
+            try
+            {
+                pathGrantService.RestoreTraverse(
+                    traverseRollback.Sid,
+                    traverseRollback.Path,
+                    traverseRollback.PreviousState);
+            }
+            catch (Exception rollbackEx)
+            {
+                log.Warn($"DragBridgePasteHandler: rollback traverse restore failed for '{traverseRollback.Path}': {rollbackEx.Message}");
+            }
+        }
+    }
+
+    private async Task<DragBridgeAccessAction?> AskUserAboutAccessAsync(
+        SecurityIdentifier targetSid,
+        SecurityIdentifier? targetContainerSid,
+        List<string> inaccessiblePaths,
+        AppDatabase? database,
+        CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource<DragBridgeAccessAction?>();
+        var targetDisplayName = ResolveTargetDisplayName(targetSid, targetContainerSid, database);
+        var totalSize = inaccessiblePaths.Sum(path =>
+        {
+            try
+            {
+                if (File.Exists(path))
+                    return new FileInfo(path).Length;
+                if (Directory.Exists(path))
+                    return new DirectoryInfo(path).EnumerateFiles("*", SearchOption.AllDirectories).Sum(file => file.Length);
                 return 0L;
             }
-            catch (Exception)
+            catch
             {
                 return 0L;
             }
@@ -221,6 +425,67 @@ public class DragBridgePasteHandler(
         catch
         {
             return null;
-        } // dialog error or cancellation → treat as cancel
+        }
+    }
+
+    private string ResolveTargetDisplayName(
+        SecurityIdentifier targetSid,
+        SecurityIdentifier? targetContainerSid,
+        AppDatabase? database)
+    {
+        if (targetContainerSid != null && database != null)
+        {
+            var container = database.AppContainers.FirstOrDefault(entry =>
+                string.Equals(entry.Sid, targetContainerSid.Value, StringComparison.OrdinalIgnoreCase));
+            if (container != null)
+                return string.IsNullOrWhiteSpace(container.DisplayName) ? container.Name : container.DisplayName;
+        }
+
+        return displayNameResolver.GetDisplayName(targetSid.Value, null, database?.SidNames);
+    }
+
+    private static string GetTargetIdentityKey(SecurityIdentifier targetSid, SecurityIdentifier? targetContainerSid)
+        => targetContainerSid == null
+            ? targetSid.Value
+            : targetSid.Value + "|" + targetContainerSid.Value;
+
+    private static List<string> GetEffectiveTargetSids(SecurityIdentifier targetSid, SecurityIdentifier? targetContainerSid)
+    {
+        var result = new List<string> { targetSid.Value };
+        if (targetContainerSid != null)
+            result.Add(targetContainerSid.Value);
+        return result;
+    }
+
+    private static List<string> GetEffectiveSourceSids(string sourceSid, string? sourceContainerSid)
+    {
+        var result = new List<string> { sourceSid };
+        if (!string.IsNullOrWhiteSpace(sourceContainerSid))
+            result.Add(sourceContainerSid);
+        return result;
+    }
+
+    private List<string> GetRequiredFolderGrantSids(string dir, IReadOnlyList<string> inaccessiblePaths, IReadOnlyList<string> targetSids)
+    {
+        var normalizedDir = Path.GetFullPath(dir);
+        var pathsInDir = inaccessiblePaths
+            .Where(path =>
+                string.Equals(
+                    Directory.Exists(path) ? Path.GetFullPath(path) : Path.GetDirectoryName(path),
+                    normalizedDir,
+                    StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        return targetSids
+            .Where(sid => pathsInDir.Any(path => aclPermission.NeedsPermissionGrant(path, sid, FileSystemRights.Read)))
+            .ToList();
+    }
+
+    private void ShowTempCopyError(string? detail)
+    {
+        var message = string.IsNullOrWhiteSpace(detail)
+            ? "Failed to copy files to temp folder."
+            : $"Failed to copy files to temp folder. {detail}";
+        uiThreadInvoker.Invoke(() => notifications.ShowError("Drag Bridge", message));
     }
 }

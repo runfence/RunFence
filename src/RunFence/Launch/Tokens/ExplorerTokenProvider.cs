@@ -100,8 +100,7 @@ public class ExplorerTokenProvider(ILoggingService log) : IExplorerTokenProvider
     /// </summary>
     private static List<(IntPtr Token, int Pid)> EnumerateExplorerTokens()
     {
-        var currentSessionId = Process.GetCurrentProcess().SessionId;
-        var explorers = Process.GetProcessesByName("explorer");
+        var explorers = NativeTokenHelper.GetProcessesByNameInCurrentSession("explorer");
         var tokens = new List<(IntPtr Token, int Pid)>();
         try
         {
@@ -109,8 +108,6 @@ public class ExplorerTokenProvider(ILoggingService log) : IExplorerTokenProvider
             {
                 try
                 {
-                    if (proc.SessionId != currentSessionId)
-                        continue;
                     if (ProcessNative.OpenProcessToken(proc.Handle,
                             TokenQuery | TokenDuplicate | TokenImpersonate, out var hToken))
                         tokens.Add((hToken, proc.Id));

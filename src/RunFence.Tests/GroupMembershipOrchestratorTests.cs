@@ -16,7 +16,7 @@ public class GroupMembershipOrchestratorTests
     private const string MemberSid = "S-1-5-21-1000-2000-3000-1002";
     private const string MemberName = "testuser";
 
-    private readonly Mock<ILocalGroupMembershipService> _groupMembership = new();
+    private readonly Mock<ILocalGroupMutationService> _groupMembership = new();
     private readonly Mock<IMemberPickerDialog> _memberPicker = new();
     private readonly Mock<IGroupMembershipPrompt> _prompt = new();
     private readonly Mock<ILoggingService> _log = new();

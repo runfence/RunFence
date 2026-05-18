@@ -94,6 +94,11 @@ public partial class CombinedPrefixesSection : PrefixListBase
         }
     }
 
+    public void RegisterContextHelp(RunFence.UI.Forms.ContextHelpForm host)
+    {
+        host.SetContextHelp(_contentGroup, RunFence.UI.Forms.ContextHelpTextCatalog.App_PathPrefixes);
+    }
+
     protected override void PerformAdd(string path)
     {
         EnsurePrefixListRuntimeInitialized();

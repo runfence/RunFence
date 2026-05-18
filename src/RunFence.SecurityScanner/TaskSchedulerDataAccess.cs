@@ -5,6 +5,9 @@ namespace RunFence.SecurityScanner;
 
 public class TaskSchedulerDataAccess
 {
+    private const int TaskActionExecute = 0;
+    private const int TaskSecurityInformationOwnerGroupDacl = 0x07;
+
     public List<ScheduledTaskInfo> GetTaskSchedulerData()
     {
         var tasks = new List<ScheduledTaskInfo>();
@@ -66,67 +69,7 @@ public class TaskSchedulerDataAccess
             {
                 try
                 {
-                    var exePaths = new List<string>();
-                    bool isPerUser = false;
-                    string? userSid = null;
-
-                    try
-                    {
-                        dynamic definition = task.Definition;
-                        foreach (dynamic action in definition.Actions)
-                        {
-                            try
-                            {
-                                if (action.Type == 0)
-                                {
-                                    string? exePath = action.Path;
-                                    if (!string.IsNullOrEmpty(exePath))
-                                        exePaths.Add(SecurityScanner.ExpandEnvVars(exePath));
-                                }
-                            }
-                            catch
-                            {
-                                /* skip */
-                            }
-                        }
-
-                        try
-                        {
-                            string? userId = (string?)definition.Principal.UserId;
-                            if (!string.IsNullOrEmpty(userId))
-                            {
-                                if (userId.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase))
-                                {
-                                    isPerUser = true;
-                                    userSid = userId;
-                                }
-                                else
-                                {
-                                    try
-                                    {
-                                        var account = new NTAccount(userId);
-                                        var sid = (SecurityIdentifier)account.Translate(typeof(SecurityIdentifier));
-                                        isPerUser = true;
-                                        userSid = sid.Value;
-                                    }
-                                    catch
-                                    {
-                                        /* leave as non-per-user */
-                                    }
-                                }
-                            }
-                        }
-                        catch
-                        {
-                            /* no principal info — treat as system task */
-                        }
-                    }
-                    catch
-                    {
-                        /* definition not accessible */
-                    }
-
-                    tasks.Add(new ScheduledTaskInfo(exePaths, isPerUser, userSid));
+                    tasks.Add(ReadTask(task));
                 }
                 catch
                 {
@@ -160,4 +103,114 @@ public class TaskSchedulerDataAccess
         }
     }
 
+    private static ScheduledTaskInfo ReadTask(dynamic task)
+    {
+        var actions = new List<ScheduledTaskActionInfo>();
+        bool isPerUser = false;
+        string? userSid = null;
+        string? principalSid = null;
+        string? taskSecurityDescriptor = null;
+        string taskPath = "";
+        dynamic? definition = null;
+
+        try
+        {
+            taskPath = task.Path as string ?? "";
+        }
+        catch
+        {
+            /* skip path */
+        }
+
+        try
+        {
+            definition = task.Definition;
+
+            try
+            {
+                foreach (dynamic action in definition.Actions)
+                {
+                    try
+                    {
+                        int actionType = (int)action.Type;
+                        actions.Add(new ScheduledTaskActionInfo(
+                            actionType,
+                            actionType == TaskActionExecute ? action.Path as string : null,
+                            actionType == TaskActionExecute ? action.Arguments as string : null,
+                            actionType == TaskActionExecute ? action.WorkingDirectory as string : null));
+                    }
+                    catch
+                    {
+                        /* skip */
+                    }
+                    finally
+                    {
+                        ReleaseComObjectIfNeeded(action);
+                    }
+                }
+            }
+            catch
+            {
+                /* definition actions not accessible */
+            }
+
+            try
+            {
+                string? userId = (string?)definition.Principal.UserId;
+                if (!string.IsNullOrEmpty(userId))
+                {
+                    if (userId.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase))
+                    {
+                        isPerUser = true;
+                        userSid = userId;
+                        principalSid = userId;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            var account = new NTAccount(userId);
+                            var sid = (SecurityIdentifier)account.Translate(typeof(SecurityIdentifier));
+                            isPerUser = true;
+                            userSid = sid.Value;
+                            principalSid = sid.Value;
+                        }
+                        catch
+                        {
+                            principalSid = userId;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                /* no principal info - treat as system task */
+            }
+            finally
+            {
+                ReleaseComObjectIfNeeded(definition);
+            }
+        }
+        catch
+        {
+            /* definition not accessible */
+        }
+
+        try
+        {
+            taskSecurityDescriptor = task.GetSecurityDescriptor(TaskSecurityInformationOwnerGroupDacl) as string;
+        }
+        catch
+        {
+            /* best effort */
+        }
+
+        return new ScheduledTaskInfo(taskPath, actions, principalSid, taskSecurityDescriptor, isPerUser, userSid);
+    }
+
+    private static void ReleaseComObjectIfNeeded(object? value)
+    {
+        if (value != null && Marshal.IsComObject(value))
+            Marshal.ReleaseComObject(value);
+    }
 }

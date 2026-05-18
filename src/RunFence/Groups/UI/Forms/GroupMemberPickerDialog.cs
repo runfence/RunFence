@@ -5,7 +5,7 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Groups.UI.Forms;
 
-public partial class GroupMemberPickerDialog : Form
+public partial class GroupMemberPickerDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly List<LocalUserAccount> _users;
     private readonly ISidResolver _sidResolver;

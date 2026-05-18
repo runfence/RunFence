@@ -5,6 +5,7 @@ namespace RunFence.Startup;
 public class LockUiStartupEventWirer(
     IUiThreadInvoker uiThreadInvoker,
     ILockUiEventSource lockManager,
+    IWindowsHelloPinFallbackPromptEventSource fallbackPrompt,
     IMainFormLockTarget mainForm) : IStartupEventWirer
 {
     public void WireEvents()
@@ -15,9 +16,9 @@ public class LockUiStartupEventWirer(
             () => uiThreadInvoker.BeginInvoke(mainForm.ShowWindowUnlocked);
         lockManager.WindowlessUnlockCompleted +=
             () => uiThreadInvoker.BeginInvoke(mainForm.HandleWindowlessUnlock);
-        lockManager.WindowsHelloUnavailableConfirmRequested +=
+        fallbackPrompt.WindowsHelloUnavailableConfirmRequested +=
             () => uiThreadInvoker.Invoke(mainForm.ConfirmWindowsHelloUnavailableFallback);
-        lockManager.WindowsHelloFailedConfirmRequested +=
+        fallbackPrompt.WindowsHelloFailedConfirmRequested +=
             () => uiThreadInvoker.Invoke(mainForm.ConfirmWindowsHelloFailedFallback);
     }
 }

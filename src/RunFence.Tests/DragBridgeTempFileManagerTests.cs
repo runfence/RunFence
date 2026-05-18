@@ -2,7 +2,6 @@ using Moq;
 using RunFence.Acl;
 using RunFence.Core;
 using RunFence.DragBridge;
-using RunFence.Infrastructure;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -20,12 +19,12 @@ public class DragBridgeTempFileManagerTests : IDisposable
         _log = new Mock<ILoggingService>();
         _pathGrantService = new Mock<IPathGrantService>();
         _aclHelper = new Mock<ITempDirectoryAclHelper>();
-        var sessionSaver = new Mock<ISessionSaver>();
-        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
-        uiThreadInvoker.Setup(u => u.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
         _testBase = Path.Combine(Path.GetTempPath(), $"ram_test_{Guid.NewGuid():N}");
-        _manager = new DragBridgeTempFileManager(_log.Object, _pathGrantService.Object,
-            sessionSaver.Object, uiThreadInvoker.Object, _aclHelper.Object, _testBase);
+        _manager = new DragBridgeTempFileManager(
+            _log.Object,
+            _pathGrantService.Object,
+            _aclHelper.Object,
+            _testBase);
     }
 
     public void Dispose()
@@ -44,10 +43,12 @@ public class DragBridgeTempFileManagerTests : IDisposable
     {
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
 
-        var folder = _manager.CreateTempFolder(currentSid);
+        var result = _manager.CreateTempFolder(currentSid);
 
-        Assert.True(Directory.Exists(folder));
-        Assert.StartsWith(_testBase, folder);
+        Assert.True(result.Succeeded);
+        Assert.NotNull(result.TempFolderPath);
+        Assert.True(Directory.Exists(result.TempFolderPath));
+        Assert.StartsWith(_testBase, result.TempFolderPath);
     }
 
     [Fact]
@@ -58,15 +59,15 @@ public class DragBridgeTempFileManagerTests : IDisposable
         File.WriteAllText(srcFile, "hello");
 
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
-        var destFolder = _manager.CreateTempFolder(currentSid);
+        var destFolder = _manager.CreateTempFolder(currentSid).TempFolderPath!;
 
         var result = _manager.CopyFilesToTemp(destFolder, [srcFile]);
 
         var expectedDest = Path.Combine(destFolder, "test.txt");
         Assert.True(File.Exists(expectedDest));
         Assert.Equal("hello", File.ReadAllText(expectedDest));
-        Assert.Single(result);
-        Assert.Equal(expectedDest, result[0]);
+        Assert.Single(result.TempPaths);
+        Assert.Equal(expectedDest, result.TempPaths[0]);
     }
 
     [Fact]
@@ -78,7 +79,7 @@ public class DragBridgeTempFileManagerTests : IDisposable
         File.WriteAllText(file2, "second");
 
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
-        var destFolder = _manager.CreateTempFolder(currentSid);
+        var destFolder = _manager.CreateTempFolder(currentSid).TempFolderPath!;
 
         // Pre-create a conflicting file so the copy must rename
         File.WriteAllText(Path.Combine(destFolder, "file.txt"), "existing");
@@ -86,9 +87,9 @@ public class DragBridgeTempFileManagerTests : IDisposable
         var returned = _manager.CopyFilesToTemp(destFolder, [file2]);
 
         // Should have returned the collision-renamed path, not the original name
-        Assert.Single(returned);
-        Assert.Equal(Path.Combine(destFolder, "file_1.txt"), returned[0]);
-        Assert.True(File.Exists(returned[0]));
+        Assert.Single(returned.TempPaths);
+        Assert.Equal(Path.Combine(destFolder, "file_1.txt"), returned.TempPaths[0]);
+        Assert.True(File.Exists(returned.TempPaths[0]));
         // Original file unchanged
         Assert.Equal("existing", File.ReadAllText(Path.Combine(destFolder, "file.txt")));
     }
@@ -97,12 +98,13 @@ public class DragBridgeTempFileManagerTests : IDisposable
     public void CopyFilesToTemp_NonExistentSource_LogsWarning()
     {
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
-        var destFolder = _manager.CreateTempFolder(currentSid);
+        var destFolder = _manager.CreateTempFolder(currentSid).TempFolderPath!;
 
         var result = _manager.CopyFilesToTemp(destFolder, [@"C:\nonexistent_file_xyz.txt"]);
 
         _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Once);
-        Assert.Empty(result);
+        Assert.Empty(result.TempPaths);
+        Assert.False(Directory.Exists(destFolder));
     }
 
     [Fact]
@@ -135,11 +137,11 @@ public class DragBridgeTempFileManagerTests : IDisposable
     [Fact]
     public void CleanupOldFolders_NonExistentRoot_DoesNotThrow()
     {
-        var sessionSaver = new Mock<ISessionSaver>();
-        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
-        var manager = new DragBridgeTempFileManager(_log.Object, _pathGrantService.Object,
-            sessionSaver.Object, uiThreadInvoker.Object,
-            new Mock<ITempDirectoryAclHelper>().Object, @"C:\nonexistent_base_xyz");
+        var manager = new DragBridgeTempFileManager(
+            _log.Object,
+            _pathGrantService.Object,
+            new Mock<ITempDirectoryAclHelper>().Object,
+            @"C:\nonexistent_base_xyz");
 
         var ex = Record.Exception(() => manager.CleanupOldFolders(TimeSpan.FromHours(1)));
 
@@ -147,42 +149,44 @@ public class DragBridgeTempFileManagerTests : IDisposable
     }
 
     [Fact]
-    public void CreateTempFolder_TraverseGrantModified_SavesConfig()
-    {
-        var sessionSaver = CreateManagerWithTraverseResult(traverseModified: true);
-
-        sessionSaver.Verify(s => s.SaveConfig(), Times.AtLeastOnce);
-    }
-
-    [Fact]
-    public void CreateTempFolder_TraverseNotModified_DoesNotSaveConfig()
-    {
-        var sessionSaver = CreateManagerWithTraverseResult(traverseModified: false);
-
-        sessionSaver.Verify(s => s.SaveConfig(), Times.Never);
-    }
-
-    /// <summary>
-    /// Creates a <see cref="DragBridgeTempFileManager"/> with <see cref="IPathGrantService.AddTraverse"/>
-    /// returning the specified <paramref name="traverseModified"/> flag, calls
-    /// <see cref="DragBridgeTempFileManager.CreateTempFolder"/> once, and returns the
-    /// <see cref="ISessionSaver"/> mock for verification.
-    /// </summary>
-    private Mock<ISessionSaver> CreateManagerWithTraverseResult(bool traverseModified)
+    public void CreateTempFolder_EnsuresTraverseForTargetSid()
     {
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
         _pathGrantService.Setup(s => s.AddTraverse(It.IsAny<string>(), It.IsAny<string>()))
-            .Returns((traverseModified, new List<string>()));
+            .Returns(new GrantApplyResult(TraverseApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
-        var sessionSaver = new Mock<ISessionSaver>();
-        var uiThreadInvoker = new Mock<IUiThreadInvoker>();
-        if (traverseModified)
-            uiThreadInvoker.Setup(u => u.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
+        var result = _manager.CreateTempFolder(currentSid);
 
-        var manager = new DragBridgeTempFileManager(_log.Object, _pathGrantService.Object,
-            sessionSaver.Object, uiThreadInvoker.Object, _aclHelper.Object, _testBase);
+        Assert.True(result.Succeeded);
+        _pathGrantService.Verify(s => s.AddTraverse(currentSid, _testBase), Times.Once);
+    }
 
-        manager.CreateTempFolder(currentSid);
-        return sessionSaver;
+    [Fact]
+    public void CreateTempFolder_WithContainerSid_EnsuresTraverseForBothSids()
+    {
+        var currentSid = SidResolutionHelper.GetCurrentUserSid();
+        const string containerSid = "S-1-15-2-42";
+        _pathGrantService.Setup(s => s.AddTraverse(It.IsAny<string>(), It.IsAny<string>()))
+            .Returns(new GrantApplyResult(TraverseApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
+
+        var result = _manager.CreateTempFolder(currentSid, containerSid);
+
+        Assert.True(result.Succeeded);
+        _pathGrantService.Verify(s => s.AddTraverse(currentSid, _testBase), Times.Once);
+        _pathGrantService.Verify(s => s.AddTraverse(containerSid, _testBase), Times.Once);
+    }
+
+    [Fact]
+    public void CreateTempFolder_TraverseGrantFailure_ReturnsFailureResult()
+    {
+        var currentSid = SidResolutionHelper.GetCurrentUserSid();
+        _pathGrantService.Setup(s => s.AddTraverse(It.IsAny<string>(), It.IsAny<string>()))
+            .Throws(new IOException("save failed"));
+
+        var result = _manager.CreateTempFolder(currentSid);
+
+        Assert.False(result.Succeeded);
+        Assert.Null(result.TempFolderPath);
+        Assert.Contains("save failed", result.ErrorMessage);
     }
 }

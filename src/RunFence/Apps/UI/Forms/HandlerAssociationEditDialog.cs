@@ -1,3 +1,4 @@
+using RunFence.UI.Forms;
 using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Apps.UI.Forms;
@@ -7,7 +8,7 @@ namespace RunFence.Apps.UI.Forms;
 /// Serves both Add mode (user picks the key, template, and prefixes) and Edit mode
 /// (key is fixed; user edits template and prefix overrides only).
 /// </summary>
-public class HandlerAssociationEditDialog : Form
+public class HandlerAssociationEditDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private Label _keyLabel = null!;
     private ComboBox _keyCombo = null!;
@@ -16,6 +17,10 @@ public class HandlerAssociationEditDialog : Form
     private CombinedPrefixesSection _combinedPrefixesSection = null!;
     private Button _okButton = null!;
     private Button _cancelButton = null!;
+    private Panel _contextHelpHost = null!;
+    private ContextHelpButton _contextHelpButton = null!;
+    private Panel _contextHelpTopRow = null!;
+    private Panel _contentHost = null!;
 
     private HandlerAssociationDialogValueHelper? _valueHelper;
     private string _exePath = "";
@@ -32,6 +37,7 @@ public class HandlerAssociationEditDialog : Form
     public HandlerAssociationEditDialog()
     {
         BuildControls();
+        RegisterContextHelp();
     }
 
     private void BuildControls()
@@ -44,8 +50,42 @@ public class HandlerAssociationEditDialog : Form
         _combinedPrefixesSection.EnableFlatMode();
         _okButton = new Button();
         _cancelButton = new Button();
+        _contentHost = new Panel();
+        _contextHelpHost = new Panel();
+        _contextHelpTopRow = new Panel();
+        _contextHelpButton = new ContextHelpButton();
+
+        var rowHeight = ScaleHelpLogicalPixels(33);
+        var buttonSize = ScaleHelpLogicalPixels(29);
+        var verticalPadding = Math.Max(0, ScaleHelpLogicalPixels(2));
+        const int baseClientWidth = 370;
+        const int baseClientHeight = 440;
+
+        _contextHelpTopRow.BackColor = SystemColors.Control;
+        _contextHelpTopRow.Dock = DockStyle.Top;
+        _contextHelpTopRow.Height = rowHeight;
+        _contextHelpTopRow.Padding = new Padding(0, verticalPadding, 0, verticalPadding);
+        _contextHelpTopRow.Margin = Padding.Empty;
+        _contextHelpTopRow.TabStop = false;
+
+        _contentHost.Location = new Point(0, Math.Max(0, buttonSize + verticalPadding - 12));
+        _contentHost.Size = new Size(baseClientWidth, baseClientHeight);
+
+        _contextHelpHost.BackColor = SystemColors.Control;
+        _contextHelpHost.Dock = DockStyle.Right;
+        _contextHelpHost.Padding = Padding.Empty;
+        _contextHelpHost.Size = new Size(buttonSize, buttonSize);
+        _contextHelpHost.TabStop = false;
+
+        _contextHelpButton.Name = "_contextHelpButton";
+        _contextHelpButton.AccessibleName = "Context help";
+        _contextHelpButton.Dock = DockStyle.Right;
+        _contextHelpButton.Size = new Size(buttonSize, buttonSize);
+        _contextHelpButton.TabStop = false;
 
         SuspendLayout();
+        _contentHost.SuspendLayout();
+        _contextHelpTopRow.SuspendLayout();
 
         // Key label — shown in both modes; in Edit mode carries the key text
         _keyLabel.Text = "Association:";
@@ -95,9 +135,18 @@ public class HandlerAssociationEditDialog : Form
         AcceptButton = _okButton;
         CancelButton = _cancelButton;
 
-        Controls.AddRange(_keyLabel, _keyCombo, _templateLabel, _templateTextBox,
+        _contentHost.Controls.AddRange(_keyLabel, _keyCombo, _templateLabel, _templateTextBox,
             _combinedPrefixesSection, _okButton, _cancelButton);
+        _contextHelpHost.Controls.Add(_contextHelpButton);
+        _contextHelpTopRow.Controls.Add(_contextHelpHost);
 
+        Controls.Add(_contextHelpTopRow);
+        Controls.Add(_contentHost);
+        ClientSize = new Size(baseClientWidth, baseClientHeight + rowHeight);
+
+        _contentHost.ResumeLayout(false);
+        _contentHost.PerformLayout();
+        _contextHelpTopRow.ResumeLayout(false);
         ResumeLayout(false);
         PerformLayout();
     }
@@ -148,6 +197,13 @@ public class HandlerAssociationEditDialog : Form
 
         _templateTextBox.Text = currentTemplate ?? "";
         _combinedPrefixesSection.SetAssociationPrefixes(currentAssocPrefixes, currentReplacePrefixes);
+    }
+
+    private void RegisterContextHelp()
+    {
+        SetContextHelp(_contextHelpButton, ContextHelpTextResolver.InstructionText);
+        SetContextHelp(_templateTextBox, ContextHelpTextCatalog.Launch_Arguments);
+        _combinedPrefixesSection.RegisterContextHelp(this);
     }
 
     private void OnKeyTextChanged(object? sender, EventArgs e)

@@ -50,44 +50,6 @@ public sealed class JobKeeperRegistry : IJobKeeperRegistry
         DisposePipe(removed);
     }
 
-    public JobKeeperState? Take(string sid, bool isLow)
-    {
-        lock (_lock)
-        {
-            var keepers = GetKeepers(isLow);
-            if (!keepers.Remove(sid, out var state))
-                return null;
-
-            return state;
-        }
-    }
-
-    public IReadOnlyList<JobKeeperEntry> GetAll()
-    {
-        lock (_lock)
-        {
-            var result = new List<JobKeeperEntry>(_mediumKeepers.Count + _lowKeepers.Count);
-            foreach (var (sid, state) in _mediumKeepers)
-                result.Add(new JobKeeperEntry(sid, false, state.Pid));
-            foreach (var (sid, state) in _lowKeepers)
-                result.Add(new JobKeeperEntry(sid, true, state.Pid));
-            return result;
-        }
-    }
-
-    public IReadOnlyList<JobKeeperState> TakeAll()
-    {
-        lock (_lock)
-        {
-            var states = new List<JobKeeperState>(_mediumKeepers.Count + _lowKeepers.Count);
-            states.AddRange(_mediumKeepers.Values);
-            states.AddRange(_lowKeepers.Values);
-            _mediumKeepers.Clear();
-            _lowKeepers.Clear();
-            return states;
-        }
-    }
-
     private Dictionary<string, JobKeeperState> GetKeepers(bool isLow) =>
         isLow ? _lowKeepers : _mediumKeepers;
 
@@ -96,6 +58,6 @@ public sealed class JobKeeperRegistry : IJobKeeperRegistry
         if (state == null)
             return;
 
-        try { state.Pipe.Dispose(); } catch { }
+        try { state.Dispose(); } catch { }
     }
 }

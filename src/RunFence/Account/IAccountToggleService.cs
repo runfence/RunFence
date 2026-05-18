@@ -1,3 +1,5 @@
+using RunFence.Firewall;
+
 namespace RunFence.Account;
 
 public interface IAccountToggleService
@@ -8,11 +10,18 @@ public interface IAccountToggleService
     /// </summary>
     SetLogonBlockedResult SetLogonBlocked(string sid, string username, bool blocked);
 
+    void RestoreLogonState(string sid, string username, bool groupPolicyBlocked, bool hiddenBlocked);
+
     /// <summary>
     /// Updates the allow-internet firewall setting for an account and applies firewall rules.
-    /// Returns an error message if the firewall rule application fails, null on success.
+    /// Returns the user-visible message, if any, plus whether the caller should refresh data.
     /// </summary>
-    string? SetAllowInternet(string sid, bool allowInternet);
+    SetAllowInternetResult SetAllowInternet(string sid, bool allowInternet);
 }
 
-public record SetLogonBlockedResult(bool Success, string? ErrorMessage, bool IsLicenseLimit = false);
+public record SetLogonBlockedResult(
+    bool Success,
+    string? ErrorMessage,
+    bool IsLicenseLimit = false,
+    AccountRestrictionStatus FailureStatus = AccountRestrictionStatus.Failed,
+    bool RollbackAttempted = false);

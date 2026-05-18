@@ -13,7 +13,8 @@ public class TraverseAutoManager(
     IAclPermissionService aclPermission,
     IDatabaseProvider databaseProvider,
     GrantTraversePathResolver traversePathResolver,
-    IFileSystemPathInfo pathInfo)
+    IFileSystemPathInfo pathInfo,
+    ITraverseGrantOwnerResolver traverseGrantOwnerResolver)
 {
     private AclManagerPendingChanges _pending = null!;
     private string _sid = null!;
@@ -52,7 +53,7 @@ public class TraverseAutoManager(
         }
 
         // Already in DB as traverse-only? Already covered, nothing to add.
-        if (FindExistingTraverseEntry(traversePath) != null)
+        if (FindExistingTraverseEntry(traversePath, includeManualSharedEntries: true) != null)
             return;
 
 
@@ -83,7 +84,7 @@ public class TraverseAutoManager(
             }
             else
             {
-                var traverseEntry = FindExistingTraverseEntry(traversePath);
+                var traverseEntry = FindExistingTraverseEntry(traversePath, includeManualSharedEntries: false);
                 if (traverseEntry != null)
                 {
                     _pending.PendingTraverseRemoves[traversePath] = traverseEntry;
@@ -93,19 +94,17 @@ public class TraverseAutoManager(
         }
     }
 
-    private GrantedPathEntry? FindExistingTraverseEntry(string path)
+    private GrantedPathEntry? FindExistingTraverseEntry(string path, bool includeManualSharedEntries)
     {
         var database = databaseProvider.GetDatabase();
-        var accountEntry = database.GetAccount(_sid)?.Grants
+        var ownerSid = traverseGrantOwnerResolver.ResolveStorageOwnerSid(_sid);
+        return database.GetAccount(ownerSid)?.Grants
             .FirstOrDefault(e => e.IsTraverseOnly &&
-                                 string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase));
-        if (accountEntry != null)
-            return accountEntry;
-
-        return AclHelper.IsSpecificContainerSid(_sid)
-            ? database.SharedContainerTraverseGrants.FirstOrDefault(e => e.IsTraverseOnly &&
-                                                                         string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase))
-            : null;
+                                 string.Equals(e.Path, path, StringComparison.OrdinalIgnoreCase) &&
+                                 traverseGrantOwnerResolver.EntryAppliesToSid(
+                                     e,
+                                     _sid,
+                                     includeManualSharedEntries));
     }
 
     /// <summary>

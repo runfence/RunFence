@@ -31,9 +31,7 @@ public class ShutdownCleanupService(
     IAppHandlerRegistrationService handlerRegistrationService,
     IAssociationAutoSetService associationAutoSetService,
     IFolderHandlerService folderHandlerService,
-    IFirewallCleanupService firewallCleanupService,
-    IJobKeeperService jobKeeperService,
-    IProcessJobManager processJobManager)
+    IFirewallCleanupService firewallCleanupService)
 {
     public CleanupAllAppsResult CleanupAllApps(bool isEnforcementInProgress, bool isOperationInProgress)
     {
@@ -55,22 +53,6 @@ public class ShutdownCleanupService(
         associationAutoSetService.RestoreForAllUsers();
         handlerRegistrationService.UnregisterAll();
         folderHandlerService.UnregisterAll();
-        jobKeeperService.TerminateAllJobKeepers();
         return CleanupAllAppsResult.ReadyToExit;
-    }
-
-    /// <summary>
-    /// Terminates job keepers whose restricted job contains no processes other than the keeper
-    /// itself — i.e. all user-launched processes have already exited. Keepers with unknown job
-    /// state (handle not yet cached) are left running to avoid terminating active sessions.
-    /// </summary>
-    public void TerminateEmptyJobKeepers()
-    {
-        foreach (var (sid, isLow, keeperPid) in jobKeeperService.GetAllKeepers())
-        {
-            var members = processJobManager.GetKeeperJobMembers(sid, isLow);
-            if (members != null && members.All(pid => pid == keeperPid))
-                jobKeeperService.TerminateJobKeeper(sid, isLow);
-        }
     }
 }

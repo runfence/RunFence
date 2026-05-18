@@ -16,6 +16,7 @@ public class TpmKeyCreationPolicy(ITpmNativeApi api, TpmHandleProvider handlePro
         if (pcrStatus == 0)
             return;
 
+        // Retry without PCR binding is intentional compatibility behavior when the preferred PCR path is unavailable.
         log.Warn($"TpmKeyProvider: PCR binding failed (0x{pcrStatus:X8}), retrying without PCR binding.");
         DeleteKeyIfExists(keyName);
         CreateKeyCore(keyName, keySize, bindToPcr: false);

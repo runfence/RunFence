@@ -16,7 +16,7 @@ public sealed class WfpIcmpBlocker(ILoggingService log, IWfpFilterHelper filterH
 
     public void Apply(string sid, bool block)
     {
-        _txHelper.ExecuteInTransaction("WfpIcmpBlocker", handle =>
+        var tx = _txHelper.ExecuteInTransaction("WfpIcmpBlocker", handle =>
         {
             var v4Key = WfpFilterKeyHelper.DeriveKey("RunFence-IC-V4", sid);
             var v6Key = WfpFilterKeyHelper.DeriveKey("RunFence-IC-V6", sid);
@@ -35,5 +35,8 @@ public sealed class WfpIcmpBlocker(ILoggingService log, IWfpFilterHelper filterH
                 _filterWriter.AddIcmpBlockFilter(handle, v6Key, sddl, WfpNative.LayerAleAuthConnectV6, WfpNative.IPPROTO_ICMPV6);
             }
         });
+
+        if (!tx.Committed)
+            throw tx.FailureException ?? new InvalidOperationException(tx.Error ?? "WFP ICMP transaction did not commit.");
     }
 }

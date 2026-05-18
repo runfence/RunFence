@@ -30,18 +30,14 @@ public sealed class MockAccountProcessLauncher(
             psi.Domain = creds.Domain;
             // ProcessStartInfo.Password requires System.Security.SecureString (BCL API boundary).
             // Convert from ProtectedString at the interop boundary.
-            var passwordPtr = creds.Password.AllocUnicode();
-            try
+            creds.Password.UseUnicodeSnapshot(snapshot =>
             {
                 var ss = new System.Security.SecureString();
-                for (int i = 0; i < creds.Password.Length; i++)
-                    ss.AppendChar((char)System.Runtime.InteropServices.Marshal.ReadInt16(passwordPtr, i * 2));
+                IntPtr passwordPtr = snapshot.DangerousGetIntPtr();
+                for (int i = 0; i < snapshot.CharCount; i++)
+                    ss.AppendChar((char)System.Runtime.InteropServices.Marshal.ReadInt16(passwordPtr, i * sizeof(char)));
                 psi.Password = ss;
-            }
-            finally
-            {
-                System.Runtime.InteropServices.Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
-            }
+            });
             return ProcessInfo.FromManagedProcess(Process.Start(psi));
         }
 

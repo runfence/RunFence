@@ -12,7 +12,8 @@ namespace RunFence.Launcher;
 public class LauncherIpcHelper(
     ILauncherIpcClient ipcClient,
     ILauncherGuiController guiController,
-    ILauncherWaitDelay waitDelay)
+    ILauncherWaitDelay waitDelay,
+    ILauncherUserNotifier notifier)
 {
     /// <summary>
     /// Ensures the RunFence GUI is running, waits for IPC readiness, sends
@@ -21,32 +22,38 @@ public class LauncherIpcHelper(
     /// </summary>
     public IpcResponse? SendWithAutoStart(IpcMessage message)
     {
-        bool guiRunning = guiController.IsGuiRunning();
+        var guiState = guiController.GetGuiState();
 
-        if (guiRunning)
+        if (guiState == LauncherGuiInstanceState.RunningInCurrentSession)
         {
-            if (!WaitForServerWhile(guiController.IsGuiRunning))
+            if (!WaitForServerWhile(() => guiController.GetGuiState() == LauncherGuiInstanceState.RunningInCurrentSession))
             {
-                guiRunning = guiController.IsGuiRunning();
-                if (guiRunning)
+                guiState = guiController.GetGuiState();
+                if (guiState == LauncherGuiInstanceState.RunningInCurrentSession)
                 {
-                    ShowError("RunFence is not responding. Please try again or start it manually.");
+                    notifier.ShowError("RunFence is not responding. Please try again or start it manually.");
                     return null;
                 }
             }
         }
 
-        if (!guiRunning)
+        if (guiState != LauncherGuiInstanceState.RunningInCurrentSession)
         {
             if (!guiController.StartGui(IsRunAsStartupRequest(message)))
             {
-                ShowError("Failed to start RunFence.");
+                notifier.ShowError("Failed to start RunFence.");
                 return null;
             }
 
-            if (!WaitForServerWhile(() => true))
+            if (!WaitForGuiInCurrentSession())
             {
-                ShowError("RunFence is not responding. Please try again or start it manually.");
+                notifier.ShowError("RunFence is not responding. Please try again or start it manually.");
+                return null;
+            }
+
+            if (!WaitForServerWhile(() => guiController.GetGuiState() == LauncherGuiInstanceState.RunningInCurrentSession))
+            {
+                notifier.ShowError("RunFence is not responding. Please try again or start it manually.");
                 return null;
             }
         }
@@ -54,7 +61,7 @@ public class LauncherIpcHelper(
         var response = ipcClient.SendMessage(message);
         if (response == null)
         {
-            ShowError("Failed to communicate with RunFence.");
+            notifier.ShowError("Failed to communicate with RunFence.");
             return null;
         }
 
@@ -78,6 +85,20 @@ public class LauncherIpcHelper(
         return false;
     }
 
+    private bool WaitForGuiInCurrentSession()
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < IpcConstants.LauncherTimeoutMs)
+        {
+            if (guiController.GetGuiState() == LauncherGuiInstanceState.RunningInCurrentSession)
+                return true;
+
+            waitDelay.Sleep(500);
+        }
+
+        return false;
+    }
+
     private static bool IsRunAsStartupRequest(IpcMessage message) =>
         message.Command == IpcCommands.Launch
         && message.AppId?.IndexOfAny(['\\', '/']) >= 0;
@@ -85,5 +106,10 @@ public class LauncherIpcHelper(
     public static void ShowError(string message)
     {
         MessageBox.Show(message, "RunFence Launcher", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    public static void ShowWarning(string message)
+    {
+        MessageBox.Show(message, "RunFence Launcher", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 }

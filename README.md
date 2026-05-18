@@ -331,23 +331,27 @@ Note: if you open Explorer window (not file dialog) from inside an isolated acco
 
 **Can an isolated app interact with other accounts' processes?**
 
-Any normal app (non low-integrity/app-container) can see processes, their network connections and open windows - even belonging to other accounts. What it cannot do is writing their RAM or injecting code.
+Processes and network connections: readable by any app.
 
-RunFence sets up a protection for the apps it launches to prevent other account processes from reading their RAM. Though, apps launched under your interactive user account outside RunFence don't have such protection. So isolated apps are protected from reading each other's RAM but they can still read RAM of non-isolated apps; non-isolated apps can read AppContainer RAM but can't read other accounts apps RAM.
+Memory write/code injection: not possible.
+
+Memory read: Usually no. RunFence sets up a protection for the apps it launches to prevent other account processes from reading their RAM. Though, apps launched under your interactive user account outside RunFence don't have such protection. So isolated apps are protected from reading each other's RAM but they can still read RAM of non-isolated apps; non-isolated apps can read AppContainer RAM but can't read other accounts apps RAM.
+
+Control opened Windows by sending direct input/WM_*, reading window titles, etc: not if malicious app runs in app container or lesser than Basic privilege level (Isolated is the default level).
 
 **Can an isolated app capture keyboard input from my desktop?**
 
-Not if Low Integrity Mode is enabled or an App Container is used.
+Not if Low Integrity Mode is enabled or an App Container is used. Therefore per-account Internet blocking feature is recommended.
 
 **Can an isolated app control or send input to another account's apps?**
 
-Any non-elevated app can't use SendInput unless you disable "Block input injection" feature in the tray menu or close RunFence.
+Any non-elevated app can't use system-wide SendInput unless you disable "Block input injection" feature in the tray menu or close RunFence. Certain keys are excluded from blocking (e.g. media keys).
 
-Additionally, all non-uwp apps (i.e. not Windows Terminal) that you launch through RunFence with Basic privilege level get restricted from accessing other accounts' window handles, changing system settings, or shutting down Windows. 
+Additionally, all non-uwp apps (i.e. not Windows Terminal) that you launch through RunFence with lesser than Basic privilege level get restricted from accessing other accounts' window handles, changing system settings, or shutting down Windows. 
 
-**Can isolated apps access my clipboard?**
+**Can isolated apps access my clipboard in background?**
 
-Not if it's an App Container app and it's not in foreground.
+Not if it's an App Container app or lesser than Basic privilege level is used.
 
 **What is AppContainer and when should I use it?**
 
@@ -395,7 +399,7 @@ The full source code is available for review and auditing. You can build and run
 own binary to verify that what you're running matches what is published.
 
 ```bash
-dotnet build RunFence.sln -v quiet
+dotnet build RunFence.slnx -v quiet
 dotnet test src\RunFence.Tests\RunFence.Tests.csproj --no-build
 ```
 

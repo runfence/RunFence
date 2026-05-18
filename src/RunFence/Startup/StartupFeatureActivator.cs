@@ -23,7 +23,7 @@ public class StartupFeatureActivator(
     StartupOptions startupOptions,
     LockManager lockManager,
     IStartupUnlockGrant startupUnlockGrant,
-    IEvaluationLimitHelper evaluationLimitHelper)
+    IEvaluationCredentialCounter credentialCounter)
 {
     public void ActivateContextMenus(AppDatabase database)
     {
@@ -44,7 +44,7 @@ public class StartupFeatureActivator(
         if (startupOptions.IsBackground || startupOptions.PinBypassed || DebugHelper.IsDebugBuild)
             return;
         var session = sessionProvider.GetSession();
-        var credCount = evaluationLimitHelper.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
+        var credCount = credentialCounter.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
         if (session.Database.Apps.Count == 0 && credCount == 0)
             mainForm.Shown += async (_, _) => await wizardLauncher.OpenWizardAsync(mainForm);
     }

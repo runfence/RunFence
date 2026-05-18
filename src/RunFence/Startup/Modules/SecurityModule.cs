@@ -1,5 +1,6 @@
 using Autofac;
 using Autofac.Extras.Ordering;
+using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Security;
 using RunFence.Startup;
@@ -11,12 +12,23 @@ public class SecurityModule : Module
 {
     protected override void Load(ContainerBuilder builder)
     {
+        builder.RegisterType<StartupSecurityScannerRunner>()
+            .WithParameter("scannerPath", Path.Combine(AppContext.BaseDirectory, PathConstants.SecurityScannerExeName))
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<StartupSecurityService>()
             .As<IStartupSecurityService>()
             .SingleInstance();
 
         builder.RegisterType<WindowsHelloService>()
             .As<IWindowsHelloService>()
+            .SingleInstance();
+        builder.RegisterType<WindowsHelloNative>()
+            .As<IWindowsHelloNative>()
+            .SingleInstance();
+        builder.RegisterType<WindowsHelloExecutionContext>()
+            .As<IWindowsHelloExecutionContext>()
             .SingleInstance();
 
         builder.RegisterType<AutoLockTimerService>()
@@ -26,8 +38,25 @@ public class SecurityModule : Module
         builder.RegisterType<UnlockProcessLauncher>()
             .As<IUnlockProcessLauncher>()
             .SingleInstance();
+        builder.RegisterType<LockStateService>()
+            .As<ILockStateService>()
+            .SingleInstance();
+        builder.RegisterType<CredentialUnlockService>()
+            .As<ICredentialUnlockService>()
+            .SingleInstance();
+        builder.RegisterType<WindowsHelloPinFallbackPrompt>()
+            .As<IWindowsHelloPinFallbackPrompt>()
+            .As<IWindowsHelloPinFallbackPromptEventSource>()
+            .SingleInstance();
+        builder.RegisterType<WindowsHelloWindowHandleProvider>()
+            .As<IWindowsHelloWindowHandleProvider>()
+            .SingleInstance();
+        builder.RegisterType<SecureDesktopPinPrompt>()
+            .As<IUnlockPinPrompt>()
+            .SingleInstance();
 
         builder.RegisterType<LockManager>()
+            .WithParameter("operationUnlockTimeout", TimeSpan.FromMinutes(5))
             .As<ILockManager>()
             .As<ILockUiEventSource>()
             .AsSelf()
@@ -53,18 +82,18 @@ public class SecurityModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<FindingLocationHelper>()
-            .AsSelf()
-            .SingleInstance();
-
-        builder.RegisterType<SecurityCheckRunner>()
-            .AsSelf()
-            .SingleInstance();
-
         builder.RegisterType<InputInjectionBlockerService>()
             .As<IInputInjectionBlockerService>()
+            .SingleInstance();
+
+        builder.RegisterType<InputInjectionDisableBlockingDialogService>()
+            .As<IInputInjectionDisableBlockingDialogService>()
+            .SingleInstance();
+
+        builder.RegisterType<InputInjectionBlockerController>()
+            .AsSelf()
             .As<IRequiresInitialization>()
-            .OrderBy(4)
+            .OrderBy(0)
             .SingleInstance();
     }
 }

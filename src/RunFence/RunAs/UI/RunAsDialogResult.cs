@@ -29,7 +29,7 @@ public record RunAsDialogResult(
         SelectedContainer: null,
         PermissionGrant: null,
         CreateAppEntryOnly: false,
-        PrivilegeLevel: PrivilegeLevel.Basic,
+        PrivilegeLevel: PrivilegeLevel.Isolated,
         UpdateOriginalShortcut: false,
         RevertShortcutRequested: false,
         EditExistingApp: null,

@@ -100,13 +100,22 @@ public class ProcessRowGridUpdater(ProcessCommandLineFormatter commandLineFormat
         foreach (DataGridViewRow row in grid.Rows)
         {
             if (row.Tag is ProcessRow pr && pr.Process.Pid == target.Process.Pid &&
-                string.Equals(pr.OwnerSid, target.OwnerSid, StringComparison.OrdinalIgnoreCase))
+                string.Equals(pr.OwnerSid, target.OwnerSid, StringComparison.OrdinalIgnoreCase) &&
+                MatchesProcessIdentity(pr.Process, target.Process))
             {
                 grid.ClearSelection();
                 row.Selected = true;
                 return;
             }
         }
+    }
+
+    private static bool MatchesProcessIdentity(ProcessInfo current, ProcessInfo target)
+    {
+        if (current.StartTimeUtcTicks.HasValue && target.StartTimeUtcTicks.HasValue)
+            return current.StartTimeUtcTicks.Value == target.StartTimeUtcTicks.Value;
+
+        return true;
     }
 
     public DataGridViewRow? FindParentRow(DataGridView grid, string sid)

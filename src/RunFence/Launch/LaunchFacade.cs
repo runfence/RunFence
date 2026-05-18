@@ -1,9 +1,9 @@
 using System.Security.AccessControl;
 using RunFence.Core;
+using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch.Container;
-using RunFence.Launch.Tokens;
-using RunFence.Persistence;
+using RunFence.Apps;
 
 namespace RunFence.Launch;
 
@@ -12,77 +12,72 @@ public class LaunchFacade(
     ILaunchDefaultsResolver defaultsResolver,
     ILaunchTargetResolver launchTargetResolver,
     ILaunchAccessManager launchAccessManager,
-    IDatabaseService databaseService,
-    ISessionProvider sessionProvider,
+    ILoggingService log,
+    UiThreadDatabaseAccessor dbAccessor,
     IProfilePathResolver profilePathResolver,
-    IUiThreadInvoker uiThreadInvoker)
+    IFolderHandlerService folderHandlerService,
+    IAssociationAutoSetService associationAutoSetService,
+    IAppContainerPathProvider appContainerPathProvider)
     : ILaunchFacade
 {
-    public ProcessInfo? LaunchFile(ProcessLaunchTarget target, LaunchIdentity identity, Func<string, string, bool>? permissionPrompt = null)
+    public LaunchExecutionResult LaunchFile(ProcessLaunchTarget target, LaunchIdentity identity, Func<string, string, bool>? permissionPrompt = null)
     {
-        var resolved = defaultsResolver.ResolveDefaults(identity);
-        var traversal = launchTargetResolver.TraversePath(target.ExePath, resolved);
-        bool unelevated = resolved.IsUnelevated ?? true;
+        var databaseSnapshot = CaptureDatabaseSnapshot();
+        var resolved = defaultsResolver.ResolveDefaults(identity, databaseSnapshot);
+        var traversal = launchTargetResolver.TraversePath(target.ExePath, resolved, databaseSnapshot);
 
         if (traversal.IsFolder)
-            return LaunchFolderBrowser(identity, traversal.TraversedPath, permissionPrompt);
+            return LaunchFolderBrowserCore(
+                resolved,
+                databaseSnapshot,
+                traversal.TraversedPath,
+                permissionPrompt,
+                isTargetApproved: false);
 
         var traversedTarget = target with
         {
             ExePath = traversal.TraversedPath,
             Arguments = string.IsNullOrEmpty(target.Arguments) ? traversal.ShortcutArguments : target.Arguments,
-            WorkingDirectory = string.IsNullOrEmpty(target.WorkingDirectory) ? traversal.ShortcutWorkingDirectory : target.WorkingDirectory
+            WorkingDirectory = string.IsNullOrEmpty(target.WorkingDirectory) ? traversal.ShortcutWorkingDirectory : target.WorkingDirectory,
+            IsPathApproved = PathHelper.IsSamePath(target.ExePath, traversal.TraversedPath) && target.IsPathApproved
         };
 
-        string? grantPermissionToExePath;
-        if (PathHelper.IsOwnDir(traversal.TraversedPath))
-            grantPermissionToExePath = traversal.TraversedPath;
-        else
-        {
-            if (permissionPrompt != null)
-            {
-                var ensureAccessResult = launchAccessManager.EnsureAccess(resolved,
-                    Path.GetDirectoryName(traversal.TraversedPath) ?? string.Empty,
-                    FileSystemRights.ReadAndExecute, permissionPrompt, unelevated);
-                if (ensureAccessResult.DatabaseModified)
-                    SaveConfigAsync();
-            }
-
-            grantPermissionToExePath = null;
-        }
-
-        if (permissionPrompt != null
-            && !string.IsNullOrEmpty(traversedTarget.WorkingDirectory)
-            && !string.Equals(
-                traversedTarget.WorkingDirectory.TrimEnd(Path.DirectorySeparatorChar),
-                (Path.GetDirectoryName(traversal.TraversedPath) ?? string.Empty).TrimEnd(Path.DirectorySeparatorChar),
-                StringComparison.OrdinalIgnoreCase))
-        {
-            if (launchAccessManager.EnsureAccess(resolved, traversedTarget.WorkingDirectory,
-                    FileSystemRights.ReadAndExecute, permissionPrompt, unelevated).DatabaseModified)
-                SaveConfigAsync();
-        }
-
-        using var resolution = launchTargetResolver.ResolveFileHandler(resolved, traversedTarget);
-        var result = LaunchCore(resolution.Target, resolved, grantPermissionToExePath);
-        if (resolution.Kind == LaunchResolutionKind.ShellWrapped)
-        {
-            result?.Dispose();
-            return null;
-        }
-
-        return result;
+        using var resolution = launchTargetResolver.ResolveFileHandler(
+            resolved,
+            traversedTarget,
+            databaseSnapshot,
+            traversal.Extension);
+        return LaunchCore(
+            resolution,
+            resolved,
+            permissionPrompt,
+            new GrantPath(target.ExePath, false, target.IsPathApproved));
     }
 
-    public ProcessInfo? LaunchFolderBrowser(LaunchIdentity identity, string? folderPath = null,
-        Func<string, string, bool>? folderPermissionPrompt = null)
+    public LaunchExecutionResult LaunchFolderBrowser(LaunchIdentity identity, string? folderPath = null,
+        Func<string, string, bool>? folderPermissionPrompt = null, bool isTargetApproved = true)
     {
-        var resolved = defaultsResolver.ResolveDefaults(identity);
+        var databaseSnapshot = CaptureDatabaseSnapshot();
+        var resolved = defaultsResolver.ResolveDefaults(identity, databaseSnapshot);
+        return LaunchFolderBrowserCore(
+            resolved,
+            databaseSnapshot,
+            folderPath,
+            folderPermissionPrompt,
+            isTargetApproved);
+    }
 
+    private LaunchExecutionResult LaunchFolderBrowserCore(
+        LaunchIdentity resolved,
+        AppDatabase databaseSnapshot,
+        string? folderPath,
+        Func<string, string, bool>? folderPermissionPrompt,
+        bool isTargetApproved)
+    {
         if (string.IsNullOrEmpty(folderPath))
         {
             if (resolved is AppContainerLaunchIdentity c)
-                folderPath = AppContainerPaths.GetContainerDataPath(c.Entry.Name);
+                folderPath = appContainerPathProvider.GetContainerDataPath(c.Entry.Name);
             else if (SidResolutionHelper.IsSystemSid(resolved.Sid))
                 folderPath = Environment.GetFolderPath(Environment.SpecialFolder.System);
             else
@@ -93,67 +88,171 @@ public class LaunchFacade(
                                  $"Profile path not found in registry for SID {resolved.Sid}.");
         }
 
-        folderPath = folderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normalizedFolderPath = Path.GetFullPath(folderPath);
+        var root = Path.GetPathRoot(normalizedFolderPath);
+        folderPath = !string.IsNullOrEmpty(root) && PathHelper.IsSamePath(normalizedFolderPath, root)
+            ? root
+            : normalizedFolderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
-        var session = sessionProvider.GetSession();
-        var folderBrowserExe = PathHelper.ResolveExePath(session.Database.Settings.FolderBrowserExePath);
-        var resolvedArgs = session.Database.Settings.FolderBrowserArguments.Replace("%1", folderPath);
-
-        if (resolved is not AppContainerLaunchIdentity && folderPermissionPrompt != null)
-        {
-            if (launchAccessManager.EnsureAccess(resolved, folderPath,
-                    FileSystemRights.ReadAndExecute, folderPermissionPrompt,
-                    resolved.IsUnelevated ?? true).DatabaseModified)
-                SaveConfigAsync();
-        }
+        var folderBrowserExe = PathHelper.ResolveExePath(databaseSnapshot.Settings.FolderBrowserExePath);
+        var folderBrowserArguments = databaseSnapshot.Settings.FolderBrowserArguments ?? string.Empty;
+        var resolvedArgs = folderBrowserArguments.Contains("%1", StringComparison.Ordinal)
+            ? ProcessLaunchHelper.ApplySingleArgumentTemplate(folderBrowserArguments, folderPath)
+            : folderBrowserArguments;
 
         var target = new ProcessLaunchTarget(folderBrowserExe, resolvedArgs, folderPath);
-        using var resolution = launchTargetResolver.ResolveFileHandler(resolved, target);
-        var result = LaunchCore(resolution.Target, resolved, folderBrowserExe);
-        if (resolution.Kind == LaunchResolutionKind.ShellWrapped) { result?.Dispose(); return null; }
-        return result;
+        using var resolution = launchTargetResolver.ResolveFileHandler(resolved, target, databaseSnapshot);
+        return LaunchCore(
+            resolution,
+            resolved,
+            folderPermissionPrompt,
+            new GrantPath(folderBrowserExe, false, true),
+            new GrantPath(folderPath, true, isTargetApproved));
     }
 
-    public void LaunchUrl(string url, LaunchIdentity identity)
+    public LaunchExecutionResult LaunchUrl(string url, LaunchIdentity identity)
     {
         if (url.Length > 32000)
             throw new ArgumentException($"URL is too long ({url.Length} characters). Maximum allowed is 32000.", nameof(url));
-        var resolved = defaultsResolver.ResolveDefaults(identity);
-        using var resolution = launchTargetResolver.ResolveUrlHandler(resolved, url);
-        LaunchCore(resolution.Target, resolved, null)?.Dispose();
+        var databaseSnapshot = CaptureDatabaseSnapshot();
+        var resolved = defaultsResolver.ResolveDefaults(identity, databaseSnapshot);
+        using var resolution = launchTargetResolver.ResolveUrlHandler(resolved, url, databaseSnapshot);
+        return LaunchCore(resolution, resolved, null);
     }
 
-    private ProcessInfo? LaunchCore(ProcessLaunchTarget target, LaunchIdentity identity, string? grantPermissionToExePath)
-    {
-        EnsureReadExecuteAccess(identity, AppContext.BaseDirectory);
+    record struct GrantPath(string Path, bool IsDirectory, bool IsSilent);
 
-        if (grantPermissionToExePath != null)
+    private AppDatabase CaptureDatabaseSnapshot()
+        => dbAccessor.CreateSnapshot();
+
+    private LaunchExecutionResult LaunchCore(
+        LaunchTargetResolutionResult resolution,
+        LaunchIdentity identity,
+        Func<string, string, bool>? permissionPrompt,
+        params GrantPath[] extraGrantPaths)
+    {
+        IEnumerable<GrantPath> GetGrantPaths()
         {
-            var exeDir = Path.GetDirectoryName(grantPermissionToExePath);
-            if (!string.IsNullOrEmpty(exeDir) && !PathHelper.IsSamePath(exeDir, AppContext.BaseDirectory))
-                EnsureReadExecuteAccess(identity, exeDir);
+            yield return new GrantPath(AppContext.BaseDirectory, true, true);
+
+            string? dir;
+            foreach (var gp in extraGrantPaths)
+            {
+                dir = gp.IsDirectory ? gp.Path : Path.GetDirectoryName(gp.Path);
+
+                if (!string.IsNullOrEmpty(dir))
+                    yield return new GrantPath(dir, true, gp.IsSilent);
+            }
+
+            if (resolution.Kind is not LaunchResolutionKind.Script and not LaunchResolutionKind.ShellWrapped)
+            {
+                dir = Path.GetDirectoryName(resolution.Target.ExePath);
+                if (!string.IsNullOrEmpty(dir))
+                    yield return new GrantPath(dir, true, false);
+            }
+            
+            dir = resolution.Target.WorkingDirectory;
+            if (!string.IsNullOrEmpty(dir))
+                yield return new GrantPath(dir, true, false);
         }
 
-        return processLauncher.Launch(identity, target);
-    }
-
-    private void EnsureReadExecuteAccess(LaunchIdentity identity, string path)
-    {
-        if (launchAccessManager.EnsureAccess(identity, path,
-                FileSystemRights.ReadAndExecute, confirm: null,
-                unelevated: identity.IsUnelevated ?? true).DatabaseModified)
+        var grantPaths = GetGrantPaths()
+            .Select(x => x with { Path = PathHelper.NormalizeComparablePath(x.Path) })
+            .OrderBy(x => x.IsSilent ? 0 : 1)
+            .DistinctBy(x => x.Path, StringComparer.OrdinalIgnoreCase).ToList();
+        
+        foreach (var gp in grantPaths)
         {
-            SaveConfigAsync();
+            if (PathHelper.IsOwnDir(gp.Path) || gp.IsSilent)
+            {
+                launchAccessManager.EnsureAccess(
+                    identity,
+                    gp.Path,
+                    FileSystemRights.ReadAndExecute,
+                    null,
+                    identity.IsUnelevated ?? true);
+            }
+            else if (permissionPrompt is not null)
+            {
+                launchAccessManager.EnsureAccess(
+                    identity,
+                    gp.Path,
+                    FileSystemRights.ReadAndExecute,
+                    permissionPrompt,
+                    identity.IsUnelevated ?? true);
+            }
         }
-    }
 
-    private void SaveConfigAsync()
-    {
-        uiThreadInvoker.BeginInvoke(() =>
+        var process = processLauncher.Launch(identity, resolution.Target);
+
+        if (resolution.Kind != LaunchResolutionKind.ShellWrapped && process == null)
         {
-            var s = sessionProvider.GetSession();
-            using var scope = s.PinDerivedKey.Unprotect();
-            databaseService.SaveConfig(s.Database, scope.Data, s.CredentialStore.ArgonSalt);
-        });
+            throw new InvalidOperationException(
+                $"Launch did not return a process for non-shell-wrapped target '{resolution.Target.ExePath}'.");
+        }
+
+        var maintenanceWarnings = new List<string>();
+        log.Info(
+            $"Post-launch maintenance started for '{resolution.Target.ExePath}' " +
+            $"(kind={resolution.Kind}, sid={identity.Sid}, hasProcess={process != null})");
+
+        if (identity is AccountLaunchIdentity accountIdentity)
+        {
+            log.Info($"Post-launch step started: folder-browser registration refresh for '{accountIdentity.Sid}'");
+            try
+            {
+                var registrationResult = folderHandlerService.Register(accountIdentity.Sid);
+                if (registrationResult?.Warnings is { Count: > 0 } warnings)
+                {
+                    foreach (var warning in warnings)
+                    {
+                        maintenanceWarnings.Add(warning);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                maintenanceWarnings.Add($"RunFence could not refresh folder-browser registration for '{accountIdentity.Sid}': {ex.Message}");
+            }
+
+            log.Info($"Post-launch step started: user association refresh for '{accountIdentity.Sid}'");
+            try
+            {
+                associationAutoSetService.AutoSetForUser(accountIdentity.Sid);
+            }
+            catch (Exception ex)
+            {
+                maintenanceWarnings.Add($"RunFence could not refresh user associations for '{accountIdentity.Sid}': {ex.Message}");
+            }
+        }
+
+        if (resolution.Kind == LaunchResolutionKind.ShellWrapped)
+        {
+            log.Info("Post-launch step started: shell-wrapper launch handle release");
+            try
+            {
+                process?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                maintenanceWarnings.Add($"RunFence could not release the shell-wrapper launch handle: {ex.Message}");
+            }
+
+            log.Info(
+                $"Post-launch maintenance finished for '{resolution.Target.ExePath}' " +
+                $"(warnings={maintenanceWarnings.Count})");
+            return new LaunchExecutionResult(LaunchExecutionStatus.ShellWrappedNoProcess, null, maintenanceWarnings);
+        }
+
+        log.Info(
+            $"Post-launch maintenance finished for '{resolution.Target.ExePath}' " +
+            $"(warnings={maintenanceWarnings.Count})");
+
+        return new LaunchExecutionResult(
+            maintenanceWarnings.Count == 0
+                ? LaunchExecutionStatus.ProcessStarted
+                : LaunchExecutionStatus.ProcessStartedWithMaintenanceWarnings,
+            process,
+            maintenanceWarnings);
     }
 }

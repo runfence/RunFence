@@ -22,7 +22,8 @@ public class WizardAccountSetupHelper(
     ISidNameCacheService sidNameCache,
     ISettingsTransferService settingsTransferService,
     FirewallApplyHelper firewallApplyHelper,
-    PackageInstallService packageInstallService,
+    IPackageInstallService packageInstallService,
+    IWizardSessionSaver sessionSaver,
     SessionContext session)
 {
     /// <summary>
@@ -38,14 +39,15 @@ public class WizardAccountSetupHelper(
         FirewallAccountSettings? FirewallSettings,
         string? DesktopSettingsPath,
         List<InstallablePackage>? InstallPackages,
-        bool TrayTerminal);
+        bool TrayTerminal,
+        bool WaitForInstallPackages);
 
     /// <summary>
     /// Performs all post-creation setup steps:
     /// credential storage, SidNames, AccountEntry properties, firewall settings,
     /// desktop settings import, and install packages (respecting the install-before-firewall ordering).
     /// Returns the credential ID if a credential was stored, otherwise null.
-    /// Non-fatal errors are reported via <paramref name="progress"/>.
+    /// Non-fatal errors and warnings are reported via <paramref name="progress"/>.
     /// </summary>
     public async Task<Guid?> SetupAsync(SetupRequest request, IWizardProgressReporter progress)
     {
@@ -74,17 +76,19 @@ public class WizardAccountSetupHelper(
         if (request.FirewallSettings is { IsDefault: false })
             FirewallAccountSettings.UpdateOrRemove(session.Database, request.Sid, request.FirewallSettings);
 
+        sessionSaver.SaveConfig();
+
         // 5. Import desktop settings (async, non-fatal)
         if (!string.IsNullOrEmpty(request.DesktopSettingsPath) && File.Exists(request.DesktopSettingsPath))
         {
             progress.ReportStatus($"Importing desktop settings for {request.Username}...");
             try
             {
-                var (error, _) = await SettingsImportHelper.ImportAsync(
+                var importResult = await SettingsImportHelper.ImportAsync(
                     request.DesktopSettingsPath, request.Sid,
                     settingsTransferService);
-                if (error != null)
-                    progress.ReportError($"Settings import: {error}");
+                if (importResult.Status != SettingsImportStatus.Succeeded)
+                    progress.ReportError($"Settings import: {string.Join("; ", importResult.Errors)}");
             }
             catch (Exception ex)
             {
@@ -94,13 +98,19 @@ public class WizardAccountSetupHelper(
 
         // 6. Install packages + wait for completion before firewall (when internet is blocked)
         bool internetBlocked = request.FirewallSettings is { AllowInternet: false };
-        if (request.InstallPackages?.Count > 0 && internetBlocked)
+        bool mustWaitForPackages = internetBlocked || request.WaitForInstallPackages;
+        if (request.InstallPackages?.Count > 0 && mustWaitForPackages)
         {
-            progress.ReportStatus("Installing packages (internet will be blocked after completion)...");
+            progress.ReportStatus("Installing packages...");
             if (session.CredentialStore.Credentials.Any(c => string.Equals(c.Sid, request.Sid, StringComparison.OrdinalIgnoreCase)))
             {
-                await Task.Run(() => packageInstallService.InstallPackages(request.InstallPackages, new AccountLaunchIdentity(request.Sid)));
-                await packageInstallService.WaitForInstallCompletionAsync(request.Sid, TimeSpan.FromMinutes(10));
+                var warning = await Task.Run(() => packageInstallService.InstallPackages(
+                    request.InstallPackages,
+                    new AccountLaunchIdentity(request.Sid)));
+                var formattedWarning = LaunchExecutionWarningFormatter.Format("The package installer", warning);
+                if (formattedWarning != null)
+                    progress.ReportWarning(formattedWarning);
+                await packageInstallService.WaitForInstallCompletionAsync(request.Sid, ct: progress.CancellationToken);
             }
         }
 
@@ -121,10 +131,15 @@ public class WizardAccountSetupHelper(
         }
 
         // 8. Install packages fire-and-forget (when internet is NOT blocked — no need to wait)
-        if (request.InstallPackages?.Count > 0 && !internetBlocked)
+        if (request.InstallPackages?.Count > 0 && !mustWaitForPackages)
         {
             if (session.CredentialStore.Credentials.Any(c => string.Equals(c.Sid, request.Sid, StringComparison.OrdinalIgnoreCase)))
-                packageInstallService.InstallPackages(request.InstallPackages, new AccountLaunchIdentity(request.Sid));
+            {
+                var warning = packageInstallService.InstallPackages(request.InstallPackages, new AccountLaunchIdentity(request.Sid));
+                var formattedWarning = LaunchExecutionWarningFormatter.Format("The package installer", warning);
+                if (formattedWarning != null)
+                    progress.ReportWarning(formattedWarning);
+            }
         }
 
         return credId;
@@ -132,7 +147,7 @@ public class WizardAccountSetupHelper(
 
     /// <summary>
     /// Installs the given packages under <paramref name="sid"/> and waits for completion.
-    /// Only installs when the account has a stored credential. Non-fatal: progress errors are
+    /// Only installs when the account has a stored credential. Non-fatal problems are
     /// reported via <paramref name="progress"/> but execution continues.
     /// Used when packages must be installed before internet is blocked (e.g., AI agent setup).
     /// </summary>
@@ -147,9 +162,13 @@ public class WizardAccountSetupHelper(
         if (!session.CredentialStore.Credentials.Any(c => string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase)))
             return;
 
+        sessionSaver.SaveConfig();
         progress.ReportStatus("Installing packages (internet will be blocked after setup completes)...");
-        await Task.Run(() => packageInstallService.InstallPackages(packages, new AccountLaunchIdentity(sid)));
-        await packageInstallService.WaitForInstallCompletionAsync(sid, timeout);
+        var warning = await Task.Run(() => packageInstallService.InstallPackages(packages, new AccountLaunchIdentity(sid)));
+        var formattedWarning = LaunchExecutionWarningFormatter.Format("The package installer", warning);
+        if (formattedWarning != null)
+            progress.ReportWarning(formattedWarning);
+        await packageInstallService.WaitForInstallCompletionAsync(sid, timeout, progress.CancellationToken);
     }
 
 }

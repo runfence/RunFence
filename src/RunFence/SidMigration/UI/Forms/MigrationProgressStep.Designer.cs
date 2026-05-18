@@ -7,6 +7,7 @@ namespace RunFence.SidMigration.UI.Forms;
 partial class MigrationProgressStep
 {
     private IContainer components = null;
+    protected Label DescriptionLabel;
 
     public MigrationProgressStep()
     {
@@ -22,30 +23,39 @@ partial class MigrationProgressStep
 
     private void InitializeComponent()
     {
+        DescriptionLabel = new Label();
         ProgressBar = new ProgressBar();
         StatusLabel = new Label();
         CancelButton = new Button();
         SuspendLayout();
 
-        ProgressBar.Location = new Point(15, 30);
+        DescriptionLabel.Dock = DockStyle.Top;
+        DescriptionLabel.AutoSize = false;
+        DescriptionLabel.Padding = new Padding(15, 10, 15, 8);
+        DescriptionLabel.Height = 64;
+        DescriptionLabel.Text = "Scanning...";
+
+        ProgressBar.Location = new Point(15, 74);
         ProgressBar.Size = new Size(560, 25);
         ProgressBar.Style = ProgressBarStyle.Marquee;
 
-        StatusLabel.Location = new Point(15, 65);
+        StatusLabel.Location = new Point(15, 109);
         StatusLabel.Size = new Size(560, 25);
         StatusLabel.Text = "Scanning...";
 
         CancelButton.Text = "Cancel Scan";
-        CancelButton.Location = new Point(15, 100);
+        CancelButton.Location = new Point(15, 139);
         CancelButton.Size = new Size(100, 28);
         CancelButton.FlatStyle = FlatStyle.System;
         CancelButton.Visible = false;
 
+        Controls.Add(DescriptionLabel);
         Controls.Add(ProgressBar);
         Controls.Add(StatusLabel);
         Controls.Add(CancelButton);
 
         AutoScaleMode = AutoScaleMode.Font;
+        Size = new Size(595, 160);
         ResumeLayout(false);
     }
 }

@@ -29,7 +29,6 @@ public class DataPanel : UserControl
 
     protected AppDatabase Database => Session.Database;
     protected CredentialStore CredentialStore => Session.CredentialStore;
-    protected ProtectedBuffer PinDerivedKey => Session.PinDerivedKey;
 
     /// <summary>
     /// Shows a modal dialog and wraps it with BeginModal/EndModal tracking.

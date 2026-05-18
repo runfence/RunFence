@@ -15,4 +15,5 @@ public record WizardSetupOptions(
     FirewallAccountSettings? FirewallSettings,
     string? DesktopSettingsPath,
     List<InstallablePackage>? InstallPackages,
-    bool TrayTerminal);
+    bool TrayTerminal,
+    bool WaitForInstallPackages = false);

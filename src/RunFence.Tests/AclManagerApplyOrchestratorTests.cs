@@ -1,6 +1,7 @@
 using Moq;
 using RunFence.Acl;
 using RunFence.Acl.QuickAccess;
+using RunFence.Acl.Traverse;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -15,40 +16,445 @@ public class AclManagerApplyOrchestratorTests
     private const string TestSid = "S-1-5-21-111-222-333-1001";
     private const string ContainerSid = "S-1-15-2-99-1-2-3-4-5-6";
 
-    /// <summary>
-    /// Testable subclass that suppresses the error dialog so tests that trigger
-    /// partial failures don't block waiting for user input.
-    /// </summary>
-    private sealed class TestableOrchestrator(
-        ILoggingService log,
-        IPathGrantService pathGrantService,
-        IGrantConfigTracker grantConfigTracker,
-        IDatabaseProvider databaseProvider,
-        ISessionSaver sessionSaver,
-        IQuickAccessPinService quickAccessPinService)
-        : AclManagerApplyOrchestrator(log, pathGrantService, grantConfigTracker,
-            databaseProvider, sessionSaver, quickAccessPinService)
+    [Fact]
+    public async Task Apply_RemovePhase_CallsPersistedRemoveGrant()
     {
-        protected override void ShowApplyErrors(List<(string Path, string Error)> errors)
-        {
-            // Suppress dialog in tests to prevent blocking on user input.
-        }
+        var (orchestrator, pathGrantService) = CreateOrchestrator();
+        var pending = new AclManagerPendingChanges();
+        pending.PendingRemoves[(@"C:\ToRemove", false)] = new GrantedPathEntry { Path = @"C:\ToRemove", IsDeny = false };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.True(result);
+        pathGrantService.Verify(p => p.RemoveGrant(TestSid, @"C:\ToRemove", false), Times.Once);
     }
 
-    private static IDatabaseProvider CreateDatabaseProvider()
+    [Fact]
+    public async Task Apply_AddPhase_CallsPersistedAddGrant()
     {
-        var db = new AppDatabase();
-        db.GetOrCreateAccount(TestSid);
-        var databaseProvider = new Mock<IDatabaseProvider>();
-        databaseProvider.Setup(d => d.GetDatabase()).Returns(db);
-        return databaseProvider.Object;
+        var (orchestrator, pathGrantService) = CreateOrchestrator();
+        var rights = SavedRightsState.DefaultForMode(false);
+        var pending = new AclManagerPendingChanges();
+        pending.PendingAdds[(@"C:\ToAdd", false)] = new GrantedPathEntry
+        {
+            Path = @"C:\ToAdd",
+            IsDeny = false,
+            SavedRights = rights
+        };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.True(result);
+        pathGrantService.Verify(p => p.AddGrant(TestSid, @"C:\ToAdd", false, rights, null, null), Times.Once);
+    }
+
+    [Fact]
+    public async Task Apply_Modifications_UsePersistedGrantOperationsWithoutDirectResetOwner()
+    {
+        var (orchestrator, pathGrantService) = CreateOrchestrator();
+        var allowEntry = new GrantedPathEntry
+        {
+            Path = @"C:\AllowOwn",
+            IsDeny = false,
+            SavedRights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: true)
+        };
+        var switchEntry = new GrantedPathEntry
+        {
+            Path = @"C:\SwitchOwn",
+            IsDeny = false,
+            SavedRights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: true)
+        };
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingModifications[(allowEntry.Path, allowEntry.IsDeny)] = new PendingModification(
+            allowEntry,
+            WasIsDeny: false,
+            WasOwn: true,
+            NewIsDeny: false,
+            NewRights: allowEntry.SavedRights! with { Own = false },
+            WasRights: allowEntry.SavedRights);
+        pending.PendingModifications[(switchEntry.Path, switchEntry.IsDeny)] = new PendingModification(
+            switchEntry,
+            WasIsDeny: false,
+            WasOwn: true,
+            NewIsDeny: true,
+            NewRights: SavedRightsState.DefaultForMode(true),
+            WasRights: switchEntry.SavedRights);
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.True(result);
+        pathGrantService.Verify(p => p.UpdateGrant(
+            TestSid,
+            allowEntry.Path,
+            false,
+            It.Is<SavedRightsState>(rights => rights.Own == false),
+            null,
+            null), Times.Once);
+        pathGrantService.Verify(p => p.SwitchGrantMode(
+            TestSid,
+            switchEntry.Path,
+            true,
+            It.IsAny<SavedRightsState>(),
+            It.Is<Func<bool>>(confirm => confirm()),
+            null), Times.Once);
+        pathGrantService.Verify(p => p.ResetOwner(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Apply_AllSuccess_ClearsPendingState()
+    {
+        var (orchestrator, _) = CreateOrchestrator();
+        var pending = new AclManagerPendingChanges();
+        pending.PendingAdds[(@"C:\Cleared", false)] = new GrantedPathEntry { Path = @"C:\Cleared", IsDeny = false };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.True(result);
+        Assert.False(pending.HasPendingChanges);
+    }
+
+    [Fact]
+    public async Task Apply_SaveConfigThrows_KeepsCommittedStateAndReturnsWarning()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        var sessionSaver = new Mock<ISessionSaver>();
+        sessionSaver.Setup(saver => saver.SaveConfig()).Throws(new InvalidOperationException("config save failed"));
+        var log = new Mock<ILoggingService>();
+        var orchestrator = CreateOrchestrator(
+            pathGrantService.Object,
+            loggingService: log.Object,
+            sessionSaver: sessionSaver.Object);
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingAdds[(@"C:\RetryAdd", false)] = new GrantedPathEntry
+        {
+            Path = @"C:\RetryAdd",
+            IsDeny = false,
+            SavedRights = SavedRightsState.DefaultForMode(false)
+        };
+        pending.PendingTraverseAdds[@"C:\RetryTraverse"] = new GrantedPathEntry
+        {
+            Path = @"C:\RetryTraverse",
+            IsTraverseOnly = true
+        };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var outcome = await RunApplyOutcomeAsync(orchestrator);
+
+        Assert.True(outcome.Succeeded);
+        Assert.Empty(outcome.Errors);
+        var warning = Assert.Single(outcome.Warnings);
+        Assert.Equal(GrantApplyFailureStep.PostGrantMutationSave, warning.Step);
+        Assert.Equal("config save failed", warning.Cause.Message);
+        Assert.False(pending.IsPendingAdd(@"C:\RetryAdd", false));
+        Assert.False(pending.IsPendingTraverseAdd(@"C:\RetryTraverse"));
+        Assert.False(pending.HasPendingChanges);
+        sessionSaver.Verify(saver => saver.SaveConfig(), Times.Once);
+        log.Verify(logger => logger.Error(
+            "ACL Manager apply succeeded in memory but failed to save config",
+            It.Is<InvalidOperationException>(ex => ex.Message == "config save failed")), Times.Once);
+    }
+
+    [Fact]
+    public async Task Apply_PartialFailure_KeepsOnlyFailedEntriesPending()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService
+            .Setup(p => p.RemoveGrant(TestSid, @"C:\Fail", false))
+            .Throws(CreateGrantOperationException(GrantApplyFailureStep.GrantAclRemove, @"C:\Fail", "Simulated failure"));
+        var orchestrator = CreateOrchestrator(pathGrantService.Object);
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingRemoves[(@"C:\Fail", false)] = new GrantedPathEntry { Path = @"C:\Fail", IsDeny = false };
+        pending.PendingRemoves[(@"C:\Ok", false)] = new GrantedPathEntry { Path = @"C:\Ok", IsDeny = false };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.False(result);
+        Assert.True(pending.IsPendingRemove(@"C:\Fail", false));
+        Assert.False(pending.IsPendingRemove(@"C:\Ok", false));
+    }
+
+    [Fact]
+    public async Task Apply_TraverseAndUntrackPhases_CallPersistedOperations()
+    {
+        var (orchestrator, pathGrantService) = CreateOrchestrator();
+        var pending = new AclManagerPendingChanges();
+        pending.PendingGrantFixes[(@"C:\GrantFix", false)] = new GrantedPathEntry { Path = @"C:\GrantFix", IsDeny = false };
+        pending.PendingTraverseAdds[@"C:\TraverseAdd"] = new GrantedPathEntry { Path = @"C:\TraverseAdd", IsTraverseOnly = true };
+        pending.PendingTraverseRemoves[@"C:\TraverseRemove"] = new GrantedPathEntry { Path = @"C:\TraverseRemove", IsTraverseOnly = true };
+        pending.PendingTraverseFixes[@"C:\TraverseFix"] = new GrantedPathEntry { Path = @"C:\TraverseFix", IsTraverseOnly = true };
+        pending.PendingUntrackGrants[(@"C:\GrantUntrack", false)] = new GrantedPathEntry { Path = @"C:\GrantUntrack", IsDeny = false };
+        pending.PendingUntrackTraverse[@"C:\TraverseUntrack"] = new GrantedPathEntry { Path = @"C:\TraverseUntrack", IsTraverseOnly = true };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.True(result);
+        pathGrantService.Verify(p => p.FixGrantAcl(TestSid, @"C:\GrantFix", false), Times.Once);
+        pathGrantService.Verify(p => p.AddTraverse(TestSid, @"C:\TraverseAdd", null), Times.Once);
+        pathGrantService.Verify(p => p.RemoveTraverse(TestSid, @"C:\TraverseRemove"), Times.Once);
+        pathGrantService.Verify(p => p.FixTraverseAcl(TestSid, @"C:\TraverseFix"), Times.Once);
+        pathGrantService.Verify(p => p.UntrackGrant(TestSid, @"C:\GrantUntrack", false), Times.Once);
+        pathGrantService.Verify(p => p.UntrackTraverse(TestSid, @"C:\TraverseUntrack"), Times.Once);
+    }
+
+    [Fact]
+    public async Task Apply_ConfigMoveOnly_MovesGrantIntentMembershipAndSavesAffectedStores()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        var mainStore = new TestGrantIntentStore();
+        var dbEntry = new GrantedPathEntry { Path = @"C:\ConfigMove", IsDeny = false };
+        mainStore.AddEntry(TestSid, dbEntry);
+        var grantIntentStoreProvider = new TestGrantIntentStoreProvider(mainStore);
+        var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
+        grantIntentStoreProvider.AddLoadedStore(additionalStore);
+
+        var orchestrator = CreateOrchestrator(
+            pathGrantService.Object,
+            grantIntentStoreProvider: grantIntentStoreProvider);
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingConfigMoves[(dbEntry.Path, dbEntry.IsDeny)] =
+            new PendingConfigMove(dbEntry, additionalStore.ConfigPath);
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.True(result);
+        Assert.Equal(1, mainStore.SaveCount);
+        Assert.Equal(1, additionalStore.SaveCount);
+        Assert.Empty(mainStore.GetEntries(TestSid));
+        Assert.Single(additionalStore.GetEntries(TestSid));
+    }
+
+    [Fact]
+    public async Task Apply_ContainerSharedTraverseConfigMove_MovesSharedTraverseGrantIntent()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        var sharedEntry = new GrantedPathEntry { Path = @"C:\SharedTraverse", IsTraverseOnly = true };
+        var mainStore = new TestGrantIntentStore();
+        mainStore.AddEntry(WellKnownSecuritySids.AllApplicationPackagesSid, sharedEntry);
+        var grantIntentStoreProvider = new TestGrantIntentStoreProvider(mainStore);
+        var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
+        grantIntentStoreProvider.AddLoadedStore(additionalStore);
+
+        var orchestrator = CreateOrchestrator(
+            pathGrantService.Object,
+            grantIntentStoreProvider: grantIntentStoreProvider);
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingTraverseConfigMoves[sharedEntry.Path] =
+            new PendingConfigMove(sharedEntry, additionalStore.ConfigPath);
+        orchestrator.Initialize(pending, ContainerSid, isContainer: true);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.True(result);
+        Assert.Equal(1, mainStore.SaveCount);
+        Assert.Equal(1, additionalStore.SaveCount);
+        Assert.Empty(mainStore.GetEntries(WellKnownSecuritySids.AllApplicationPackagesSid));
+        Assert.Single(additionalStore.GetEntries(WellKnownSecuritySids.AllApplicationPackagesSid));
+    }
+
+    [Fact]
+    public async Task Apply_AddGrantAllowPhase_PinsToQuickAccess()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        var quickAccessPinService = new Mock<IQuickAccessPinService>();
+
+        var orchestrator = CreateOrchestrator(
+            pathGrantService.Object,
+            quickAccessPinService: quickAccessPinService.Object);
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingAdds[(@"C:\PinFolder", false)] = new GrantedPathEntry
+        {
+            Path = @"C:\PinFolder",
+            IsDeny = false,
+            SavedRights = SavedRightsState.DefaultForMode(false)
+        };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.True(result);
+        quickAccessPinService.Verify(
+            q => q.PinFolders(TestSid, It.Is<IReadOnlyList<string>>(l => l.Contains(@"C:\PinFolder"))),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task Apply_PartialFailure_QuickAccessUpdatesOnlySuccessfulEntries()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService
+            .Setup(p => p.AddGrant(TestSid, @"C:\PinFail", false, It.IsAny<SavedRightsState?>(), null, null))
+            .Throws(CreateGrantOperationException(GrantApplyFailureStep.GrantAclApply, @"C:\PinFail", "add failed"));
+        pathGrantService
+            .Setup(p => p.RemoveGrant(TestSid, @"C:\UnpinFail", false))
+            .Throws(CreateGrantOperationException(GrantApplyFailureStep.GrantAclRemove, @"C:\UnpinFail", "remove failed"));
+
+        var quickAccessPinService = new Mock<IQuickAccessPinService>();
+        var orchestrator = CreateOrchestrator(
+            pathGrantService.Object,
+            quickAccessPinService: quickAccessPinService.Object);
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingAdds[(@"C:\PinFail", false)] = new GrantedPathEntry { Path = @"C:\PinFail", IsDeny = false, SavedRights = SavedRightsState.DefaultForMode(false) };
+        pending.PendingAdds[(@"C:\PinOk", false)] = new GrantedPathEntry { Path = @"C:\PinOk", IsDeny = false, SavedRights = SavedRightsState.DefaultForMode(false) };
+        pending.PendingRemoves[(@"C:\UnpinFail", false)] = new GrantedPathEntry { Path = @"C:\UnpinFail", IsDeny = false };
+        pending.PendingRemoves[(@"C:\UnpinOk", false)] = new GrantedPathEntry { Path = @"C:\UnpinOk", IsDeny = false };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyAsync(orchestrator);
+
+        Assert.False(result);
+        quickAccessPinService.Verify(
+            q => q.PinFolders(TestSid, It.Is<IReadOnlyList<string>>(l => l.Count == 1 && l.Contains(@"C:\PinOk"))),
+            Times.Once);
+        quickAccessPinService.Verify(
+            q => q.UnpinFolders(TestSid, It.Is<IReadOnlyList<string>>(l => l.Count == 1 && l.Contains(@"C:\UnpinOk"))),
+            Times.Once);
+        Assert.True(pending.IsPendingAdd(@"C:\PinFail", false));
+        Assert.False(pending.IsPendingAdd(@"C:\PinOk", false));
+        Assert.True(pending.IsPendingRemove(@"C:\UnpinFail", false));
+        Assert.False(pending.IsPendingRemove(@"C:\UnpinOk", false));
+    }
+
+    [Fact]
+    public async Task Apply_Canceled_RetainsPendingInput()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService
+            .Setup(p => p.AddGrant(
+                TestSid,
+                @"C:\Cancel",
+                true,
+                It.IsAny<SavedRightsState?>(),
+                It.IsAny<Func<bool>>(),
+                null))
+            .Throws(new OperationCanceledException("user canceled"));
+
+        var quickAccessPinService = new Mock<IQuickAccessPinService>();
+        var orchestrator = CreateOrchestrator(
+            pathGrantService.Object,
+            quickAccessPinService: quickAccessPinService.Object);
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingAdds[(@"C:\Cancel", true)] = new GrantedPathEntry
+        {
+            Path = @"C:\Cancel",
+            IsDeny = true,
+            SavedRights = SavedRightsState.DefaultForMode(true)
+        };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+
+        var result = await RunApplyOutcomeAsync(orchestrator);
+
+        Assert.False(result.Succeeded);
+        Assert.True(pending.IsPendingAdd(@"C:\Cancel", true));
+        quickAccessPinService.Verify(
+            q => q.PinFolders(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task Apply_UnexpectedExecutorFailure_ReturnsStructuredFailureAndRefreshesGridsExactlyOnce()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService
+            .Setup(p => p.RemoveGrant(TestSid, @"C:\Completed", false))
+            .Returns(new GrantApplyResult(
+                GrantApplied: true,
+                DatabaseModified: true,
+                DurableSaveCompleted: true));
+        pathGrantService
+            .Setup(p => p.RemoveGrant(TestSid, @"C:\Boom", false))
+            .Throws(new InvalidOperationException("boom"));
+        var orchestrator = CreateOrchestrator(pathGrantService.Object);
+        var pending = new AclManagerPendingChanges();
+        pending.PendingRemoves[(@"C:\Completed", false)] = new GrantedPathEntry { Path = @"C:\Completed", IsDeny = false };
+        pending.PendingRemoves[(@"C:\Boom", false)] = new GrantedPathEntry { Path = @"C:\Boom", IsDeny = false };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+        int refreshCount = 0;
+
+        var outcome = await orchestrator.ApplyAsync(
+            new Progress<(int current, int total)>(),
+            setApplyEnabled: _ => { },
+            setDialogEnabled: _ => { },
+            refreshGrids: () =>
+            {
+                refreshCount++;
+                Assert.False(pending.IsPendingRemove(@"C:\Completed", false));
+                Assert.True(pending.IsPendingRemove(@"C:\Boom", false));
+            });
+
+        Assert.False(outcome.Succeeded);
+        var error = Assert.Single(outcome.Errors);
+        Assert.Equal(GrantApplyFailureStep.GrantAclRemove, error.Step);
+        Assert.Equal(@"C:\Boom", error.Path);
+        Assert.Equal("boom", error.Cause.Message);
+        Assert.Equal(1, refreshCount);
+    }
+
+    [Fact]
+    public async Task Apply_StructuredFailure_RefreshesGridsExactlyOnce()
+    {
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService
+            .Setup(p => p.RemoveGrant(TestSid, @"C:\StructuredFail", false))
+            .Throws(CreateGrantOperationException(GrantApplyFailureStep.GrantAclRemove, @"C:\StructuredFail", "structured failure"));
+        var orchestrator = CreateOrchestrator(pathGrantService.Object);
+        var pending = new AclManagerPendingChanges();
+        pending.PendingRemoves[(@"C:\StructuredFail", false)] = new GrantedPathEntry { Path = @"C:\StructuredFail", IsDeny = false };
+        orchestrator.Initialize(pending, TestSid, isContainer: false);
+        int refreshCount = 0;
+
+        var outcome = await orchestrator.ApplyAsync(
+            new Progress<(int current, int total)>(),
+            setApplyEnabled: _ => { },
+            setDialogEnabled: _ => { },
+            refreshGrids: () => refreshCount++);
+
+        Assert.False(outcome.Succeeded);
+        Assert.Single(outcome.Errors);
+        Assert.Equal(1, refreshCount);
+    }
+
+    private static AclManagerApplyOrchestrator CreateOrchestrator(
+        IPathGrantService pathGrantService,
+        IQuickAccessPinService? quickAccessPinService = null,
+        ILoggingService? loggingService = null,
+        TestGrantIntentStoreProvider? grantIntentStoreProvider = null,
+        ISessionSaver? sessionSaver = null)
+    {
+        var log = loggingService ?? new Mock<ILoggingService>().Object;
+        var resolvedStores = grantIntentStoreProvider ?? new TestGrantIntentStoreProvider(new TestGrantIntentStore());
+        var planBuilder = new AclApplyPlanBuilder();
+        var executor = new AclApplyExecutor(log, pathGrantService, resolvedStores);
+        var postProcessor = new AclApplyPostProcessor(
+            log,
+            new GrantIntentRepository(resolvedStores),
+            resolvedStores,
+            quickAccessPinService ?? new Mock<IQuickAccessPinService>().Object,
+            new TraverseGrantOwnerResolver());
+        return new AclManagerApplyOrchestrator(
+            planBuilder,
+            executor,
+            postProcessor,
+            sessionSaver ?? new Mock<ISessionSaver>().Object,
+            log);
     }
 
     private static AclManagerApplyOrchestrator CreateOrchestrator(IPathGrantService pathGrantService)
-        => new TestableOrchestrator(
-            new Mock<ILoggingService>().Object, pathGrantService,
-            new Mock<IGrantConfigTracker>().Object, CreateDatabaseProvider(),
-            new Mock<ISessionSaver>().Object, new Mock<IQuickAccessPinService>().Object);
+        => CreateOrchestrator(pathGrantService, null, null, null);
 
     private static (AclManagerApplyOrchestrator Orchestrator, Mock<IPathGrantService> PathGrantService)
         CreateOrchestrator()
@@ -57,540 +463,26 @@ public class AclManagerApplyOrchestratorTests
         return (CreateOrchestrator(pathGrantService.Object), pathGrantService);
     }
 
-    private static Task RunApplyAsync(AclManagerApplyOrchestrator orchestrator)
+    private static async Task<bool> RunApplyAsync(AclManagerApplyOrchestrator orchestrator)
+    {
+        var outcome = await orchestrator.ApplyAsync(
+            new Progress<(int current, int total)>(),
+            setApplyEnabled: _ => { },
+            setDialogEnabled: _ => { },
+            refreshGrids: () => { });
+        return outcome.Succeeded;
+    }
+
+    private static Task<AclApplyOutcome> RunApplyOutcomeAsync(AclManagerApplyOrchestrator orchestrator)
         => orchestrator.ApplyAsync(
             new Progress<(int current, int total)>(),
             setApplyEnabled: _ => { },
             setDialogEnabled: _ => { },
             refreshGrids: () => { });
 
-    private static async Task ApplyModificationAsync(
-        AclManagerApplyOrchestrator orchestrator, PendingModification mod)
-    {
-        var pending = new AclManagerPendingChanges
-        {
-            PendingModifications =
-            {
-                [(mod.Entry.Path, mod.WasIsDeny)] = mod
-            }
-        };
-
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        await RunApplyAsync(orchestrator);
-    }
-
-    [Fact]
-    public async Task AllowOwnToDeny_ShouldResetOwner()
-    {
-        // Arrange
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-
-        var entry = new GrantedPathEntry
-        {
-            Path = @"C:\TestFolder",
-            IsDeny = false,
-            SavedRights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: true)
-        };
-        var mod = new PendingModification(
-            Entry: entry, WasIsDeny: false, WasOwn: true, NewIsDeny: true,
-            NewRights: SavedRightsState.DefaultForMode(isDeny: true, own: false));
-
-        // Act
-        await ApplyModificationAsync(orchestrator, mod);
-
-        // Assert
-        pathGrantService.Verify(p => p.ResetOwner(@"C:\TestFolder", false), Times.Once);
-    }
-
-    [Fact]
-    public async Task AllowOwnToAllowNoOwn_ShouldResetOwner()
-    {
-        // Arrange
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-
-        var entry = new GrantedPathEntry
-        {
-            Path = @"C:\TestFolder2",
-            IsDeny = false,
-            SavedRights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: true)
-        };
-        var mod = new PendingModification(
-            Entry: entry, WasIsDeny: false, WasOwn: true, NewIsDeny: false,
-            NewRights: new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: false));
-
-        // Act
-        await ApplyModificationAsync(orchestrator, mod);
-
-        // Assert
-        pathGrantService.Verify(p => p.ResetOwner(@"C:\TestFolder2", false), Times.Once);
-    }
-
-    [Fact]
-    public async Task Apply_RemovePhase_CallsRemoveGrant()
-    {
-        // Arrange: a pending remove entry
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-        var entry = new GrantedPathEntry { Path = @"C:\ToRemove", IsDeny = false };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingRemoves[(@"C:\ToRemove", false)] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: RemoveGrant called with updateFileSystem=true
-        pathGrantService.Verify(
-            p => p.RemoveGrant(TestSid, @"C:\ToRemove", false, updateFileSystem: true),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task Apply_AddPhase_CallsAddGrant()
-    {
-        // Arrange: a pending add entry
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-        var rights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: false);
-        var entry = new GrantedPathEntry { Path = @"C:\ToAdd", IsDeny = false, SavedRights = rights };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(@"C:\ToAdd", false)] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: AddGrant called with the correct parameters
-        pathGrantService.Verify(
-            p => p.AddGrant(TestSid, @"C:\ToAdd", false, rights, null),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task AllSuccess_ClearsPendingState()
-    {
-        // Arrange: one pending add that succeeds
-        var (orchestrator, _) = CreateOrchestrator();
-        var entry = new GrantedPathEntry { Path = @"C:\Cleared", IsDeny = false };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(@"C:\Cleared", false)] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: pending cleared after all-success apply
-        Assert.False(pending.HasPendingChanges);
-    }
-
-    [Fact]
-    public async Task PartialFailure_KeepsFailedEntriesPending()
-    {
-        // Arrange: two pending removes; the first throws, the second succeeds.
-        // On partial failure, pending state must NOT be cleared.
-        var pathGrantService = new Mock<IPathGrantService>();
-
-        pathGrantService
-            .Setup(p => p.RemoveGrant(TestSid, @"C:\Fail", false, updateFileSystem: true))
-            .Throws(new InvalidOperationException("Simulated failure"));
-
-        pathGrantService
-            .Setup(p => p.RemoveGrant(TestSid, @"C:\Ok", false, updateFileSystem: true))
-            .Returns(true);
-
-        var orchestrator = CreateOrchestrator(pathGrantService.Object);
-
-        var entryFail = new GrantedPathEntry { Path = @"C:\Fail", IsDeny = false };
-        var entryOk = new GrantedPathEntry { Path = @"C:\Ok", IsDeny = false };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingRemoves[(@"C:\Fail", false)] = entryFail;
-        pending.PendingRemoves[(@"C:\Ok", false)] = entryOk;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: pending NOT cleared because at least one operation failed
-        Assert.True(pending.HasPendingChanges,
-            "Pending state must be kept intact when partial failure occurs so the user can retry");
-    }
-
-    [Fact]
-    public async Task ModeSwitch_AddFails_RestoresOriginalGrant()
-    {
-        // Arrange: mode switch Allow→Deny; RemoveGrant succeeds but AddGrant (new mode) throws.
-        // The orchestrator must: revert SavedRights, call AddGrant with original mode to restore.
-        var pathGrantService = new Mock<IPathGrantService>();
-
-        var originalRights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: false);
-        var newRights = SavedRightsState.DefaultForMode(isDeny: true, own: false);
-
-        // RemoveGrant for original allow mode succeeds
-        pathGrantService.Setup(p => p.RemoveGrant(TestSid, @"C:\Switch", false, updateFileSystem: true))
-            .Returns(true);
-
-        // AddGrant for new deny mode fails
-        pathGrantService.Setup(p => p.AddGrant(TestSid, @"C:\Switch", true, It.IsAny<SavedRightsState?>(), It.IsAny<string?>()))
-            .Throws(new InvalidOperationException("Simulated add failure"));
-
-        // Restoration AddGrant (original allow mode) succeeds
-        pathGrantService.Setup(p => p.AddGrant(TestSid, @"C:\Switch", false, It.IsAny<SavedRightsState?>(), null))
-            .Returns(default(GrantOperationResult));
-
-        var orchestrator = CreateOrchestrator(pathGrantService.Object);
-
-        var entry = new GrantedPathEntry
-        {
-            Path = @"C:\Switch",
-            IsDeny = false,
-            SavedRights = originalRights
-        };
-        var mod = new PendingModification(
-            Entry: entry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: newRights);
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingModifications[(@"C:\Switch", false)] = mod;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: restoration AddGrant was called with the original allow mode (false)
-        pathGrantService.Verify(
-            p => p.AddGrant(TestSid, @"C:\Switch", false, It.IsAny<SavedRightsState?>(), null),
-            Times.Once);
-
-        // SavedRights on the entry should have been restored to the original value
-        Assert.Equal(originalRights, entry.SavedRights);
-
-        // Partial failure → pending NOT cleared
-        Assert.True(pending.HasPendingChanges);
-    }
-
-    // --- F-36: Traverse add/remove/fix phases ---
-
-    [Fact]
-    public async Task Apply_TraverseAddPhase_CallsAddTraverse()
-    {
-        // Arrange
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-        var entry = new GrantedPathEntry { Path = @"C:\TraverseDir", IsTraverseOnly = true };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingTraverseAdds[@"C:\TraverseDir"] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert
-        pathGrantService.Verify(p => p.AddTraverse(TestSid, @"C:\TraverseDir"), Times.Once);
-    }
-
-    [Fact]
-    public async Task Apply_GrantModifications_RunBeforeTraverseAdds()
-    {
-        // Arrange
-        var calls = new List<string>();
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService.Setup(p => p.AddGrant(
-                TestSid,
-                @"C:\Grant",
-                false,
-                It.IsAny<SavedRightsState?>(),
-                It.IsAny<string?>()))
-            .Callback(() => calls.Add("grant-add"))
-            .Returns(default(GrantOperationResult));
-        pathGrantService.Setup(p => p.UpdateGrant(
-                TestSid,
-                @"C:\Modify",
-                false,
-                It.IsAny<SavedRightsState>(),
-                It.IsAny<string?>()))
-            .Callback(() => calls.Add("grant-modify"));
-        pathGrantService.Setup(p => p.AddTraverse(TestSid, @"C:\Traverse"))
-            .Callback(() => calls.Add("traverse-add"))
-            .Returns((true, []));
-        var orchestrator = CreateOrchestrator(pathGrantService.Object);
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(@"C:\Grant", false)] = new GrantedPathEntry
-        {
-            Path = @"C:\Grant",
-            IsDeny = false,
-            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
-        };
-        var modEntry = new GrantedPathEntry
-        {
-            Path = @"C:\Modify",
-            IsDeny = false,
-            SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
-        };
-        pending.PendingModifications[(@"C:\Modify", false)] = new PendingModification(
-            modEntry,
-            WasIsDeny: false,
-            WasOwn: false,
-            NewIsDeny: false,
-            NewRights: new SavedRightsState(Execute: true, Write: true, Read: true, Special: false, Own: false));
-        pending.PendingTraverseAdds[@"C:\Traverse"] = new GrantedPathEntry
-        {
-            Path = @"C:\Traverse",
-            IsTraverseOnly = true
-        };
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert
-        Assert.Equal(["grant-add", "grant-modify", "traverse-add"], calls);
-    }
-
-    [Fact]
-    public async Task Apply_TraverseRemovePhase_CallsRemoveTraverse()
-    {
-        // Arrange
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-        var entry = new GrantedPathEntry { Path = @"C:\TraverseDir", IsTraverseOnly = true };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingTraverseRemoves[@"C:\TraverseDir"] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: RemoveTraverse called with updateFileSystem=true
-        pathGrantService.Verify(
-            p => p.RemoveTraverse(TestSid, @"C:\TraverseDir", updateFileSystem: true),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task Apply_TraverseFixPhase_CallsFixTraverse()
-    {
-        // Arrange
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-        var entry = new GrantedPathEntry { Path = @"C:\TraverseDir", IsTraverseOnly = true };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingTraverseFixes[@"C:\TraverseDir"] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert
-        pathGrantService.Verify(p => p.FixTraverse(TestSid, @"C:\TraverseDir"), Times.Once);
-    }
-
-    // --- F-36: Untrack phase ---
-
-    [Fact]
-    public async Task Apply_UntrackGrantPhase_CallsRemoveGrantWithUpdateFileSystemFalse()
-    {
-        // Arrange
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-        var entry = new GrantedPathEntry { Path = @"C:\Untrack", IsDeny = false };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingUntrackGrants[(@"C:\Untrack", false)] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: RemoveGrant called with updateFileSystem=false (DB-only untrack)
-        pathGrantService.Verify(
-            p => p.RemoveGrant(TestSid, @"C:\Untrack", false, updateFileSystem: false),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task Apply_UntrackTraversePhase_CallsRemoveTraverseWithUpdateFileSystemFalse()
-    {
-        // Arrange
-        var (orchestrator, pathGrantService) = CreateOrchestrator();
-        var entry = new GrantedPathEntry { Path = @"C:\TraverseUntrack", IsTraverseOnly = true };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingUntrackTraverse[@"C:\TraverseUntrack"] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert
-        pathGrantService.Verify(
-            p => p.RemoveTraverse(TestSid, @"C:\TraverseUntrack", updateFileSystem: false),
-            Times.Once);
-    }
-
-    // --- F-36: Config moves phase ---
-
-    [Fact]
-    public async Task Apply_ConfigMovePhase_CallsGrantConfigTrackerAssignGrant()
-    {
-        // Arrange: a grant entry committed to DB with a pending config move
-        var pathGrantService = new Mock<IPathGrantService>();
-        var grantConfigTracker = new Mock<IGrantConfigTracker>();
-        var db = new AppDatabase();
-        db.GetOrCreateAccount(TestSid);
-
-        // Create a grant entry in the DB that the config-move phase will look up
-        var dbEntry = new GrantedPathEntry { Path = @"C:\ConfigMove", IsDeny = false };
-        db.GetAccount(TestSid)!.Grants.Add(dbEntry);
-
-        var databaseProvider = new Mock<IDatabaseProvider>();
-        databaseProvider.Setup(d => d.GetDatabase()).Returns(db);
-
-        var orchestrator = new TestableOrchestrator(
-            new Mock<ILoggingService>().Object, pathGrantService.Object,
-            grantConfigTracker.Object, databaseProvider.Object,
-            new Mock<ISessionSaver>().Object, new Mock<IQuickAccessPinService>().Object);
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingConfigMoves[(@"C:\ConfigMove", false)] = "extra.rfn";
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: AssignGrant called with the target config path
-        grantConfigTracker.Verify(
-            t => t.AssignGrant(TestSid, dbEntry, "extra.rfn"),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task Apply_ContainerSharedTraverseConfigMove_AssignsSharedContainerGrant()
-    {
-        var pathGrantService = new Mock<IPathGrantService>();
-        var grantConfigTracker = new Mock<IGrantConfigTracker>();
-        var db = new AppDatabase();
-        var sharedEntry = new GrantedPathEntry { Path = @"C:\SharedTraverse", IsTraverseOnly = true };
-        db.SharedContainerTraverseGrants.Add(sharedEntry);
-
-        var databaseProvider = new Mock<IDatabaseProvider>();
-        databaseProvider.Setup(d => d.GetDatabase()).Returns(db);
-
-        var orchestrator = new TestableOrchestrator(
-            new Mock<ILoggingService>().Object, pathGrantService.Object,
-            grantConfigTracker.Object, databaseProvider.Object,
-            new Mock<ISessionSaver>().Object, new Mock<IQuickAccessPinService>().Object);
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingTraverseConfigMoves[@"C:\SharedTraverse"] = "extra.rfn";
-        orchestrator.Initialize(pending, ContainerSid, isContainer: true);
-
-        await RunApplyAsync(orchestrator);
-
-        grantConfigTracker.Verify(
-            t => t.AssignGrant(WellKnownSecuritySids.AllApplicationPackagesSid, sharedEntry, "extra.rfn"),
-            Times.Once);
-    }
-
-    // --- F-36: QuickAccess pin/unpin phases ---
-
-    [Fact]
-    public async Task Apply_AddGrantAllowPhase_PinsToQuickAccess()
-    {
-        // Arrange: a pending allow (non-deny, non-traverse) add — should pin the folder
-        var pathGrantService = new Mock<IPathGrantService>();
-        var quickAccessPinService = new Mock<IQuickAccessPinService>();
-        var db = new AppDatabase();
-        db.GetOrCreateAccount(TestSid);
-
-        var databaseProvider = new Mock<IDatabaseProvider>();
-        databaseProvider.Setup(d => d.GetDatabase()).Returns(db);
-
-        var orchestrator = new TestableOrchestrator(
-            new Mock<ILoggingService>().Object, pathGrantService.Object,
-            new Mock<IGrantConfigTracker>().Object, databaseProvider.Object,
-            new Mock<ISessionSaver>().Object, quickAccessPinService.Object);
-
-        var rights = new SavedRightsState(Execute: false, Write: false, Read: true, Special: false, Own: false);
-        var entry = new GrantedPathEntry { Path = @"C:\PinFolder", IsDeny = false, SavedRights = rights };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(@"C:\PinFolder", false)] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: PinFolders called with the added allow path
-        quickAccessPinService.Verify(
-            q => q.PinFolders(TestSid, It.Is<IReadOnlyList<string>>(l => l.Contains(@"C:\PinFolder"))),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task Apply_RemoveGrantAllowPhase_UnpinsFromQuickAccess()
-    {
-        // Arrange: a pending allow (non-deny, non-traverse) remove — should unpin the folder
-        var pathGrantService = new Mock<IPathGrantService>();
-        var quickAccessPinService = new Mock<IQuickAccessPinService>();
-        var db = new AppDatabase();
-        db.GetOrCreateAccount(TestSid);
-
-        var databaseProvider = new Mock<IDatabaseProvider>();
-        databaseProvider.Setup(d => d.GetDatabase()).Returns(db);
-
-        var orchestrator = new TestableOrchestrator(
-            new Mock<ILoggingService>().Object, pathGrantService.Object,
-            new Mock<IGrantConfigTracker>().Object, databaseProvider.Object,
-            new Mock<ISessionSaver>().Object, quickAccessPinService.Object);
-
-        var entry = new GrantedPathEntry { Path = @"C:\UnpinFolder", IsDeny = false };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingRemoves[(@"C:\UnpinFolder", false)] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: UnpinFolders called with the removed allow path
-        quickAccessPinService.Verify(
-            q => q.UnpinFolders(TestSid, It.Is<IReadOnlyList<string>>(l => l.Contains(@"C:\UnpinFolder"))),
-            Times.Once);
-    }
-
-    [Fact]
-    public async Task Apply_AddGrantDenyPhase_DoesNotPin()
-    {
-        // Arrange: a deny grant add — deny grants are NOT pinned to Quick Access
-        var pathGrantService = new Mock<IPathGrantService>();
-        var quickAccessPinService = new Mock<IQuickAccessPinService>();
-        var db = new AppDatabase();
-        db.GetOrCreateAccount(TestSid);
-
-        var databaseProvider = new Mock<IDatabaseProvider>();
-        databaseProvider.Setup(d => d.GetDatabase()).Returns(db);
-
-        var orchestrator = new TestableOrchestrator(
-            new Mock<ILoggingService>().Object, pathGrantService.Object,
-            new Mock<IGrantConfigTracker>().Object, databaseProvider.Object,
-            new Mock<ISessionSaver>().Object, quickAccessPinService.Object);
-
-        var rights = SavedRightsState.DefaultForMode(isDeny: true);
-        var entry = new GrantedPathEntry { Path = @"C:\DenyFolder", IsDeny = true, SavedRights = rights };
-
-        var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(@"C:\DenyFolder", true)] = entry;
-        orchestrator.Initialize(pending, TestSid, isContainer: false);
-
-        // Act
-        await RunApplyAsync(orchestrator);
-
-        // Assert: PinFolders NOT called for deny grants
-        quickAccessPinService.Verify(
-            q => q.PinFolders(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()),
-            Times.Never);
-    }
-
+    private static GrantOperationException CreateGrantOperationException(
+        GrantApplyFailureStep step,
+        string path,
+        string message)
+        => new(step, path, configPath: null, new InvalidOperationException(message));
 }

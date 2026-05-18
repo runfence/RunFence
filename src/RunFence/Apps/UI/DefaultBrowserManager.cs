@@ -12,7 +12,10 @@ namespace RunFence.Apps.UI;
 public class DefaultBrowserManager(
     IDatabaseProvider databaseProvider,
     IHandlerMappingService handlerMappingService,
+    IAssociationPolicyService associationPolicyService,
     IAppHandlerRegistrationService handlerRegistrationService,
+    IAppConfigService appConfigService,
+    ISessionProvider sessionProvider,
     IShellHelper shellHelper,
     ILoggingService log)
 {
@@ -28,10 +31,11 @@ public class DefaultBrowserManager(
         var database = databaseProvider.GetDatabase();
         var allMappings = handlerMappingService.GetAllHandlerMappings(database);
 
-        if (handlerMappingService.IsDefaultBrowser(app.Id, allMappings))
+        if (associationPolicyService.IsDefaultBrowser(app.Id, allMappings))
         {
             foreach (var key in AppEntryHelper.BrowserKeys)
                 handlerMappingService.RemoveHandlerMapping(key, app.Id, database);
+            SaveAllConfigs(database);
             var updatedEffective = handlerMappingService.GetEffectiveHandlerMappings(database);
             handlerRegistrationService.Sync(updatedEffective, database.Apps);
             return null;
@@ -45,6 +49,7 @@ public class DefaultBrowserManager(
             foreach (var key in AppEntryHelper.BrowserKeys)
                 handlerMappingService.SetHandlerMapping(key, new HandlerMappingEntry(app.Id, "\"%1\""), database);
 
+            SaveAllConfigs(database);
             var updatedEffective = handlerMappingService.GetEffectiveHandlerMappings(database);
             // AutoSetForAllUsers is intentionally NOT called here. Browser keys (http, https, .htm, .html)
             // are DefaultAppsOnly — Windows ignores HKCU overrides for these protocols/extensions.
@@ -64,5 +69,11 @@ public class DefaultBrowserManager(
             return $"Registered as \"{PathConstants.HandlerRegisteredAppName}\".\n\n" +
                    "The Default Apps settings will now open. Find \"RunFence\" in the browser list and set it as default.";
         }
+    }
+
+    private void SaveAllConfigs(AppDatabase database)
+    {
+        var session = sessionProvider.GetSession();
+        appConfigService.SaveAllConfigs(database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
     }
 }

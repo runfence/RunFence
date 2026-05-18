@@ -1,6 +1,6 @@
-using System.Runtime.InteropServices;
 using RunFence.Account.UI;
 using RunFence.Core;
+using System.Runtime.InteropServices;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -135,15 +135,8 @@ public class SecurePasswordEditBufferTests
     private static string ToString(SecurePasswordEditBuffer buffer)
     {
         using var password = buffer.GetPassword();
-        IntPtr ptr = password.AllocUnicode();
-        try
-        {
-            return Marshal.PtrToStringUni(ptr) ?? "";
-        }
-        finally
-        {
-            Marshal.ZeroFreeGlobalAllocUnicode(ptr);
-        }
+        return password.UseUnicodeSnapshot(snapshot =>
+            Marshal.PtrToStringUni(snapshot.DangerousGetIntPtr(), snapshot.CharCount) ?? string.Empty);
     }
 
     private sealed class TestPasteSource(string text) : ISecurePasswordPasteSource

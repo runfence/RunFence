@@ -12,8 +12,8 @@ using RunFence.TrayIcon;
 
 namespace RunFence.UI.Forms;
 
-public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisibility,
-    IMainFormDataRefreshTarget, IMainFormLockTarget, IStartupFormLifetime
+public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMainFormVisibility,
+    IMainFormDataRefreshTarget, IMainFormLockTarget, IStartupFormLifetime, IStartupIpcHost
 {
     private static readonly int WmTaskbarCreated = (int)WindowNative.RegisterWindowMessage("TaskbarCreated");
     private const int WM_ACTIVATEAPP = 0x001C;
@@ -33,8 +33,6 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     private bool _suppressInitialVisibility;
     private bool _wasStartedInBackground;
-
-    public event Action<ProtectedBuffer, ProtectedBuffer>? PinDerivedKeyReplaced;
 
     // Reviewed: 12 deps are justified — each is an already-extracted independent handler with
     // no overlap in responsibility. MainForm is the composition root for the main window.
@@ -71,6 +69,16 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
 
+        BuildDynamicContent(aboutPanel);
+
+        SetData();
+
+        if (_session.Database.Apps.Count == 0)
+            _tabControl.SelectedTab = _accountsTab;
+    }
+
+    private void BuildDynamicContent(AboutPanel aboutPanel)
+    {
         _appsPanel.DataChanged += HandleDataChanged;
         _appsPanel.EnforcementRequested += OnEnforcementRequested;
         _appsPanel.AccountNavigationRequested += OnNavigateToAccount;
@@ -82,6 +90,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _accountsPanel.NewAppRequested += OnNewAppForAccount;
         _accountsTab.Controls.Add(_accountsPanel);
         _accountsPanel.Dock = DockStyle.Fill;
+        _accountsPanel.RegisterContextHelp(this);
 
         _groupsPanel.GroupsChanged += OnGroupsChanged;
         _groupsTab.Controls.Add(_groupsPanel);
@@ -94,33 +103,70 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         _optionsPanel.MigrationExitRequested += () => Application.Exit();
         _optionsPanel.ConfigLoadRequested += path =>
         {
-            var (success, errorMessage) = _configHandler.LoadApps(path);
-            if (!success && errorMessage != null)
-                MessageBox.Show(errorMessage, "Load Config Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            var result = _configHandler.LoadApps(path);
+            HandleConfigLoadResult(path, result);
         };
         _optionsPanel.ConfigUnloadRequested += path => _configHandler.UnloadApps(path);
         _optionsTab.Controls.Add(_optionsPanel);
         _optionsPanel.Dock = DockStyle.Fill;
+        _optionsPanel.RegisterContextHelp(this);
 
         _aboutTab.Controls.Add(aboutPanel);
         aboutPanel.Dock = DockStyle.Fill;
 
-        _tabControl.SelectedIndexChanged += (_, _) => ScheduleAvailabilityCheck();
-
+        _tabControl.SelectedIndexChanged += (_, _) =>
+        {
+            ScheduleAvailabilityCheck();
+            QueueSelectedTabRefresh();
+        };
         _trayHandler.Initialize(this, this);
         _trayHandler.UpdateTitleAndTooltip();
 
         Activated += (_, _) =>
         {
             ScheduleAvailabilityCheck();
-            RefreshActivePanel();
+            QueueSelectedTabRefresh();
         };
         Resize += OnResize;
+    }
 
-        SetData();
+    private void HandleConfigLoadResult(string path, LoadAppsResult result, bool allowBackupRestore = true)
+    {
+        if (!result.Succeeded && result.ErrorMessage != null)
+        {
+            if (allowBackupRestore && result.BackupAvailable)
+            {
+                if (!ConfirmRestoreAppConfigBackup(result.ErrorMessage))
+                    return;
 
-        if (_session.Database.Apps.Count == 0)
-            _tabControl.SelectedTab = _accountsTab;
+                HandleConfigLoadResult(path, _configHandler.LoadAppConfigBackup(path), allowBackupRestore: false);
+                return;
+            }
+
+            MessageBox.Show(result.ErrorMessage, "Load Config Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        else if (result.Warnings is { Count: > 0 })
+        {
+            MessageBox.Show(string.Join("\n\n", result.Warnings), "Load Config Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private bool ConfirmRestoreAppConfigBackup(string errorMessage)
+    {
+        var useBackupButton = new TaskDialogButton("Use Backup");
+        var cancelButton = new TaskDialogButton("Cancel");
+        var page = new TaskDialogPage
+        {
+            Caption = "Load Config Failed",
+            Heading = "This app config cannot be read.",
+            Text = $"{errorMessage}\n\n\"Use Backup\" will restore the last version of this config that loaded successfully.",
+            Icon = TaskDialogIcon.Error,
+            Buttons = { useBackupButton, cancelButton },
+            DefaultButton = useBackupButton,
+            AllowCancel = true
+        };
+
+        return TaskDialog.ShowDialog(this, page) == useBackupButton;
     }
 
     // IMainFormVisibility explicit implementations
@@ -131,6 +177,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     void IMainFormVisibility.BeginInvokeOnUiThread(Action action) => BeginInvoke(action);
     void IMainFormVisibility.InvokeOnUiThread(Action action) => Invoke(action);
+    void IStartupIpcHost.BeginInvokeOnUiThread(Action action) => BeginInvoke(action);
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool SuppressInitialVisibility
@@ -165,10 +212,14 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
     public Task<bool> HandleElevatedUnlockRequestAsync() => _windowRequestHandler.HandleElevatedUnlockRequestAsync();
 
     public void ConfigureIdleMonitor() => _trayHandler.ConfigureIdleMonitor();
+    public void LockToTrayImmediately() => _trayHandler.LockToTrayImmediately();
+    public bool IsLocked => _trayHandler.LockManager.IsLocked;
 
     public void ShowWindowNormal() => _windowRequestHandler.ShowAndActivate();
     public void ShowWindowUnlocked() => _windowRequestHandler.ShowAndActivateForUnlock();
     public void HandleWindowlessUnlock() => _autoLockCoordinator.HandleWindowlessUnlock();
+    public bool IsTrayLockVisible => _trayHandler.IsTrayLockVisible;
+    public bool IsTrayLockEnabled => _trayHandler.IsTrayLockEnabled;
 
     public bool ConfirmWindowsHelloUnavailableFallback() =>
         MessageBox.Show(this,
@@ -196,6 +247,7 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
         WindowForegroundHelper.ForceToForeground(Handle);
         BringToFront();
         _trayHandler.RefreshDiscovery();
+        QueueSelectedTabRefresh();
         BeginInvoke(async void () =>
         {
             try
@@ -220,7 +272,6 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
             _configHandler.UnloadApps(path);
         Application.RemoveMessageFilter(this);
         _trayHandler.HandleFormClosing();
-        _configHandler.TerminateEmptyJobKeepers();
     }
 
     protected override void WndProc(ref Message m)
@@ -306,10 +357,9 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
 
     // --- Event handlers ---
 
-    private void OnPinDerivedKeyChanged(ProtectedBuffer oldBuffer, CredentialStore newStore, ProtectedBuffer newBuffer)
+    private void OnPinDerivedKeyChanged()
     {
         SetData();
-        PinDerivedKeyReplaced?.Invoke(oldBuffer, newBuffer);
     }
 
     private void OnOptionsSettingsChanged()
@@ -326,13 +376,30 @@ public partial class MainForm : Form, IMessageFilter, ITrayOwner, IMainFormVisib
     {
         if (_trayHandler.LockManager.IsLocked)
             return;
-        DataPanel? panel = _tabControl.SelectedTab switch
+
+        (_tabControl.SelectedTab switch
         {
+            var t when t == _applicationsTab => (DataPanel?)_appsPanel,
             var t when t == _accountsTab => _accountsPanel,
             var t when t == _groupsTab => _groupsPanel,
-            _ => null
-        };
-        panel?.RefreshOnActivation();
+            var t when t == _optionsTab => _optionsPanel,
+            _ => null,
+        })?.RefreshOnActivation();
+    }
+
+    private void QueueSelectedTabRefresh()
+    {
+        if (!IsHandleCreated || IsDisposed)
+            return;
+
+        BeginInvoke(() =>
+        {
+            if (IsDisposed)
+                return;
+
+            _tabControl.SelectedTab?.PerformLayout();
+            RefreshActivePanel();
+        });
     }
 
     private void OnCleanupRequested()

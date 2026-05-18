@@ -28,6 +28,7 @@ public class StartupEnforcementService(
 
         var timestampUpdates = new Dictionary<string, DateTime>();
         var traverseGrants = new List<ContainerTraverseGrant>();
+        var warnings = new List<string>();
 
         foreach (var app in database.Apps)
         {
@@ -42,7 +43,12 @@ public class StartupEnforcementService(
                         containerEntry = database.AppContainers.FirstOrDefault(c =>
                             string.Equals(c.Name, app.AppContainerName, StringComparison.OrdinalIgnoreCase));
                         if (containerEntry != null)
-                            appContainerService.EnsureProfile(containerEntry);
+                        {
+                            var profileResult = appContainerService.EnsureProfile(containerEntry);
+                            if (profileResult.Status != AppContainerProfileSetupStatus.Succeeded)
+                                throw new InvalidOperationException(
+                                    profileResult.ErrorMessage ?? $"Failed to ensure AppContainer profile '{containerEntry.Name}'.");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -136,10 +142,12 @@ public class StartupEnforcementService(
             }
         }
 
-        shortcutEnforcementHelper.EnforceShortcuts(database, shortcutCache);
+        var shortcutWarning = shortcutEnforcementHelper.EnforceShortcuts(database, shortcutCache);
+        if (!string.IsNullOrWhiteSpace(shortcutWarning))
+            warnings.Add(shortcutWarning);
         shortcutEnforcementHelper.EnforceBesideTargetShortcuts(database);
 
         log.Info("Startup enforcement completed.");
-        return new EnforcementResult(timestampUpdates, traverseGrants);
+        return new EnforcementResult(timestampUpdates, traverseGrants, warnings);
     }
 }

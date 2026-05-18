@@ -12,6 +12,7 @@ namespace RunFence.UI;
 public class MainFormFirstRunExporter(
     OptionsDesktopSettingsHandler desktopSettingsHandler,
     ILaunchFacade launchFacade,
+    ILaunchFeedbackPresenter launchFeedbackPresenter,
     ISessionSaver sessionSaver,
     SessionContext session)
 {
@@ -50,12 +51,19 @@ public class MainFormFirstRunExporter(
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Question);
             if (open == DialogResult.Yes)
-                launchFacade.LaunchFile(
+            {
+                using var launch = launchFacade.LaunchFile(
                     path,
                     AccountLaunchIdentity.InteractiveUser with
                     {
                         AssociationResolutionPolicy = AssociationResolutionPolicy.AllowAccountRedirection
-                    })?.Dispose();
+                    });
+                launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("Desktop settings", LaunchFeedbackSource.InteractiveUi)
+                {
+                    Owner = owner,
+                    WarningCaption = "Export Desktop Settings"
+                });
+            }
         }
 #pragma warning restore CS0162 // Unreachable code detected
     }

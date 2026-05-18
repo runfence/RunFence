@@ -1,14 +1,12 @@
+using System.Diagnostics;
 namespace RunFence.Infrastructure;
 
 /// <summary>
 /// Applies per-HWND security settings to every window created in this process via an
 /// EVENT_OBJECT_CREATE WinEvent hook:
 /// <list type="bullet">
-/// <item>Blocks WM_GETOBJECT — prevents lower-IL processes from using UIAutomation/MSAA to
+/// <item>Blocks WM_GETOBJECT - prevents lower-IL processes from using UIAutomation/MSAA to
 /// simulate user interaction.</item>
-/// <item>Allows OLE drag-drop messages (WM_DROPFILES, WM_COPYDATA, WM_COPYGLOBALDATA) —
-/// OLE creates internal helper windows during RegisterDragDrop that also need the filter;
-/// applying it here covers all HWNDs including those hidden ones.</item>
 /// </list>
 /// </summary>
 public sealed class WindowSecurityService : IDisposable
@@ -36,9 +34,12 @@ public sealed class WindowSecurityService : IDisposable
     {
         if (hwnd == IntPtr.Zero || idObject != ObjidWindow || idChild != 0)
             return;
-        WindowNative.ChangeWindowMessageFilterEx(hwnd, WindowNative.WM_GETOBJECT,
-            WindowNative.MSGFLT_DISALLOW, IntPtr.Zero);
-        WindowNative.AllowDropFromLowIL(hwnd);
+
+        if (!WindowNative.ChangeWindowMessageFilterEx(hwnd, WindowNative.WM_GETOBJECT,
+                WindowNative.MSGFLT_DISALLOW, IntPtr.Zero))
+        {
+            ReportWindowSecurityWarning("Could not block WM_GETOBJECT on a newly created window.");
+        }
     }
 
     public void Dispose()
@@ -46,4 +47,6 @@ public sealed class WindowSecurityService : IDisposable
         if (_hook != IntPtr.Zero)
             WindowNative.UnhookWinEvent(_hook);
     }
+
+    private static void ReportWindowSecurityWarning(string message) => Trace.TraceWarning(message);
 }

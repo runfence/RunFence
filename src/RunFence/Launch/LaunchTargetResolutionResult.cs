@@ -24,7 +24,7 @@ public sealed record LaunchTargetResolutionResult : IDisposable
 
     public void Dispose()
     {
-        var hiveLease = Interlocked.Exchange(ref _hiveLease, null);
+        var hiveLease = ReleaseHiveLease();
         if (hiveLease == null)
             return;
 
@@ -40,4 +40,6 @@ public sealed record LaunchTargetResolutionResult : IDisposable
             }
         });
     }
+
+    private IDisposable? ReleaseHiveLease() => Interlocked.Exchange(ref _hiveLease, null);
 }

@@ -3,6 +3,7 @@ using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Ipc;
 
 namespace RunFence.Launch;
 
@@ -17,26 +18,29 @@ public class LaunchTargetResolver(
     AssociationRegistryResolver associationRegistryResolver,
     AssociationCommandMaterializer associationCommandMaterializer,
     IAssociationLaunchResolver associationLaunchResolver,
-    IUiThreadInvoker uiThreadInvoker,
+    UiThreadDatabaseAccessor dbAccessor,
     LaunchHiveLeaseCoordinator launchHiveLeaseCoordinator,
     ShortcutTargetResolver shortcutTargetResolver,
-    ISessionProvider sessionProvider,
     ILoggingService log)
     : ILaunchTargetResolver
 {
     private readonly ILoggingService _log = log;
 
     public TraversePathResult TraversePath(string path, LaunchIdentity identity)
+        => TraversePath(path, identity, CreateDatabaseSnapshot());
+
+    public TraversePathResult TraversePath(string path, LaunchIdentity identity, AppDatabase databaseSnapshot)
     {
         string? shortcutArgs = null;
         string? shortcutWorkDir = null;
+        var extension = Path.GetExtension(path);
 
         if (Directory.Exists(path))
-            return new TraversePathResult(path, null, null, true);
+            return new TraversePathResult(path, null, null, true, extension);
 
         if (path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase))
         {
-            var resolved = shortcutTargetResolver.TryResolveShortcut(path, sessionProvider.GetSession().Database.Apps);
+            var resolved = shortcutTargetResolver.TryResolveShortcut(path, databaseSnapshot.Apps);
             if (resolved == null)
                 throw new InvalidOperationException(
                     "Could not resolve shortcut target. The shortcut may be broken or reference a removed app entry.");
@@ -53,9 +57,10 @@ public class LaunchTargetResolver(
             path = resolved.Value.ResolvedPath;
             shortcutArgs = resolved.Value.ShortcutArgs;
             shortcutWorkDir = resolved.Value.ShortcutWorkingDirectory;
+            extension = Path.GetExtension(path);
 
             if (Directory.Exists(path))
-                return new TraversePathResult(path, shortcutArgs, shortcutWorkDir, true);
+                return new TraversePathResult(path, shortcutArgs, shortcutWorkDir, true, extension);
         }
 
         try
@@ -68,33 +73,46 @@ public class LaunchTargetResolver(
         }
 
         if (Directory.Exists(path))
-            return new TraversePathResult(path, shortcutArgs, shortcutWorkDir, true);
+            return new TraversePathResult(path, shortcutArgs, shortcutWorkDir, true, extension);
 
-        return new TraversePathResult(path, shortcutArgs, shortcutWorkDir, false);
+        return new TraversePathResult(path, shortcutArgs, shortcutWorkDir, false, extension);
     }
 
-    public LaunchTargetResolutionResult ResolveFileHandler(LaunchIdentity identity, ProcessLaunchTarget target)
+    public LaunchTargetResolutionResult ResolveFileHandler(LaunchIdentity identity, ProcessLaunchTarget target, string? extension = null)
+        => ResolveFileHandler(identity, target, CreateDatabaseSnapshot(), extension);
+
+    public LaunchTargetResolutionResult ResolveFileHandler(
+        LaunchIdentity identity,
+        ProcessLaunchTarget target,
+        AppDatabase databaseSnapshot,
+        string? extension = null)
     {
-        if (ProcessLaunchHelper.CanLaunchDirect(target))
+        if (ProcessLaunchHelper.CanLaunchDirect(target, extension))
             return new LaunchTargetResolutionResult(target, LaunchResolutionKind.Direct, null, _log);
 
-        var scriptTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(target);
+        var scriptTarget = ProcessLaunchHelper.TryWrapForScriptLaunch(target, extension);
         if (scriptTarget != null)
             return new LaunchTargetResolutionResult(scriptTarget, LaunchResolutionKind.Script, null, _log);
 
-        var request = AssociationResolutionRequest.ForFile(target);
-        return identity.Visit(new ResolutionVisitor(this, request), target);
+        var request = AssociationResolutionRequest.ForFile(target, extension);
+        return identity.Visit(new ResolutionVisitor(this, request, databaseSnapshot), target);
     }
 
     public LaunchTargetResolutionResult ResolveUrlHandler(LaunchIdentity identity, string url)
+        => ResolveUrlHandler(identity, url, CreateDatabaseSnapshot());
+
+    public LaunchTargetResolutionResult ResolveUrlHandler(LaunchIdentity identity, string url, AppDatabase databaseSnapshot)
     {
         if (!ProcessLaunchHelper.ValidateUrlScheme(url, out var error))
             throw new InvalidOperationException($"URL scheme blocked: {error}");
         var request = AssociationResolutionRequest.ForUrl(url);
-        return identity.Visit(new ResolutionVisitor(this, request), null);
+        return identity.Visit(new ResolutionVisitor(this, request, databaseSnapshot), null);
     }
 
-    private LaunchTargetResolutionResult ResolveAssociation(AssociationResolutionRequest request, AccountLaunchIdentity identity)
+    private LaunchTargetResolutionResult ResolveAssociation(
+        AssociationResolutionRequest request,
+        AppDatabase databaseSnapshot,
+        AccountLaunchIdentity identity)
     {
         IDisposable? launchedHiveLease = null;
         IDisposable? interactiveHiveLease = null;
@@ -104,6 +122,7 @@ public class LaunchTargetResolver(
             launchedHiveLease = launchHiveLeaseCoordinator.EnsureHiveLoaded(identity.Sid);
             var launchedTarget = ResolveForSid(
                 identity.Sid,
+                databaseSnapshot,
                 request,
                 identity.AssociationResolutionPolicy,
                 rejectUserProfileHandlers: false);
@@ -120,9 +139,10 @@ public class LaunchTargetResolver(
             {
                 interactiveHiveLease = launchHiveLeaseCoordinator.EnsureHiveLoaded(interactiveSid!);
                 var interactiveTarget = ResolveForSid(
-                    interactiveSid!,
-                    request,
-                    identity.AssociationResolutionPolicy,
+                interactiveSid!,
+                databaseSnapshot,
+                request,
+                identity.AssociationResolutionPolicy,
                     rejectUserProfileHandlers: true);
                 if (interactiveTarget != null)
                 {
@@ -138,7 +158,8 @@ public class LaunchTargetResolver(
             {
                 _log.Warn(
                     $"LaunchTargetResolver: no usable association handler found for {request.Kind} '{request.RawArgument}' under HighestAllowed for SID {identity.Sid}.");
-                throw new InvalidOperationException($"No usable association handler found for '{request.RawArgument}'.");
+                throw new AssociationResolutionException(
+                    $"No usable association handler found for '{request.RawArgument}'.");
             }
 
             var fallbackLease = launchHiveLeaseCoordinator.TakeCombinedLease(ref launchedHiveLease, ref interactiveHiveLease);
@@ -162,6 +183,7 @@ public class LaunchTargetResolver(
 
     private ProcessLaunchTarget? ResolveForSid(
         string sid,
+        AppDatabase databaseSnapshot,
         AssociationResolutionRequest request,
         AssociationResolutionPolicy associationResolutionPolicy,
         bool rejectUserProfileHandlers)
@@ -171,7 +193,8 @@ public class LaunchTargetResolver(
             AssociationLaunchKind.File => associationRegistryResolver.ResolveFileCandidates(
                 sid,
                 request.FileTarget!,
-                rejectUserProfileHandlers),
+                rejectUserProfileHandlers,
+                request.Extension),
             AssociationLaunchKind.Url => associationRegistryResolver.ResolveUrlCandidates(
                 sid,
                 request.RawArgument,
@@ -191,14 +214,12 @@ public class LaunchTargetResolver(
                 // A broken launcher command is a configuration problem handled by later launch validation or failure behavior.
                 if (associationResolutionPolicy != AssociationResolutionPolicy.AllowAccountRedirection)
                 {
-                    var resolved = uiThreadInvoker.Invoke(() =>
-                        associationLaunchResolver.Resolve(
-                            sessionProvider.GetSession().Database,
-                            materialized.LauncherAssociation,
-                            materialized.LauncherArgument!,
-                            callerIdentity: null,
-                            callerSid: candidate.ResolutionSid,
-                            identityFromImpersonation: true));
+                    var resolved = associationLaunchResolver.Resolve(
+                        databaseSnapshot,
+                        AssociationLaunchResolver.BuildRequest(materialized.LauncherAssociation, materialized.LauncherArgument),
+                        callerIdentity: null,
+                        callerSid: candidate.ResolutionSid,
+                        identityFromImpersonation: true);
 
                     if (resolved.App != null
                         && !string.Equals(resolved.App.AccountSid, candidate.ResolutionSid, StringComparison.OrdinalIgnoreCase))
@@ -229,11 +250,17 @@ public class LaunchTargetResolver(
             $"LaunchTargetResolver: rejected {candidate.SourceLabel} candidate for '{candidate.RawArgument}'"
             + $"{AssociationLogHelper.FormatProgId(candidate.ProgId)}: {reason}. Command='{command ?? string.Empty}'.");
 
-    private sealed class ResolutionVisitor(LaunchTargetResolver owner, AssociationResolutionRequest request)
+    private AppDatabase CreateDatabaseSnapshot()
+        => dbAccessor.CreateSnapshot();
+
+    private sealed class ResolutionVisitor(
+        LaunchTargetResolver owner,
+        AssociationResolutionRequest request,
+        AppDatabase databaseSnapshot)
         : ILaunchIdentityAcceptor<LaunchTargetResolutionResult>
     {
         public LaunchTargetResolutionResult Accept(AccountLaunchIdentity identity, ProcessLaunchTarget? target)
-            => owner.ResolveAssociation(request, identity);
+            => owner.ResolveAssociation(request, databaseSnapshot, identity);
 
         public LaunchTargetResolutionResult Accept(AppContainerLaunchIdentity identity, ProcessLaunchTarget? target)
             => new(request.GetFallbackTarget(), LaunchResolutionKind.ShellWrapped, null, owner._log);
@@ -242,18 +269,19 @@ public class LaunchTargetResolver(
     private sealed record AssociationResolutionRequest(
         AssociationLaunchKind Kind,
         string RawArgument,
-        ProcessLaunchTarget? FileTarget)
+        ProcessLaunchTarget? FileTarget,
+        string? Extension)
     {
         public ProcessLaunchTarget GetFallbackTarget()
             => Kind == AssociationLaunchKind.File
                 ? ProcessLaunchHelper.WrapForShellLaunch(FileTarget!)
                 : ProcessLaunchHelper.BuildUrlLaunchTarget(RawArgument);
 
-        public static AssociationResolutionRequest ForFile(ProcessLaunchTarget originalTarget)
-            => new(AssociationLaunchKind.File, originalTarget.ExePath, originalTarget);
+        public static AssociationResolutionRequest ForFile(ProcessLaunchTarget originalTarget, string? extension)
+            => new(AssociationLaunchKind.File, originalTarget.ExePath, originalTarget, extension);
 
         public static AssociationResolutionRequest ForUrl(string url)
-            => new(AssociationLaunchKind.Url, url, null);
+            => new(AssociationLaunchKind.Url, url, null, null);
     }
 
     private enum AssociationLaunchKind

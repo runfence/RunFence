@@ -32,7 +32,7 @@ public sealed class WfpGlobalIcmpBlocker(ILoggingService log, IWfpFilterHelper f
                 ? "WfpGlobalIcmpBlocker: removing global ICMP block filters"
                 : $"WfpGlobalIcmpBlocker: applying global ICMP block ({ipv4CidrRanges.Count} IPv4 + {ipv6CidrRanges.Count} IPv6 CIDR ranges)");
 
-            _txHelper.ExecuteInTransaction("WfpGlobalIcmpBlocker", handle =>
+            var tx = _txHelper.ExecuteInTransaction("WfpGlobalIcmpBlocker", handle =>
             {
                 var v4Key = V4FilterKey;
                 var v6Key = V6FilterKey;
@@ -44,6 +44,9 @@ public sealed class WfpGlobalIcmpBlocker(ILoggingService log, IWfpFilterHelper f
                 if (ipv6CidrRanges.Count > 0)
                     AddGlobalFilter(handle, V6FilterKey, isIPv6: true, WfpNative.IPPROTO_ICMPV6, ipv6CidrRanges);
             });
+
+            if (!tx.Committed)
+                throw tx.FailureException ?? new InvalidOperationException(tx.Error ?? "WFP global ICMP transaction did not commit.");
         }
     }
 

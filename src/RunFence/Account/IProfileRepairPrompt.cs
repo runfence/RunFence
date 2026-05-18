@@ -18,8 +18,8 @@ public interface IProfileRepairPrompt
     void NotifyRepairFailed();
 
     /// <summary>
-    /// Asks the user whether to retry the launch after a successful repair.
-    /// Returns true if the user wants to retry.
+    /// Asks the user whether RunFence should restart after a successful repair.
+    /// Returns true if the user wants to restart RunFence.
     /// </summary>
-    bool ConfirmRetry();
+    bool ConfirmRestartRunFence();
 }

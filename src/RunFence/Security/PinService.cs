@@ -1,6 +1,6 @@
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Runtime.InteropServices;
 using Org.BouncyCastle.Crypto.Generators;
 using Org.BouncyCastle.Crypto.Parameters;
 using RunFence.Core;
@@ -9,30 +9,24 @@ using RunFence.Core.Models;
 namespace RunFence.Security;
 
 public class PinService(
-    ICredentialEncryptionService encryptionService,
+    ICredentialEncryptionSpanService encryptionService,
     int? argon2MemoryKb = null,
     int? argon2Iterations = null,
     int? argon2Parallelism = null)
     : IPinService
 {
-    public unsafe byte[] DeriveKey(ProtectedString pin, byte[] salt)
+    private byte[] DeriveKey(ProtectedString pin, byte[] salt)
     {
         byte[]? pinBytes = null;
-        GCHandle pinHandle = default;
-        var utf16Ptr = pin.AllocUnicode();
-        try
-        {
-            var chars = (char*)utf16Ptr;
-            var byteCount = Encoding.UTF8.GetByteCount(chars, pin.Length);
-            pinBytes = new byte[byteCount];
-            pinHandle = GCHandle.Alloc(pinBytes, GCHandleType.Pinned);
-            fixed (byte* bytes = pinBytes)
-                Encoding.UTF8.GetBytes(chars, pin.Length, bytes, byteCount);
-        }
-        finally
-        {
-            Marshal.ZeroFreeGlobalAllocUnicode(utf16Ptr);
-        }
+        var pinnedPinBytes = default(GCHandle);
+        pin.UseUtf16BytesSnapshot(
+            utf16Bytes =>
+            {
+                var chars = MemoryMarshal.Cast<byte, char>(utf16Bytes);
+                pinBytes = new byte[Encoding.UTF8.GetByteCount(chars)];
+                Encoding.UTF8.GetBytes(chars, pinBytes);
+                pinnedPinBytes = GCHandle.Alloc(pinBytes, GCHandleType.Pinned);
+            });
 
         try
         {
@@ -60,56 +54,99 @@ public class PinService(
         finally
         {
             if (pinBytes != null)
-                Array.Clear(pinBytes, 0, pinBytes.Length);
-            if (pinHandle.IsAllocated)
-                pinHandle.Free();
+            {
+                try
+                {
+                    CryptographicOperations.ZeroMemory(pinBytes);
+                }
+                finally
+                {
+                    if (pinnedPinBytes.IsAllocated)
+                        pinnedPinBytes.Free();
+                }
+            }
         }
     }
 
-    private (CredentialStore store, byte[] pinDerivedKey) CreateNewStoreWithKey(ProtectedString pin)
+    public SecureSecret DeriveKeySecret(ProtectedString pin, byte[] salt)
     {
-        var salt = RandomNumberGenerator.GetBytes(Constants.Argon2SaltSize);
-        var pinDerivedKey = DeriveKey(pin, salt);
-
-        var store = new CredentialStore
+        var derivedKey = DeriveKey(pin, salt);
+        try
         {
-            ArgonSalt = salt,
-            EncryptedCanary = EncryptCanary(pinDerivedKey),
-            Credentials = new List<CredentialEntry>()
-        };
+            if (derivedKey.Length != Constants.Argon2OutputBytes)
+                throw new CryptographicException("Derived PIN key has an invalid length.");
 
-        return (store, pinDerivedKey);
+            return new SecureSecret(
+                derivedKey.Length,
+                destination => derivedKey.CopyTo(destination));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(derivedKey);
+        }
     }
 
-    public bool VerifyDerivedKey(byte[] pinDerivedKey, CredentialStore store)
+    private PinResetResult CreateNewStoreWithKey(ProtectedString pin)
+    {
+        var salt = RandomNumberGenerator.GetBytes(Constants.Argon2SaltSize);
+        var pinDerivedKey = DeriveKeySecret(pin, salt);
+
+        try
+        {
+            var encryptedCanary = pinDerivedKey.TransformSnapshot(EncryptCanary);
+            var store = new CredentialStore
+            {
+                ArgonSalt = salt,
+                EncryptedCanary = encryptedCanary,
+                Credentials = new List<CredentialEntry>()
+            };
+
+            return new PinResetResult(store, pinDerivedKey);
+        }
+        catch
+        {
+            pinDerivedKey.Dispose();
+            throw;
+        }
+    }
+
+    public bool VerifyDerivedKey(ReadOnlySpan<byte> pinDerivedKey, CredentialStore store)
     {
         try
         {
             var decrypted = DecryptCanary(store.EncryptedCanary, pinDerivedKey);
             return CryptographicOperations.FixedTimeEquals(decrypted, Constants.PinCanaryPlaintext);
         }
-        catch (CryptographicException) { return false; }
-    }
-
-    public bool VerifyPin(ProtectedString pin, CredentialStore store, out byte[] pinDerivedKey)
-    {
-        pinDerivedKey = DeriveKey(pin, store.ArgonSalt);
-
-        try
-        {
-            var decrypted = DecryptCanary(store.EncryptedCanary, pinDerivedKey);
-            if (CryptographicOperations.FixedTimeEquals(decrypted, Constants.PinCanaryPlaintext))
-                return true;
-
-            Array.Clear(pinDerivedKey, 0, pinDerivedKey.Length);
-            pinDerivedKey = Array.Empty<byte>();
-            return false;
-        }
         catch (CryptographicException)
         {
-            Array.Clear(pinDerivedKey, 0, pinDerivedKey.Length);
-            pinDerivedKey = Array.Empty<byte>();
             return false;
+        }
+    }
+
+    public bool VerifyPin(ProtectedString pin, CredentialStore store)
+    {
+        using var result = VerifyPinForSession(pin, store);
+        return result.Succeeded;
+    }
+
+    public PinVerificationResult VerifyPinForSession(ProtectedString pin, CredentialStore store)
+    {
+        SecureSecret? pinDerivedKey = null;
+        try
+        {
+            pinDerivedKey = DeriveKeySecret(pin, store.ArgonSalt);
+            bool verified = pinDerivedKey.TransformSnapshot(key => VerifyDerivedKey(key, store));
+            if (verified)
+                return PinVerificationResult.Success(pinDerivedKey);
+
+            pinDerivedKey.Dispose();
+            pinDerivedKey = null;
+            return PinVerificationResult.Failed();
+        }
+        catch
+        {
+            pinDerivedKey?.Dispose();
+            throw;
         }
     }
 
@@ -118,29 +155,25 @@ public class PinService(
     /// then re-encrypts all credentials with the new key.
     /// Zeros newPinDerivedKey on all error paths.
     /// </summary>
-    public (CredentialStore store, byte[] newPinDerivedKey) ChangePin(byte[] oldPinDerivedKey, ProtectedString newPin, CredentialStore store)
+    public PinKeyRotationResult ChangePin(ISecureSecretSnapshotSource oldPinDerivedKey, ProtectedString newPin, CredentialStore store)
     {
+        ArgumentNullException.ThrowIfNull(oldPinDerivedKey);
+
         // Defense-in-depth: verify old key before proceeding
-        try
-        {
-            var decrypted = DecryptCanary(store.EncryptedCanary, oldPinDerivedKey);
-            if (!CryptographicOperations.FixedTimeEquals(decrypted, Constants.PinCanaryPlaintext))
-                throw new CryptographicException("Old PIN key is incorrect.");
-        }
-        catch (CryptographicException)
-        {
+        bool verified = oldPinDerivedKey.TransformSnapshot(key => VerifyDerivedKey(key, store));
+        if (!verified)
             throw new CryptographicException("Old PIN key is incorrect.");
-        }
 
         var newSalt = RandomNumberGenerator.GetBytes(Constants.Argon2SaltSize);
-        var newPinDerivedKey = DeriveKey(newPin, newSalt);
+        var newPinDerivedKey = DeriveKeySecret(newPin, newSalt);
 
         try
         {
+            var encryptedCanary = newPinDerivedKey.TransformSnapshot(EncryptCanary);
             var newStore = new CredentialStore
             {
                 ArgonSalt = newSalt,
-                EncryptedCanary = EncryptCanary(newPinDerivedKey),
+                EncryptedCanary = encryptedCanary,
                 Credentials = new List<CredentialEntry>()
             };
 
@@ -155,8 +188,9 @@ public class PinService(
                 ProtectedString? password = null;
                 try
                 {
-                    password = encryptionService.Decrypt(cred.EncryptedPassword, oldPinDerivedKey);
-                    var newEncrypted = encryptionService.Encrypt(password, newPinDerivedKey);
+                    password = oldPinDerivedKey.TransformSnapshot(key =>
+                        encryptionService.Decrypt(cred.EncryptedPassword, key));
+                    var newEncrypted = newPinDerivedKey.TransformSnapshot(key => encryptionService.Encrypt(password, key));
                     newStore.Credentials.Add(new CredentialEntry
                     {
                         Id = cred.Id,
@@ -170,21 +204,18 @@ public class PinService(
                 }
             }
 
-            return (newStore, newPinDerivedKey);
+            return new PinKeyRotationResult(newStore, newPinDerivedKey);
         }
         catch
         {
-            CryptographicOperations.ZeroMemory(newPinDerivedKey);
+            newPinDerivedKey.Dispose();
             throw;
         }
     }
 
-    public (CredentialStore store, byte[] pinDerivedKey) ResetPin(ProtectedString newPin)
-    {
-        return CreateNewStoreWithKey(newPin);
-    }
+    public PinResetResult ResetPin(ProtectedString newPin) => CreateNewStoreWithKey(newPin);
 
-    private static byte[] EncryptCanary(byte[] pinDerivedKey)
+    private static byte[] EncryptCanary(ReadOnlySpan<byte> pinDerivedKey)
     {
         byte[]? derivedKey = null;
         try
@@ -199,7 +230,7 @@ public class PinService(
         }
     }
 
-    private static byte[] DecryptCanary(byte[] encryptedCanary, byte[] pinDerivedKey)
+    private static byte[] DecryptCanary(byte[] encryptedCanary, ReadOnlySpan<byte> pinDerivedKey)
     {
         byte[]? derivedKey = null;
         try

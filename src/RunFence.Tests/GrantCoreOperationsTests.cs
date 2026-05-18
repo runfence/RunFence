@@ -32,7 +32,7 @@ public class GrantCoreOperationsTests
     public GrantCoreOperationsTests()
     {
         var dbProvider = new LambdaDatabaseProvider(() => _database);
-        var dbAccessor = new UiThreadDatabaseAccessor(dbProvider, SyncInvoker);
+        var dbAccessor = new UiThreadDatabaseAccessor(dbProvider, () => SyncInvoker);
         _ops = new GrantCoreOperations(_grantAceService.Object, _fileOwnerService.Object,
             dbAccessor, _log.Object, _pathInfo);
     }

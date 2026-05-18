@@ -26,6 +26,26 @@ public static class JobKeeperProtocol
         return JsonSerializer.Deserialize<T>(buf);
     }
 
+    public static async Task WriteMessageAsync<T>(Stream stream, T message, CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.SerializeToUtf8Bytes(message);
+        await stream.WriteAsync(BitConverter.GetBytes(json.Length), cancellationToken).ConfigureAwait(false);
+        await stream.WriteAsync(json, cancellationToken).ConfigureAwait(false);
+        await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task<T?> ReadMessageAsync<T>(Stream stream, CancellationToken cancellationToken)
+    {
+        var lenBytes = new byte[4];
+        await ReadExactAsync(stream, lenBytes, cancellationToken).ConfigureAwait(false);
+        var len = BitConverter.ToInt32(lenBytes);
+        if (len <= 0 || len > MaxMessageSize)
+            throw new IOException($"Invalid message length: {len}");
+        var buf = new byte[len];
+        await ReadExactAsync(stream, buf, cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<T>(buf);
+    }
+
     private static void ReadExact(Stream stream, byte[] buf)
     {
         var offset = 0;
@@ -36,6 +56,18 @@ public static class JobKeeperProtocol
             offset += read;
         }
     }
+
+    private static async Task ReadExactAsync(Stream stream, byte[] buf, CancellationToken cancellationToken)
+    {
+        var offset = 0;
+        while (offset < buf.Length)
+        {
+            var read = await stream.ReadAsync(buf.AsMemory(offset, buf.Length - offset), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+                throw new IOException("Pipe closed");
+            offset += read;
+        }
+    }
 }
 
 public record JobKeeperLaunchRequest(
@@ -43,7 +75,8 @@ public record JobKeeperLaunchRequest(
     string? Arguments,
     string? WorkingDirectory,
     bool HideWindow,
-    Dictionary<string, string>? EnvOverrides
+    bool SuppressStartupFeedback = false,
+    Dictionary<string, string>? EnvOverrides = null
 );
 
 public record JobKeeperLaunchResponse(int Pid, int Error);

@@ -20,7 +20,7 @@ public class AccountEditOrchestrator(
     IEvaluationLimitHelper evaluationLimitHelper,
     IAccountCredentialManager credentialManager,
     ILocalUserProvider localUserProvider,
-    PackageInstallService packageInstallService)
+    IPackageInstallService packageInstallService)
 {
     private Control _ownerControl = null!;
 
@@ -55,7 +55,7 @@ public class AccountEditOrchestrator(
         var session = sessionProvider.GetSession();
         var isCurrentAccount = accountRow.Credential?.IsCurrentAccount == true;
         var acctEntry = session.Database.GetAccount(accountRow.Sid);
-        var privilegeLevel = acctEntry?.PrivilegeLevel ?? PrivilegeLevel.Basic;
+        var privilegeLevel = acctEntry?.PrivilegeLevel ?? PrivilegeLevel.Isolated;
 
         var hiddenCount = session.CredentialStore.Credentials
             .Count(c => accountRestriction.IsLoginBlockedBySid(c.Sid));
@@ -95,16 +95,17 @@ public class AccountEditOrchestrator(
             var passwordApplied = editHelper.ApplyPasswordChange(accountRow, dlg, isCurrentAccount);
             if (dlg.NewPassword != null)
             {
+                var pinKeySource = session.PinDerivedKey;
                 if (passwordApplied)
                 {
                     if (accountRow.Credential is { IsCurrentAccount: false })
-                        credentialManager.UpdateCredentialPassword(accountRow.Credential, dlg.NewPassword, session.PinDerivedKey);
+                        credentialManager.UpdateCredentialPassword(accountRow.Credential, dlg.NewPassword, pinKeySource);
                     else if (accountRow.Credential == null
                              && evaluationLimitHelper.CheckCredentialLimit(session.CredentialStore.Credentials,
                                  extraMessage: "Right-click any credential in the list to remove it."))
                     {
                         var (_, credId, _) = credentialManager.AddNewCredential(
-                            accountRow.Sid, dlg.NewPassword, session.CredentialStore, session.PinDerivedKey);
+                            accountRow.Sid, dlg.NewPassword, session.CredentialStore, pinKeySource);
                         newCredentialId = credId;
                     }
                 }
@@ -143,7 +144,6 @@ public class AccountEditOrchestrator(
                     LocalhostPortExemptions = currentFirewallSettings?.LocalhostPortExemptions.ToList() ?? ["53", "49152-65535"],
                     FilterEphemeralLoopback = currentFirewallSettings?.FilterEphemeralLoopback ?? true
                 };
-                FirewallAccountSettings.UpdateOrRemove(session.Database, accountRow.Sid, newFirewallSettings);
             }
 
             if (dlg.Errors.Count > 0)
@@ -160,8 +160,8 @@ public class AccountEditOrchestrator(
             else
                 SaveAndRefreshRequested?.Invoke(null, selectedIndex);
 
-            // Apply firewall OS rules AFTER DB is persisted to disk, so OS state never diverges
-            // from persisted state. ApplyFirewallRules catches and logs errors internally.
+            // Apply firewall changes after the rest of the account edit has been saved.
+            // The firewall helper handles the persist-before-tighten / loosen-before-persist ordering.
             editHelper.ApplyFirewallRules(accountRow, previousFirewallSettings, newFirewallSettings);
 
             if (dlg.SelectedInstallPackages.Count > 0)

@@ -3,18 +3,22 @@ using RunFence.Account;
 using RunFence.Account.Lifecycle;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Tests.TestDoubles;
 using Xunit;
 
 namespace RunFence.Tests;
 
 public class EphemeralContainerServiceTests : IDisposable
 {
-    private readonly Mock<IContainerDeletionService> _containerDeletion = new();
     private readonly Mock<IDatabaseService> _databaseService = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IProcessListService> _processListService = new();
-    private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
+    private readonly Mock<ITrayBalloonService> _trayBalloon = new();
+    private readonly RecordingEphemeralContainerDeletionService _containerDeletion = new();
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
+    private readonly List<SessionContext> _sessions = [];
 
     public EphemeralContainerServiceTests()
     {
@@ -23,69 +27,66 @@ public class EphemeralContainerServiceTests : IDisposable
             .Returns(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
     }
 
-    public void Dispose() => _pinKey.Dispose();
-
-    private SessionContext CreateSession(AppDatabase database) => new()
+    public void Dispose()
     {
-        Database = database,
-        CredentialStore = new CredentialStore(),
-        PinDerivedKey = _pinKey
-    };
+        foreach (var session in _sessions)
+            session.Dispose();
 
-    /// <summary>
-    /// Creates an expired ephemeral container: <see cref="AppContainerEntry.IsEphemeral"/> = true,
-    /// <see cref="AppContainerEntry.DeleteAfterUtc"/> = 1 hour ago.
-    /// </summary>
+        _pinKey.Dispose();
+    }
+
+    private SessionContext CreateSession(AppDatabase database)
+    {
+        var session = new SessionContext
+{
+            Database = database,
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(_pinKey);
+        _sessions.Add(session);
+        return session;
+    }
+
     private static AppContainerEntry ExpiredContainer(string name, string? sid = null) =>
         new() { Name = name, IsEphemeral = true, DeleteAfterUtc = DateTime.UtcNow.AddHours(-1), Sid = sid ?? string.Empty };
 
-    /// <summary>
-    /// Creates an orphaned ephemeral container: <see cref="AppContainerEntry.IsEphemeral"/> = true,
-    /// <see cref="AppContainerEntry.DeleteAfterUtc"/> = null (no expiry set, so immediately removable).
-    /// </summary>
     private static AppContainerEntry OrphanedContainer(string name) =>
         new() { Name = name, IsEphemeral = true };
 
-    /// <summary>
-    /// Configures <see cref="_containerDeletion"/> to simulate successful deletion: returns true
-    /// and removes the container entry (and any referencing app entries) from the database.
-    /// </summary>
-    private void SetupDeletionSucceeds(AppDatabase database)
-    {
-        _containerDeletion.Setup(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()))
-            .Returns((AppContainerEntry entry, string? _) =>
-            {
-                database.AppContainers.Remove(entry);
-                database.Apps.RemoveAll(a => a.AppContainerName == entry.Name);
-                return Task.FromResult(true);
-            });
-    }
-
-    private EphemeralContainerService CreateStartedService(AppDatabase database,
+    private EphemeralContainerService CreateStartedService(
+        AppDatabase database,
         IContainerDeletionService? containerDeletion = null)
     {
         if (containerDeletion == null)
         {
-            // Set up default mock to return true (success) and remove the container
-            SetupDeletionSucceeds(database);
-            containerDeletion = _containerDeletion.Object;
+            _containerDeletion.Reset();
+            _containerDeletion.ApplyDeletionToDatabase = (db, entry) =>
+            {
+                db.AppContainers.Remove(entry);
+                db.Apps.RemoveAll(app => app.AppContainerName == entry.Name);
+            };
+            _containerDeletion.Delete = (entry, sid) =>
+            {
+                _containerDeletion.ApplyDeletionToDatabase?.Invoke(database, entry);
+                return ContainerDeletionResult.Success();
+            };
+            containerDeletion = _containerDeletion;
         }
 
         var service = new EphemeralContainerService(
             containerDeletion,
-            _databaseService.Object, _log.Object,
-            new LambdaSessionProvider(() => CreateSession(database)), new InlineUiThreadInvoker(a => a()),
-            _processListService.Object);
+            _databaseService.Object,
+            _log.Object,
+            new LambdaSessionProvider(() => CreateSession(database)),
+            new InlineUiThreadInvoker(a => a()),
+            _processListService.Object,
+            _trayBalloon.Object);
         service.Start();
         return service;
     }
 
-    // --- ProcessExpiredContainers ---
-
     [Fact]
     public async Task ProcessExpiredContainers_RemovesOrphanedEntries()
     {
-        // Orphaned = IsEphemeral=true, DeleteAfterUtc=null (no expiry set)
         var database = new AppDatabase();
         database.AppContainers.Add(OrphanedContainer("ram_orphan"));
 
@@ -93,8 +94,8 @@ public class EphemeralContainerServiceTests : IDisposable
         await service.ProcessExpiredContainers();
 
         Assert.Empty(database.AppContainers);
-        _containerDeletion.Verify(s => s.DeleteContainer(It.Is<AppContainerEntry>(e => e.Name == "ram_orphan"), It.IsAny<string?>()), Times.Once);
-        _databaseService.Verify(s => s.SaveConfig(database, It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Once);
+        Assert.Equal(["ram_orphan"], _containerDeletion.DeletedContainerNames);
+        _databaseService.Verify(s => s.SaveConfig(database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Once);
     }
 
     [Fact]
@@ -107,8 +108,8 @@ public class EphemeralContainerServiceTests : IDisposable
         await service.ProcessExpiredContainers();
 
         Assert.Empty(database.AppContainers);
-        _containerDeletion.Verify(s => s.DeleteContainer(It.Is<AppContainerEntry>(e => e.Name == "ram_expired"), It.IsAny<string?>()), Times.Once);
-        _databaseService.Verify(s => s.SaveConfig(database, It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Once);
+        Assert.Equal(["ram_expired"], _containerDeletion.DeletedContainerNames);
+        _databaseService.Verify(s => s.SaveConfig(database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Once);
     }
 
     [Fact]
@@ -122,7 +123,6 @@ public class EphemeralContainerServiceTests : IDisposable
         using var service = CreateStartedService(database);
         await service.ProcessExpiredContainers();
 
-        // Only the expired container's app should be removed (via DeleteContainer mock behavior)
         Assert.Single(database.Apps);
         Assert.Equal("OtherApp", database.Apps[0].Name);
     }
@@ -131,34 +131,33 @@ public class EphemeralContainerServiceTests : IDisposable
     public async Task ProcessExpiredContainers_SkipsOnDeleteFailure_PreservesEntry()
     {
         var database = new AppDatabase();
-        var entry = ExpiredContainer("ram_fail");
-        database.AppContainers.Add(entry);
+        database.AppContainers.Add(ExpiredContainer("ram_fail"));
 
-        // Override: return false (failure) for this specific entry
-        var containerDeletion = new Mock<IContainerDeletionService>();
-        containerDeletion.Setup(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()))
-            .ReturnsAsync(false);
+        var containerDeletion = new RecordingEphemeralContainerDeletionService
+        {
+            Delete = (_, _) => ContainerDeletionResult.Failure("delete failed")
+        };
 
-        using var service = CreateStartedService(database, containerDeletion.Object);
+        using var service = CreateStartedService(database, containerDeletion);
         await service.ProcessExpiredContainers();
 
-        // Entry preserved when delete fails (retry on next tick)
         Assert.Single(database.AppContainers);
-        _databaseService.Verify(s => s.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+        Assert.Equal(["ram_fail"], containerDeletion.DeletedContainerNames);
+        _databaseService.Verify(s => s.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Never);
     }
 
     [Fact]
     public async Task ProcessExpiredContainers_NonEphemeral_NotTouched()
     {
         var database = new AppDatabase();
-        database.AppContainers.Add(new AppContainerEntry { Name = "ram_permanent" }); // IsEphemeral defaults to false
+        database.AppContainers.Add(new AppContainerEntry { Name = "ram_permanent" });
 
         using var service = CreateStartedService(database);
         await service.ProcessExpiredContainers();
 
         Assert.Single(database.AppContainers);
-        _containerDeletion.Verify(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()), Times.Never);
-        _databaseService.Verify(s => s.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Never);
+        Assert.Empty(_containerDeletion.DeletedContainerNames);
+        _databaseService.Verify(s => s.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Never);
     }
 
     [Fact]
@@ -171,10 +170,8 @@ public class EphemeralContainerServiceTests : IDisposable
         using var service = CreateStartedService(database);
         await service.ProcessExpiredContainers();
 
-        _containerDeletion.Verify(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), containerSid), Times.Once);
+        Assert.Equal(["ram_expired"], _containerDeletion.DeletedContainerNames);
     }
-
-    // --- ProcessExpiredAtStartup ---
 
     [Fact]
     public async Task ProcessExpiredAtStartup_RemovesExpiredContainersAndReferencingApps()
@@ -183,15 +180,21 @@ public class EphemeralContainerServiceTests : IDisposable
         database.AppContainers.Add(ExpiredContainer("ram_expired"));
         database.Apps.Add(new AppEntry { Name = "App", AppContainerName = "ram_expired" });
 
-        SetupDeletionSucceeds(database);
+        _containerDeletion.Reset();
+        _containerDeletion.Delete = (entry, _) =>
+        {
+            _containerDeletion.ApplyDeletionToDatabase?.Invoke(database, entry);
+            return ContainerDeletionResult.Success();
+        };
 
-        var changed = await EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerDeletion.Object, _log.Object, _processListService.Object);
+        var result = await EphemeralContainerService.ProcessExpiredAtStartup(
+            database, _containerDeletion, _log.Object, _processListService.Object);
 
-        Assert.True(changed);
+        Assert.True(result.Changed);
+        Assert.Empty(result.Warnings);
         Assert.Empty(database.AppContainers);
         Assert.Empty(database.Apps);
-        _containerDeletion.Verify(s => s.DeleteContainer(It.Is<AppContainerEntry>(e => e.Name == "ram_expired"), It.IsAny<string?>()), Times.Once);
+        Assert.Equal(["ram_expired"], _containerDeletion.DeletedContainerNames);
     }
 
     [Fact]
@@ -200,14 +203,20 @@ public class EphemeralContainerServiceTests : IDisposable
         var database = new AppDatabase();
         database.AppContainers.Add(OrphanedContainer("ram_orphan"));
 
-        SetupDeletionSucceeds(database);
+        _containerDeletion.Reset();
+        _containerDeletion.Delete = (entry, _) =>
+        {
+            _containerDeletion.ApplyDeletionToDatabase?.Invoke(database, entry);
+            return ContainerDeletionResult.Success();
+        };
 
-        var changed = await EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerDeletion.Object, _log.Object, _processListService.Object);
+        var result = await EphemeralContainerService.ProcessExpiredAtStartup(
+            database, _containerDeletion, _log.Object, _processListService.Object);
 
-        Assert.True(changed);
+        Assert.True(result.Changed);
+        Assert.Empty(result.Warnings);
         Assert.Empty(database.AppContainers);
-        _containerDeletion.Verify(s => s.DeleteContainer(It.Is<AppContainerEntry>(e => e.Name == "ram_orphan"), It.IsAny<string?>()), Times.Once);
+        Assert.Equal(["ram_orphan"], _containerDeletion.DeletedContainerNames);
     }
 
     [Fact]
@@ -215,10 +224,12 @@ public class EphemeralContainerServiceTests : IDisposable
     {
         var database = new AppDatabase();
 
-        var changed = await EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerDeletion.Object, _log.Object, _processListService.Object);
+        var result = await EphemeralContainerService.ProcessExpiredAtStartup(
+            database, _containerDeletion, _log.Object, _processListService.Object);
 
-        Assert.False(changed);
+        Assert.False(result.Changed);
+        Assert.Empty(result.Warnings);
+        Assert.Empty(_containerDeletion.DeletedContainerNames);
     }
 
     [Fact]
@@ -227,18 +238,19 @@ public class EphemeralContainerServiceTests : IDisposable
         var database = new AppDatabase();
         database.AppContainers.Add(new AppContainerEntry
         {
-            Name = "ram_future", IsEphemeral = true,
-            DeleteAfterUtc = DateTime.UtcNow.AddHours(12) // not yet expired
+            Name = "ram_future",
+            IsEphemeral = true,
+            DeleteAfterUtc = DateTime.UtcNow.AddHours(12)
         });
 
-        var changed = await EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerDeletion.Object, _log.Object, _processListService.Object);
+        var result = await EphemeralContainerService.ProcessExpiredAtStartup(
+            database, _containerDeletion, _log.Object, _processListService.Object);
 
-        Assert.False(changed);
+        Assert.False(result.Changed);
+        Assert.Empty(result.Warnings);
         Assert.Single(database.AppContainers);
+        Assert.Empty(_containerDeletion.DeletedContainerNames);
     }
-
-    // --- ContainersChanged event ---
 
     [Fact]
     public async Task ProcessExpiredContainers_WhenEntriesRemoved_FiresContainersChanged()
@@ -258,8 +270,6 @@ public class EphemeralContainerServiceTests : IDisposable
     [Fact]
     public async Task ProcessExpiredContainers_WhenTtlExtended_FiresContainersChanged()
     {
-        // A running-process postpone updates DeleteAfterUtc (TTL extension) and must fire ContainersChanged
-        // so the UI reflects the updated expiry time.
         var containerSid = "S-1-15-2-8888";
         var database = new AppDatabase();
         var entry = ExpiredContainer("ram_busy", containerSid);
@@ -281,9 +291,8 @@ public class EphemeralContainerServiceTests : IDisposable
     [Fact]
     public async Task ProcessExpiredContainers_WhenNothingChanged_DoesNotFireContainersChanged()
     {
-        // No ephemeral entries → nothing to process
         var database = new AppDatabase();
-        database.AppContainers.Add(new AppContainerEntry { Name = "ram_permanent" }); // IsEphemeral defaults to false
+        database.AppContainers.Add(new AppContainerEntry { Name = "ram_permanent" });
 
         using var service = CreateStartedService(database);
         var eventFired = false;
@@ -300,15 +309,16 @@ public class EphemeralContainerServiceTests : IDisposable
         var database = new AppDatabase();
         database.AppContainers.Add(ExpiredContainer("ram_fail"));
 
-        _containerDeletion.Setup(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()))
-            .ReturnsAsync(false);
+        _containerDeletion.Reset();
+        _containerDeletion.Delete = (_, _) => ContainerDeletionResult.Failure("delete failed");
 
-        var changed = await EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerDeletion.Object, _log.Object, _processListService.Object);
+        var result = await EphemeralContainerService.ProcessExpiredAtStartup(
+            database, _containerDeletion, _log.Object, _processListService.Object);
 
-        // Deletion failed → entry preserved, changed=false
-        Assert.False(changed);
+        Assert.False(result.Changed);
+        Assert.Empty(result.Warnings);
         Assert.Single(database.AppContainers);
+        Assert.Equal(["ram_fail"], _containerDeletion.DeletedContainerNames);
     }
 
     [Fact]
@@ -323,14 +333,14 @@ public class EphemeralContainerServiceTests : IDisposable
             .Setup(p => p.GetSidsWithProcesses(It.IsAny<IEnumerable<string>>()))
             .Returns(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { containerSid });
 
-        var changed = await EphemeralContainerService.ProcessExpiredAtStartup(
-            database, _containerDeletion.Object, _log.Object, _processListService.Object);
+        var result = await EphemeralContainerService.ProcessExpiredAtStartup(
+            database, _containerDeletion, _log.Object, _processListService.Object);
 
-        // Entry preserved — postponed with extended TTL, changed=true (TTL was updated)
-        Assert.True(changed);
+        Assert.True(result.Changed);
+        Assert.Empty(result.Warnings);
         Assert.Single(database.AppContainers);
         Assert.True(entry.DeleteAfterUtc > DateTime.UtcNow);
-        _containerDeletion.Verify(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()), Times.Never);
+        Assert.Empty(_containerDeletion.DeletedContainerNames);
     }
 
     [Fact]
@@ -348,10 +358,49 @@ public class EphemeralContainerServiceTests : IDisposable
         using var service = CreateStartedService(database);
         await service.ProcessExpiredContainers();
 
-        // Entry preserved — postponed with extended TTL
         Assert.Single(database.AppContainers);
         Assert.True(entry.DeleteAfterUtc > DateTime.UtcNow);
-        _containerDeletion.Verify(s => s.DeleteContainer(It.IsAny<AppContainerEntry>(), It.IsAny<string?>()), Times.Never);
-        _databaseService.Verify(s => s.SaveConfig(database, It.IsAny<byte[]>(), It.IsAny<byte[]>()), Times.Once);
+        Assert.Empty(_containerDeletion.DeletedContainerNames);
+        _databaseService.Verify(s => s.SaveConfig(database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ProcessExpiredContainers_DeleteWarnings_AreLoggedAndShown()
+    {
+        const string warning = "cleanup warning";
+        var database = new AppDatabase();
+        database.AppContainers.Add(ExpiredContainer("ram_warn"));
+        _containerDeletion.Reset();
+        _containerDeletion.Delete = (entry, _) =>
+        {
+            database.AppContainers.Remove(entry);
+            return ContainerDeletionResult.Success([warning]);
+        };
+
+        using var service = CreateStartedService(database, _containerDeletion);
+        await service.ProcessExpiredContainers();
+
+        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(warning, StringComparison.Ordinal))), Times.Once);
+        _trayBalloon.Verify(t => t.ShowWarning(warning), Times.Once);
+    }
+
+    [Fact]
+    public async Task ProcessExpiredAtStartup_DeleteWarnings_ReturnsWarnings()
+    {
+        const string warning = "cleanup warning";
+        var database = new AppDatabase();
+        database.AppContainers.Add(ExpiredContainer("ram_warn"));
+        _containerDeletion.Reset();
+        _containerDeletion.Delete = (entry, _) =>
+        {
+            database.AppContainers.Remove(entry);
+            return ContainerDeletionResult.Success([warning]);
+        };
+
+        var result = await EphemeralContainerService.ProcessExpiredAtStartup(
+            database, _containerDeletion, _log.Object, _processListService.Object);
+
+        Assert.True(result.Changed);
+        Assert.Equal([warning], result.Warnings);
     }
 }

@@ -7,4 +7,6 @@ public interface ISecureClipboardService : IDisposable
     void CopyProtectedStringToClipboard(ProtectedString password);
 
     void ScheduleClipboardClear();
+
+    void ClearActiveSecretExposure();
 }

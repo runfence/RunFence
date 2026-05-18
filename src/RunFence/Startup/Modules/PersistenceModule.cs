@@ -1,4 +1,5 @@
 using Autofac;
+using RunFence.Acl;
 using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Infrastructure;
@@ -30,6 +31,43 @@ public class PersistenceModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<GrantIntentOwnershipProjectionService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AppConfigIndex>()
+            .As<IAppFilter>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AppConfigSaveHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<HandlerMappingService>()
+            .As<IHandlerMappingService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AppConfigService>()
+            .As<IAppConfigService>()
+            .SingleInstance();
+
+        builder.RegisterType<MainGrantIntentStore>()
+            .As<IGrantIntentStore>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<GrantIntentStoreProvider>()
+            .As<IGrantIntentStoreProvider>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<GrantIntentRepository>()
+            .As<IGrantIntentRepository>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<ConfigGrantPinHelper>()
             .AsSelf()
             .SingleInstance();
@@ -44,6 +82,7 @@ public class PersistenceModule : Module
 
         builder.RegisterType<ConfigManagementOrchestrator>()
             .As<IConfigManagementContext>()
+            .As<IAdditionalConfigLoadService>()
             .As<IConfigAvailabilityChecker>()
             .As<IConfigManagementEventSource>()
             .AsSelf()
@@ -56,6 +95,16 @@ public class PersistenceModule : Module
 
         builder.RegisterType<PrefTransLauncher>()
             .As<IPrefTransLauncher>()
+            .SingleInstance();
+
+        builder.RegisterType<SettingsTransferAccessGrantService>()
+            .As<ISettingsTransferAccessGrantService>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<SettingsTransferStagingService>()
+            .As<ISettingsTransferStagingService>()
+            .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<SettingsTransferService>()
@@ -74,8 +123,10 @@ public class PersistenceModule : Module
         builder.RegisterType<MainConfigImportEvaluationValidator>().AsSelf().SingleInstance();
         builder.RegisterType<MainConfigImportRepairService>().AsSelf().SingleInstance();
         builder.RegisterType<MainConfigImportApplyService>().AsSelf().SingleInstance();
-        builder.RegisterType<MainConfigImportSaveHelper>().AsSelf().SingleInstance();
         builder.RegisterType<ConfigImportHandler>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<AdditionalConfigImportCoordinator>()
             .AsSelf()
             .SingleInstance();
 

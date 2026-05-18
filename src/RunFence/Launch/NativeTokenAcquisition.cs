@@ -78,28 +78,47 @@ public static class NativeTokenAcquisition
         pSid = IntPtr.Zero;
         tmlBuffer = IntPtr.Zero;
 
-        if (!ProcessNative.ConvertStringSidToSid(integritySid, out pSid))
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-
-        var sidLen = ProcessLaunchNative.GetLengthSid(pSid);
-        var tmlSize = Marshal.SizeOf<ProcessLaunchNative.TOKEN_MANDATORY_LABEL>();
-        var totalSize = tmlSize + sidLen;
-
-        tmlBuffer = Marshal.AllocHGlobal(totalSize);
-
-        var sidInBuffer = IntPtr.Add(tmlBuffer, tmlSize);
-        var sidBytes = new byte[sidLen];
-        Marshal.Copy(pSid, sidBytes, 0, sidLen);
-        Marshal.Copy(sidBytes, 0, sidInBuffer, sidLen);
-
-        var tml = new ProcessLaunchNative.TOKEN_MANDATORY_LABEL
+        try
         {
-            Label = new ProcessLaunchNative.SID_AND_ATTRIBUTES { Sid = sidInBuffer, Attributes = ProcessLaunchNative.SE_GROUP_INTEGRITY }
-        };
-        Marshal.StructureToPtr(tml, tmlBuffer, false);
+            if (!ProcessNative.ConvertStringSidToSid(integritySid, out pSid))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
 
-        if (!ProcessLaunchNative.SetTokenInformation(hToken, ProcessLaunchNative.TOKEN_INTEGRITY_LEVEL, tmlBuffer, (uint)totalSize))
-            throw new Win32Exception(Marshal.GetLastWin32Error());
+            var sidLen = ProcessLaunchNative.GetLengthSid(pSid);
+            var tmlSize = Marshal.SizeOf<ProcessLaunchNative.TOKEN_MANDATORY_LABEL>();
+            var totalSize = tmlSize + sidLen;
+
+            tmlBuffer = Marshal.AllocHGlobal(totalSize);
+
+            var sidInBuffer = IntPtr.Add(tmlBuffer, tmlSize);
+            var sidBytes = new byte[sidLen];
+            Marshal.Copy(pSid, sidBytes, 0, sidLen);
+            Marshal.Copy(sidBytes, 0, sidInBuffer, sidLen);
+
+            var tml = new ProcessLaunchNative.TOKEN_MANDATORY_LABEL
+            {
+                Label = new ProcessLaunchNative.SID_AND_ATTRIBUTES { Sid = sidInBuffer, Attributes = ProcessLaunchNative.SE_GROUP_INTEGRITY }
+            };
+            Marshal.StructureToPtr(tml, tmlBuffer, false);
+
+            if (!ProcessLaunchNative.SetTokenInformation(hToken, ProcessLaunchNative.TOKEN_INTEGRITY_LEVEL, tmlBuffer, (uint)totalSize))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        catch
+        {
+            if (tmlBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(tmlBuffer);
+                tmlBuffer = IntPtr.Zero;
+            }
+
+            if (pSid != IntPtr.Zero)
+            {
+                ProcessNative.LocalFree(pSid);
+                pSid = IntPtr.Zero;
+            }
+
+            throw;
+        }
     }
 
 }

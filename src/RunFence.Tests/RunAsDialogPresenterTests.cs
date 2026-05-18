@@ -8,13 +8,14 @@ using RunFence.Persistence;
 using RunFence.RunAs;
 using RunFence.RunAs.UI.Forms;
 using RunFence.Security;
+using RunFence.Startup.UI;
 using Xunit;
 
 namespace RunFence.Tests;
 
 public class RunAsDialogPresenterTests : IDisposable
 {
-    private readonly ProtectedBuffer _pinKey = new(new byte[32], protect: false);
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
 
     public void Dispose() => _pinKey.Dispose();
 
@@ -22,12 +23,11 @@ public class RunAsDialogPresenterTests : IDisposable
     public async Task ShowRunAsDialogAsync_WhenLockedAndCallerIsAdmin_ConsumesStartupUnlockGrant()
     {
         var database = new AppDatabase();
-        var session = new SessionContext
-        {
+        using var session = new SessionContext
+{
             Database = database,
             CredentialStore = new CredentialStore(),
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(_pinKey);
 
         var modalCoordinator = new Mock<IModalCoordinator>();
         var appState = new Mock<IAppStateProvider>();
@@ -36,7 +36,7 @@ public class RunAsDialogPresenterTests : IDisposable
 
         appState.Setup(a => a.Database).Returns(database);
         appLock.Setup(l => l.IsLocked).Returns(true);
-        appLock.Setup(l => l.TryUnlockForOperationAsync(true)).ReturnsAsync(true);
+        appLock.Setup(l => l.TryUnlockForOperationWithResultAsync(true)).ReturnsAsync(OperationUnlockResult.Succeeded);
         startupUnlockGrant.Setup(g => g.TryConsume()).Returns(true);
 
         var presenter = new RunAsDialogPresenter(
@@ -45,7 +45,7 @@ public class RunAsDialogPresenterTests : IDisposable
             new RunAsCredentialPersister(
                 appState.Object,
                 session,
-                new Mock<ICredentialEncryptionService>().Object,
+                new ByteArrayCredentialEncryptionSpanAdapter(new Mock<IByteArrayCredentialEncryptionService>().Object),
                 new Mock<IDatabaseService>().Object,
                 new Mock<ILoggingService>().Object),
             appState.Object,
@@ -70,6 +70,6 @@ public class RunAsDialogPresenterTests : IDisposable
 
         Assert.NotNull(result);
         startupUnlockGrant.Verify(g => g.TryConsume(), Times.Once);
-        appLock.Verify(l => l.TryUnlockForOperationAsync(true), Times.Once);
+        appLock.Verify(l => l.TryUnlockForOperationWithResultAsync(true), Times.Once);
     }
 }

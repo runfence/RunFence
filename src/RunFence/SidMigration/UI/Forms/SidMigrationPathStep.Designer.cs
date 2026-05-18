@@ -75,7 +75,7 @@ partial class SidMigrationPathStep
         _skipButton.Click += OnSkipClick;
 
         // _hintLabel
-        _hintLabel.Text = "Click 'Discover' to scan for orphaned SIDs, or 'Skip' to manually enter SID mappings.";
+        _hintLabel.Text = "Choose the drives and folders that may still contain permissions or ownership references to deleted accounts. Smaller scope finishes faster and reduces noise, while Skip is for cases where you already know the old SID and want to enter it manually. Add extra folders only for places that actually stored files or settings for the old identity.";
         _hintLabel.Location = new Point(15, 260);
         _hintLabel.Size = new Size(560, 40);
         _hintLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;

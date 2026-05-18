@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using RunFence.Core;
+using RunFence.Infrastructure;
 using RunFence.Licensing;
 using RunFence.Persistence;
 
@@ -9,7 +10,8 @@ public class RememberPinService(
     ILoggingService log,
     IMachineIdProvider machineIdProvider,
     IConfigPaths configPaths,
-    ITpmKeyProvider tpmKeyProvider)
+    ITpmKeyProvider tpmKeyProvider,
+    IDpapiProtector dpapiProtector)
     : IRememberPinService
 {
     // Keep the legacy TPM key name so existing remembered-PIN users remain readable.
@@ -29,9 +31,8 @@ public class RememberPinService(
 
     public bool IsTpmAvailable() => tpmKeyProvider.IsAvailable();
 
-    public void EnableWithTpm(ProtectedBuffer pinDerivedKey)
+    public void EnableWithTpm(ISecureSecretSnapshotSource pinDerivedKey)
     {
-        using var scope = pinDerivedKey.Unprotect();
         byte[]? dpapiBlob = null;
         byte[]? dataKey = null;
         byte[]? wrappedDataKey = null;
@@ -42,7 +43,15 @@ public class RememberPinService(
         try
         {
             var dpapiEntropy = DeriveDpapiEntropy();
-            dpapiBlob = ProtectedData.Protect(scope.Data, dpapiEntropy, DataProtectionScope.CurrentUser);
+            try
+            {
+                dpapiBlob = pinDerivedKey.TransformSnapshot(key => dpapiProtector.Protect(key, dpapiEntropy));
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(dpapiEntropy);
+            }
+
             dataKey = RandomNumberGenerator.GetBytes(TpmWrappedDataKeyLength);
             nonce = RandomNumberGenerator.GetBytes(NonceLength);
             ciphertext = new byte[dpapiBlob.Length];
@@ -52,6 +61,8 @@ public class RememberPinService(
                 aes.Encrypt(nonce, dpapiBlob, ciphertext, tag);
             }
 
+            // Create the TPM-wrapped key before writing remember-PIN state so a failed key path
+            // does not leave an unusable persisted remember-PIN marker behind.
             tpmKeyProvider.CreateKey(TpmKeyName, 2048);
             keyCreated = true;
             wrappedDataKey = tpmKeyProvider.Encrypt(TpmKeyName, dataKey);
@@ -96,13 +107,13 @@ public class RememberPinService(
         }
     }
 
-    public void EnableDpapiOnly(ProtectedBuffer pinDerivedKey)
+    public void EnableDpapiOnly(ISecureSecretSnapshotSource pinDerivedKey)
     {
-        using var scope = pinDerivedKey.Unprotect();
         var dpapiEntropy = DeriveDpapiEntropy();
-        var dpapiBlob = ProtectedData.Protect(scope.Data, dpapiEntropy, DataProtectionScope.CurrentUser);
+        byte[]? dpapiBlob = null;
         try
         {
+            dpapiBlob = pinDerivedKey.TransformSnapshot(key => dpapiProtector.Protect(key, dpapiEntropy));
             var fileContent = new byte[2 + dpapiBlob.Length];
             fileContent[0] = DpapiOnlyVersion;
             fileContent[1] = DpapiMode;
@@ -111,13 +122,15 @@ public class RememberPinService(
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(dpapiBlob);
+            CryptographicOperations.ZeroMemory(dpapiEntropy);
+            if (dpapiBlob != null)
+                CryptographicOperations.ZeroMemory(dpapiBlob);
         }
     }
 
-    public bool TryDecrypt(out byte[] pinDerivedKey)
+    public bool TryDecryptSecret(out SecureSecret? pinDerivedKey)
     {
-        pinDerivedKey = [];
+        pinDerivedKey = null;
         try
         {
             if (!File.Exists(configPaths.RememberPinFilePath))
@@ -145,6 +158,7 @@ public class RememberPinService(
             byte[]? tag = null;
             byte[]? ciphertext = null;
             byte[]? blob = null;
+            SecureSecret? decryptedSecret = null;
             try
             {
                 if (mode == TpmMode && version == TpmHybridVersion)
@@ -195,8 +209,24 @@ public class RememberPinService(
                 }
 
                 var dpapiEntropy = DeriveDpapiEntropy();
-                pinDerivedKey = ProtectedData.Unprotect(dpapiBlob, dpapiEntropy, DataProtectionScope.CurrentUser);
+                try
+                {
+                    decryptedSecret = dpapiProtector.UnprotectToSecret(dpapiBlob, dpapiEntropy);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(dpapiEntropy);
+                }
 
+                bool validLength = decryptedSecret.TransformSnapshot(data => data.Length == Constants.Argon2OutputBytes);
+                if (!validLength)
+                {
+                    log.Warn("RememberPinService: decrypted PIN key length is invalid.");
+                    return false;
+                }
+
+                pinDerivedKey = decryptedSecret;
+                decryptedSecret = null;
                 return true;
             }
             finally
@@ -218,14 +248,14 @@ public class RememberPinService(
                     CryptographicOperations.ZeroMemory(ciphertext);
                 if (blob != null)
                     CryptographicOperations.ZeroMemory(blob);
+                decryptedSecret?.Dispose();
             }
         }
         catch (Exception ex)
         {
             log.Warn($"RememberPinService: TryDecrypt failed: {ex.Message}");
-            if (pinDerivedKey.Length > 0)
-                CryptographicOperations.ZeroMemory(pinDerivedKey);
-            pinDerivedKey = [];
+            pinDerivedKey?.Dispose();
+            pinDerivedKey = null;
             return false;
         }
     }
@@ -245,7 +275,7 @@ public class RememberPinService(
         File.Delete(path);
     }
 
-    public void UpdateForPinChange(ProtectedBuffer newPinDerivedKey)
+    public void UpdateForPinChange(ISecureSecretSnapshotSource newPinDerivedKey)
     {
         if (!IsEnabled)
             return;
@@ -316,10 +346,21 @@ public class RememberPinService(
 
     private byte[] DeriveDpapiEntropy()
     {
-        var machineHash = machineIdProvider.MachineIdHash;
+        var identity = machineIdProvider.GetMachineIdentity();
+        if (identity.Status != MachineIdentityStatus.Available || identity.MachineIdHash == null)
+            throw new InvalidOperationException(identity.ErrorText ?? "Machine identity unavailable for Remember PIN binding.");
+
+        var machineHash = identity.MachineIdHash;
         var combined = new byte[machineHash.Length + StaticSalt.Length];
-        Buffer.BlockCopy(machineHash, 0, combined, 0, machineHash.Length);
-        Buffer.BlockCopy(StaticSalt, 0, combined, machineHash.Length, StaticSalt.Length);
-        return SHA256.HashData(combined);
+        try
+        {
+            Buffer.BlockCopy(machineHash, 0, combined, 0, machineHash.Length);
+            Buffer.BlockCopy(StaticSalt, 0, combined, machineHash.Length, StaticSalt.Length);
+            return SHA256.HashData(combined);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(combined);
+        }
     }
 }

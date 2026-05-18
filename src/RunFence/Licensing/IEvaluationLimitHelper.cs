@@ -4,8 +4,6 @@ namespace RunFence.Licensing;
 
 public interface IEvaluationLimitHelper
 {
-    int CountCredentialsExcludingCurrent(IEnumerable<CredentialEntry> credentials);
-
     /// <summary>
     /// Checks whether adding another credential is allowed by the license.
     /// Returns true if allowed, false if the limit was hit (shows a message via the injected prompt).

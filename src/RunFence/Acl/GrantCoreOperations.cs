@@ -38,10 +38,10 @@ public class GrantCoreOperations(
     /// </para>
     /// </summary>
     public GrantAddResult AddGrant(string sid, string path, bool isDeny,
-        SavedRightsState? savedRights = null, string? ownerSid = null)
+        SavedRightsState? savedRights = null, string? ownerSid = null, bool? isFolderOverride = null)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = pathInfo.DirectoryExists(normalized);
+        bool isFolder = isFolderOverride ?? pathInfo.DirectoryExists(normalized);
         var canAssignOwner = AclHelper.CanAssignGrantOwner(sid);
         var rights = AclHelper.ClearBlockedGrantOwner(sid, savedRights ?? SavedRightsState.DefaultForMode(isDeny))!;
         if (!canAssignOwner)
@@ -51,9 +51,8 @@ public class GrantCoreOperations(
         {
             var acct = db.GetAccount(sid);
             if (acct == null) return (false, (bool?)null);
-            bool same = FindGrantEntryInList(acct.Grants, normalized, isDeny) != null;
-            var opp = FindGrantEntryInList(acct.Grants, normalized, !isDeny);
-            return (same, opp?.IsDeny);
+            var conflict = FindNonTraverseGrantConflict(acct.Grants, normalized, isDeny);
+            return (conflict.HasSameModeEntry, conflict.OppositeModeEntry?.IsDeny);
         });
 
         if (hasSameMode)
@@ -124,10 +123,10 @@ public class GrantCoreOperations(
     /// the NTFS ACE. Updates the owner if <paramref name="ownerSid"/> is provided.
     /// </summary>
     public void UpdateGrant(string sid, string path, bool isDeny,
-        SavedRightsState savedRights, string? ownerSid = null)
+        SavedRightsState savedRights, string? ownerSid = null, bool? isFolderOverride = null)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = pathInfo.DirectoryExists(normalized);
+        bool isFolder = isFolderOverride ?? pathInfo.DirectoryExists(normalized);
         var canAssignOwner = AclHelper.CanAssignGrantOwner(sid);
         savedRights = AclHelper.ClearBlockedGrantOwner(sid, savedRights)!;
         if (!canAssignOwner)
@@ -148,10 +147,10 @@ public class GrantCoreOperations(
     /// <summary>
     /// Re-applies the NTFS ACE for an existing grant entry (does not change the DB).
     /// </summary>
-    public void FixGrant(string sid, string path, bool isDeny)
+    public void FixGrant(string sid, string path, bool isDeny, bool? isFolderOverride = null)
     {
         var normalized = Path.GetFullPath(path);
-        bool isFolder = pathInfo.DirectoryExists(normalized);
+        bool isFolder = isFolderOverride ?? pathInfo.DirectoryExists(normalized);
 
         var rights = dbAccessor.Read(db =>
         {
@@ -213,21 +212,53 @@ public class GrantCoreOperations(
             var account = database.GetAccount(sid);
             if (account == null) return;
 
-            foreach (var entry in account.Grants)
+            var conflict = FindNonTraverseGrantConflict(account.Grants, normalized, isDeny);
+            if (conflict.HasSameModeEntry)
             {
-                if (!string.Equals(entry.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
-                    entry.IsTraverseOnly)
-                    continue;
+                throw new InvalidOperationException(
+                    $"A {(isDeny ? "deny" : "allow")} grant for '{normalized}' already exists for SID '{sid}'.");
+            }
 
-                if (entry.IsDeny == isDeny)
-                    throw new InvalidOperationException(
-                        $"A {(isDeny ? "deny" : "allow")} grant for '{normalized}' already exists for SID '{sid}'.");
-
+            if (conflict.OppositeModeEntry != null)
+            {
                 throw new InvalidOperationException(
                     $"An opposite-mode grant for '{normalized}' already exists for SID '{sid}'. " +
-                    $"Remove the existing {(entry.IsDeny ? "deny" : "allow")} grant first.");
+                    $"Remove the existing {(conflict.OppositeModeEntry.IsDeny ? "deny" : "allow")} grant first.");
             }
         });
+    }
+
+    /// <summary>
+    /// Returns any existing non-traverse entry for the normalized path, split into same-mode and
+    /// opposite-mode matches using path plus <see cref="GrantedPathEntry.IsTraverseOnly"/> as the
+    /// coexistence key.
+    /// </summary>
+    public static GrantConflictResult FindNonTraverseGrantConflict(
+        IEnumerable<GrantedPathEntry> grants,
+        string normalized,
+        bool isDeny)
+    {
+        GrantedPathEntry? sameMode = null;
+        GrantedPathEntry? oppositeMode = null;
+
+        foreach (var entry in grants)
+        {
+            if (!string.Equals(entry.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
+                entry.IsTraverseOnly)
+            {
+                continue;
+            }
+
+            if (entry.IsDeny == isDeny)
+                sameMode ??= entry;
+            else
+                oppositeMode ??= entry;
+
+            if (sameMode != null && oppositeMode != null)
+                break;
+        }
+
+        return new GrantConflictResult(sameMode, oppositeMode);
     }
 
     /// <summary>

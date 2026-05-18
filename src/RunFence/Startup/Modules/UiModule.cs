@@ -1,8 +1,7 @@
 using Autofac;
-using Autofac.Core.Activators.Reflection;
 using Autofac.Extras.Ordering;
-using BindingFlags = System.Reflection.BindingFlags;
 using RunFence.Account.UI;
+using RunFence.Account.UI.AppContainer;
 using RunFence.Account.UI.Forms;
 using RunFence.Acl;
 using RunFence.Acl.UI;
@@ -13,7 +12,9 @@ using RunFence.Core;
 using RunFence.DragBridge.UI.Forms;
 using RunFence.Groups.UI;
 using RunFence.Groups.UI.Forms;
+using RunFence.Groups;
 using RunFence.Infrastructure;
+using RunFence.Launch;
 using RunFence.Licensing.UI.Forms;
 using RunFence.Persistence.UI.Forms;
 using RunFence.Startup;
@@ -26,17 +27,15 @@ namespace RunFence.Startup.Modules;
 
 public class UiModule : Module
 {
-    private static readonly IConstructorFinder AllInstanceConstructors =
-        new DefaultConstructorFinder(type => type.GetConstructors(
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
-
     protected override void Load(ContainerBuilder builder)
     {
         builder.RegisterType<MainForm>()
             .As<ITrayOwner>()
+            .As<IMainFormVisibility>()
             .As<IMainFormDataRefreshTarget>()
             .As<IMainFormLockTarget>()
             .As<IStartupFormLifetime>()
+            .As<IStartupIpcHost>()
             .AsSelf()
             .SingleInstance();
 
@@ -70,21 +69,24 @@ public class UiModule : Module
             .InstancePerDependency();
 
         builder.RegisterType<AppEditBrowseHelper>()
-            .FindConstructorsWith(AllInstanceConstructors)
             .AsSelf()
             .InstancePerDependency();
         builder.RegisterType<AppEditAssociationHandler>().AsSelf().InstancePerDependency();
         builder.RegisterType<AppEditDialogSaveHandler>().AsSelf().InstancePerDependency();
         builder.RegisterType<AppEditAccountSwitchHandler>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditDialogInputValidator>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditDialogAclConfigBuilder>().AsSelf().InstancePerDependency();
         builder.RegisterType<AppEditDialogController>()
-            .FindConstructorsWith(AllInstanceConstructors)
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<AppEditDialogSubmitController>()
             .AsSelf()
             .InstancePerDependency();
         builder.RegisterType<AppEditPopulator>().AsSelf().InstancePerDependency();
         builder.RegisterType<AppEditDialogPopulator>().AsSelf().InstancePerDependency();
         builder.RegisterType<AppEditDialogInitializer>().AsSelf().InstancePerDependency();
+        builder.RegisterType<AppEditDialogInitializationBinder>().AsSelf().InstancePerDependency();
         builder.RegisterType<AppEditDialog>()
-            .FindConstructorsWith(AllInstanceConstructors)
             .AsSelf()
             .InstancePerDependency();
 
@@ -93,6 +95,10 @@ public class UiModule : Module
             .SingleInstance();
 
         builder.RegisterType<ApplicationsPanelSaveHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<ApplicationsCrudOperationService>()
             .AsSelf()
             .SingleInstance();
 
@@ -117,6 +123,15 @@ public class UiModule : Module
             .SingleInstance();
 
         builder.RegisterType<HandlerMappingAddDialog>()
+            .As<IHandlerMappingAddDialog>()
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<HandlerMappingAddDialogSubmissionState>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<ImportAssociationsDialog>()
+            .As<IImportAssociationsDialog>()
             .AsSelf()
             .InstancePerDependency();
 
@@ -128,9 +143,42 @@ public class UiModule : Module
             .As<IMessageBoxService>()
             .SingleInstance();
 
-        builder.RegisterType<MessageBoxHandlerMappingNotifier>()
-            .As<IHandlerMappingNotifier>()
+        builder.RegisterType<AccountMessageBoxService>()
+            .As<IAccountMessageBoxService>()
             .SingleInstance();
+
+        builder.RegisterType<ShellHelper>()
+            .As<IShellHelper>()
+            .SingleInstance();
+
+        builder.RegisterType<ClipboardTextService>()
+            .As<IClipboardTextService>()
+            .SingleInstance();
+
+        builder.RegisterType<AppContainerEditDialogNotifier>()
+            .As<IAppContainerEditDialogNotifier>()
+            .SingleInstance();
+        builder.RegisterType<AppContainerDialogStateAssembler>()
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<AppContainerCapabilitiesBinder>()
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<AppContainerDialogResultPresenter>()
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<AppContainerEditSubmitController>()
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<AppContainerEditDialog>()
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<AppContainerProfileActions>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<AppContainerEditDialogRunner>()
+            .AsSelf()
+            .InstancePerDependency();
 
         builder.RegisterType<HandlerMappingMutationHandler>()
             .AsSelf()
@@ -140,7 +188,17 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<HandlerMappingSubmitTransaction>()
+            .AsSelf()
+            .InstancePerDependency();
+
         builder.RegisterType<HandlerMappingDialogHelper>()
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<HandlerMappingDialogSubmissionCoordinator>()
+            .AsSelf()
+            .InstancePerDependency();
+        builder.RegisterType<HandlerMappingsChildDialogCoordinator>()
             .AsSelf()
             .InstancePerDependency();
 
@@ -167,6 +225,9 @@ public class UiModule : Module
             .As<IAccountsPanelOperationContext>()
             .As<IGridSortState>()
             .As<IAccountGridCallbacks>()
+            .SingleInstance();
+        builder.RegisterType<AccountListPresenter>()
+            .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<ApplicationsPanel>()
@@ -214,6 +275,10 @@ public class UiModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<OptionsMaintenanceLaunchHandler>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<OptionsFolderBrowserHandler>()
             .AsSelf()
             .SingleInstance();
@@ -231,6 +296,14 @@ public class UiModule : Module
             .SingleInstance();
 
         builder.RegisterType<MainFormFirstRunExporter>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<FindingLocationHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<SecurityCheckRunner>()
             .AsSelf()
             .SingleInstance();
 
@@ -264,6 +337,10 @@ public class UiModule : Module
             .InstancePerDependency();
 
         builder.RegisterType<TrayMenuDiscoveryBuilder>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<TrayMenuBuilder>()
             .AsSelf()
             .SingleInstance();
 
@@ -320,10 +397,24 @@ public class UiModule : Module
             .As<IAccountAclBulkScanService>()
             .SingleInstance();
 
+        builder.RegisterType<AclBulkScanResultProcessor>()
+            .As<IAclBulkScanResultProcessor>()
+            .SingleInstance();
+        builder.RegisterType<AclBulkScanWorkflow>()
+            .AsSelf()
+            .SingleInstance();
         builder.RegisterType<AccountBulkScanHandler>()
             .As<IAccountBulkScanHandler>()
-            .As<IAccountScanResultProcessor>()
             .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<AclBulkScanWarningPresenter>()
+            .As<IAclBulkScanWarningPresenter>()
+            .SingleInstance();
+        builder.RegisterType<AclBulkScanMessagePresenter>()
+            .As<IAclBulkScanMessagePresenter>()
+            .SingleInstance();
+        builder.RegisterType<AclBulkScanResultDialogFactory>()
+            .As<IAclBulkScanResultDialogFactory>()
             .SingleInstance();
 
         builder.RegisterType<StartMenuDiscoveryService>()
@@ -351,7 +442,16 @@ public class UiModule : Module
 
         builder.RegisterType<MainFormTrayHandler>()
             .As<ITrayBalloonService>()
+            .As<ITrayMenuActionHandler>()
             .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<TrayWarningSink>()
+            .As<ITrayWarningSink>()
+            .SingleInstance();
+
+        builder.RegisterType<LaunchFeedbackPresenter>()
+            .As<ILaunchFeedbackPresenter>()
             .SingleInstance();
 
         builder.RegisterType<WinFormsUiTimerFactory>()
@@ -383,11 +483,6 @@ public class UiModule : Module
         builder.RegisterType<DragBridgeEventWirer>()
             .As<IStartupEventWirer>()
             .OrderBy(5)
-            .SingleInstance();
-
-        builder.RegisterType<InputInjectionBlockerEventWirer>()
-            .As<IStartupEventWirer>()
-            .OrderBy(6)
             .SingleInstance();
 
         builder.RegisterType<DataRefreshStartupEventWirer>()
@@ -429,6 +524,12 @@ public class UiModule : Module
 
         builder.RegisterType<AccountConfigTransferOrchestrator>()
             .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<AccountConfigTransferSecureDesktopService>()
+            .As<IAccountConfigTransferSecureDesktopService>()
+            .SingleInstance();
+        builder.RegisterType<AccountConfigTransferPromptService>()
+            .As<IAccountConfigTransferPromptService>()
             .SingleInstance();
 
         builder.RegisterType<UserConfirmationService>()

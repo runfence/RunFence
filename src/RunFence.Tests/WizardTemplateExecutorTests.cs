@@ -19,14 +19,13 @@ using Xunit;
 
 namespace RunFence.Tests;
 
-public class WizardTemplateExecutorTests
+public class WizardTemplateExecutorTests : IDisposable
 {
     private const string TestSid = "S-1-5-21-100-200-300-1001";
 
     private readonly Mock<IWindowsAccountService> _windowsAccountService = new();
-    private readonly Mock<ILocalGroupMembershipService> _groupMembership = new();
-    private readonly Mock<IAccountLoginRestrictionService> _loginRestriction = new();
-    private readonly Mock<IAccountLsaRestrictionService> _lsaRestriction = new();
+    private readonly Mock<ILocalGroupMutationService> _groupMutation = new();
+    private readonly Mock<IAccountRestrictionCoordinator> _restrictionCoordinator = new();
     private readonly Mock<ILicenseService> _licenseService = new();
     private readonly Mock<IAclService> _aclService = new();
     private readonly Mock<IShortcutService> _shortcutService = new();
@@ -37,34 +36,53 @@ public class WizardTemplateExecutorTests
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IShortcutDiscoveryService> _shortcutDiscovery = new();
     private readonly Mock<IWizardSessionSaver> _sessionSaver = new();
-    private readonly Mock<IEvaluationLimitHelper> _evaluationLimitHelper = new();
     private readonly Mock<IAppEntryIdGenerator> _idGenerator = new();
+    private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
+    private readonly Mock<IAppStateProvider> _appState = new();
+    private readonly Mock<IDatabaseService> _databaseService = new();
+    private readonly Mock<IAccountCredentialManager> _credentialManager = new();
+    private readonly Mock<ILocalUserProvider> _localUserProvider = new();
+    private readonly Mock<ISettingsTransferService> _settingsTransferService = new();
     private readonly AppDatabase _database;
-    private readonly ProtectedBuffer _pinKey;
     private readonly SessionContext _session;
 
-    private class TestProgressReporter : IWizardProgressReporter
+    private sealed class TestProgressReporter : IWizardProgressReporter
     {
         public List<string> Errors { get; } = [];
+        public List<string> Warnings { get; } = [];
         public List<string> StatusMessages { get; } = [];
+        public CancellationToken CancellationToken => CancellationToken.None;
         public void ReportStatus(string message) => StatusMessages.Add(message);
+        public void ReportWarning(string message) => Warnings.Add(message);
         public void ReportError(string message) => Errors.Add(message);
     }
 
     public WizardTemplateExecutorTests()
     {
         _database = new AppDatabase();
-        _pinKey = new ProtectedBuffer(new byte[32], protect: false);
         _session = new SessionContext
-        {
+{
             Database = _database,
             CredentialStore = new CredentialStore(),
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+
+        _appState.Setup(a => a.Database).Returns(_database);
+        _uiThreadInvoker.Setup(i => i.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
+        _uiThreadInvoker.Setup(i => i.BeginInvoke(It.IsAny<Action>())).Callback<Action>(a => a());
 
         _licenseService.Setup(l => l.IsLicensed).Returns(true);
         _licenseService.Setup(l => l.CanAddCredential(It.IsAny<int>())).Returns(true);
         _licenseService.Setup(l => l.CanAddApp(It.IsAny<int>())).Returns(true);
+        _restrictionCoordinator
+            .Setup(r => r.ApplyRestrictions(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<bool>()))
+            .Returns(new AccountRestrictionResult(
+            [
+                new(AccountRestrictionKind.HideLogon, AccountRestrictionStatus.Succeeded, false, null),
+                new(AccountRestrictionKind.NetworkLogin, AccountRestrictionStatus.Succeeded, false, null),
+                new(AccountRestrictionKind.BackgroundAutorun, AccountRestrictionStatus.Succeeded, false, null),
+                new(AccountRestrictionKind.LogonScript, AccountRestrictionStatus.Succeeded, false, null),
+                new(AccountRestrictionKind.LsaPolicy, AccountRestrictionStatus.Succeeded, false, null),
+            ]));
 
         _idGenerator.Setup(g => g.GenerateUniqueId(It.IsAny<IEnumerable<string>>()))
             .Returns(() => Guid.NewGuid().ToString("N")[..8]);
@@ -74,36 +92,46 @@ public class WizardTemplateExecutorTests
         _shortcutDiscovery.Setup(s => s.CaptureManagedSids()).Returns([]);
     }
 
+    public void Dispose() => _session.Dispose();
+
     private WizardTemplateExecutor CreateExecutor()
     {
         var createHandler = new EditAccountDialogCreateHandler(
             _windowsAccountService.Object,
-            _groupMembership.Object,
-            _loginRestriction.Object,
-            _lsaRestriction.Object,
-            _licenseService.Object);
+            _groupMutation.Object,
+            _restrictionCoordinator.Object,
+            _licenseService.Object,
+            _uiThreadInvoker.Object,
+            _appState.Object,
+            _session,
+            _databaseService.Object,
+            _sidNameCache.Object);
 
-        var credentialManager = new Mock<IAccountCredentialManager>();
-        var localUserProvider = new Mock<ILocalUserProvider>();
-        var settingsTransferService = new Mock<ISettingsTransferService>();
         var firewallSettingsApplier = new Mock<IAccountFirewallSettingsApplier>();
-        var portRangeChecker = new DynamicPortRangeChecker(_log.Object, new Mock<IUserConfirmationService>().Object);
+        var portRangeChecker = new DynamicPortRangeChecker(_log.Object, new Mock<IUserConfirmationService>().Object, new StandardNetshCommandRunner());
         var firewallApplyHelper = new FirewallApplyHelper(firewallSettingsApplier.Object, portRangeChecker, _log.Object);
         var profilePathResolver = new Mock<IProfilePathResolver>();
         var launchFacade = new Mock<ILaunchFacade>();
+        launchFacade
+            .Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()))
+            .Returns(() => new LaunchExecutionResult(LaunchExecutionStatus.ProcessStarted, null));
         var toolResolver = new AccountToolResolver(profilePathResolver.Object);
-        var packageInstallService = new PackageInstallService(launchFacade.Object, toolResolver, _log.Object);
+        var packageInstallService = new PackageInstallService(
+            Mock.Of<IPackageInstallLauncher>(),
+            Mock.Of<IPackageInstallScriptStore>(),
+            toolResolver);
         var databaseProvider = new Mock<IDatabaseProvider>();
         databaseProvider.Setup(d => d.GetDatabase()).Returns(_database);
 
         var setupHelperFactory = new WizardAccountSetupHelperFactory(
-            credentialManager.Object,
-            localUserProvider.Object,
+            _credentialManager.Object,
+            _localUserProvider.Object,
             _sidNameCache.Object,
-            settingsTransferService.Object,
+            _settingsTransferService.Object,
             firewallApplyHelper,
             packageInstallService,
-            databaseProvider.Object);
+            databaseProvider.Object,
+            _sessionSaver.Object);
 
         var appEntryBuilder = new AppEntryBuilder(_idGenerator.Object);
 
@@ -117,7 +145,11 @@ public class WizardTemplateExecutorTests
             new Mock<IInteractiveUserSidResolver>().Object,
             _log.Object);
 
-        var licenseChecker = new WizardLicenseChecker(_licenseService.Object, _evaluationLimitHelper.Object);
+        var credentialCounter = new Mock<IEvaluationCredentialCounter>();
+        credentialCounter.Setup(c => c.CountCredentialsExcludingCurrent(It.IsAny<IEnumerable<CredentialEntry>>()))
+            .Returns(0);
+
+        var licenseChecker = new WizardLicenseChecker(_licenseService.Object, credentialCounter.Object);
 
         return new WizardTemplateExecutor(
             createHandler,
@@ -137,7 +169,6 @@ public class WizardTemplateExecutorTests
     [Fact]
     public async Task ExecuteAsync_CredentialLicenseCheckFails_ReturnsEarlyWithoutSave()
     {
-        // Arrange
         _licenseService.Setup(l => l.CanAddCredential(It.IsAny<int>())).Returns(false);
         _licenseService.Setup(l => l.GetRestrictionMessage(EvaluationFeature.Credentials, It.IsAny<int>()))
             .Returns("Credential limit reached.");
@@ -145,15 +176,13 @@ public class WizardTemplateExecutorTests
         var flowParams = new WizardStandardFlowParams(
             Request: MakeRequest(),
             SetupOptions: new WizardSetupOptions(
-                StoreCredential: true, IsEphemeral: false, PrivilegeLevel: PrivilegeLevel.Basic,
+                StoreCredential: true, IsEphemeral: false, PrivilegeLevel: PrivilegeLevel.Isolated,
                 FirewallSettings: null, DesktopSettingsPath: null, InstallPackages: null, TrayTerminal: false));
 
         var progress = new TestProgressReporter();
 
-        // Act
         await CreateExecutor().ExecuteAsync(flowParams, progress);
 
-        // Assert — returned early before account creation, no save
         _windowsAccountService.Verify(s => s.CreateLocalUser(It.IsAny<string>(), It.IsAny<ProtectedString>()), Times.Never);
         _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Never);
     }
@@ -161,100 +190,136 @@ public class WizardTemplateExecutorTests
     [Fact]
     public async Task ExecuteAsync_AccountCreationFails_ReportsErrorAndReturnsEarlyWithoutSave()
     {
-        // Arrange — CreateLocalUser throws simulating OS failure
         _windowsAccountService.Setup(s => s.CreateLocalUser(It.IsAny<string>(), It.IsAny<ProtectedString>()))
             .Throws(new InvalidOperationException("Username already exists."));
 
-        var flowParams = new WizardStandardFlowParams(Request: MakeRequest(), SetupOptions: null);
         var progress = new TestProgressReporter();
 
-        // Act
-        await CreateExecutor().ExecuteAsync(flowParams, progress);
+        await CreateExecutor().ExecuteAsync(new WizardStandardFlowParams(Request: MakeRequest(), SetupOptions: null), progress);
 
-        // Assert — error reported, session not saved
         Assert.Contains("Username already exists.", progress.Errors);
         _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Never);
     }
 
     [Fact]
-    public async Task ExecuteAsync_AccountCreationSucceeds_WithNonFatalErrors_ReportsErrorsButContinuesToSave()
+    public async Task ExecuteAsync_AccountCreationPersistsBeforeGroupMutation()
     {
-        // Arrange — account creation succeeds but group membership fails (non-fatal)
         _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
-        _groupMembership.Setup(g => g.AddUserToGroups(TestSid, "TestUser", It.IsAny<List<string>>()))
-            .Throws(new UnauthorizedAccessException("Access denied."));
+        var events = new List<string>();
+        _databaseService
+            .Setup(s => s.SaveConfig(_database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()))
+            .Callback(() => events.Add("account-save"));
+        _groupMutation
+            .Setup(g => g.AddUserToGroups(TestSid, "TestUser", It.IsAny<List<string>>()))
+            .Callback(() => events.Add("group-add"));
 
-        // Provide a non-empty checked groups list to trigger the group add
-        var requestWithGroup = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            "TestUser", ProtectedString.FromChars("Pass1!".AsSpan()), ProtectedString.FromChars("Pass1!".AsSpan()), false,
+        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
+            "TestUser",
+            ProtectedString.FromChars("Pass1!".AsSpan()),
+            ProtectedString.FromChars("Pass1!".AsSpan()),
+            false,
             CheckedGroups: [("S-1-5-32-545", "Users")],
             UncheckedGroups: [],
-            AllowLogon: true, AllowNetworkLogin: true, AllowBgAutorun: true, CurrentHiddenCount: 0);
+            AllowLogon: true,
+            AllowNetworkLogin: true,
+            AllowBgAutorun: true,
+            CurrentHiddenCount: 0);
 
-        var flowParams = new WizardStandardFlowParams(Request: requestWithGroup, SetupOptions: null);
-        var progress = new TestProgressReporter();
+        await CreateExecutor().ExecuteAsync(new WizardStandardFlowParams(Request: request, SetupOptions: null), new TestProgressReporter());
 
-        // Act
-        await CreateExecutor().ExecuteAsync(flowParams, progress);
-
-        // Assert — non-fatal error reported but session still saved
-        Assert.Contains(progress.Errors, e => e.Contains("Group membership") || e.Contains("Access denied."));
-        _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
+        Assert.Equal(["account-save", "group-add"], events);
+        Assert.NotNull(_database.GetAccount(TestSid));
     }
 
     [Fact]
-    public async Task ExecuteAsync_MultipleNonFatalFailures_AllErrorsCollectedAndSessionSaved()
+    public async Task ExecuteAsync_RestrictionFailure_ReportsAllRestrictionItemsWithoutDuplicatingFailures()
     {
-        // Arrange — account creation succeeds; both group membership AND pre-enforcement fail.
-        // Both errors must appear in progress.Errors (not just the first one).
         _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
-        _groupMembership.Setup(g => g.AddUserToGroups(TestSid, "TestUser", It.IsAny<List<string>>()))
-            .Throws(new UnauthorizedAccessException("Group access denied."));
+        _restrictionCoordinator
+            .Setup(r => r.ApplyRestrictions(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<bool>()))
+            .Returns(new AccountRestrictionResult(
+            [
+                new(AccountRestrictionKind.HideLogon, AccountRestrictionStatus.Failed, false, "hide failed"),
+                new(AccountRestrictionKind.LogonScript, AccountRestrictionStatus.Failed, false, "hide failed"),
+                new(AccountRestrictionKind.NetworkLogin, AccountRestrictionStatus.Succeeded, false, null),
+                new(AccountRestrictionKind.BackgroundAutorun, AccountRestrictionStatus.Succeeded, false, null),
+                new(AccountRestrictionKind.LsaPolicy, AccountRestrictionStatus.Failed, false, "HideLogon: hide failed")
+            ]));
 
-        var requestWithGroup = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            "TestUser", ProtectedString.FromChars("Pass1!".AsSpan()), ProtectedString.FromChars("Pass1!".AsSpan()), false,
-            CheckedGroups: [("S-1-5-32-545", "Users")],
-            UncheckedGroups: [],
-            AllowLogon: true, AllowNetworkLogin: true, AllowBgAutorun: true, CurrentHiddenCount: 0);
-
-        var flowParams = new WizardStandardFlowParams(
-            Request: requestWithGroup,
-            SetupOptions: null,
-            PreEnforcementAction: (_, _) => throw new InvalidOperationException("Folder grant failed."));
         var progress = new TestProgressReporter();
 
-        // Act
-        await CreateExecutor().ExecuteAsync(flowParams, progress);
+        await CreateExecutor().ExecuteAsync(new WizardStandardFlowParams(Request: MakeRequest(), SetupOptions: null), progress);
 
-        // Assert — both failures reported; session still saved
-        Assert.True(progress.Errors.Count >= 2, $"Expected at least 2 errors, got {progress.Errors.Count}: [{string.Join(", ", progress.Errors)}]");
-        Assert.Contains(progress.Errors, e => e.Contains("Group access denied.") || e.Contains("Group membership"));
-        Assert.Contains(progress.Errors, e => e.Contains("Folder grant failed.") || e.Contains("Pre-enforcement action"));
-        _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
+        Assert.Contains("HideLogon: hide failed", progress.Errors);
+        Assert.Contains("LogonScript: hide failed", progress.Errors);
+        Assert.Contains("LsaPolicy: HideLogon: hide failed", progress.Errors);
+        Assert.Contains("NetworkLogin: Succeeded", progress.StatusMessages);
+        Assert.Contains("BackgroundAutorun: Succeeded", progress.StatusMessages);
+        Assert.Equal(1, progress.Errors.Count(e => e == "HideLogon: hide failed"));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_PersistsAppIntentBeforeSetupAsyncRuns()
+    {
+        _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
+        _databaseService.Setup(s => s.SaveConfig(_database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()));
+
+        var events = new List<string>();
+        _sessionSaver.Setup(s => s.SaveConfig()).Callback(() => events.Add("session-save"));
+        _credentialManager
+            .Setup(c => c.StoreCreatedUserCredential(TestSid, It.IsAny<ProtectedString>(), _session.CredentialStore, _session.PinDerivedKey))
+            .Callback(() =>
+            {
+                events.Add("store-credential");
+                Assert.Single(_database.Apps);
+                Assert.Equal(TestSid, _database.Apps[0].AccountSid);
+            })
+            .Returns(Guid.NewGuid());
+
+        var flowParams = new WizardStandardFlowParams(
+            Request: MakeRequest(),
+            SetupOptions: new WizardSetupOptions(
+                StoreCredential: true,
+                IsEphemeral: false,
+                PrivilegeLevel: PrivilegeLevel.Isolated,
+                FirewallSettings: null,
+                DesktopSettingsPath: null,
+                InstallPackages: null,
+                TrayTerminal: false),
+            BuildOptionsFactory: sid =>
+            [
+                AppEntryBuildOptions.ForWizard(
+                    "TestApp",
+                    @"C:\Windows\System32\notepad.exe",
+                    sid,
+                    restrictAcl: false,
+                    aclMode: AclMode.Allow,
+                    manageShortcuts: false)
+            ]);
+
+        await CreateExecutor().ExecuteAsync(flowParams, new TestProgressReporter());
+
+        Assert.True(events.IndexOf("session-save") < events.IndexOf("store-credential"));
     }
 
     [Fact]
     public async Task ExecuteAsync_PreEnforcementActionThrows_ReportsErrorAndContinuesToSave()
     {
-        // Arrange
         _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
 
         var preEnforcementCalled = false;
         var flowParams = new WizardStandardFlowParams(
             Request: MakeRequest(),
             SetupOptions: null,
-            AccountSid: null,
-            PreEnforcementAction: (_, sid) =>
+            PreEnforcementAction: (_, _) =>
             {
                 preEnforcementCalled = true;
                 throw new InvalidOperationException("Folder grant failed.");
             });
-        var progress = new TestProgressReporter();
 
-        // Act
+        var progress = new TestProgressReporter();
         await CreateExecutor().ExecuteAsync(flowParams, progress);
 
-        // Assert — pre-enforcement error reported but session still saved
         Assert.True(preEnforcementCalled);
         Assert.Contains(progress.Errors, e => e.Contains("Pre-enforcement action") && e.Contains("Folder grant failed."));
         _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
@@ -263,7 +328,6 @@ public class WizardTemplateExecutorTests
     [Fact]
     public async Task ExecuteAsync_PostEnforcementActionThrows_ReportsErrorAndSaves()
     {
-        // Arrange — account creation succeeds, one app entry built, post-enforcement throws
         _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
 
         var postEnforcementCalled = false;
@@ -278,84 +342,71 @@ public class WizardTemplateExecutorTests
                 postEnforcementCalled = true;
                 throw new InvalidOperationException("Handler registration failed.");
             });
-        var progress = new TestProgressReporter();
 
-        // Act
+        var progress = new TestProgressReporter();
         await CreateExecutor().ExecuteAsync(flowParams, progress);
 
-        // Assert — post-enforcement error reported but session still saved
         Assert.True(postEnforcementCalled);
         Assert.Contains(progress.Errors, e => e.Contains("Post-enforcement action") && e.Contains("Handler registration failed."));
         _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
     }
 
     [Fact]
-    public async Task ExecuteAsync_AppLicenseCheckFails_StopsAddingAppsButStillSaves()
+    public async Task ExecuteAsync_AppLicenseCheckFails_ContinuesTryingRemainingAppsAndStillSaves()
     {
-        // Arrange — account creation succeeds but app license check fails
         _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
-        _licenseService.Setup(l => l.CanAddApp(It.IsAny<int>())).Returns(false);
+        _licenseService.SetupSequence(l => l.CanAddApp(It.IsAny<int>()))
+            .Returns(false)
+            .Returns(true);
         _licenseService.Setup(l => l.GetRestrictionMessage(EvaluationFeature.Apps, It.IsAny<int>()))
             .Returns("App limit reached.");
 
         var flowParams = new WizardStandardFlowParams(
             Request: MakeRequest(),
             SetupOptions: null,
-            BuildOptionsFactory: _ => [AppEntryBuildOptions.ForWizard(
-                "App1", @"C:\Windows\System32\notepad.exe", TestSid,
-                restrictAcl: false, aclMode: AclMode.Allow, manageShortcuts: false)]);
-        var progress = new TestProgressReporter();
+            BuildOptionsFactory: _ =>
+            [
+                AppEntryBuildOptions.ForWizard(
+                    "App1", @"C:\Windows\System32\notepad.exe", TestSid,
+                    restrictAcl: false, aclMode: AclMode.Allow, manageShortcuts: false),
+                AppEntryBuildOptions.ForWizard(
+                    "App2", @"C:\Windows\System32\calc.exe", TestSid,
+                    restrictAcl: false, aclMode: AclMode.Allow, manageShortcuts: false)
+            ]);
 
-        // Act
+        var progress = new TestProgressReporter();
         await CreateExecutor().ExecuteAsync(flowParams, progress);
 
-        // Assert — no apps in database (license blocked), but session still saved
-        Assert.Empty(_database.Apps);
+        Assert.Single(_database.Apps);
+        Assert.Equal("App2", _database.Apps[0].Name);
+        Assert.Contains("App limit reached.", progress.Errors);
         _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
     }
 
     [Fact]
     public async Task ExecuteAsync_NoRequest_UsesSidFromFlowParams_AndPreEnforcementReceivesCorrectSid()
     {
-        // Arrange — no account creation, SID pre-provided
-        var capturedSid = "";
+        string capturedSid = string.Empty;
         var flowParams = new WizardStandardFlowParams(
             Request: null,
             SetupOptions: null,
             AccountSid: TestSid,
-            PreEnforcementAction: (_, sid) => { capturedSid = sid; return Task.CompletedTask; });
-        var progress = new TestProgressReporter();
+            PreEnforcementAction: (_, sid) =>
+            {
+                capturedSid = sid;
+                return Task.CompletedTask;
+            });
 
-        // Act
-        await CreateExecutor().ExecuteAsync(flowParams, progress);
+        await CreateExecutor().ExecuteAsync(flowParams, new TestProgressReporter());
 
-        // Assert — correct SID passed, no account creation called, session saved
         Assert.Equal(TestSid, capturedSid);
         _windowsAccountService.Verify(s => s.CreateLocalUser(It.IsAny<string>(), It.IsAny<ProtectedString>()), Times.Never);
         _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
     }
 
     [Fact]
-    public async Task ExecuteAsync_HappyPath_AccountCreationAndNoApps_CallsSaveAtEnd()
-    {
-        // Arrange — successful account creation, no apps
-        _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
-
-        var flowParams = new WizardStandardFlowParams(Request: MakeRequest(), SetupOptions: null);
-        var progress = new TestProgressReporter();
-
-        // Act
-        await CreateExecutor().ExecuteAsync(flowParams, progress);
-
-        // Assert — no errors, session saved
-        Assert.Empty(progress.Errors);
-        _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
-    }
-
-    [Fact]
     public async Task ExecuteAsync_HappyPath_AppEntryBuiltAndAddedToDatabase()
     {
-        // Arrange — account creation succeeds, one app entry to build
         _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
 
         var flowParams = new WizardStandardFlowParams(
@@ -364,43 +415,12 @@ public class WizardTemplateExecutorTests
             BuildOptionsFactory: sid => [AppEntryBuildOptions.ForWizard(
                 "TestApp", @"C:\Windows\System32\notepad.exe", sid,
                 restrictAcl: false, aclMode: AclMode.Allow, manageShortcuts: false)]);
-        var progress = new TestProgressReporter();
 
-        // Act
-        await CreateExecutor().ExecuteAsync(flowParams, progress);
+        await CreateExecutor().ExecuteAsync(flowParams, new TestProgressReporter());
 
-        // Assert — app added to database and session saved
         Assert.Single(_database.Apps);
         Assert.Equal("TestApp", _database.Apps[0].Name);
         Assert.Equal(TestSid, _database.Apps[0].AccountSid);
         _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_PreEnforcementAction_ReceivesCorrectSessionAndSid()
-    {
-        // Arrange
-        _windowsAccountService.Setup(s => s.CreateLocalUser("TestUser", It.IsAny<ProtectedString>())).Returns(TestSid);
-
-        SessionContext? capturedSession = null;
-        string capturedSid = "";
-
-        var flowParams = new WizardStandardFlowParams(
-            Request: MakeRequest(),
-            SetupOptions: null,
-            PreEnforcementAction: (session, sid) =>
-            {
-                capturedSession = session;
-                capturedSid = sid;
-                return Task.CompletedTask;
-            });
-        var progress = new TestProgressReporter();
-
-        // Act
-        await CreateExecutor().ExecuteAsync(flowParams, progress);
-
-        // Assert
-        Assert.Same(_session, capturedSession);
-        Assert.Equal(TestSid, capturedSid);
     }
 }

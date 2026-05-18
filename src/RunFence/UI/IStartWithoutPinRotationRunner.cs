@@ -1,11 +1,7 @@
 using RunFence.Core.Models;
+using RunFence.Security;
 
 namespace RunFence.UI;
-
-/// <summary>
-/// Holds the result of a successful secure-desktop PIN verification and key rotation.
-/// </summary>
-public record struct PinRotationResult(CredentialStore NewStore, byte[] NewKey);
 
 /// <summary>
 /// Executes the secure-desktop PIN verify + change-PIN flow needed to rotate the PIN-derived key
@@ -21,8 +17,6 @@ public interface IStartWithoutPinRotationRunner
     /// <summary>
     /// Runs the secure-desktop verify+rotate flow with the given <paramref name="promptMessage"/>.
     /// Returns <c>null</c> when the user cancelled or an error occurred.
-    /// Returns a <see cref="PinRotationResult"/> on success; the caller is responsible for
-    /// zeroing <see cref="PinRotationResult.NewKey"/> after consuming it.
     /// </summary>
-    PinRotationResult? Run(string promptMessage, SessionContext session);
+    PinKeyRotationResult? Run(string promptMessage, SessionContext session);
 }

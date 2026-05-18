@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using RunFence.Account;
+using RunFence.Acl;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -17,6 +18,7 @@ namespace RunFence.Apps.UI;
 public class ApplicationsPanelLaunchHandler(
     AppEntryLauncher entryLauncher,
     ISidNameCacheService sidNameCache,
+    ILaunchFeedbackPresenter launchFeedbackPresenter,
     ILoggingService log,
     IRunAsFlowHandler runAsFlowHandler)
 {
@@ -27,8 +29,13 @@ public class ApplicationsPanelLaunchHandler(
     {
         try
         {
-            entryLauncher.Launch(app, launcherArguments,
+            using var launch = entryLauncher.Launch(app, launcherArguments,
                 permissionPrompt: AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache, owner));
+            launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The application", LaunchFeedbackSource.InteractiveUi)
+            {
+                Owner = owner,
+                SummaryName = app.Name
+            });
         }
         catch (CredentialNotFoundException ex)
         {
@@ -45,6 +52,14 @@ public class ApplicationsPanelLaunchHandler(
         }
         catch (OperationCanceledException)
         {
+        }
+        catch (GrantOperationException ex)
+        {
+            launchFeedbackPresenter.ShowGrantFailure(ex, new LaunchFeedbackContext("The application", LaunchFeedbackSource.InteractiveUi)
+            {
+                Owner = owner,
+                SummaryName = app.Name
+            });
         }
         catch (Exception ex)
         {

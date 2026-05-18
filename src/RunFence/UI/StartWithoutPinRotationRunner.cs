@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -19,29 +18,27 @@ public class StartWithoutPinRotationRunner(
     ILoggingService log)
     : IStartWithoutPinRotationRunner
 {
-    public PinRotationResult? Run(string promptMessage, SessionContext session)
+    public PinKeyRotationResult? Run(string promptMessage, SessionContext session)
     {
-        byte[]? capturedOldKey = null;
-        CredentialStore? capturedStore = null;
-        byte[]? capturedKey = null;
+        PinKeyRotationResult? rotationResult = null;
         DialogResult dlgResult = DialogResult.Cancel;
+        var currentKey = session.PinDerivedKey;
 
         modalCoordinator.RunOnSecureDesktop(() =>
         {
             using var dlg = new PinDialog(PinDialogMode.Verify, promptMessage: promptMessage, allowReset: false);
-            dlg.VerifyCallback = (ProtectedString pin) => pinService.VerifyPin(pin, session.CredentialStore, out capturedOldKey);
+            dlg.VerifyCallback = (ProtectedString pin) => pinService.VerifyPin(pin, session.CredentialStore);
             dlg.ProcessingCallback = async (ProtectedString pin, string? _) =>
             {
                 try
                 {
-                    var (resultStore, resultKey) = await Task.Run(() =>
-                        pinService.ChangePin(capturedOldKey!, pin, session.CredentialStore));
-                    capturedStore = resultStore;
-                    capturedKey = resultKey;
+                    rotationResult = await Task.Run(() => pinService.ChangePin(currentKey, pin, session.CredentialStore));
                     return null;
                 }
                 catch (Exception ex)
                 {
+                    rotationResult?.Dispose();
+                    rotationResult = null;
                     log.Error("PIN re-encryption failed", ex);
                     return ex.Message;
                 }
@@ -49,12 +46,12 @@ public class StartWithoutPinRotationRunner(
             dlgResult = dlg.ShowDialog();
         });
 
-        if (capturedOldKey != null)
-            CryptographicOperations.ZeroMemory(capturedOldKey);
-
         if (dlgResult != DialogResult.OK)
+        {
+            rotationResult?.Dispose();
             return null;
+        }
 
-        return new PinRotationResult(capturedStore!, capturedKey!);
+        return rotationResult;
     }
 }

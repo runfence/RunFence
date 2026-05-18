@@ -4,10 +4,18 @@ namespace RunFence.Firewall;
 
 public class FirewallEnforcementRetryState
 {
+    private const string GlobalScopeKey = "__global__";
     private readonly Lock _lock = new();
     private readonly HashSet<string> _dnsServerRefreshPendingSids = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<(FirewallEnforcementLayer Layer, string Key), RetryEntry> _retryEntries = new();
     private IReadOnlyList<string> _lastDnsServers = [];
-    private bool _globalIcmpDirty;
+
+    public sealed record RetryEntry(
+        FirewallEnforcementLayer Layer,
+        string Key,
+        string? LastError,
+        DateTimeOffset LastAttemptUtc,
+        string RetryReason);
 
     public bool UpdateDnsServersAndReturnChanged(IReadOnlyList<string> dnsServers)
     {
@@ -51,25 +59,48 @@ public class FirewallEnforcementRetryState
 
     public void MarkGlobalIcmpDirty()
     {
-        lock (_lock)
-        {
-            _globalIcmpDirty = true;
-        }
+        MarkRetryPending(FirewallEnforcementLayer.GlobalIcmp, GlobalScopeKey, null, "Global ICMP enforcement failed.");
     }
 
     public void MarkGlobalIcmpSucceeded()
     {
-        lock (_lock)
-        {
-            _globalIcmpDirty = false;
-        }
+        MarkRetrySucceeded(FirewallEnforcementLayer.GlobalIcmp, GlobalScopeKey);
     }
 
     public bool IsGlobalIcmpDirty()
     {
         lock (_lock)
         {
-            return _globalIcmpDirty;
+            return _retryEntries.ContainsKey((FirewallEnforcementLayer.GlobalIcmp, GlobalScopeKey));
+        }
+    }
+
+    public void MarkRetryPending(FirewallEnforcementLayer layer, string key, string? error, string retryReason)
+    {
+        lock (_lock)
+        {
+            _retryEntries[(layer, key)] = new RetryEntry(
+                layer,
+                key,
+                error,
+                DateTimeOffset.UtcNow,
+                retryReason);
+        }
+    }
+
+    public void MarkRetrySucceeded(FirewallEnforcementLayer layer, string key)
+    {
+        lock (_lock)
+        {
+            _retryEntries.Remove((layer, key));
+        }
+    }
+
+    public IReadOnlyList<RetryEntry> GetRetryEntries()
+    {
+        lock (_lock)
+        {
+            return _retryEntries.Values.ToList();
         }
     }
 
@@ -81,6 +112,17 @@ public class FirewallEnforcementRetryState
                 .Select(account => account.Sid)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             _dnsServerRefreshPendingSids.RemoveWhere(sid => !activeSids.Contains(sid));
+            var sidScopedLayers = new HashSet<FirewallEnforcementLayer>
+            {
+                FirewallEnforcementLayer.AccountRules,
+                FirewallEnforcementLayer.WfpFilters,
+                FirewallEnforcementLayer.DnsRefresh
+            };
+            var staleKeys = _retryEntries.Keys
+                .Where(entry => sidScopedLayers.Contains(entry.Layer) && !activeSids.Contains(entry.Key))
+                .ToList();
+            foreach (var staleKey in staleKeys)
+                _retryEntries.Remove(staleKey);
         }
     }
 
@@ -90,7 +132,7 @@ public class FirewallEnforcementRetryState
         {
             _dnsServerRefreshPendingSids.Clear();
             _lastDnsServers = [];
-            _globalIcmpDirty = false;
+            _retryEntries.Clear();
         }
     }
 

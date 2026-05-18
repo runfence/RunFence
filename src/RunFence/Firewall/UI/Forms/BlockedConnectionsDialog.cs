@@ -6,9 +6,12 @@ using RunFence.UI;
 
 namespace RunFence.Firewall.UI.Forms;
 
-public partial class BlockedConnectionsDialog : Form
+public partial class BlockedConnectionsDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly IBlockedConnectionReader _reader;
+    private readonly IAuditPolicyService _auditPolicyService;
+    private readonly FirewallEnforcementRetryState _retryState;
+    private readonly IFirewallDomainRefreshRequester _refreshRequester;
     private readonly IDnsResolver _dnsResolver;
     private readonly BlockedConnectionAggregator _aggregator;
     private readonly IReadOnlyList<FirewallAllowlistEntry> _existingAllowlist;
@@ -21,12 +24,18 @@ public partial class BlockedConnectionsDialog : Form
 
     public BlockedConnectionsDialog(
         IBlockedConnectionReader reader,
+        IAuditPolicyService auditPolicyService,
+        FirewallEnforcementRetryState retryState,
+        IFirewallDomainRefreshRequester refreshRequester,
         IDnsResolver dnsResolver,
         BlockedConnectionAggregator aggregator,
         IReadOnlyList<FirewallAllowlistEntry> existingAllowlist,
         bool enableAuditLogging = false)
     {
         _reader = reader;
+        _auditPolicyService = auditPolicyService;
+        _retryState = retryState;
+        _refreshRequester = refreshRequester;
         _dnsResolver = dnsResolver;
         _aggregator = aggregator;
         _existingAllowlist = existingAllowlist;
@@ -40,18 +49,21 @@ public partial class BlockedConnectionsDialog : Form
     protected override async void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-        bool currentPolicy = await Task.Run(TryGetAuditPolicy);
+        bool currentPolicy = await Task.Run(TryGetAuditPolicyState);
         bool shouldEnable = _forceEnableAuditLogging || currentPolicy;
         _auditCheckBox.Checked = shouldEnable;
         // If pre-enabling from wizard and not already enabled, apply the policy now.
         if (shouldEnable && !currentPolicy)
         {
-            try
+            var initialEnableResult = await Task.Run(() => _auditPolicyService.EnableBlockedConnectionAuditing());
+            if (initialEnableResult.Status != AuditPolicyStatus.Succeeded && initialEnableResult.IsRetryable)
             {
-                await Task.Run(() => _reader.SetAuditPolicyEnabled(true));
-            }
-            catch
-            {
+                _retryState.MarkRetryPending(
+                    FirewallEnforcementLayer.AuditPolicy,
+                    "enabled",
+                    initialEnableResult.Error ?? initialEnableResult.Status.ToString(),
+                    "Retry blocked-connection audit policy enforcement.");
+                _refreshRequester.RequestRefresh();
             }
         }
 
@@ -173,11 +185,12 @@ public partial class BlockedConnectionsDialog : Form
             _grid.Rows.Clear();
     }
 
-    private bool TryGetAuditPolicy()
+    private bool TryGetAuditPolicyState()
     {
         try
         {
-            return _reader.IsAuditPolicyEnabled();
+            var result = _auditPolicyService.ReadBlockedConnectionAuditingState();
+            return result.ObservedState ?? false;
         }
         catch
         {
@@ -189,22 +202,37 @@ public partial class BlockedConnectionsDialog : Form
     {
         _auditCheckBox.Enabled = false;
         var wantEnabled = _auditCheckBox.Checked;
-        try
+        var result = await Task.Run(() => wantEnabled
+            ? _auditPolicyService.EnableBlockedConnectionAuditing()
+            : _auditPolicyService.DisableBlockedConnectionAuditing());
+        if (result.Status != AuditPolicyStatus.Succeeded)
         {
-            await Task.Run(() => _reader.SetAuditPolicyEnabled(wantEnabled));
+            if (result.IsRetryable)
+            {
+                var retryKey = wantEnabled ? "enabled" : "disabled";
+                _retryState.MarkRetryPending(
+                    FirewallEnforcementLayer.AuditPolicy,
+                    retryKey,
+                    result.Error ?? result.Status.ToString(),
+                    "Retry blocked-connection audit policy enforcement.");
+                _refreshRequester.RequestRefresh();
+            }
+
+            MessageBox.Show(
+                $"Audit setting saved, but enforcement will retry: {result.Error ?? result.Status.ToString()}",
+                "RunFence",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
         }
-        catch (Exception ex)
+        else
         {
-            MessageBox.Show($"Failed to change audit policy: {ex.Message}", "Error",
-                MessageBoxButtons.OK, MessageBoxIcon.Error);
-            _auditCheckBox.CheckedChanged -= OnAuditCheckBoxChanged;
-            _auditCheckBox.Checked = !wantEnabled;
-            _auditCheckBox.CheckedChanged += OnAuditCheckBoxChanged;
+            var retryKey = wantEnabled ? "enabled" : "disabled";
+            var oppositeKey = wantEnabled ? "disabled" : "enabled";
+            _retryState.MarkRetrySucceeded(FirewallEnforcementLayer.AuditPolicy, retryKey);
+            _retryState.MarkRetrySucceeded(FirewallEnforcementLayer.AuditPolicy, oppositeKey);
         }
-        finally
-        {
-            _auditCheckBox.Enabled = true;
-        }
+
+        _auditCheckBox.Enabled = true;
     }
 
     private async void OnRefreshClick(object? sender, EventArgs e)

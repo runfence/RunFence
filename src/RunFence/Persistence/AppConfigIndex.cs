@@ -8,7 +8,10 @@ namespace RunFence.Persistence;
 /// Implements <see cref="IAppFilter"/> so <see cref="DatabaseService"/> can filter
 /// main-config saves without depending on <see cref="AppConfigService"/>.
 /// </summary>
-public class AppConfigIndex(IGrantConfigTracker grantTracker) : IAppFilter
+public class AppConfigIndex(
+    GrantIntentOwnershipProjectionService ownershipProjection,
+    AppIdValidator appIdValidator)
+    : IAppFilter
 {
     // appId → normalized config path (absent = main config)
     private readonly Dictionary<string, string> _appConfigMap =
@@ -28,44 +31,47 @@ public class AppConfigIndex(IGrantConfigTracker grantTracker) : IAppFilter
     {
         var mainApps = database.Apps
             .Where(a => !_appConfigMap.ContainsKey(a.Id))
+            .Select(a => a.Clone())
             .ToList();
+        var accounts = new List<AccountEntry>();
+        foreach (var account in database.Accounts)
+        {
+            var clone = account.Clone();
+            if (ownershipProjection.HasRegisteredAdditionalConfigs)
+            {
+                clone.Grants = account.Grants
+                    .Where(entry => ownershipProjection.HasMainOwnership(account.Sid, entry))
+                    .Select(entry => entry.Clone())
+                    .ToList();
+            }
+
+            if (!clone.IsEmpty)
+                accounts.Add(clone);
+        }
 
         return new AppDatabase
         {
             Apps = mainApps,
             Settings = database.Settings.Clone(),
             LastPrefsFilePath = database.LastPrefsFilePath,
-            SidNames = database.SidNames,
-            AppContainers = database.AppContainers,
-            SharedContainerTraverseGrants = database.SharedContainerTraverseGrants
-                .Where(e => grantTracker.IsInMainConfig(WellKnownSecuritySids.AllApplicationPackagesSid, e))
-                .ToList(),
-            Accounts = FilterAccountsForMainConfig(database.Accounts),
-            AccountGroupSnapshots = database.AccountGroupSnapshots,
+            SidNames = new Dictionary<string, string>(database.SidNames, StringComparer.OrdinalIgnoreCase),
+            JobKeeperInstances = database.JobKeeperInstances?.ToDictionary(
+                kvp => kvp.Key, kvp => kvp.Value with { }, StringComparer.OrdinalIgnoreCase),
+            AppContainers = database.AppContainers.Select(c => c.Clone()).ToList(),
+            Accounts = accounts,
+            AccountGroupSnapshots = database.AccountGroupSnapshots?.ToDictionary(
+                kvp => kvp.Key, kvp => kvp.Value.ToList(), StringComparer.OrdinalIgnoreCase),
             ShowSystemInRunAs = database.ShowSystemInRunAs,
         };
     }
 
-    private List<AccountEntry> FilterAccountsForMainConfig(List<AccountEntry> accounts)
-    {
-        var result = new List<AccountEntry>();
-        foreach (var account in accounts)
-        {
-            var mainGrants = account.Grants
-                .Where(e => grantTracker.IsInMainConfig(account.Sid, e))
-                .ToList();
-            var clone = account.Clone();
-            clone.Grants = mainGrants;
-            if (!clone.IsEmpty)
-                result.Add(clone);
-        }
-
-        return result;
-    }
-
     // --- Query ---
 
-    public string? GetConfigPath(string appId) => _appConfigMap.GetValueOrDefault(appId);
+    public string? GetConfigPath(string appId)
+    {
+        appIdValidator.EnsureValidAppId(appId, "App ID");
+        return _appConfigMap.GetValueOrDefault(appId);
+    }
 
     public bool ContainsLoadedPath(string normalizedPath) =>
         _loadedPaths.Any(p => string.Equals(p, normalizedPath, StringComparison.OrdinalIgnoreCase));
@@ -83,14 +89,37 @@ public class AppConfigIndex(IGrantConfigTracker grantTracker) : IAppFilter
                         string.Equals(p, normalizedPath, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
+    internal AppConfigIndexStateSnapshot CaptureStateSnapshot()
+        => new(
+            new Dictionary<string, string>(_appConfigMap, StringComparer.OrdinalIgnoreCase),
+            _loadedPaths.ToList());
+
     // --- Mutation ---
 
-    public void AssignApp(string appId, string normalizedPath) => _appConfigMap[appId] = normalizedPath;
+    public void AssignApp(string appId, string normalizedPath)
+    {
+        appIdValidator.EnsureValidAppId(appId, "App ID");
+        _appConfigMap[appId] = normalizedPath;
+    }
 
-    public void UnassignApp(string appId) => _appConfigMap.Remove(appId);
+    public void UnassignApp(string appId)
+    {
+        appIdValidator.EnsureValidAppId(appId, "App ID");
+        _appConfigMap.Remove(appId);
+    }
 
     public void AddLoadedPath(string normalizedPath) => _loadedPaths.Add(normalizedPath);
 
     public void RemoveLoadedPath(string normalizedPath) =>
         _loadedPaths.RemoveAll(p => string.Equals(p, normalizedPath, StringComparison.OrdinalIgnoreCase));
+
+    internal void RestoreStateSnapshot(AppConfigIndexStateSnapshot snapshot)
+    {
+        _appConfigMap.Clear();
+        foreach (var (appId, configPath) in snapshot.AppConfigMap)
+            _appConfigMap[appId] = configPath;
+
+        _loadedPaths.Clear();
+        _loadedPaths.AddRange(snapshot.LoadedPaths);
+    }
 }

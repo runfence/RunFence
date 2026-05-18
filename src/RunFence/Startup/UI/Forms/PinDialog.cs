@@ -12,7 +12,7 @@ public enum PinDialogMode
     Verify
 }
 
-public partial class PinDialog : Form
+public partial class PinDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private const int MinPinLength = 4;
 

@@ -19,11 +19,11 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
     private readonly string _scriptsDir;
     private readonly string _legacyScriptsDir;
     private readonly ILoggingService _log;
-    private readonly LogonScriptTraverseGranter? _traverseGranter;
+    private readonly ILogonScriptTraverseGranter? _traverseGranter;
     private readonly LogonScriptIniManager _iniManager;
 
     public GroupPolicyScriptHelper(LogonScriptIniManager iniManager, ILoggingService log,
-        LogonScriptTraverseGranter? traverseGranter = null, string? systemDir = null,
+        ILogonScriptTraverseGranter? traverseGranter = null, string? systemDir = null,
         string? scriptsDir = null, string? legacyScriptsDir = null)
     {
         var sysDir = systemDir ?? Environment.GetFolderPath(Environment.SpecialFolder.System);
@@ -90,43 +90,54 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
     {
         var iniPath = GetIniPath(sid);
         var wrapperPath = GetWrapperScriptPath(sid);
+        var legacyWrapperPath = GetLegacyWrapperScriptPath(sid);
 
         if (blocked)
         {
             if (IsLoginBlocked(sid))
                 return new SetLoginBlockedResult(wrapperPath, null);
-            EnsureWrapperScript(wrapperPath, sid);
-            _iniManager.AppendLogonEntry(iniPath, wrapperPath);
-            _iniManager.UpdateGptIni(GetGptIniPath(sid), hasScripts: true);
 
-            var traversePaths = _traverseGranter?.GrantTraverseAccess(sid, _scriptsDir);
-            return new SetLoginBlockedResult(wrapperPath, traversePaths);
+            try
+            {
+                EnsureWrapperScript(wrapperPath, sid);
+                _iniManager.AppendLogonEntry(iniPath, wrapperPath);
+                _iniManager.UpdateGptIni(GetGptIniPath(sid), hasScripts: true);
+
+                var traversePaths = _traverseGranter?.GrantTraverseAccess(sid, _scriptsDir);
+                return new SetLoginBlockedResult(wrapperPath, traversePaths);
+            }
+            catch (Exception ex)
+            {
+                TryRollbackLogonScriptState(
+                    () => RemoveBlockedStateArtifacts(sid, iniPath, wrapperPath, legacyWrapperPath, strictRollback: true),
+                    ex);
+            }
         }
 
-        var legacyWrapperPath = GetLegacyWrapperScriptPath(sid);
+        try
+        {
+            RemoveBlockedStateArtifacts(sid, iniPath, wrapperPath, legacyWrapperPath, strictRollback: false);
+        }
+        catch (Exception ex)
+        {
+            TryRollbackLogonScriptState(
+                () => RestoreBlockedStateArtifacts(sid, iniPath, wrapperPath),
+                ex);
+        }
+
+        // Return the script path so callers with a database can remove the corresponding
+        // AccountGrants entries (both the script grant and the scripts-dir traverse entry).
+        return new SetLoginBlockedResult(wrapperPath, null);
+    }
+
+    private void RemoveBlockedStateArtifacts(string sid, string iniPath, string wrapperPath, string legacyWrapperPath, bool strictRollback)
+    {
         if (File.Exists(iniPath))
             _iniManager.RemoveLogonEntry(iniPath, wrapperPath, legacyWrapperPath);
         // scripts.ini deleted by RemoveLogonEntry when no entries remain
         _iniManager.UpdateGptIni(GetGptIniPath(sid), hasScripts: File.Exists(iniPath));
-        // Clean up new-style wrapper script
-        try
-        {
-            if (File.Exists(wrapperPath))
-                File.Delete(wrapperPath);
-        }
-        catch
-        {
-        } // best-effort cleanup
-
-        // Clean up legacy RunAsManager wrapper script if present
-        try
-        {
-            if (File.Exists(legacyWrapperPath))
-                File.Delete(legacyWrapperPath);
-        }
-        catch
-        {
-        }
+        DeleteWrapperIfExists(wrapperPath, strictRollback);
+        DeleteWrapperIfExists(legacyWrapperPath, strictRollback);
 
         try
         {
@@ -134,12 +145,55 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
         }
         catch (Exception ex)
         {
+            if (strictRollback)
+                throw;
+
             _log.Warn($"GroupPolicyScriptHelper: failed to revoke traverse access for '{sid}' on '{_scriptsDir}': {ex.Message}");
         }
+    }
 
-        // Return the script path so callers with a database can remove the corresponding
-        // AccountGrants entries (both the script grant and the scripts-dir traverse entry).
-        return new SetLoginBlockedResult(wrapperPath, null);
+    private void RestoreBlockedStateArtifacts(string sid, string iniPath, string wrapperPath)
+    {
+        EnsureWrapperScript(wrapperPath, sid);
+        _iniManager.AppendLogonEntry(iniPath, wrapperPath);
+        _iniManager.UpdateGptIni(GetGptIniPath(sid), hasScripts: true);
+        _traverseGranter?.GrantTraverseAccess(sid, _scriptsDir);
+    }
+
+    private void DeleteWrapperIfExists(string wrapperPath, bool strictRollback)
+    {
+        try
+        {
+            if (File.Exists(wrapperPath))
+                File.Delete(wrapperPath);
+        }
+        catch
+        {
+            if (strictRollback)
+                throw;
+        }
+    }
+
+    private void TryRollbackLogonScriptState(Action rollback, Exception ex)
+    {
+        try
+        {
+            rollback();
+        }
+        catch (Exception rollbackEx)
+        {
+            throw new AccountRestrictionOperationException(
+                $"{ex.Message} Rollback failed: {rollbackEx.Message}",
+                AccountRestrictionStatus.Failed,
+                rollbackAttempted: true,
+                ex);
+        }
+
+        throw new AccountRestrictionOperationException(
+            ex.Message,
+            AccountRestrictionStatus.RolledBack,
+            rollbackAttempted: true,
+            ex);
     }
 
     private void EnsureWrapperScript(string scriptPath, string userSid)

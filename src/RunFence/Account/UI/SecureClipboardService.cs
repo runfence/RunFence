@@ -1,7 +1,7 @@
 using RunFence.Core;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Text;  
+using System.Text;
 using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Account.UI;
@@ -18,20 +18,15 @@ public class SecureClipboardService : ISecureClipboardService
 
     public void CopyProtectedStringToClipboard(ProtectedString password)
     {
-        var ptr = password.AllocUnicode();
-        try
+        password.UseUnicodeSnapshot(snapshot =>
         {
-            // PtrToStringUni creates a managed string that cannot be zeroed after use — known
+            // PtrToStringUni creates a managed string that cannot be zeroed after use - known
             // limitation of placing text on the clipboard. Mitigated by the 60-second clear timer.
-            var text = Marshal.PtrToStringUni(ptr)!;
+            string text = Marshal.PtrToStringUni(snapshot.DangerousGetIntPtr(), snapshot.CharCount)!;
             var dataObject = new DataObject(DataFormats.UnicodeText, text);
             dataObject.SetData("ExcludeClipboardContentFromMonitorProcessing", new MemoryStream(new byte[4]));
             Clipboard.SetDataObject(dataObject, copy: true);
-        }
-        finally
-        {
-            Marshal.ZeroFreeGlobalAllocUnicode(ptr);
-        }
+        });
     }
 
     public void ScheduleClipboardClear()
@@ -60,9 +55,13 @@ public class SecureClipboardService : ISecureClipboardService
             if (Clipboard.ContainsText() && _clipboardExpectedHash != null &&
                 SHA256.HashData(Encoding.Unicode.GetBytes(Clipboard.GetText()))
                     .AsSpan().SequenceEqual(_clipboardExpectedHash))
+            {
                 Clipboard.Clear();
+            }
         }
-        catch (ExternalException) { }
+        catch (ExternalException)
+        {
+        }
 
         _clipboardExpectedHash = null;
         _clipboardClearTimer?.Dispose();
@@ -71,6 +70,12 @@ public class SecureClipboardService : ISecureClipboardService
 
     public void Dispose()
     {
+        ClearActiveSecretExposure();
+    }
+
+    public void ClearActiveSecretExposure()
+    {
+        _clipboardExpectedHash = null;
         _clipboardClearTimer?.Dispose();
         _clipboardClearTimer = null;
     }

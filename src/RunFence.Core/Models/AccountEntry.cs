@@ -35,7 +35,7 @@ public class AccountEntry
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public PrivilegeLevel PrivilegeLevel { get; set; } = PrivilegeLevel.Basic;
+    public PrivilegeLevel PrivilegeLevel { get; set; } = PrivilegeLevel.Isolated;
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DateTime? DeleteAfterUtc { get; set; }
@@ -57,7 +57,7 @@ public class AccountEntry
     [JsonIgnore]
     public bool IsEmpty => !IsIpcCaller && !TrayFolderBrowser && !TrayDiscovery && !TrayTerminal
                            && ManageAssociations && !ReceiveInjectedInput
-                           && PrivilegeLevel == PrivilegeLevel.Basic && DeleteAfterUtc == null
+                           && PrivilegeLevel == PrivilegeLevel.Isolated && DeleteAfterUtc == null
                            && Firewall.IsDefault && Grants.Count == 0;
 
     public AccountEntry Clone() => new()

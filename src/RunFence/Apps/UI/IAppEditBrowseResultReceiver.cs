@@ -18,8 +18,8 @@ public interface IAppEditBrowseResultReceiver
 
     /// <summary>
     /// Returns true when the privilege level combo is enabled and not set to Highest Allowed,
-    /// meaning a suggestion to switch to Above Basic is applicable.
+    /// meaning a suggestion to switch to Basic is applicable.
     /// </summary>
-    bool CanSuggestAboveBasicPrivilegeLevel();
+    bool CanSuggestBasicPrivilegeLevel();
     void SetPrivilegeLevel(PrivilegeLevel? level);
 }

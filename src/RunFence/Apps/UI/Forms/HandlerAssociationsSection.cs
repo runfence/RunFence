@@ -13,6 +13,7 @@ public partial class HandlerAssociationsSection : UserControl
 
     private readonly IExeAssociationRegistryReader? _reader;
     private List<string> _loadedKeys = [];
+    private int _ctxRowIndex = -1;
 
     public event Action? Changed;
 
@@ -133,7 +134,7 @@ public partial class HandlerAssociationsSection : UserControl
 
     private void OnEditClick(object? sender, EventArgs e)
     {
-        var row = _dataGrid.CurrentRow;
+        var row = GetActionRow(sender);
         if (row == null)
             return;
 
@@ -155,9 +156,10 @@ public partial class HandlerAssociationsSection : UserControl
 
     private void OnRemoveClick(object? sender, EventArgs e)
     {
-        if (_dataGrid.CurrentRow != null)
+        var row = GetActionRow(sender);
+        if (row != null)
         {
-            _dataGrid.Rows.Remove(_dataGrid.CurrentRow);
+            _dataGrid.Rows.Remove(row);
             Changed?.Invoke();
         }
     }
@@ -186,7 +188,19 @@ public partial class HandlerAssociationsSection : UserControl
         {
             var hit = _dataGrid.HitTest(e.X, e.Y);
             if (hit.RowIndex >= 0)
+            {
+                _ctxRowIndex = hit.RowIndex;
+                _dataGrid.ClearSelection();
                 _dataGrid.Rows[hit.RowIndex].Selected = true;
+                var cellIndex = hit.ColumnIndex >= 0 ? hit.ColumnIndex : 0;
+                _dataGrid.CurrentCell = _dataGrid.Rows[hit.RowIndex].Cells[cellIndex];
+            }
+            else
+            {
+                _ctxRowIndex = -1;
+                _dataGrid.ClearSelection();
+                _dataGrid.CurrentCell = null;
+            }
         }
     }
 
@@ -198,8 +212,22 @@ public partial class HandlerAssociationsSection : UserControl
             return;
         }
 
-        _ctxAdd.Visible = _dataGrid.CurrentRow == null;
-        _ctxEdit.Visible = _dataGrid.CurrentRow != null;
-        _ctxRemove.Visible = _dataGrid.CurrentRow != null;
+        if (_ctxRowIndex < 0)
+        {
+            _dataGrid.ClearSelection();
+            _dataGrid.CurrentCell = null;
+        }
+
+        _ctxAdd.Visible = _ctxRowIndex < 0;
+        _ctxEdit.Visible = _ctxRowIndex >= 0;
+        _ctxRemove.Visible = _ctxRowIndex >= 0;
+    }
+
+    private DataGridViewRow? GetActionRow(object? sender)
+    {
+        if (sender is ToolStripItem && _ctxRowIndex >= 0 && _ctxRowIndex < _dataGrid.Rows.Count)
+            return _dataGrid.Rows[_ctxRowIndex];
+
+        return _dataGrid.CurrentRow;
     }
 }

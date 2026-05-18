@@ -45,7 +45,10 @@ public class AppEditAssociationHandler(
     /// </summary>
     public void ApplyChanges(string appId, IReadOnlyList<HandlerAssociationItem> newAssociations)
     {
-        _pendingRemovedAssociations = _mutationHandler.SetAssociationsForApp(appId, newAssociations);
+        _pendingRemovedAssociations = _mutationHandler.SetAssociationsForApp(
+            databaseProvider.GetDatabase(),
+            appId,
+            newAssociations);
     }
 
     /// <summary>
@@ -55,7 +58,10 @@ public class AppEditAssociationHandler(
     /// </summary>
     public void RevertChanges(string appId, IReadOnlyList<HandlerAssociationItem> originalAssociations)
     {
-        _mutationHandler.SetAssociationsForApp(appId, originalAssociations);
+        _mutationHandler.SetAssociationsForApp(
+            databaseProvider.GetDatabase(),
+            appId,
+            originalAssociations);
         _pendingRemovedAssociations = [];
     }
 

@@ -7,9 +7,11 @@ namespace RunFence.Acl.UI.Forms;
 /// Shows the results of an account-wide ACL scan and lets the user select which accounts
 /// to import ACL entries for.
 /// </summary>
-public partial class AclBulkScanResultDialog : Form
+public partial class AclBulkScanResultDialog : RunFence.UI.Forms.ContextHelpForm, IAclBulkScanResultDialog
 {
     private readonly Dictionary<string, AccountScanResult> _results;
+
+    Form IAclBulkScanResultDialog.Form => this;
 
     /// <summary>
     /// Gets the subset of scan results for accounts the user chose to import (checked rows).

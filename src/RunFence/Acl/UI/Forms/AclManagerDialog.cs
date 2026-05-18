@@ -4,6 +4,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.UI;
+using RunFence.UI.Forms;
 
 namespace RunFence.Acl.UI.Forms;
 
@@ -12,7 +13,7 @@ namespace RunFence.Acl.UI.Forms;
 /// a single account or AppContainer SID.
 /// </summary>
 /// <remarks>Deps above threshold: 13 deps: all handlers mutate shared <see cref="AclManagerPendingChanges"/> for atomic apply. Splitting would require passing the pending state between classes, breaking the current atomic transaction guarantee. Reviewed 2026-04-09.</remarks>
-public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclManagerDialogHost
+public partial class AclManagerDialog : RunFence.UI.Forms.ContextHelpForm, IAclManagerGridRefresher, IAclManagerDialogHost
 {
     private readonly ILoggingService _log;
     private readonly IAclPermissionService _aclPermission;
@@ -27,6 +28,7 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
     private readonly AclManagerModificationHandler _modificationHandler;
     private readonly AclManagerMouseEventHandler _mouseEventHandler;
     private readonly AclManagerPathActionHelper _pathActionHelper;
+    private readonly AclDialogApplyPresenter _applyPresenter;
     private DropFilesInterceptor? _grantsDropInterceptor;
     private DropFilesInterceptor? _traverseDropInterceptor;
     private readonly AclManagerPendingChanges _pending = new();
@@ -48,7 +50,8 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         AclManagerSelectionHandler selectionHandler,
         AclManagerModificationHandler modificationHandler,
         AclManagerMouseEventHandler mouseEventHandler,
-        AclManagerPathActionHelper pathActionHelper)
+        AclManagerPathActionHelper pathActionHelper,
+        AclDialogApplyPresenter applyPresenter)
     {
         _aclPermission = aclPermission;
         _log = log;
@@ -63,6 +66,7 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         _modificationHandler = modificationHandler;
         _mouseEventHandler = mouseEventHandler;
         _pathActionHelper = pathActionHelper;
+        _applyPresenter = applyPresenter;
     }
 
     public void Initialize(
@@ -168,6 +172,8 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
 
         AclManagerDialogGridSetup.BuildGrantsGrid(_grantsGrid, _isContainer);
         AclManagerDialogGridSetup.BuildTraverseGrid(_traverseGrid);
+        if (_isContainer)
+            _tabControl.TabPages.Remove(_traverseTab);
 
         // Suppress ComboBox cell formatting errors
         _grantsGrid.DataError += (_, e) => { e.ThrowException = false; };
@@ -185,12 +191,34 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
         RefreshTraverseGrid();
 
         _grantsGrid.HandleCreated += (_, _) =>
+        {
+            var old = _grantsDropInterceptor;
             _grantsDropInterceptor = new DropFilesInterceptor(_grantsGrid.Handle, _mouseEventHandler.HandleGrantsFileDrop);
+            old?.Dispose();
+        };
         _traverseGrid.HandleCreated += (_, _) =>
+        {
+            var old = _traverseDropInterceptor;
             _traverseDropInterceptor = new DropFilesInterceptor(_traverseGrid.Handle, _mouseEventHandler.HandleTraverseFileDrop);
+            old?.Dispose();
+        };
+        Disposed += (_, _) =>
+        {
+            _grantsDropInterceptor?.Dispose();
+            _traverseDropInterceptor?.Dispose();
+        };
 
         Resize += OnResize;
         Shown += OnShown;
+        RegisterContextHelp();
+    }
+
+    private void RegisterContextHelp()
+    {
+        SetContextHelp(_contextHelpButton, ContextHelpTextResolver.InstructionText);
+        SetContextHelp(_grantsTab, ContextHelpTextCatalog.AclManager_Grants);
+        if (!_isContainer)
+            SetContextHelp(_traverseTab, ContextHelpTextCatalog.AclManager_Traverse);
     }
 
     private void OnShown(object? sender, EventArgs e)
@@ -239,9 +267,9 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
 
     private void PositionTabControl()
     {
-        int toolbarHeight = _toolStrip.PreferredSize.Height;
-        _tabControl.Location = new Point(0, toolbarHeight);
-        _tabControl.Size = new Size(ClientSize.Width, ClientSize.Height - toolbarHeight - _closeButton.Height - ButtonPadding * 2);
+        int topRowHeight = _topRowHost.Height;
+        _tabControl.Location = new Point(0, topRowHeight);
+        _tabControl.Size = new Size(ClientSize.Width, ClientSize.Height - topRowHeight - _closeButton.Height - ButtonPadding * 2);
     }
 
     private void OnResize(object? sender, EventArgs e)
@@ -335,16 +363,17 @@ public partial class AclManagerDialog : Form, IAclManagerGridRefresher, IAclMana
             });
             try
             {
-                await _applyHandler.ApplyAsync(progress,
+                var outcome = await _applyHandler.ApplyAsync(progress,
                     enabled => _applyButton.Enabled = enabled,
                     enabled => Enabled = enabled,
                     RefreshGrids);
+                var presentation = _applyPresenter.ShowResult(this, outcome);
+                return !presentation.RetainPendingInput;
             }
             finally
             {
                 _progressBar.Visible = false;
             }
-            return true;
         }
         catch (Exception ex)
         {

@@ -91,6 +91,13 @@ public class DriveAclReplacerTests : IDisposable
         return rules.Cast<FileSystemAccessRule>().Any(r => r.IdentityReference.Equals(sid));
     }
 
+    private static FileSystemAccessRule GetSingleAceForSid(string path, SecurityIdentifier sid)
+    {
+        var security = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access);
+        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
+        return Assert.Single(rules.Cast<FileSystemAccessRule>(), rule => rule.IdentityReference.Equals(sid));
+    }
+
     [Theory]
     [InlineData(WellKnownSidType.WorldSid)]      // Everyone
     [InlineData(WellKnownSidType.BuiltinUsersSid)] // Builtin Users
@@ -101,6 +108,7 @@ public class DriveAclReplacerTests : IDisposable
         var targetSid = new SecurityIdentifier(TestSid);
 
         AddBroadAccessAce(_tempDir.Path, sidType, FileSystemRights.ReadAndExecute);
+        var sourceRule = GetSingleAceForSid(_tempDir.Path, broadSid);
         Assert.True(HasAceForSid(_tempDir.Path, broadSid), "Broad-access ACE must be present before test");
 
         // Act
@@ -109,7 +117,9 @@ public class DriveAclReplacerTests : IDisposable
         // Assert: no error, broad ACE removed, target SID ACE added, UpdateFromPath called
         Assert.Null(result);
         Assert.False(HasAceForSid(_tempDir.Path, broadSid), "Broad-access ACE should be removed");
-        Assert.True(HasAceForSid(_tempDir.Path, targetSid), "Target SID ACE should be added");
+        var targetRule = GetSingleAceForSid(_tempDir.Path, targetSid);
+        Assert.Equal(sourceRule.FileSystemRights & FileSystemRights.FullControl, targetRule.FileSystemRights);
+        Assert.Equal(AccessControlType.Allow, targetRule.AccessControlType);
         _pathGrantService.Verify(p => p.UpdateFromPath(_tempDir.Path, TestSid), Times.Once);
     }
 
@@ -122,7 +132,7 @@ public class DriveAclReplacerTests : IDisposable
 
         AddBroadAccessAce(_tempDir.Path, WellKnownSidType.WorldSid, FileSystemRights.ReadAndExecute);
         // Also add an existing ACE for the target SID with the same rights
-        var acl = new AclAccessor();
+        var acl = AclAccessorFactory.Create();
         acl.ApplyExplicitAce(_tempDir.Path, TestSid, AccessControlType.Allow, FileSystemRights.ReadAndExecute);
 
         // Act
@@ -138,4 +148,31 @@ public class DriveAclReplacerTests : IDisposable
         // At most 1 ACE for target SID (no duplicate added when existing one matches)
         Assert.True(targetRuleCount <= 1, $"Expected at most 1 ACE for target SID, got {targetRuleCount}");
     }
+
+    [Fact]
+    public void HasReplaceableBroadAces_WithBroadAccessAce_ReturnsTrue()
+    {
+        AddBroadAccessAce(_tempDir.Path, WellKnownSidType.AuthenticatedUserSid, FileSystemRights.ReadAndExecute);
+
+        var result = _replacer.HasReplaceableBroadAces(_tempDir.Path);
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public void HasReplaceableBroadAces_WithoutBroadAccessAce_ReturnsFalse()
+    {
+        var targetSid = new SecurityIdentifier(TestSid);
+        AclAccessorFactory.Create().ApplyExplicitAce(
+            _tempDir.Path,
+            TestSid,
+            AccessControlType.Allow,
+            FileSystemRights.ReadAndExecute);
+        Assert.True(HasAceForSid(_tempDir.Path, targetSid));
+
+        var result = _replacer.HasReplaceableBroadAces(_tempDir.Path);
+
+        Assert.False(result);
+    }
 }
+

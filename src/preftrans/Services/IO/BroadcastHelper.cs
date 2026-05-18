@@ -12,14 +12,6 @@ public class BroadcastHelper : IBroadcastHelper
             Constants.SMTO_ABORTIFHUNG, 1000, out _);
     }
 
-    public void BroadcastEnvironment()
-    {
-        NativeMethods.SendMessageTimeoutW(
-            Constants.HWND_BROADCAST, Constants.WM_SETTINGCHANGE,
-            UIntPtr.Zero, "Environment",
-            Constants.SMTO_ABORTIFHUNG, 1000, out _);
-    }
-
     public void BroadcastIntl()
     {
         NativeMethods.SendMessageTimeoutW(

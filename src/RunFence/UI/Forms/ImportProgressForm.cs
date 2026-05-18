@@ -1,6 +1,6 @@
 namespace RunFence.UI.Forms;
 
-public partial class ImportProgressForm : Form
+public partial class ImportProgressForm : ContextHelpForm
 {
     public ImportProgressForm(IWin32Window? owner)
     {

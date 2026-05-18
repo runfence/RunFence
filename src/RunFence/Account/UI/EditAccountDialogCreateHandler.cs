@@ -3,16 +3,22 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
+using RunFence.Persistence;
+using RunFence.RunAs;
 using RunFence.UI;
 
 namespace RunFence.Account.UI;
 
 public class EditAccountDialogCreateHandler(
     IWindowsAccountService windowsAccountService,
-    ILocalGroupMembershipService groupMembership,
-    IAccountLoginRestrictionService loginRestriction,
-    IAccountLsaRestrictionService lsaRestriction,
-    ILicenseService licenseService)
+    ILocalGroupMutationService groupMembership,
+    IAccountRestrictionCoordinator restrictionCoordinator,
+    ILicenseService licenseService,
+    IUiThreadInvoker uiThreadInvoker,
+    IAppStateProvider appState,
+    SessionContext session,
+    IDatabaseService databaseService,
+    ISidNameCacheService sidNameCache)
 {
     public record CreateAccountRequest(
         string Username,
@@ -46,24 +52,19 @@ public class EditAccountDialogCreateHandler(
                 CurrentHiddenCount: 0);
     }
 
-    public record CreateAccountResult(
-        string Sid,
-        ProtectedString Password,
-        string Username,
-        bool IsEphemeral,
-        List<string> Errors);
-
     /// <summary>
-    /// Set after Execute returns null — describes the validation error to show in the status label.
+    /// Set after Execute returns a non-success status that should be shown inline in the status label.
     /// </summary>
     public string? LastValidationError { get; private set; }
 
     /// <summary>
-    /// Creates a local Windows user account with the specified settings.
-    /// Returns null if validation fails; check <see cref="LastValidationError"/> for the message.
-    /// On success, returns a result with SID, password, username, and any non-fatal errors.
+     /// Creates a local Windows user account with the specified settings.
+    /// Validation and Windows account creation failures return a non-success status with
+    /// <see cref="LastValidationError"/> populated for inline display. When the Windows account
+    /// is created but saving RunFence cleanup state fails, the result keeps the created SID/name
+    /// while omitting the password so callers can stop further setup without losing in-memory cleanup.
     /// </summary>
-    public CreateAccountResult? Execute(CreateAccountRequest request)
+    public CreateAccountResult Execute(CreateAccountRequest request)
     {
         LastValidationError = null;
 
@@ -71,19 +72,40 @@ public class EditAccountDialogCreateHandler(
         if (request.Username.Length is 0 or > 20)
         {
             LastValidationError = "Account name must be 1\u201320 characters.";
-            return null;
+            return new CreateAccountResult(
+                CreateAccountStatus.ValidationFailed,
+                string.Empty,
+                null,
+                request.Username,
+                request.IsEphemeral,
+                [],
+                LastValidationError);
         }
 
         if (request.Username.IndexOfAny(EditAccountDialog.InvalidNameChars) >= 0)
         {
             LastValidationError = "Account name contains invalid characters.";
-            return null;
+            return new CreateAccountResult(
+                CreateAccountStatus.ValidationFailed,
+                string.Empty,
+                null,
+                request.Username,
+                request.IsEphemeral,
+                [],
+                LastValidationError);
         }
 
         if (request.Password.Length > 0 && !ProtectedString.ContentEqual(request.Password, request.ConfirmPassword))
         {
             LastValidationError = "Passwords do not match.";
-            return null;
+            return new CreateAccountResult(
+                CreateAccountStatus.ValidationFailed,
+                string.Empty,
+                null,
+                request.Username,
+                request.IsEphemeral,
+                [],
+                LastValidationError);
         }
 
         // Create user
@@ -95,10 +117,61 @@ public class EditAccountDialogCreateHandler(
         catch (Exception ex)
         {
             LastValidationError = ex.Message;
-            return null;
+            return new CreateAccountResult(
+                CreateAccountStatus.WindowsAccountCreationFailed,
+                string.Empty,
+                null,
+                request.Username,
+                request.IsEphemeral,
+                [],
+                ex.Message);
         }
 
+        var previousAccount = appState.Database.GetAccount(sid)?.Clone();
+        var rollbackState = new CreatedAccountRollbackState
+        {
+            Sid = sid,
+            Username = request.Username,
+            PreviousAccount = previousAccount,
+            HadPreviousAccount = previousAccount != null,
+            PreviousSidName = appState.Database.SidNames.TryGetValue(sid, out var previousSidName)
+                ? previousSidName
+                : null,
+            HadPreviousSidName = appState.Database.SidNames.ContainsKey(sid),
+            PreviousFirewallSettings = previousAccount?.Firewall.IsDefault == false
+                ? previousAccount.Firewall.Clone()
+                : null,
+            HadPreviousFirewallSettings = previousAccount?.Firewall.IsDefault == false
+        };
+
         // From here on, user exists — collect errors but don't abort
+        try
+        {
+            uiThreadInvoker.Invoke(() =>
+            {
+                sidNameCache.UpdateName(sid, $"{Environment.MachineName}\\{request.Username}");
+                var entry = appState.Database.GetOrCreateAccount(sid);
+                entry.DeleteAfterUtc = request.IsEphemeral ? DateTime.UtcNow.AddHours(24) : null;
+
+                databaseService.SaveConfig(
+                    appState.Database,
+                    session.PinDerivedKey,
+                    session.CredentialStore.ArgonSalt);
+            });
+        }
+        catch (Exception ex)
+        {
+            return new CreateAccountResult(
+                CreateAccountStatus.CleanupStateSaveFailed,
+                sid,
+                null,
+                request.Username,
+                request.IsEphemeral,
+                [],
+                ex.Message,
+                rollbackState);
+        }
+
         var errors = new List<string>();
 
         // Add to explicitly checked groups
@@ -129,55 +202,30 @@ public class EditAccountDialogCreateHandler(
             }
         }
 
-        // Network Login (unchecked = local only)
-        if (!request.AllowNetworkLogin)
-        {
-            try
-            {
-                lsaRestriction.SetLocalOnlyBySid(sid, true);
-            }
-            catch (Exception ex)
-            {
-                errors.Add($"Network Login: {ex.Message}");
-            }
-        }
+        var canBlockLogon = request.AllowLogon || licenseService.CanHideAccount(request.CurrentHiddenCount);
+        if (!request.AllowLogon && !canBlockLogon)
+            errors.Add(licenseService.GetRestrictionMessage(EvaluationFeature.HiddenAccounts, request.CurrentHiddenCount)!);
 
-        // Logon (unchecked = blocked)
-        if (!request.AllowLogon)
-        {
-            if (!licenseService.CanHideAccount(request.CurrentHiddenCount))
-            {
-                errors.Add(licenseService.GetRestrictionMessage(EvaluationFeature.HiddenAccounts, request.CurrentHiddenCount)!);
-            }
-            else
-            {
-                try
-                {
-                    loginRestriction.SetLoginBlockedBySid(sid, request.Username, true);
-                }
-                catch (Exception ex)
-                {
-                    errors.Add($"Logon: {ex.Message}");
-                }
-            }
-        }
-
-        // Bg Autorun (unchecked = no bg autostart)
-        if (!request.AllowBgAutorun)
-        {
-            try
-            {
-                lsaRestriction.SetNoBgAutostartBySid(sid, true);
-            }
-            catch (Exception ex)
-            {
-                errors.Add($"Bg Autorun: {ex.Message}");
-            }
-        }
+        var restrictionResult = restrictionCoordinator.ApplyRestrictions(
+            sid,
+            request.Username,
+            logonBlocked: !request.AllowLogon && canBlockLogon,
+            networkLoginBlocked: !request.AllowNetworkLogin,
+            backgroundAutorunBlocked: !request.AllowBgAutorun);
+        foreach (var entry in restrictionResult.Entries.Where(e => e.Status != AccountRestrictionStatus.Succeeded))
+            errors.Add(AccountRestrictionEntryFormatter.Format(entry));
 
         // Build CreatedPassword as independent copy (caller owns disposal)
         var password = request.Password.Copy();
 
-        return new CreateAccountResult(sid, password, request.Username, request.IsEphemeral, errors);
+        return new CreateAccountResult(
+            CreateAccountStatus.Succeeded,
+            sid,
+            password,
+            request.Username,
+            request.IsEphemeral,
+            errors,
+            RollbackState: rollbackState,
+            RestrictionEntries: restrictionResult.Entries);
     }
 }

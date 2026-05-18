@@ -12,9 +12,18 @@ public class MachineLevelRegistryScanner(
     IFileSystemDataAccess fileSystem,
     AclCheckHelper aclCheck)
 {
+    private const FileSystemRights MissingResolvedPathParentFileCreateRightsMask =
+        FileSystemRights.WriteData |
+        FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+
+    private const FileSystemRights MissingResolvedPathAncestorDirectoryCreateRightsMask =
+        FileSystemRights.AppendData |
+        FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+
     private const RegistryRights IfeoRegistryWriteRightsMask =
         RegistryRights.SetValue | RegistryRights.CreateSubKey |
         RegistryRights.ChangePermissions | RegistryRights.TakeOwnership;
+    private static readonly string s_windowsDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
 
     public void ScanMachineRegistryRunKeys(ScanContext ctx)
     {
@@ -108,16 +117,22 @@ public class MachineLevelRegistryScanner(
                     @"HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options");
             }
 
-            foreach (var exeName in ifeoRegistry.GetIfeoSubkeyNames())
+            foreach (var subkey in ifeoRegistry.GetIfeoSubkeys())
             {
-                var debugger = ifeoRegistry.GetIfeoDebuggerPath(exeName);
-                if (!string.IsNullOrEmpty(debugger))
-                    SecurityScanner.AddAutorunPath(ctx.Autorun, debugger, null, StartupSecurityCategory.RegistryRunKey);
-
-                var verifierDlls = ifeoRegistry.GetIfeoVerifierDlls(exeName);
-                if (!string.IsNullOrEmpty(verifierDlls))
+                if (subkey.Security != null)
                 {
-                    foreach (var dll in verifierDlls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    aclCheck.CheckRegistryKeyAcl(subkey.Security, subkey.DisplayPath,
+                        ctx.AdminSids, IfeoRegistryWriteRightsMask,
+                        StartupSecurityCategory.RegistryRunKey, ctx.Findings, ctx.Seen,
+                        subkey.NavigationTarget);
+                }
+
+                if (!string.IsNullOrEmpty(subkey.DebuggerPath))
+                    SecurityScanner.AddAutorunPath(ctx.Autorun, subkey.DebuggerPath, null, StartupSecurityCategory.RegistryRunKey);
+
+                if (!string.IsNullOrEmpty(subkey.VerifierDlls))
+                {
+                    foreach (var dll in subkey.VerifierDlls.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                     {
                         if (!string.IsNullOrEmpty(dll))
                             SecurityScanner.AddAutorunPath(ctx.Autorun, dll, null, StartupSecurityCategory.RegistryRunKey);
@@ -145,11 +160,7 @@ public class MachineLevelRegistryScanner(
                         navigationTarget);
                 }
 
-                foreach (var dll in dllPaths)
-                {
-                    if (!string.IsNullOrEmpty(dll))
-                        SecurityScanner.AddAutorunPath(ctx.Autorun, dll, null, StartupSecurityCategory.RegistryRunKey);
-                }
+                AddSystemDllPaths(ctx, keyDisplayPath, navigationTarget, dllPaths);
             }
         }
         catch (Exception ex)
@@ -169,11 +180,7 @@ public class MachineLevelRegistryScanner(
                         @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa");
                 }
 
-                foreach (var dll in dllPaths)
-                {
-                    if (!string.IsNullOrEmpty(dll))
-                        SecurityScanner.AddAutorunPath(ctx.Autorun, dll, null, StartupSecurityCategory.RegistryRunKey);
-                }
+                AddSystemDllPaths(ctx, @"HKLM\...\Lsa", @"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Lsa", dllPaths);
             }
         }
         catch (Exception ex)
@@ -193,16 +200,124 @@ public class MachineLevelRegistryScanner(
                         navigationTarget);
                 }
 
-                foreach (var dll in dllPaths)
-                {
-                    if (!string.IsNullOrEmpty(dll))
-                        SecurityScanner.AddAutorunPath(ctx.Autorun, dll, null, StartupSecurityCategory.RegistryRunKey);
-                }
+                AddSystemDllPaths(ctx, keyDisplayPath, navigationTarget, dllPaths);
             }
         }
         catch (Exception ex)
         {
             fileSystem.LogError($"Failed to scan Network Providers: {ex.Message}");
         }
+    }
+
+    private void AddSystemDllPaths(ScanContext ctx, string sourceDescription, string navigationTarget, IEnumerable<string> dllPaths)
+    {
+        foreach (var dll in dllPaths)
+        {
+            if (string.IsNullOrWhiteSpace(dll))
+                continue;
+
+            if (!IsBareModuleName(dll))
+            {
+                SecurityScanner.AddAutorunPath(ctx.Autorun, dll, null, StartupSecurityCategory.RegistryRunKey);
+                continue;
+            }
+
+            var candidateName = Path.HasExtension(dll) ? dll : dll + ".dll";
+            var resolvedPaths = GetBareModuleResolutionCandidates(candidateName);
+
+            if (resolvedPaths.Count == 0)
+            {
+                SecurityScanner.AddAutorunWarning(ctx.Autorun, new AutorunWarning(
+                    StartupSecurityCategory.RegistryRunKey,
+                    $"{sourceDescription}: {dll}",
+                    "Windows component DLL",
+                    "Bare module name could not be resolved to a deterministic filesystem path.",
+                    navigationTarget));
+                continue;
+            }
+
+            foreach (var resolvedPath in resolvedPaths)
+            {
+                if (fileSystem.FileExists(resolvedPath))
+                {
+                    SecurityScanner.AddAutorunPath(ctx.Autorun, resolvedPath, null, StartupSecurityCategory.RegistryRunKey);
+                    continue;
+                }
+
+                CheckMissingResolvedSystemDllPath(ctx, resolvedPath, navigationTarget);
+            }
+        }
+    }
+
+    private void CheckMissingResolvedSystemDllPath(ScanContext ctx, string resolvedPath, string navigationTarget)
+    {
+        var targetDirectory = Path.GetDirectoryName(resolvedPath);
+        var existingDirectory = FindNearestExistingDirectory(targetDirectory);
+        if (string.IsNullOrEmpty(existingDirectory))
+            return;
+
+        try
+        {
+            var dirSecurity = fileSystem.GetDirectorySecurity(existingDirectory);
+            var requiredRights = string.Equals(existingDirectory, targetDirectory, StringComparison.OrdinalIgnoreCase)
+                ? MissingResolvedPathParentFileCreateRightsMask
+                : MissingResolvedPathAncestorDirectoryCreateRightsMask;
+            var effective = aclCheck.ComputeFilteredFileRights(dirSecurity, ctx.AdminSids, requiredRights);
+            foreach (var (sidStr, rights) in effective)
+            {
+                var writeRights = rights & requiredRights;
+                if (writeRights == 0)
+                    continue;
+
+                var principal = aclCheck.CachedResolveDisplayName(sidStr);
+                var key = (resolvedPath, sidStr);
+                if (!ctx.Seen.Add(key))
+                    continue;
+
+                ctx.Findings.Add(new StartupSecurityFinding(
+                    StartupSecurityCategory.RegistryRunKey,
+                    resolvedPath,
+                    sidStr,
+                    principal,
+                    $"{SecurityScanner.FormatFileSystemRights(writeRights, isDirectory: true)} on existing parent {existingDirectory}",
+                    navigationTarget));
+            }
+        }
+        catch (Exception ex)
+        {
+            fileSystem.LogError($"Failed to check ACL for missing resolved DLL path '{resolvedPath}': {ex.Message}");
+        }
+    }
+
+    private static bool IsBareModuleName(string value)
+    {
+        var trimmed = SecurityScanner.ExpandEnvVars(value.Trim());
+        return !Path.IsPathRooted(trimmed) &&
+               trimmed.IndexOf('\\') < 0 &&
+               trimmed.IndexOf('/') < 0;
+    }
+
+    private List<string> GetBareModuleResolutionCandidates(string candidateName)
+    {
+        return new List<string>
+        {
+            Path.Combine(s_windowsDir, "System32", candidateName),
+            Path.Combine(s_windowsDir, "SysWOW64", candidateName),
+        }
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+    }
+
+    private string? FindNearestExistingDirectory(string? path)
+    {
+        while (!string.IsNullOrEmpty(path))
+        {
+            if (fileSystem.DirectoryExists(path))
+                return path;
+
+            path = Path.GetDirectoryName(path);
+        }
+
+        return null;
     }
 }

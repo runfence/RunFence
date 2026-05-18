@@ -29,6 +29,9 @@ public class AclManagerPendingChanges
     /// </summary>
     public Dictionary<(string Path, bool IsDeny), PendingModification> PendingModifications { get; } = new(PathKeyComparer);
 
+    /// <summary>Existing grant entries that need re-applying without changing stored rights or mode. Keyed by (normalizedPath, isDeny).</summary>
+    public Dictionary<(string Path, bool IsDeny), GrantedPathEntry> PendingGrantFixes { get; } = new(PathKeyComparer);
+
     /// <summary>Traverse entries to add. Keyed by normalizedPath.</summary>
     public Dictionary<string, GrantedPathEntry> PendingTraverseAdds { get; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -44,14 +47,14 @@ public class AclManagerPendingChanges
     /// <summary>Traverse entries to remove from DB only (no NTFS ACE removal). Keyed by normalizedPath.</summary>
     public Dictionary<string, GrantedPathEntry> PendingUntrackTraverse { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Deferred config-section moves for grant entries. Key=(normalizedPath, isDeny), value=target config path (null=main).</summary>
-    public Dictionary<(string Path, bool IsDeny), string?> PendingConfigMoves { get; } = new(PathKeyComparer);
+    /// <summary>Deferred config-section moves for grant entries. Key=(normalizedPath, isDeny), value=entry+target config path (null=main).</summary>
+    public Dictionary<(string Path, bool IsDeny), PendingConfigMove> PendingConfigMoves { get; } = new(PathKeyComparer);
 
-    /// <summary>Deferred config-section moves for traverse entries. Key=normalizedPath, value=target config path (null=main).</summary>
-    public Dictionary<string, string?> PendingTraverseConfigMoves { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Deferred config-section moves for traverse entries. Key=normalizedPath, value=entry+target config path (null=main).</summary>
+    public Dictionary<string, PendingConfigMove> PendingTraverseConfigMoves { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public bool HasPendingChanges => PendingAdds.Count + PendingRemoves.Count +
-        PendingModifications.Count + PendingTraverseAdds.Count + PendingTraverseRemoves.Count +
+        PendingModifications.Count + PendingGrantFixes.Count + PendingTraverseAdds.Count + PendingTraverseRemoves.Count +
         PendingTraverseFixes.Count + PendingUntrackGrants.Count + PendingUntrackTraverse.Count +
         PendingConfigMoves.Count + PendingTraverseConfigMoves.Count > 0;
 
@@ -67,6 +70,11 @@ public class AclManagerPendingChanges
         // Check effective mode in case a mode switch re-keyed the config move to the new mode.
         if (PendingModifications.TryGetValue((path, isDeny), out var mod))
             return PendingConfigMoves.ContainsKey((path, mod.NewIsDeny));
+        mod = PendingModifications.Values.FirstOrDefault(m =>
+            string.Equals(m.Entry.Path, path, StringComparison.OrdinalIgnoreCase) &&
+            (m.Entry.IsDeny == isDeny || m.WasIsDeny == isDeny || m.NewIsDeny == isDeny));
+        if (mod != null)
+            return PendingConfigMoves.ContainsKey((path, mod.NewIsDeny));
         return false;
     }
 
@@ -78,6 +86,11 @@ public class AclManagerPendingChanges
     public bool GetEffectiveIsDeny(GrantedPathEntry entry)
     {
         if (PendingModifications.TryGetValue((entry.Path, entry.IsDeny), out var mod))
+            return mod.NewIsDeny;
+        mod = PendingModifications.Values.FirstOrDefault(m =>
+            ReferenceEquals(m.Entry, entry) ||
+            string.Equals(m.Entry.Path, entry.Path, StringComparison.OrdinalIgnoreCase));
+        if (mod != null)
             return mod.NewIsDeny;
         return entry.IsDeny;
     }
@@ -91,6 +104,12 @@ public class AclManagerPendingChanges
     {
         if (PendingModifications.TryGetValue((entry.Path, entry.IsDeny), out var mod) && mod.NewRights != null)
             return mod.NewRights;
+        mod = PendingModifications.Values.FirstOrDefault(m =>
+            (ReferenceEquals(m.Entry, entry) ||
+             string.Equals(m.Entry.Path, entry.Path, StringComparison.OrdinalIgnoreCase)) &&
+            m.NewRights != null);
+        if (mod != null)
+            return mod.NewRights;
         return entry.SavedRights;
     }
 
@@ -99,25 +118,32 @@ public class AclManagerPendingChanges
     /// config-section move. For grant entries (<paramref name="entry"/>.IsTraverseOnly false),
     /// checks <see cref="PendingConfigMoves"/> under the effective (post-mode-switch) key.
     /// For traverse entries, checks <see cref="PendingTraverseConfigMoves"/>.
-    /// Falls back to <paramref name="grantConfigTracker"/> when no pending move exists.
+    /// Falls back to the current grant-intent store membership when no pending move exists.
     /// </summary>
-    public string? GetEffectiveConfigPath(GrantedPathEntry entry, IGrantConfigTracker grantConfigTracker, string sid)
+    public string? GetEffectiveConfigPath(
+        GrantedPathEntry entry,
+        IGrantIntentRepository grantIntentRepository,
+        IGrantIntentStoreProvider grantIntentStoreProvider,
+        string sid)
     {
         if (!entry.IsTraverseOnly)
         {
             var effectiveIsDeny = GetEffectiveIsDeny(entry);
             var key = (Path.GetFullPath(entry.Path), effectiveIsDeny);
-            if (PendingConfigMoves.TryGetValue(key, out var pendingTarget))
-                return pendingTarget;
+            if (PendingConfigMoves.TryGetValue(key, out var pendingMove))
+                return pendingMove.TargetConfigPath;
         }
         else
         {
             var path = Path.GetFullPath(entry.Path);
-            if (PendingTraverseConfigMoves.TryGetValue(path, out var pendingTarget))
-                return pendingTarget;
+            if (PendingTraverseConfigMoves.TryGetValue(path, out var pendingMove))
+                return pendingMove.TargetConfigPath;
         }
 
-        return grantConfigTracker.GetGrantConfigPath(sid, entry);
+        var location = entry.IsTraverseOnly
+            ? grantIntentRepository.FindTraverse(sid, entry)
+            : grantIntentRepository.FindGrant(sid, entry);
+        return grantIntentStoreProvider.ResolveStore(location?.Store.ConfigPath).ConfigPath;
     }
 
     public bool IsPendingAdd(string path, bool isDeny) => PendingAdds.ContainsKey((path, isDeny));
@@ -127,7 +153,13 @@ public class AclManagerPendingChanges
 
     public bool IsPendingRemove(string path, bool isDeny) => PendingRemoves.ContainsKey((path, isDeny));
 
-    public bool IsPendingModification(string path, bool isDeny) => PendingModifications.ContainsKey((path, isDeny));
+    public bool IsPendingModification(string path, bool isDeny) =>
+        PendingModifications.ContainsKey((path, isDeny)) ||
+        PendingModifications.Values.Any(m =>
+            string.Equals(m.Entry.Path, path, StringComparison.OrdinalIgnoreCase) &&
+            (m.Entry.IsDeny == isDeny || m.NewIsDeny == isDeny || m.WasIsDeny == isDeny));
+
+    public bool IsPendingGrantFix(string path, bool isDeny) => PendingGrantFixes.ContainsKey((path, isDeny));
 
     public bool IsPendingTraverseAdd(string path) => PendingTraverseAdds.ContainsKey(path);
 
@@ -145,6 +177,7 @@ public class AclManagerPendingChanges
     /// </summary>
     public bool IsPendingGrantChange(string path, bool isDeny) =>
         IsPendingAdd(path, isDeny) ||
+        IsPendingGrantFix(path, isDeny) ||
         IsPendingModification(path, isDeny) ||
         IsPendingConfigMove(path, isDeny);
 
@@ -173,24 +206,38 @@ public class AclManagerPendingChanges
     {
         if (IsPendingTraverseAdd(normalizedPath))
             return true;
-        var entries = database.GetAccount(sid)?.Grants;
-        return TraverseEntryExists(entries, normalizedPath, checkUntrack) ||
-               AclHelper.IsSpecificContainerSid(sid) &&
-               TraverseEntryExists(database.SharedContainerTraverseGrants, normalizedPath, checkUntrack);
+        var entries = database.GetAccount(ResolveTraverseOwnerSid(sid))?.Grants;
+        return TraverseEntryExists(entries, sid, normalizedPath, checkUntrack);
     }
 
-    private bool TraverseEntryExists(IEnumerable<GrantedPathEntry>? entries, string normalizedPath, bool checkUntrack) =>
+    private static string ResolveTraverseOwnerSid(string sid)
+        => AclHelper.IsSpecificContainerSid(sid)
+            ? AclHelper.AllApplicationPackagesSid
+            : sid;
+
+    private bool TraverseEntryExists(IEnumerable<GrantedPathEntry>? entries, string sid, string normalizedPath, bool checkUntrack) =>
         entries != null &&
         entries.Any(e => e.IsTraverseOnly &&
                          string.Equals(e.Path, normalizedPath, StringComparison.OrdinalIgnoreCase) &&
+                         TraverseEntryAppliesToSid(e, sid) &&
                          !IsPendingTraverseRemove(normalizedPath) &&
                          (!checkUntrack || !IsUntrackTraverse(normalizedPath)));
+
+    private static bool TraverseEntryAppliesToSid(GrantedPathEntry entry, string sid)
+    {
+        if (!AclHelper.IsSpecificContainerSid(sid))
+            return true;
+
+        return entry.SourceSids == null ||
+               entry.SourceSids.Contains(sid, StringComparer.OrdinalIgnoreCase);
+    }
 
     public void Clear()
     {
         PendingAdds.Clear();
         PendingRemoves.Clear();
         PendingModifications.Clear();
+        PendingGrantFixes.Clear();
         PendingTraverseAdds.Clear();
         PendingTraverseRemoves.Clear();
         PendingTraverseFixes.Clear();

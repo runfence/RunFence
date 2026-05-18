@@ -9,9 +9,9 @@ public sealed class NoOpAssociationAutoSetService(IAssociationAutoSetService rea
     // to keep DI validation working; all HKCU association writes are suppressed in non-elevated debug mode
     // to prevent conflicts with the real release RunFence's HKCU associations
 
-    public void AutoSetForAllUsers() { }
-    public void AutoSetForUser(string sid) { }
-    public void ForceAutoSetForUser(string sid) { }
+    public AssociationAutoSetResult AutoSetForAllUsers() => AssociationAutoSetResult.Success;
+    public AssociationAutoSetResult AutoSetForUser(string sid) => AssociationAutoSetResult.Success;
+    public AssociationAutoSetResult ForceAutoSetForUser(string sid) => AssociationAutoSetResult.Success;
     public void RestoreForAllUsers() { }
     public void RestoreForUser(string sid) { }
     public void RestoreKeyForAllUsers(string key) { }

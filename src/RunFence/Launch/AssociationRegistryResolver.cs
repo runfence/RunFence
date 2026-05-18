@@ -14,10 +14,13 @@ public class AssociationRegistryResolver(
     public IEnumerable<AssociationRegistryCommandCandidate> ResolveFileCandidates(
         string sid,
         ProcessLaunchTarget originalTarget,
-        bool rejectUserProfileHandlers)
+        bool rejectUserProfileHandlers,
+        string? extension = null)
     {
-        var extension = Path.GetExtension(originalTarget.ExePath);
-        if (string.IsNullOrEmpty(extension))
+        var effectiveExtension = string.IsNullOrEmpty(extension)
+            ? Path.GetExtension(originalTarget.ExePath)
+            : extension;
+        if (string.IsNullOrEmpty(effectiveExtension))
             yield break;
 
         using var hkuClasses = _hku.OpenSubKey($@"{sid}\Software\Classes");
@@ -28,7 +31,7 @@ public class AssociationRegistryResolver(
         var workingDirectory = ResolveAssociationWorkingDirectory(originalTarget);
 
         var userChoiceProgId = ReadStringValue(_hku.OpenSubKey(
-            $@"{sid}\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{extension}\UserChoice"),
+            $@"{sid}\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{effectiveExtension}\UserChoice"),
             "ProgId");
         foreach (var candidate in ResolveProgIdCandidates(
                      $"{scopeLabel} HKU UserChoice ProgId",
@@ -40,6 +43,7 @@ public class AssociationRegistryResolver(
                      workingDirectory,
                      originalTarget.EnvironmentVariables,
                      originalTarget.HideWindow,
+                     originalTarget.SuppressStartupFeedback,
                      rejectUserProfileHandlers))
         {
             yield return candidate;
@@ -48,7 +52,7 @@ public class AssociationRegistryResolver(
         string? userProgId = null;
         if (hkuClasses != null)
         {
-            using var userExtensionKey = hkuClasses.OpenSubKey(extension);
+            using var userExtensionKey = hkuClasses.OpenSubKey(effectiveExtension);
             userProgId = ReadStringValue(userExtensionKey);
             foreach (var candidate in ResolveProgIdCandidates(
                          $"{scopeLabel} HKU extension ProgId",
@@ -60,6 +64,7 @@ public class AssociationRegistryResolver(
                          workingDirectory,
                          originalTarget.EnvironmentVariables,
                          originalTarget.HideWindow,
+                         originalTarget.SuppressStartupFeedback,
                          rejectUserProfileHandlers))
             {
                 yield return candidate;
@@ -69,7 +74,7 @@ public class AssociationRegistryResolver(
         if (!string.IsNullOrEmpty(userProgId))
             yield break;
 
-        using var machineExtensionKey = hklmClasses?.OpenSubKey(extension);
+        using var machineExtensionKey = hklmClasses?.OpenSubKey(effectiveExtension);
         var machineProgId = ReadStringValue(machineExtensionKey);
         foreach (var candidate in ResolveProgIdCandidates(
                      $"{scopeLabel} HKLM extension ProgId",
@@ -81,6 +86,7 @@ public class AssociationRegistryResolver(
                      workingDirectory,
                      originalTarget.EnvironmentVariables,
                      originalTarget.HideWindow,
+                     originalTarget.SuppressStartupFeedback,
                      rejectUserProfileHandlers))
         {
             yield return candidate;
@@ -113,6 +119,7 @@ public class AssociationRegistryResolver(
                      workingDirectory: null,
                      environmentVariables: null,
                      hideWindow: false,
+                     suppressStartupFeedback: false,
                      rejectUserProfileHandlers))
         {
             yield return candidate;
@@ -124,30 +131,40 @@ public class AssociationRegistryResolver(
             if (protocolKey?.GetValue("URL Protocol") != null)
             {
                 using var userCommandKey = protocolKey.OpenSubKey(@"shell\open\command");
-                yield return new AssociationRegistryCommandCandidate(
-                    SourceLabel: $"{scopeLabel} HKU protocol command",
-                    ResolutionSid: sid,
-                    ProgId: null,
-                    RegistryCommand: ReadStringValue(userCommandKey),
-                    RawArgument: url,
-                    WorkingDirectory: null,
-                    EnvironmentVariables: null,
-                    HideWindow: false,
-                    RejectUserProfileHandlers: rejectUserProfileHandlers);
+                foreach (var candidate in BuildCommandCandidates(
+                             sourceLabel: $"{scopeLabel} HKU protocol command",
+                             resolutionSid: sid,
+                             progId: null,
+                             commandKey: userCommandKey,
+                             rawArgument: url,
+                             workingDirectory: null,
+                             environmentVariables: null,
+                             hideWindow: false,
+                             suppressStartupFeedback: false,
+                             rejectUserProfileHandlers: rejectUserProfileHandlers,
+                             allowDelegateExecuteFallback: true))
+                {
+                    yield return candidate;
+                }
             }
         }
 
         using var machineCommandKey = hklmClasses?.OpenSubKey($@"{scheme}\shell\open\command");
-        yield return new AssociationRegistryCommandCandidate(
-            SourceLabel: $"{scopeLabel} HKLM protocol command",
-            ResolutionSid: sid,
-            ProgId: null,
-            RegistryCommand: ReadStringValue(machineCommandKey),
-            RawArgument: url,
-            WorkingDirectory: null,
-            EnvironmentVariables: null,
-            HideWindow: false,
-            RejectUserProfileHandlers: rejectUserProfileHandlers);
+        foreach (var candidate in BuildCommandCandidates(
+                     sourceLabel: $"{scopeLabel} HKLM protocol command",
+                     resolutionSid: sid,
+                     progId: null,
+                     commandKey: machineCommandKey,
+                     rawArgument: url,
+                     workingDirectory: null,
+                     environmentVariables: null,
+                     hideWindow: false,
+                     suppressStartupFeedback: false,
+                     rejectUserProfileHandlers: rejectUserProfileHandlers,
+                     allowDelegateExecuteFallback: true))
+        {
+            yield return candidate;
+        }
     }
 
     private IEnumerable<AssociationRegistryCommandCandidate> ResolveProgIdCandidates(
@@ -160,6 +177,7 @@ public class AssociationRegistryResolver(
         string? workingDirectory,
         Dictionary<string, string>? environmentVariables,
         bool hideWindow,
+        bool suppressStartupFeedback,
         bool rejectUserProfileHandlers)
     {
         if (string.IsNullOrWhiteSpace(progId))
@@ -171,34 +189,114 @@ public class AssociationRegistryResolver(
         log.Debug($"LaunchTargetResolver: considering {scopeLabel} '{progId}' for '{rawArgument}'.");
 
         using var userCommandKey = hkuClasses?.OpenSubKey($@"{progId}\shell\open\command");
-        yield return new AssociationRegistryCommandCandidate(
-            SourceLabel: $"{scopeLabel} -> HKU command",
-            ResolutionSid: resolutionSid,
-            ProgId: progId,
-            RegistryCommand: ReadStringValue(userCommandKey),
-            RawArgument: rawArgument,
-            WorkingDirectory: workingDirectory,
-            EnvironmentVariables: environmentVariables,
-            HideWindow: hideWindow,
-            RejectUserProfileHandlers: rejectUserProfileHandlers);
+        foreach (var candidate in BuildCommandCandidates(
+                     sourceLabel: $"{scopeLabel} -> HKU command",
+                     resolutionSid: resolutionSid,
+                     progId: progId,
+                     commandKey: userCommandKey,
+                     rawArgument: rawArgument,
+                     workingDirectory: workingDirectory,
+                     environmentVariables: environmentVariables,
+                     hideWindow: hideWindow,
+                     suppressStartupFeedback: suppressStartupFeedback,
+                     rejectUserProfileHandlers: rejectUserProfileHandlers,
+                     allowDelegateExecuteFallback: PathHelper.IsUrlScheme(rawArgument)))
+        {
+            yield return candidate;
+        }
 
         using var machineCommandKey = hklmClasses?.OpenSubKey($@"{progId}\shell\open\command");
-        yield return new AssociationRegistryCommandCandidate(
-            SourceLabel: $"{scopeLabel} -> HKLM command",
-            ResolutionSid: resolutionSid,
-            ProgId: progId,
-            RegistryCommand: ReadStringValue(machineCommandKey),
-            RawArgument: rawArgument,
-            WorkingDirectory: workingDirectory,
-            EnvironmentVariables: environmentVariables,
-            HideWindow: hideWindow,
-            RejectUserProfileHandlers: rejectUserProfileHandlers);
+        foreach (var candidate in BuildCommandCandidates(
+                     sourceLabel: $"{scopeLabel} -> HKLM command",
+                     resolutionSid: resolutionSid,
+                     progId: progId,
+                     commandKey: machineCommandKey,
+                     rawArgument: rawArgument,
+                     workingDirectory: workingDirectory,
+                     environmentVariables: environmentVariables,
+                     hideWindow: hideWindow,
+                     suppressStartupFeedback: suppressStartupFeedback,
+                     rejectUserProfileHandlers: rejectUserProfileHandlers,
+                     allowDelegateExecuteFallback: PathHelper.IsUrlScheme(rawArgument)))
+        {
+            yield return candidate;
+        }
     }
 
     private static string? ReadStringValue(RegistryKey? key, string? valueName = null)
     {
         using (key)
             return key?.GetValue(valueName) as string;
+    }
+
+    private static IEnumerable<AssociationRegistryCommandCandidate> BuildCommandCandidates(
+        string sourceLabel,
+        string resolutionSid,
+        string? progId,
+        RegistryKey? commandKey,
+        string rawArgument,
+        string? workingDirectory,
+        Dictionary<string, string>? environmentVariables,
+        bool hideWindow,
+        bool suppressStartupFeedback,
+        bool rejectUserProfileHandlers,
+        bool allowDelegateExecuteFallback)
+    {
+        using (commandKey)
+        {
+            var registryCommand = commandKey?.GetValue(null) as string;
+            var delegateExecute = allowDelegateExecuteFallback
+                ? commandKey?.GetValue("DelegateExecute") as string
+                : null;
+
+            if (!string.IsNullOrWhiteSpace(registryCommand))
+            {
+                yield return new AssociationRegistryCommandCandidate(
+                    SourceLabel: sourceLabel,
+                    ResolutionSid: resolutionSid,
+                    ProgId: progId,
+                    RegistryCommand: registryCommand,
+                    RawArgument: rawArgument,
+                    WorkingDirectory: workingDirectory,
+                    EnvironmentVariables: environmentVariables,
+                    HideWindow: hideWindow,
+                    SuppressStartupFeedback: suppressStartupFeedback,
+                    RejectUserProfileHandlers: rejectUserProfileHandlers,
+                    DelegateExecuteClsid: null);
+            }
+
+            if (!string.IsNullOrWhiteSpace(delegateExecute))
+            {
+                yield return new AssociationRegistryCommandCandidate(
+                    SourceLabel: $"{sourceLabel} (DelegateExecute fallback)",
+                    ResolutionSid: resolutionSid,
+                    ProgId: progId,
+                    RegistryCommand: null,
+                    RawArgument: rawArgument,
+                    WorkingDirectory: workingDirectory,
+                    EnvironmentVariables: environmentVariables,
+                    HideWindow: hideWindow,
+                    SuppressStartupFeedback: suppressStartupFeedback,
+                    RejectUserProfileHandlers: rejectUserProfileHandlers,
+                    DelegateExecuteClsid: delegateExecute);
+            }
+
+            if (string.IsNullOrWhiteSpace(registryCommand) && string.IsNullOrWhiteSpace(delegateExecute))
+            {
+                yield return new AssociationRegistryCommandCandidate(
+                    SourceLabel: sourceLabel,
+                    ResolutionSid: resolutionSid,
+                    ProgId: progId,
+                    RegistryCommand: null,
+                    RawArgument: rawArgument,
+                    WorkingDirectory: workingDirectory,
+                    EnvironmentVariables: environmentVariables,
+                    HideWindow: hideWindow,
+                    SuppressStartupFeedback: suppressStartupFeedback,
+                    RejectUserProfileHandlers: rejectUserProfileHandlers,
+                    DelegateExecuteClsid: null);
+            }
+        }
     }
 
     private static string ResolveAssociationWorkingDirectory(ProcessLaunchTarget target)
@@ -235,4 +333,6 @@ public sealed record AssociationRegistryCommandCandidate(
     string? WorkingDirectory,
     Dictionary<string, string>? EnvironmentVariables,
     bool HideWindow,
-    bool RejectUserProfileHandlers);
+    bool SuppressStartupFeedback,
+    bool RejectUserProfileHandlers,
+    string? DelegateExecuteClsid);

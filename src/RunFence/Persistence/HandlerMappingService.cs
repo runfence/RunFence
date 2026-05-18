@@ -126,6 +126,32 @@ public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMapp
         return null;
     }
 
+    public Dictionary<string, HandlerMappingEntry> StageConfigMappings(
+        Dictionary<string, HandlerMappingEntry>? mappings,
+        IReadOnlyDictionary<string, string> renamedAppIds,
+        ISet<string> validAppIds)
+    {
+        var staged = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, entry) in mappings ?? [])
+        {
+            var appId = renamedAppIds.TryGetValue(entry.AppId, out var renamedAppId)
+                ? renamedAppId
+                : entry.AppId;
+
+            if (!validAppIds.Contains(appId))
+                throw new InvalidOperationException(
+                    $"Handler mapping '{key}' references unknown app ID '{entry.AppId}'.");
+
+            staged[key] = new HandlerMappingEntry(
+                appId,
+                entry.ArgumentsTemplate,
+                entry.PathPrefixes?.ToList(),
+                entry.ReplacePrefixes);
+        }
+
+        return staged;
+    }
+
     public void RenameAppIdInConfigMappings(string configPath, string oldAppId, string newAppId)
     {
         var normalized = Path.GetFullPath(configPath);
@@ -186,8 +212,4 @@ public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMapp
             database.Settings.DirectHandlerMappings = null;
     }
 
-    public bool IsDefaultBrowser(string appId, IReadOnlyDictionary<string, IReadOnlyList<HandlerMappingEntry>> allMappings)
-        => EvaluationConstants.BrowserAssociations.All(key =>
-            allMappings.TryGetValue(key, out var entries) &&
-            entries.Any(e => string.Equals(e.AppId, appId, StringComparison.Ordinal)));
 }

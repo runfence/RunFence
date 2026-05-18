@@ -43,7 +43,8 @@ public class AppEntryLaunchPlanBuilder : IAppEntryLaunchPlanBuilder
             ExePath: app.ExePath,
             WorkingDirectory: workingDirectory,
             Arguments: ProcessLaunchHelper.DetermineArguments(app, launcherArguments, associationArgsTemplate),
-            EnvironmentVariables: app.EnvironmentVariables);
+            EnvironmentVariables: app.EnvironmentVariables,
+            IsPathApproved: associationArgsTemplate == null);
         return new AppEntryLaunchPlan(AppEntryLaunchKind.File, identity, FileTarget: target);
     }
 }

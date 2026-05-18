@@ -7,7 +7,7 @@ namespace RunFence.Account.UI.AppContainer;
 /// Dialog for browsing registered COM AppID objects from the registry.
 /// Enumerates HKCR\AppID subkeys with CLSID format and a non-empty display name.
 /// </summary>
-public partial class ComBrowserDialog : Form
+public partial class ComBrowserDialog : RunFence.UI.Forms.ContextHelpForm
 {
     public string? SelectedAppId { get; private set; }
 

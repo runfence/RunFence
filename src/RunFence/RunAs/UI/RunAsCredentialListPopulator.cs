@@ -13,11 +13,12 @@ namespace RunFence.RunAs.UI;
 /// Handles populating and restoring selection in the credential list box for <see cref="RunAsDialog"/>.
 /// </summary>
 public class RunAsCredentialListPopulator(
-    ISidResolver sidResolver,
-    IProfilePathResolver profilePathResolver,
+    CredentialDisplayItemFactory displayItemFactory,
     ILocalUserProvider localUserProvider,
     CredentialFilterHelper credentialFilterHelper)
 {
+    private readonly CredentialDisplayItemFactory _displayItemFactory = displayItemFactory;
+
     private ListBox _listBox = null!;
     private List<CredentialEntry> _credentials = null!;
     private IReadOnlyDictionary<string, string>? _sidNames;
@@ -63,14 +64,18 @@ public class RunAsCredentialListPopulator(
 
         if (_showSystemAccount)
         {
-            var systemCred = new CredentialEntry { Id = Guid.NewGuid(), Sid = Core.SidConstants.SystemSid };
-            _listBox.Items.Add(new CredentialDisplayItem(systemCred, sidResolver, profilePathResolver, _sidNames, hasStoredCredential: false));
+            _listBox.Items.Add(_displayItemFactory.Create(
+                _credentials,
+                Core.SidConstants.SystemSid,
+                _sidNames,
+                isEphemeral: false,
+                hasStoredCredentialOverride: false));
             representedSids.Add(Core.SidConstants.SystemSid);
         }
 
         foreach (var cred in credentialFilterHelper.FilterResolvableCredentials(_credentials, _sidNames))
         {
-            _listBox.Items.Add(new CredentialDisplayItem(cred, sidResolver, profilePathResolver, _sidNames));
+            _listBox.Items.Add(_displayItemFactory.Create(cred, _sidNames));
             if (!string.IsNullOrEmpty(cred.Sid))
                 representedSids.Add(cred.Sid);
         }
@@ -91,8 +96,12 @@ public class RunAsCredentialListPopulator(
                     if (interactiveSid != null && string.Equals(user.Sid, interactiveSid, StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = user.Sid };
-                    _listBox.Items.Add(new CredentialDisplayItem(transient, sidResolver, profilePathResolver, _sidNames, hasStoredCredential: false));
+                    _listBox.Items.Add(_displayItemFactory.Create(
+                        _credentials,
+                        user.Sid,
+                        _sidNames,
+                        isEphemeral: false,
+                        hasStoredCredentialOverride: false));
                     representedSids.Add(user.Sid);
                 }
             }
@@ -104,15 +113,18 @@ public class RunAsCredentialListPopulator(
 
         if (interactiveSid != null && !representedSids.Contains(interactiveSid))
         {
-            var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = interactiveSid };
-            _listBox.Items.Add(new CredentialDisplayItem(transient, sidResolver, profilePathResolver, _sidNames));
+            _listBox.Items.Add(_displayItemFactory.Create(_credentials, interactiveSid, _sidNames));
             representedSids.Add(interactiveSid);
         }
 
         if (!string.IsNullOrEmpty(_initialAccountSid) && !representedSids.Contains(_initialAccountSid))
         {
-            var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = _initialAccountSid };
-            _listBox.Items.Add(new CredentialDisplayItem(transient, sidResolver, profilePathResolver, _sidNames, hasStoredCredential: false));
+            _listBox.Items.Add(_displayItemFactory.Create(
+                _credentials,
+                _initialAccountSid,
+                _sidNames,
+                isEphemeral: false,
+                hasStoredCredentialOverride: false));
         }
 
         _listBox.Items.Add(new CreateAccountItem());

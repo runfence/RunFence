@@ -11,7 +11,8 @@ public class MainConfigImportRepairService(
     IHandlerMappingService handlerMappingService,
     IPathGrantService pathGrantService,
     ILoggingService log,
-    IAppEntryIdGenerator idGenerator)
+    IAppEntryIdGenerator idGenerator,
+    AppIdValidator appIdValidator)
 {
     public void ClearImportedAppTimestamps(AppDatabase importedDb)
     {
@@ -24,7 +25,42 @@ public class MainConfigImportRepairService(
             .Where(app => appConfigService.GetConfigPath(app.Id) != null)
             .ToList();
 
-    public void RemoveOrphanedGrantAces(
+    public MainConfigImportRepairPlan PrepareAdditionalAppIdRepairs(
+        AppDatabase importedDb,
+        List<AppEntry> additionalApps)
+    {
+        var importedIds = importedDb.Apps
+            .Select(app => app.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var repairedAdditionalApps = additionalApps
+            .Select(app => app.Clone())
+            .ToList();
+        var renames = new List<MainConfigAdditionalAppIdRename>();
+
+        for (var i = 0; i < repairedAdditionalApps.Count; i++)
+        {
+            var app = repairedAdditionalApps[i];
+            appIdValidator.EnsureValidAppId(app.Id, $"Loaded app ID for '{app.Name}'");
+
+            if (!importedIds.Contains(app.Id))
+                continue;
+
+            var oldAppId = app.Id;
+            var configPath = appConfigService.GetConfigPath(additionalApps[i].Id);
+            var newAppId = idGenerator.GenerateUniqueId(importedIds.Concat(repairedAdditionalApps.Select(a => a.Id)));
+            log.Info($"ImportMainConfig: additional app '{app.Name}' had ID collision, regenerated: {oldAppId} -> {newAppId}");
+
+            app.Id = newAppId;
+            importedIds.Add(newAppId);
+
+            if (configPath != null)
+                renames.Add(new MainConfigAdditionalAppIdRename(configPath, oldAppId, newAppId));
+        }
+
+        return new MainConfigImportRepairPlan(repairedAdditionalApps, renames, []);
+    }
+
+    public List<string> GetOrphanedGrantSids(
         AppDatabase database,
         AppDatabase importedDb,
         List<AppEntry> additionalApps)
@@ -44,8 +80,7 @@ public class MainConfigImportRepairService(
             .Where(sid => !incomingSids.Contains(sid) && !additionalSids.Contains(sid))
             .ToList();
 
-        foreach (var sid in orphanedSids)
-            pathGrantService.RemoveAll(sid, updateFileSystem: true);
+        return orphanedSids;
     }
 
     public void RepairImportedAppIdCollisions(AppDatabase importedDb)
@@ -53,6 +88,8 @@ public class MainConfigImportRepairService(
         var importedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var app in importedDb.Apps)
         {
+            appIdValidator.EnsureValidAppId(app.Id, $"Imported app ID for '{app.Name}'");
+
             if (importedIds.Add(app.Id))
                 continue;
 
@@ -63,29 +100,28 @@ public class MainConfigImportRepairService(
         }
     }
 
-    public void RepairAdditionalAppIdCollisions(AppDatabase importedDb, List<AppEntry> additionalApps)
+    public void ApplyAdditionalAppIdRepairs(MainConfigImportRepairPlan repairPlan)
     {
-        var importedIds = importedDb.Apps
-            .Select(app => app.Id)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var app in additionalApps)
+        foreach (var rename in repairPlan.AdditionalAppIdRenames)
         {
-            if (!importedIds.Contains(app.Id))
-                continue;
-
-            var oldAppId = app.Id;
-            var configPath = appConfigService.GetConfigPath(oldAppId);
-            var newAppId = idGenerator.GenerateUniqueId(importedIds.Concat(additionalApps.Select(additionalApp => additionalApp.Id)));
-            log.Info($"ImportMainConfig: additional app '{app.Name}' had ID collision, regenerated: {oldAppId} -> {newAppId}");
-
-            app.Id = newAppId;
-            importedIds.Add(newAppId);
-
-            appConfigService.RemoveApp(oldAppId);
-            appConfigService.AssignApp(newAppId, configPath);
-            if (configPath != null)
-                handlerMappingService.RenameAppIdInConfigMappings(configPath, oldAppId, newAppId);
+            appConfigService.RemoveApp(rename.OldAppId);
+            appConfigService.AssignApp(rename.NewAppId, rename.ConfigPath);
+            handlerMappingService.RenameAppIdInConfigMappings(
+                rename.ConfigPath,
+                rename.OldAppId,
+                rename.NewAppId);
         }
+    }
+
+    public IReadOnlyList<string> ApplyOrphanedGrantRemovals(MainConfigImportRepairPlan repairPlan)
+    {
+        var warnings = new List<string>();
+        foreach (var sid in repairPlan.OrphanedGrantSids)
+        {
+            var result = pathGrantService.RemoveAll(sid);
+            warnings.AddRange(result.Warnings.Select(GrantApplyFailureFormatter.Format));
+        }
+
+        return warnings;
     }
 }

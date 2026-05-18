@@ -3,6 +3,31 @@ param([string]$Configuration = "Release")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 
+function Assert-InstallerArpLinksConfigured([string]$wxsPath) {
+    $xml = [xml](Get-Content $wxsPath -Raw -Encoding UTF8)
+    $ns = [System.Xml.XmlNamespaceManager]::new($xml.NameTable)
+    $ns.AddNamespace("w", "http://wixtoolset.org/schemas/v4/wxs")
+
+    $placeholderPattern = 'your-repo-url-here|placeholder|example\.com|contoso'
+    foreach ($propertyId in @("ARPHELPLINK", "ARPURLINFOABOUT")) {
+        $node = $xml.SelectSingleNode("//w:Property[@Id='$propertyId']", $ns)
+        if ($null -eq $node) {
+            throw "Missing required WiX property '$propertyId' in $wxsPath."
+        }
+
+        $value = $node.GetAttribute("Value")
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            throw "WiX property '$propertyId' must not be empty."
+        }
+
+        if ($value -match $placeholderPattern) {
+            throw "WiX property '$propertyId' still contains placeholder text: $value"
+        }
+    }
+}
+
+Assert-InstallerArpLinksConfigured "$PSScriptRoot/RunFence.wxs"
+
 # 0. Ensure required WiX extensions are installed
 wix extension add --global WixToolset.BootstrapperApplications.wixext/6.0.0
 wix extension add --global WixToolset.Netfx.wixext/6.0.0
@@ -189,6 +214,8 @@ Invoke-Sign "$PSScriptRoot/Output/$outputName.msi"
 $dotnetRuntime = "$PSScriptRoot/dotnet-runtime-10-win-x64.exe"
 $dotnetRuntimeUrlFile = "$PSScriptRoot/dotnet-runtime-10-win-x64.url"
 if ((Test-Path $dotnetRuntime) -and (Test-Path $dotnetRuntimeUrlFile)) {
+    # Installer build keeps this runtime download cache to avoid repeat fetches during local builds;
+    # cache storage is build-local and intentionally not part of the installed MSI state.
     $dotnetDownloadUrl = (Get-Content $dotnetRuntimeUrlFile -Raw).Trim()
     Write-Host "Using cached .NET 10 Windows Desktop Runtime."
 } else {

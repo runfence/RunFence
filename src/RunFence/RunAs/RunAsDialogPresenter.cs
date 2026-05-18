@@ -4,6 +4,7 @@ using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.RunAs.UI;
 using RunFence.RunAs.UI.Forms;
+using RunFence.Startup.UI;
 
 namespace RunFence.RunAs;
 
@@ -38,7 +39,10 @@ public class RunAsDialogPresenter(
         {
             var startupUnlockApprovedByAdmin = startupUnlockGrant.TryConsume();
             var unlockApprovedByAdmin = isAdmin || startupUnlockApprovedByAdmin;
-            if (!await appLock.TryUnlockForOperationAsync(unlockApprovedByAdmin))
+            var unlockResult = await appLock.TryUnlockForOperationWithResultAsync(unlockApprovedByAdmin);
+            if (unlockResult is OperationUnlockResult.Declined or OperationUnlockResult.Failed)
+                postDialogRouter.RecordUnlockDecline();
+            if (unlockResult != OperationUnlockResult.Succeeded)
             {
                 return null;
             }
@@ -94,7 +98,7 @@ public class RunAsDialogPresenter(
             }
         });
 
-        return postDialogRouter.Route(
+        return await postDialogRouter.RouteAsync(
             dlgResult,
             capturedResult,
             createNewAccountRequested,

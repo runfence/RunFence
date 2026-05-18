@@ -42,6 +42,21 @@ public class IpcPipeSecurityFactoryTests
         AssertCallerRule(rules, WellKnownSidType.RestrictedCodeSid);
     }
 
+    [Fact]
+    public void NetworkSid_IsExplicitlyDeniedFullControl()
+    {
+        var securityFactory = new IpcPipeSecurityFactory(new CurrentProcessSidProvider());
+        var rules = securityFactory.Create()
+            .GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier))
+            .OfType<PipeAccessRule>()
+            .ToList();
+
+        var networkSid = new SecurityIdentifier(WellKnownSidType.NetworkSid, null);
+        var denyRule = Assert.Single(rules, r =>
+            r.IdentityReference.Equals(networkSid) && r.AccessControlType == AccessControlType.Deny);
+        Assert.True(denyRule.PipeAccessRights.HasFlag(PipeAccessRights.FullControl));
+    }
+
     private static void AssertCallerRule(List<PipeAccessRule> rules, WellKnownSidType sidType)
     {
         var sid = new SecurityIdentifier(sidType, null);

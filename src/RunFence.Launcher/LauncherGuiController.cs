@@ -5,20 +5,24 @@ namespace RunFence.Launcher;
 
 public class LauncherGuiController : ILauncherGuiController
 {
-    public bool IsGuiRunning()
+    public LauncherGuiInstanceState GetGuiState()
     {
         try
         {
             using var mutex = Mutex.OpenExisting(IpcConstants.MutexName);
-            return true;
+            return IsRunFenceRunningInCurrentSession()
+                ? LauncherGuiInstanceState.RunningInCurrentSession
+                : LauncherGuiInstanceState.RunningInDifferentSession;
         }
         catch (WaitHandleCannotBeOpenedException)
         {
-            return false;
+            return LauncherGuiInstanceState.NotRunning;
         }
         catch (UnauthorizedAccessException)
         {
-            return true;
+            return IsRunFenceRunningInCurrentSession()
+                ? LauncherGuiInstanceState.RunningInCurrentSession
+                : LauncherGuiInstanceState.RunningInDifferentSession;
         }
     }
 
@@ -50,5 +54,36 @@ public class LauncherGuiController : ILauncherGuiController
         {
             return false;
         }
+    }
+
+    protected virtual int GetCurrentSessionId() => Process.GetCurrentProcess().SessionId;
+
+    protected virtual IReadOnlyList<Process> GetRunFenceProcesses() => Process.GetProcessesByName("RunFence");
+
+    private bool IsRunFenceRunningInCurrentSession()
+    {
+        var processes = GetRunFenceProcesses();
+        try
+        {
+            var currentSessionId = GetCurrentSessionId();
+            foreach (var process in processes)
+            {
+                try
+                {
+                    if (process.SessionId == currentSessionId)
+                        return true;
+                }
+                catch
+                {
+                }
+            }
+        }
+        finally
+        {
+            foreach (var process in processes)
+                process.Dispose();
+        }
+
+        return false;
     }
 }

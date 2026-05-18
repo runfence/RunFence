@@ -1,30 +1,19 @@
 using System.Security.AccessControl;
-using System.Security.Principal;
-using RunFence.Acl;
-using RunFence.Acl.Permissions;
 using RunFence.Core;
+using RunFence.Acl.Permissions;
 
 namespace RunFence.PrefTrans;
 
 public class SettingsTransferService(
     ILoggingService log,
     IPrefTransLauncher launcher,
-    IPathGrantService pathGrantService,
+    Func<ISettingsTransferAccessGrantService> accessGrantServiceFactory,
+    ISettingsTransferStagingService stagingService,
     IInteractiveUserResolver interactiveUserResolver,
     string baseDirectory)
     : ISettingsTransferService
 {
-    /// <summary>
-    /// Base directory used to locate <c>preftrans.exe</c>.
-    /// </summary>
     public string BaseDirectory { get; } = baseDirectory;
-
-    /// <summary>
-    /// Returns the shared ProgramData temp directory path used for preftrans log files and settings copies.
-    /// The directory is not created by this method — callers call <see cref="Directory.CreateDirectory"/> as needed.
-    /// </summary>
-    public static string GetSharedTempDir() =>
-        Path.Combine(PathConstants.ProgramDataDir, "temp");
 
     public bool ValidatePrefTransExists(out string expectedPath)
     {
@@ -49,7 +38,62 @@ public class SettingsTransferService(
             return new SettingsTransferResult(false, noSessionMsg);
         }
 
-        return launcher.RunAndWait(prefTransPath, "store", outputFilePath, interactiveSid, timeoutMs, pollCallback);
+        var accessGrantService = accessGrantServiceFactory();
+        bool databaseModified = false;
+        if (string.Equals(interactiveSid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var exeDir = Path.GetDirectoryName(prefTransPath)!;
+                databaseModified |= EnsureDurableTransferToolAccess(accessGrantService, interactiveSid, exeDir, FileSystemRights.ReadAndExecute);
+                databaseModified |= EnsureTransferAccess(accessGrantService, interactiveSid, outputFilePath, FileSystemRights.Write | FileSystemRights.Synchronize, isDirectory: false);
+                var launcherResult = launcher.RunAndWait(prefTransPath, "store", outputFilePath, interactiveSid, timeoutMs, pollCallback);
+                return launcherResult with { DatabaseModified = launcherResult.DatabaseModified || databaseModified };
+            }
+            catch (OperationCanceledException)
+            {
+                return new SettingsTransferResult(false, "Permission grant was declined.");
+            }
+            catch (Exception ex)
+            {
+                log.Error("Settings export failed", ex);
+                return new SettingsTransferResult(false, $"Export failed: {ex.Message}");
+            }
+            finally
+            {
+                accessGrantService.CleanupTemporaryGrant();
+            }
+        }
+
+        var tempDirPath = stagingService.CreateSharedTempDirectoryPath();
+        var tempOutputPath = Path.Combine(tempDirPath, "settings.json");
+
+        try
+        {
+            stagingService.CreateRestrictedExportDirectory(tempDirPath, interactiveSid);
+            databaseModified |= EnsureDurableTransferToolAccess(accessGrantService, interactiveSid, Path.GetDirectoryName(prefTransPath)!, FileSystemRights.ReadAndExecute);
+
+            var launcherResult = launcher.RunAndWait(prefTransPath, "store", tempOutputPath, interactiveSid, timeoutMs, pollCallback);
+            if (!launcherResult.Success)
+                return launcherResult with { DatabaseModified = launcherResult.DatabaseModified || databaseModified };
+
+            stagingService.CopyExportFileToDestination(tempOutputPath, outputFilePath);
+            return launcherResult with { DatabaseModified = launcherResult.DatabaseModified || databaseModified };
+        }
+        catch (OperationCanceledException)
+        {
+            return new SettingsTransferResult(false, "Permission grant was declined.");
+        }
+        catch (Exception ex)
+        {
+            log.Error("Settings export failed", ex);
+            return new SettingsTransferResult(false, $"Export failed: {ex.Message}");
+        }
+        finally
+        {
+            accessGrantService.CleanupTemporaryGrant();
+            stagingService.TryDeleteTempDirectory(tempDirPath);
+        }
     }
 
     public SettingsTransferResult Import(string settingsFilePath, string accountSid,
@@ -62,14 +106,69 @@ public class SettingsTransferService(
             return new SettingsTransferResult(false, notFoundMsg);
         }
 
-        bool dbModified = false;
+        var accessGrantService = accessGrantServiceFactory();
+        bool databaseModified = false;
+        var interactiveUserSid = interactiveUserResolver.GetInteractiveUserSid();
+        if (string.Equals(accountSid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase)
+            || string.Equals(accountSid, interactiveUserSid, StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var exeDir = Path.GetDirectoryName(prefTransPath)!;
+                databaseModified |= EnsureDurableTransferToolAccess(accessGrantService, accountSid, exeDir, FileSystemRights.ReadAndExecute);
+                databaseModified |= EnsureTransferAccess(accessGrantService, accountSid, settingsFilePath, FileSystemRights.Read | FileSystemRights.Synchronize, isDirectory: false);
+                var launcherResult = launcher.RunAndWait(prefTransPath, "load", settingsFilePath, accountSid, timeoutMs, pollCallback);
+                return launcherResult with { DatabaseModified = launcherResult.DatabaseModified || databaseModified };
+            }
+            catch (OperationCanceledException)
+            {
+                return new SettingsTransferResult(false, "Permission grant was declined.");
+            }
+            catch (Exception ex)
+            {
+                log.Error("Settings import failed", ex);
+                return new SettingsTransferResult(false, $"Import failed: {ex.Message}");
+            }
+            finally
+            {
+                accessGrantService.CleanupTemporaryGrant();
+            }
+        }
+
+        if (interactiveUserSid == null)
+        {
+            var noSessionMsg = "Cannot import desktop settings through temporary staging: no interactive user session is active.";
+            log.Error(noSessionMsg);
+            return new SettingsTransferResult(false, noSessionMsg);
+        }
+
+        var tempSettingsPath = stagingService.CreateSharedTempFilePath("json");
+        var tempDirectory = Path.GetDirectoryName(tempSettingsPath);
+        if (tempDirectory == null)
+        {
+            log.Error("Failed to create temporary import path.");
+            return new SettingsTransferResult(false, "Failed to create temporary import path.");
+        }
+
         try
         {
             var exeDir = Path.GetDirectoryName(prefTransPath)!;
-            dbModified = pathGrantService.EnsureAccess(accountSid, exeDir,
-                FileSystemRights.ReadAndExecute, confirm: null).DatabaseModified;
-            dbModified |= pathGrantService.EnsureAccess(accountSid, settingsFilePath,
-                FileSystemRights.Read | FileSystemRights.Synchronize, confirm: null).DatabaseModified;
+            databaseModified |= EnsureDurableTransferToolAccess(accessGrantService, accountSid, exeDir, FileSystemRights.ReadAndExecute);
+            stagingService.CopyImportFileToRestrictedTemp(settingsFilePath, tempSettingsPath, interactiveUserSid);
+
+            var cleanupResult = accessGrantService.TryEnsureAccessForCleanup(
+                accountSid,
+                tempSettingsPath,
+                FileSystemRights.Read | FileSystemRights.Synchronize,
+                isDirectory: false);
+            if (!cleanupResult.Succeeded)
+                throw new InvalidOperationException(cleanupResult.WarningMessage ?? $"Failed to ensure cleanup access to '{tempSettingsPath}'.");
+
+            if (!string.IsNullOrWhiteSpace(cleanupResult.WarningMessage))
+                log.Warn(cleanupResult.WarningMessage);
+
+            var launcherResult = launcher.RunAndWait(prefTransPath, "load", tempSettingsPath, accountSid, timeoutMs, pollCallback);
+            return launcherResult with { DatabaseModified = launcherResult.DatabaseModified || databaseModified };
         }
         catch (OperationCanceledException)
         {
@@ -77,71 +176,45 @@ public class SettingsTransferService(
         }
         catch (Exception ex)
         {
-            log.Warn($"Permission check failed, proceeding anyway: {ex.Message}");
-        }
-
-        if (string.Equals(accountSid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase)
-            || string.Equals(accountSid, interactiveUserResolver.GetInteractiveUserSid(), StringComparison.OrdinalIgnoreCase))
-        {
-            // De-elevated launch: the process runs as the current or interactive user who already has
-            // access to settingsFilePath. No temp copy is needed — pass the file directly.
-            var launcherResult = launcher.RunAndWait(prefTransPath, "load", settingsFilePath, accountSid, timeoutMs, pollCallback);
-            return launcherResult with { DatabaseModified = dbModified };
-        }
-
-        // Credentials path: copy to a shared ProgramData location and restrict access to the target
-        // user so the process launched with their credentials can read the settings file.
-        var sharedTempDir = GetSharedTempDir();
-        var tempSettingsPath = Path.Combine(sharedTempDir, $"rfn_import_{Guid.NewGuid():N}.json");
-
-        try
-        {
-            Directory.CreateDirectory(sharedTempDir);
-            var fileSecurity = BuildRestrictedFileSecurity(accountSid);
-            using (var dst = FileSystemAclExtensions.Create(new FileInfo(tempSettingsPath), FileMode.CreateNew, FileSystemRights.Write, FileShare.None, 4096, FileOptions.None, fileSecurity))
-            using (var src = File.OpenRead(settingsFilePath))
-                src.CopyTo(dst);
-
-            var launcherResult = launcher.RunAndWait(prefTransPath, "load", tempSettingsPath, accountSid, timeoutMs, pollCallback);
-            return launcherResult with { DatabaseModified = dbModified };
-        }
-        catch (Exception ex)
-        {
             log.Error("Settings import failed", ex);
-            return new SettingsTransferResult(false, $"Import failed: {ex.Message}", dbModified);
+            return new SettingsTransferResult(false, $"Import failed: {ex.Message}");
         }
         finally
         {
-            try
-            {
-                if (File.Exists(tempSettingsPath))
-                    File.Delete(tempSettingsPath);
-            }
-            catch
-            {
-            } // best-effort cleanup
+            accessGrantService.CleanupTemporaryGrant();
+            stagingService.TryDeleteTempFile(tempSettingsPath);
+            stagingService.TryDeleteTempDirectory(tempDirectory);
         }
     }
 
-    private static FileSecurity BuildRestrictedFileSecurity(string accountSid)
+    private bool EnsureTransferAccess(
+        ISettingsTransferAccessGrantService accessGrantService,
+        string sid,
+        string path,
+        FileSystemRights rights,
+        bool isDirectory)
     {
-        var security = new FileSecurity();
-        security.SetAccessRuleProtection(true, false);
+        var result = accessGrantService.TryEnsureAccess(sid, path, rights, isDirectory);
+        if (!result.Succeeded)
+            throw new InvalidOperationException(result.WarningMessage ?? $"Failed to ensure access to '{path}'.");
 
-        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        security.AddAccessRule(new FileSystemAccessRule(
-            admins, FileSystemRights.FullControl, AccessControlType.Allow));
+        if (!string.IsNullOrWhiteSpace(result.WarningMessage))
+            log.Warn(result.WarningMessage);
+        return result.GrantCreated;
+    }
 
-        var currentUser = WindowsIdentity.GetCurrent().User;
-        if (currentUser != null)
-            security.AddAccessRule(new FileSystemAccessRule(
-                currentUser, FileSystemRights.FullControl, AccessControlType.Allow));
+    private bool EnsureDurableTransferToolAccess(
+        ISettingsTransferAccessGrantService accessGrantService,
+        string sid,
+        string path,
+        FileSystemRights rights)
+    {
+        var result = accessGrantService.TryEnsureDurableAccess(sid, path, rights);
+        if (!result.Succeeded)
+            throw new InvalidOperationException(result.WarningMessage ?? $"Failed to ensure durable access to '{path}'.");
 
-        security.AddAccessRule(new FileSystemAccessRule(
-            new SecurityIdentifier(accountSid),
-            FileSystemRights.Read | FileSystemRights.Synchronize,
-            AccessControlType.Allow));
-
-        return security;
+        if (!string.IsNullOrWhiteSpace(result.WarningMessage))
+            log.Warn(result.WarningMessage);
+        return result.GrantCreated;
     }
 }

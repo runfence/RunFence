@@ -1,4 +1,4 @@
-using RunFence.Account.UI.Forms;
+using RunFence.Account.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Firewall.UI;
@@ -19,7 +19,8 @@ public class RunAsAccountSettingsApplier(
     IDatabaseService databaseService,
     ILoggingService log,
     ISettingsTransferService settingsTransferService,
-    FirewallApplyHelper firewallApplyHelper)
+    FirewallApplyHelper firewallApplyHelper,
+    IAccountCreationProgressRunner progressRunner)
 {
     /// <summary>
     /// Applies the privilege level default for a newly created account.
@@ -48,7 +49,7 @@ public class RunAsAccountSettingsApplier(
     /// Runs post-creation tasks (settings import, config save, firewall rule enforcement) with
     /// a progress dialog when needed. Collects errors into the provided list.
     /// </summary>
-    public void RunPostCreationTasks(
+    public async Task RunPostCreationTasksAsync(
         string sid,
         string username,
         string? settingsImportPath,
@@ -58,21 +59,20 @@ public class RunAsAccountSettingsApplier(
         bool needsProgress = settingsImportPath != null || firewallSettingsChanged;
         if (needsProgress)
         {
-            using var progressForm = new AccountCreationProgressForm();
-            progressForm.Shown += async (_, _) =>
+            await progressRunner.RunAsync(async progress =>
             {
                 try
                 {
                     if (settingsImportPath != null)
                     {
-                        progressForm.SetStatus($"Importing desktop settings for {username}...");
+                        progress.SetStatus($"Importing desktop settings for {username}...");
                         try
                         {
-                            var (error, _) = await SettingsImportHelper.ImportAsync(
+                            var importResult = await SettingsImportHelper.ImportAsync(
                                 settingsImportPath, sid,
                                 settingsTransferService);
-                            if (error != null)
-                                errors.Add($"Settings import: {error}");
+                            if (importResult.Status != SettingsImportStatus.Succeeded)
+                                errors.Add($"Settings import: {string.Join("; ", importResult.Errors)}");
                         }
                         catch (Exception ex)
                         {
@@ -85,7 +85,7 @@ public class RunAsAccountSettingsApplier(
 
                     if (firewallSettingsChanged)
                     {
-                        progressForm.SetStatus($"Applying firewall rules for {username}...");
+                        progress.SetStatus($"Applying firewall rules for {username}...");
                         var displayName = appState.Database.SidNames.GetValueOrDefault(sid)
                                           ?? username;
                         var fwSettings = appState.Database.GetAccount(sid)?.Firewall
@@ -105,12 +105,7 @@ public class RunAsAccountSettingsApplier(
                     log.Error($"Account post-creation setup failed for {username}", ex);
                     errors.Add($"Account setup: {ex.Message}");
                 }
-                finally
-                {
-                    progressForm.DialogResult = DialogResult.OK;
-                }
-            };
-            progressForm.ShowDialog();
+            });
         }
         else
         {
@@ -120,7 +115,9 @@ public class RunAsAccountSettingsApplier(
 
     private void SaveConfig()
     {
-        using var scope = session.PinDerivedKey.Unprotect();
-        databaseService.SaveConfig(appState.Database, scope.Data, session.CredentialStore.ArgonSalt);
+        databaseService.SaveConfig(
+            appState.Database,
+            session.PinDerivedKey,
+            session.CredentialStore.ArgonSalt);
     }
 }

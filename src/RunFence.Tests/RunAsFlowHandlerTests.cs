@@ -210,7 +210,8 @@ public class RunAsFlowHandlerTests
             .Callback<Action>(_ =>
             {
                 firstCallStarted.Set();
-                allowFirstToComplete.Wait(TimeSpan.FromSeconds(2));
+                Assert.True(allowFirstToComplete.Wait(TimeSpan.FromSeconds(2)),
+                    "First RunAs call should remain blocked until signaled.");
                 // Deliberately do NOT invoke the action: the async UI-thread work (HandleRunAsOnUIThreadAsync)
                 // would call MessageBox.Show for a non-existent path, which blocks in a test environment.
                 // The concurrent guard (_runAsInProgress) is set BEFORE BeginInvoke is called and is
@@ -219,9 +220,14 @@ public class RunAsFlowHandlerTests
 
         var handler = CreateHandler();
 
-        // First call on a background thread — holds _runAsInProgress during BeginInvoke
-        var firstTask = Task.Run(() => handler.HandleRunAs(MakeMessage(ValidLocalPath), MakeContext()));
-        firstCallStarted.Wait(TimeSpan.FromSeconds(2));
+        // First call on a background thread – holds _runAsInProgress during BeginInvoke
+        var firstTask = Task.Factory.StartNew(
+            () => handler.HandleRunAs(MakeMessage(ValidLocalPath), MakeContext()),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Assert.True(firstCallStarted.Wait(TimeSpan.FromSeconds(2)),
+            "First call should reach BeginInvoke before issuing concurrent request.");
 
         // Second call on this thread: concurrent guard must reject it
         var secondResponse = handler.HandleRunAs(MakeMessage(ValidLocalPath), MakeContext());
@@ -347,24 +353,21 @@ public class RunAsFlowHandlerTests
     }
 
     [Fact]
-    public void TriggerFromUI_WhenUnlockPolling_StartsRunAsFlow()
+    public async Task TriggerFromUIAsync_WhenUnlockPolling_StartsRunAsFlow()
     {
-        using var resetCalled = new ManualResetEventSlim();
-        using var pinKey = new ProtectedBuffer(new byte[32], protect: false);
-        var session = new SessionContext
-        {
+        using var pinKey = TestSecretFactory.Create(32);
+        using var session = new SessionContext
+{
             Database = _appState.Object.Database,
             CredentialStore = new CredentialStore(),
-            PinDerivedKey = pinKey
-        };
+        }.WithOwnedPinDerivedKey(pinKey);
         _appLock.Setup(l => l.IsUnlockPolling).Returns(true);
         _appLock.Setup(l => l.TryUnlockForOperationAsync(true)).ReturnsAsync(true);
-        _idleMonitor.Setup(m => m.ResetIdleTimer()).Callback(resetCalled.Set);
         var handler = CreateHandler(CreateNoOpDialogPresenter(session));
 
-        handler.TriggerFromUI(ValidLocalPath);
+        await handler.TriggerFromUIAsync(ValidLocalPath);
 
-        Assert.True(resetCalled.Wait(1000));
+        _idleMonitor.Verify(m => m.ResetIdleTimer(), Times.Once);
     }
 
     private RunAsDialogPresenter CreateNoOpDialogPresenter(SessionContext session)
@@ -377,7 +380,7 @@ public class RunAsFlowHandlerTests
             new RunAsCredentialPersister(
                 _appState.Object,
                 session,
-                new Mock<ICredentialEncryptionService>().Object,
+                new ByteArrayCredentialEncryptionSpanAdapter(new Mock<IByteArrayCredentialEncryptionService>().Object),
                 new Mock<IDatabaseService>().Object,
                 _log.Object),
             _appState.Object,
@@ -432,14 +435,20 @@ public class RunAsFlowHandlerTests
             .Callback<Action>(_ =>
             {
                 firstCallStarted.Set();
-                allowFirstToComplete.Wait(TimeSpan.FromSeconds(2));
+                Assert.True(allowFirstToComplete.Wait(TimeSpan.FromSeconds(2)),
+                    "First RunAs call should remain blocked until signaled.");
             });
 
         var handler = CreateHandler();
 
         // First call via HandleRunAs: sets _runAsInProgress = 1, blocks inside BeginInvoke
-        var firstTask = Task.Run(() => handler.HandleRunAs(MakeMessage(ValidLocalPath), MakeContext()));
-        firstCallStarted.Wait(TimeSpan.FromSeconds(2));
+        var firstTask = Task.Factory.StartNew(
+            () => handler.HandleRunAs(MakeMessage(ValidLocalPath), MakeContext()),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Assert.True(firstCallStarted.Wait(TimeSpan.FromSeconds(2)),
+            "First call should reach BeginInvoke before concurrent TriggerFromUI request.");
 
         // Second call via TriggerFromUI: concurrent guard must fire → returns immediately
         handler.TriggerFromUI(ValidLocalPath);

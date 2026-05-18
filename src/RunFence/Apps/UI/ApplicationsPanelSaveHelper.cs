@@ -16,8 +16,7 @@ public class ApplicationsPanelSaveHelper(IAppConfigService appConfigService, ISe
     public void SaveAll()
     {
         var session = sessionProvider.GetSession();
-        using var scope = session.PinDerivedKey.Unprotect();
-        appConfigService.SaveAllConfigs(session.Database, scope.Data, session.CredentialStore.ArgonSalt);
+        appConfigService.SaveAllConfigs(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
     }
 
     /// <summary>
@@ -26,7 +25,6 @@ public class ApplicationsPanelSaveHelper(IAppConfigService appConfigService, ISe
     public void SaveForApp(string appId)
     {
         var session = sessionProvider.GetSession();
-        using var scope = session.PinDerivedKey.Unprotect();
-        appConfigService.SaveConfigForApp(appId, session.Database, scope.Data, session.CredentialStore.ArgonSalt);
+        appConfigService.SaveConfigForApp(appId, session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
     }
 }

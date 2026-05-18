@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI.Forms;
+using RunFence.Core.Infrastructure;
 using RunFence.Infrastructure;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
@@ -93,7 +94,8 @@ public partial class AppPathBrowseControl : UserControl
         Cursor = Cursors.WaitCursor;
         try
         {
-            var apps = await Task.Run(() => _discoveryService.DiscoverApps());
+            var apps = await Task.Run(() =>
+                ShortcutClassificationHelper.ExcludeSystemExecutables(_discoveryService.DiscoverApps()));
             if (IsDisposed) return;
 
             using var dlg = new AppDiscoveryDialog(apps, _iconHelper);

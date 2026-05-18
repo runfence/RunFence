@@ -24,6 +24,7 @@ public class AclManagerExportImportTests
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IPathGrantService> _pathGrantService = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
+    private readonly Mock<ISpecificContainerAceConflictDetector> _specificContainerAceConflictDetector = new();
 
     private AclManagerExportImport CreateImport(
         AppDatabase? db = null,
@@ -37,10 +38,27 @@ public class AclManagerExportImportTests
         var importProcessor = new AclImportProcessor(
             _log.Object,
             dbProvider,
-            new GrantTraversePathResolver(new TestFileSystemPathInfo()));
-        var exportImport = new AclManagerExportImport(_pathGrantService.Object, _aclPermission.Object, _log.Object, dbProvider, importProcessor);
+            new GrantTraversePathResolver(new TestFileSystemPathInfo()),
+            _specificContainerAceConflictDetector.Object);
+        var exportImport = new AclManagerExportImport(
+            _pathGrantService.Object,
+            _aclPermission.Object,
+            _log.Object,
+            dbProvider,
+            new TraverseGrantOwnerResolver(),
+            importProcessor);
         exportImport.Initialize(pending, sid, isContainer, owner: new NullWin32Window());
         return exportImport;
+    }
+
+    private AclImportProcessor CreateImportProcessor(AppDatabase? db = null)
+    {
+        db ??= new AppDatabase();
+        return new AclImportProcessor(
+            _log.Object,
+            new LambdaDatabaseProvider(() => db),
+            new GrantTraversePathResolver(new TestFileSystemPathInfo()),
+            _specificContainerAceConflictDetector.Object);
     }
 
     // --- Serialization format ---
@@ -116,6 +134,173 @@ public class AclManagerExportImportTests
         Assert.Equal(original, restored);
     }
 
+    [Fact]
+    public void BuildFullExportData_ExportsCommittedPendingAndTraverseEntriesWithExactRights()
+    {
+        var db = new AppDatabase();
+        db.GetOrCreateAccount(TestSid).Grants.Add(new GrantedPathEntry
+        {
+            Path = @"C:\Committed\App.exe",
+            IsDeny = false,
+            SavedRights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: true)
+        });
+        db.GetOrCreateAccount(TestSid).Grants.Add(new GrantedPathEntry
+        {
+            Path = @"C:\Committed\Traverse",
+            IsTraverseOnly = true
+        });
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingAdds[(@"C:\Pending\Denied.txt", true)] = new GrantedPathEntry
+        {
+            Path = @"C:\Pending\Denied.txt",
+            IsDeny = true,
+            SavedRights = new SavedRightsState(Execute: true, Write: false, Read: true, Special: false, Own: false)
+        };
+        pending.PendingTraverseAdds[@"C:\Pending\Traverse"] = new GrantedPathEntry
+        {
+            Path = @"C:\Pending\Traverse",
+            IsTraverseOnly = true
+        };
+
+        var exporter = CreateImport(db, pending);
+
+        var exportData = exporter.BuildFullExportData();
+
+        Assert.Equal(1, exportData.Version);
+        Assert.Equal(2, exportData.Grants!.Count);
+        Assert.Contains(exportData.Grants, grant =>
+            grant.Path == @"C:\Committed\App.exe" &&
+            !grant.IsDeny &&
+            grant.Execute &&
+            !grant.Write &&
+            grant.Read &&
+            !grant.Special &&
+            grant.Owner);
+        Assert.Contains(exportData.Grants, grant =>
+            grant.Path == @"C:\Pending\Denied.txt" &&
+            grant.IsDeny &&
+            grant.Execute &&
+            !grant.Write &&
+            grant.Read &&
+            !grant.Special &&
+            !grant.Owner);
+        Assert.Equal(2, exportData.Traverse!.Count);
+        Assert.Contains(exportData.Traverse, entry => entry.Path == @"C:\Committed\Traverse");
+        Assert.Contains(exportData.Traverse, entry => entry.Path == @"C:\Pending\Traverse");
+    }
+
+    [Fact]
+    public void BuildFullExportData_SpecificContainer_ExportsOnlyApplicableSharedTraverseEntries()
+    {
+        const string containerSid = "S-1-15-2-99-1-2-3-4-5-6";
+        const string otherContainerSid = "S-1-15-2-99-1-2-3-4-5-7";
+        var db = new AppDatabase();
+        db.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.AddRange(
+        [
+            new GrantedPathEntry
+            {
+                Path = @"C:\Own",
+                IsTraverseOnly = true,
+                SourceSids = [containerSid]
+            },
+            new GrantedPathEntry
+            {
+                Path = @"C:\Manual",
+                IsTraverseOnly = true,
+                SourceSids = null
+            },
+            new GrantedPathEntry
+            {
+                Path = @"C:\Other",
+                IsTraverseOnly = true,
+                SourceSids = [otherContainerSid]
+            }
+        ]);
+
+        var exporter = CreateImport(db, sid: containerSid);
+
+        var exportData = exporter.BuildFullExportData();
+
+        Assert.Contains(exportData.Traverse!, entry => entry.Path == @"C:\Own");
+        Assert.Contains(exportData.Traverse!, entry => entry.Path == @"C:\Manual");
+        Assert.DoesNotContain(exportData.Traverse!, entry => entry.Path == @"C:\Other");
+    }
+
+    [Fact]
+    public void BuildGrantSelectionExportData_MissingSavedRights_PopulatesFromReadGrantState()
+    {
+        var entry = new GrantedPathEntry
+        {
+            Path = @"C:\Selected\App.exe",
+            IsDeny = false,
+            SavedRights = null
+        };
+        _aclPermission
+            .Setup(permission => permission.ResolveAccountGroupSids(TestSid))
+            .Returns(["S-1-1-0"]);
+        _pathGrantService
+            .Setup(service => service.ReadGrantState(
+                entry.Path,
+                TestSid,
+                It.Is<IReadOnlyList<string>>(groups => groups.SequenceEqual(new[] { "S-1-1-0" })) ))
+            .Returns(new GrantRightsState(
+                AllowExecute: RightCheckState.Checked,
+                AllowWrite: RightCheckState.Checked,
+                AllowSpecial: RightCheckState.Checked,
+                DenyRead: RightCheckState.Unchecked,
+                DenyExecute: RightCheckState.Unchecked,
+                DenyWrite: RightCheckState.Unchecked,
+                DenySpecial: RightCheckState.Unchecked,
+                TraverseOnlyAllow: RightCheckState.Unchecked,
+                TraverseOnlyDeny: RightCheckState.Unchecked,
+                IsAccountOwner: RightCheckState.Checked,
+                IsAdminOwner: false,
+                DirectAllowAceCount: 1,
+                DirectDenyAceCount: 0));
+
+        var exporter = CreateImport();
+
+        var exportData = exporter.BuildGrantSelectionExportData([entry]);
+
+        var grant = Assert.Single(exportData.Grants!);
+        Assert.Equal(@"C:\Selected\App.exe", grant.Path);
+        Assert.True(grant.Execute);
+        Assert.True(grant.Write);
+        Assert.True(grant.Read);
+        Assert.True(grant.Special);
+        Assert.True(grant.Owner);
+        Assert.NotNull(entry.SavedRights);
+        Assert.True(entry.SavedRights!.Execute);
+        Assert.True(entry.SavedRights.Write);
+        Assert.True(entry.SavedRights.Special);
+        Assert.True(entry.SavedRights.Own);
+    }
+
+    [Fact]
+    public void BuildTraverseSelectionExportData_ExportsOnlySelectedTraverseEntries()
+    {
+        var traverseEntry = new GrantedPathEntry
+        {
+            Path = @"C:\Selected\Traverse",
+            IsTraverseOnly = true
+        };
+        var grantEntry = new GrantedPathEntry
+        {
+            Path = @"C:\Selected\App.exe",
+            IsDeny = false,
+            SavedRights = SavedRightsState.DefaultForMode(false)
+        };
+
+        var exporter = CreateImport();
+
+        var exportData = exporter.BuildTraverseSelectionExportData([traverseEntry, grantEntry]);
+
+        Assert.Empty(exportData.Grants!);
+        var traverse = Assert.Single(exportData.Traverse!);
+        Assert.Equal(@"C:\Selected\Traverse", traverse.Path);
+    }
+
     // --- ProcessImport: grants go to PendingAdds ---
 
     [Fact]
@@ -175,6 +360,50 @@ public class AclManagerExportImportTests
         var entry = pending.FindPendingAdd(normalizedPath, isDeny: false);
         Assert.NotNull(entry);
         Assert.False(entry.SavedRights!.Own);
+    }
+
+    [Fact]
+    public void ProcessImport_LowIntegrityConflictWarning_SkipsGrant()
+    {
+        var normalizedPath = Path.GetFullPath(@"C:\Foo\App.exe");
+        _specificContainerAceConflictDetector
+            .Setup(d => d.HasExplicitSpecificContainerAce(normalizedPath))
+            .Returns(true);
+
+        var pending = new AclManagerPendingChanges();
+        var importer = CreateImport(pending: pending, sid: AclHelper.LowIntegritySid);
+        var data = new ExportData(
+            Version: 1,
+            Grants: [new ExportGrantEntry(@"C:\Foo\App.exe", false, Execute: true, Write: false, Read: true, Special: false, Owner: false)],
+            Traverse: null);
+
+        importer.ProcessImport(data, () => { });
+
+        Assert.False(pending.IsPendingAdd(normalizedPath, isDeny: false));
+    }
+
+    [Fact]
+    public void ImportProcessor_LowIntegrityConflictWarning_ReturnsStructuredWarning()
+    {
+        var normalizedPath = Path.GetFullPath(@"C:\Foo\App.exe");
+        _specificContainerAceConflictDetector
+            .Setup(d => d.HasExplicitSpecificContainerAce(normalizedPath))
+            .Returns(true);
+
+        var pending = new AclManagerPendingChanges();
+        var processor = CreateImportProcessor();
+        var data = new ExportData(
+            Version: 1,
+            Grants: [new ExportGrantEntry(@"C:\Foo\App.exe", false, Execute: true, Write: false, Read: true, Special: false, Owner: false)],
+            Traverse: null);
+
+        var result = processor.ProcessImport(data, pending, AclHelper.LowIntegritySid, isContainer: false);
+
+        Assert.False(result.AnyAdded);
+        var warning = Assert.Single(result.Warnings);
+        Assert.Equal(normalizedPath, warning.Path);
+        Assert.Contains("Specific AppContainer ACEs conflict", warning.Message);
+        Assert.False(pending.IsPendingAdd(normalizedPath, isDeny: false));
     }
 
     [Fact]
@@ -266,6 +495,77 @@ public class AclManagerExportImportTests
         Assert.False(pending.IsPendingAdd(normalizedPath, isDeny: false));
         // Traverse also in DB → not added to pending → nothing added overall → no refresh
         Assert.False(refreshCalled);
+    }
+
+    [Fact]
+    public void ProcessImport_OppositeModesInSameImport_RejectsConflictingPath()
+    {
+        var pending = new AclManagerPendingChanges();
+        var importer = CreateImport(pending: pending);
+        var data = new ExportData(
+            Version: 1,
+            Grants:
+            [
+                new ExportGrantEntry(@"C:\Foo\App.exe", IsDeny: false, Execute: true, Write: false, Read: true, Special: false, Owner: false),
+                new ExportGrantEntry(@"C:\Foo\App.exe", IsDeny: true, Execute: true, Write: true, Read: true, Special: true, Owner: false)
+            ],
+            Traverse: null);
+
+        importer.ProcessImport(data, () => { });
+
+        var normalizedPath = Path.GetFullPath(@"C:\Foo\App.exe");
+        Assert.True(pending.IsPendingAdd(normalizedPath, isDeny: false));
+        Assert.False(pending.IsPendingAdd(normalizedPath, isDeny: true));
+    }
+
+    [Fact]
+    public void ProcessImport_OppositeModeAlreadyEffective_RejectsGrantAndDoesNotAddTraverse()
+    {
+        var normalizedPath = Path.GetFullPath(@"C:\Foo\App.exe");
+        var db = new AppDatabase();
+        db.GetOrCreateAccount(TestSid).Grants.Add(new GrantedPathEntry { Path = normalizedPath, IsDeny = true });
+
+        var pending = new AclManagerPendingChanges();
+        var importer = CreateImport(db, pending);
+        var data = new ExportData(
+            Version: 1,
+            Grants: [new ExportGrantEntry(@"C:\Foo\App.exe", IsDeny: false, Execute: true, Write: false, Read: true, Special: false, Owner: false)],
+            Traverse: null);
+
+        bool refreshCalled = false;
+        importer.ProcessImport(data, () => refreshCalled = true);
+
+        Assert.False(pending.IsPendingAdd(normalizedPath, isDeny: false));
+        Assert.False(refreshCalled);
+    }
+
+    [Fact]
+    public void ProcessImport_OppositeModePendingRemoval_AllowsReplacementGrant()
+    {
+        var normalizedPath = Path.GetFullPath(@"C:\Foo\App.exe");
+        var db = new AppDatabase();
+        var denyEntry = new GrantedPathEntry { Path = normalizedPath, IsDeny = true };
+        db.GetOrCreateAccount(TestSid).Grants.Add(denyEntry);
+
+        var pending = new AclManagerPendingChanges
+        {
+            PendingRemoves =
+            {
+                [(normalizedPath, true)] = denyEntry
+            }
+        };
+
+        var importer = CreateImport(db, pending);
+        var data = new ExportData(
+            Version: 1,
+            Grants: [new ExportGrantEntry(@"C:\Foo\App.exe", IsDeny: false, Execute: true, Write: false, Read: true, Special: false, Owner: false)],
+            Traverse: null);
+
+        bool refreshCalled = false;
+        importer.ProcessImport(data, () => refreshCalled = true);
+
+        Assert.True(pending.IsPendingAdd(normalizedPath, isDeny: false));
+        Assert.True(refreshCalled);
     }
 
     [Fact]
@@ -412,6 +712,40 @@ public class AclManagerExportImportTests
     }
 
     [Fact]
+    public void ProcessImport_ExceptionDuringProcessing_RestoresCancelledUntrackAndTraverseRemoval()
+    {
+        var normalizedGrant = Path.GetFullPath(@"C:\Foo\App.exe");
+        var normalizedTraverse = Path.GetFullPath(@"C:\Foo");
+        var grantEntry = new GrantedPathEntry { Path = normalizedGrant, IsDeny = false };
+        var traverseEntry = new GrantedPathEntry { Path = normalizedTraverse, IsTraverseOnly = true };
+        var db = new AppDatabase();
+        db.GetOrCreateAccount(TestSid).Grants.AddRange([grantEntry, traverseEntry]);
+
+        var pending = new AclManagerPendingChanges
+        {
+            PendingUntrackGrants = { [(normalizedGrant, false)] = grantEntry },
+            PendingTraverseRemoves = { [normalizedTraverse] = traverseEntry },
+            PendingUntrackTraverse = { [normalizedTraverse] = traverseEntry }
+        };
+
+        var importer = CreateImport(db, pending);
+        var data = new ExportData(
+            Version: 1,
+            Grants:
+            [
+                new ExportGrantEntry(@"C:\Foo\App.exe", false, Execute: true, Write: false, Read: true, Special: false, Owner: false),
+                new ExportGrantEntry("C:\\Bad\0Path\\App.exe", false, Execute: false, Write: false, Read: true, Special: false, Owner: false)
+            ],
+            Traverse: [new ExportTraverseEntry(@"C:\Foo")]);
+
+        Assert.Throws<ArgumentException>(() => importer.ProcessImport(data, () => { }));
+
+        Assert.True(pending.IsUntrackGrant(normalizedGrant, false));
+        Assert.True(pending.IsPendingTraverseRemove(normalizedTraverse));
+        Assert.True(pending.IsUntrackTraverse(normalizedTraverse));
+    }
+
+    [Fact]
     public void ProcessImport_WrongVersion_NoChanges()
     {
         var pending = new AclManagerPendingChanges();
@@ -460,12 +794,11 @@ public class AclManagerExportImportTests
     }
 
     [Fact]
-    public void ProcessImport_TraversePendingRemoval_ImportAddsNewEntry()
+    public void ProcessImport_TraversePendingRemoval_ImportCancelsRemoval()
     {
-        // Traverse is in DB but is pending removal. Importing the same traverse path
-        // must NOT add a new pending-add (IsTraverseAlreadyPresent returns true only when
-        // NOT pending-remove; since it IS pending removal the path appears absent, so the
-        // import adds a fresh pending-add, effectively restoring the traverse).
+        // Traverse is in DB but is pending removal. Importing the same traverse path must
+        // cancel the pending removal and keep the committed DB entry instead of queuing a
+        // duplicate pending add.
         var normalizedPath = Path.GetFullPath(@"C:\Parent");
         var traverseEntry = new GrantedPathEntry { Path = normalizedPath, IsTraverseOnly = true };
         var db = new AppDatabase();
@@ -487,9 +820,8 @@ public class AclManagerExportImportTests
         bool refreshCalled = false;
         importer.ProcessImport(data, () => refreshCalled = true);
 
-        // IsTraverseAlreadyPresent returns false when pending-remove is set,
-        // so import treats it as absent and adds a new pending-add.
-        Assert.True(pending.IsPendingTraverseAdd(normalizedPath));
+        Assert.False(pending.IsPendingTraverseRemove(normalizedPath));
+        Assert.False(pending.IsPendingTraverseAdd(normalizedPath));
         Assert.True(refreshCalled);
     }
 

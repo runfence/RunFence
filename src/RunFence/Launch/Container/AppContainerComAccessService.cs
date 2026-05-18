@@ -9,74 +9,157 @@ namespace RunFence.Launch.Container;
 /// Manages COM activation and access permissions for AppContainer SIDs.
 /// Modifies HKCR\AppID\{clsid} LaunchPermission and AccessPermission registry values.
 /// </summary>
-public class AppContainerComAccessService(ILoggingService log) : IAppContainerComAccessService
+public class AppContainerComAccessService(
+    ILoggingService log,
+    IAppContainerComRegistryRoots registryRoots)
+    : IAppContainerComAccessService
 {
     // COM rights: Execute(1) | ExecuteLocal(2) | ActivateLocal(8) = 11
     private const int ComRightsLocal = 11;
+    private readonly RegistryKey _appIdRoot = registryRoots.AppIdRoot;
+    private readonly RegistryKey _machineRoot = registryRoots.MachineRoot;
 
-    public void GrantComAccess(string containerSid, string clsid)
+    public AppContainerComAccessResult GrantComAccess(string containerSid, string clsid)
         => ModifyComPermissions(containerSid, clsid, grant: true);
 
-    public void RevokeComAccess(string containerSid, string clsid)
+    public AppContainerComAccessResult RevokeComAccess(string containerSid, string clsid)
         => ModifyComPermissions(containerSid, clsid, grant: false);
 
-    private void ModifyComPermissions(string containerSid, string clsid, bool grant)
+    private AppContainerComAccessResult ModifyComPermissions(string containerSid, string clsid, bool grant)
     {
+        var createdValues = new List<string>();
         try
         {
             var sid = new SecurityIdentifier(containerSid);
-            // HKCR\AppID\{clsid} — machine-wide COM activation/access permissions.
-            // Registry.ClassesRoot maps to HKLM\SOFTWARE\Classes in elevated processes.
-            using RegistryKey appIdKey = Registry.ClassesRoot
-                                              .OpenSubKey($@"AppID\{clsid}", writable: true)
-                                          ?? Registry.ClassesRoot.CreateSubKey($@"AppID\{clsid}");
+            using RegistryKey? existingAppIdKey = _appIdRoot.OpenSubKey($@"AppID\{clsid}", writable: true);
+            if (!grant && existingAppIdKey == null)
+                return AppContainerComAccessResult.Success();
+
+            using RegistryKey appIdKey = existingAppIdKey
+                ?? _appIdRoot.CreateSubKey($@"AppID\{clsid}")
+                ?? throw new InvalidOperationException($"Unable to open AppID registry key for '{clsid}'.");
+
             foreach (var valueName in new[] { "LaunchPermission", "AccessPermission" })
-                SetComPermissionEntry(appIdKey, valueName, sid, grant);
+            {
+                var writeResult = SetComPermissionEntry(appIdKey, valueName, sid, grant);
+                if (!writeResult.Succeeded)
+                {
+                    RollBackCreatedValues(appIdKey, createdValues, clsid);
+                    return AppContainerComAccessResult.Failure(writeResult.ErrorMessage!);
+                }
+
+                if (writeResult.ValueCreated)
+                    createdValues.Add(valueName);
+            }
+
+            return AppContainerComAccessResult.Success();
         }
         catch (Exception ex)
         {
-            log.Warn($"{(grant ? "Grant" : "Revoke")}ComAccess for CLSID '{clsid}' failed: {ex.Message}");
+            return AppContainerComAccessResult.Failure(
+                $"{(grant ? "Grant" : "Revoke")}ComAccess for CLSID '{clsid}' failed: {ex.Message}");
         }
     }
 
-    private static void SetComPermissionEntry(
-        RegistryKey key, string valueName, SecurityIdentifier sid, bool grant)
+    private PermissionWriteResult SetComPermissionEntry(
+        RegistryKey key,
+        string valueName,
+        SecurityIdentifier sid,
+        bool grant)
     {
-        RawSecurityDescriptor sd;
-        if (key.GetValue(valueName) is byte[] { Length: > 0 } existingBytes)
+        var existingBytes = key.GetValue(valueName) as byte[];
+        var hadExistingValue = existingBytes is { Length: > 0 };
+        if (!grant && !hadExistingValue)
+            return PermissionWriteResult.Success(valueCreated: false);
+
+        var descriptorBytes = hadExistingValue
+            ? existingBytes
+            : GetMachineDefaultPermission(valueName);
+        if (descriptorBytes == null)
         {
-            sd = new RawSecurityDescriptor(existingBytes, 0);
+            return PermissionWriteResult.Failure(
+                $"Machine default COM permission '{valueName}' is missing or empty.");
         }
-        else
+
+        RawSecurityDescriptor sd;
+        try
         {
-            // No existing descriptor: start with an empty DACL. The caller's ACE for the container
-            // SID will be appended below. We do NOT pre-populate Everyone — that would grant all
-            // processes local COM execution rights on this CLSID even after revocation.
-            var emptyDacl = new RawAcl(GenericAcl.AclRevision, 1);
-            sd = new RawSecurityDescriptor(
-                ControlFlags.DiscretionaryAclPresent | ControlFlags.SelfRelative,
-                null, null, null, emptyDacl);
+            sd = new RawSecurityDescriptor(descriptorBytes, 0);
+        }
+        catch (Exception ex)
+        {
+            return PermissionWriteResult.Failure(
+                $"Failed to parse COM permission descriptor '{valueName}': {ex.Message}");
         }
 
         var dacl = sd.DiscretionaryAcl ?? new RawAcl(GenericAcl.AclRevision, 1);
         var newDacl = new RawAcl(GenericAcl.AclRevision, dacl.Count + 1);
-        // Remove any existing ACE for this SID (de-duplicate before re-adding)
         foreach (GenericAce ace in dacl)
         {
-            if (ace is CommonAce ca && ca.SecurityIdentifier == sid)
+            if (ace is CommonAce commonAce && commonAce.SecurityIdentifier == sid)
                 continue;
+
             newDacl.InsertAce(newDacl.Count, ace);
         }
 
         if (grant)
         {
             newDacl.InsertAce(newDacl.Count, new CommonAce(
-                AceFlags.None, AceQualifier.AccessAllowed, ComRightsLocal, sid, false, null));
+                AceFlags.None,
+                AceQualifier.AccessAllowed,
+                ComRightsLocal,
+                sid,
+                isCallback: false,
+                opaque: null));
         }
 
         sd.DiscretionaryAcl = newDacl;
-        var newBytes = new byte[sd.BinaryLength];
-        sd.GetBinaryForm(newBytes, 0);
-        key.SetValue(valueName, newBytes, RegistryValueKind.Binary);
+        var bytes = new byte[sd.BinaryLength];
+        sd.GetBinaryForm(bytes, 0);
+        try
+        {
+            key.SetValue(valueName, bytes, RegistryValueKind.Binary);
+            return PermissionWriteResult.Success(valueCreated: !hadExistingValue);
+        }
+        catch (Exception ex)
+        {
+            return PermissionWriteResult.Failure(
+                $"Failed to write COM permission '{valueName}': {ex.Message}");
+        }
+    }
+
+    private byte[]? GetMachineDefaultPermission(string valueName)
+    {
+        var defaultValueName = valueName switch
+        {
+            "LaunchPermission" => "DefaultLaunchPermission",
+            "AccessPermission" => "DefaultAccessPermission",
+            _ => throw new ArgumentOutOfRangeException(nameof(valueName), valueName, null)
+        };
+
+        using var oleKey = _machineRoot.OpenSubKey(@"SOFTWARE\Microsoft\Ole");
+        return oleKey?.GetValue(defaultValueName) as byte[];
+    }
+
+    private void RollBackCreatedValues(RegistryKey appIdKey, IEnumerable<string> createdValues, string clsid)
+    {
+        foreach (var valueName in createdValues)
+        {
+            try
+            {
+                appIdKey.DeleteValue(valueName, throwOnMissingValue: false);
+            }
+            catch (Exception ex)
+            {
+                log.Warn($"Failed to roll back COM permission '{valueName}' for CLSID '{clsid}': {ex.Message}");
+            }
+        }
+    }
+
+    private sealed record PermissionWriteResult(bool Succeeded, bool ValueCreated, string? ErrorMessage)
+    {
+        public static PermissionWriteResult Success(bool valueCreated) => new(true, valueCreated, null);
+
+        public static PermissionWriteResult Failure(string errorMessage) => new(false, false, errorMessage);
     }
 }

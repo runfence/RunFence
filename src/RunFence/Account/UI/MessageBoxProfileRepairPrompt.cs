@@ -19,9 +19,9 @@ public sealed class MessageBoxProfileRepairPrompt : IProfileRepairPrompt
             "Failed to repair the profile. Check the log for details.",
             "Repair Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
 
-    public bool ConfirmRetry() =>
+    public bool ConfirmRestartRunFence() =>
         MessageBox.Show(
-            "Profile repaired successfully. Retry the launch?",
+            "Restart RunFence to avoid repeat profile corruption?",
             "Profile Repaired",
             MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes;
 }

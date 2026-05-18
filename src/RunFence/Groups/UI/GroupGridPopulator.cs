@@ -13,7 +13,7 @@ namespace RunFence.Groups.UI;
 /// Call <see cref="Initialize"/> after construction to wire the grid controls.
 /// </summary>
 public class GroupGridPopulator(
-    ILocalGroupMembershipService groupMembership,
+    ILocalGroupQueryService groupMembership,
     ILoggingService log,
     ISidNameCacheService sidNameCache)
 {

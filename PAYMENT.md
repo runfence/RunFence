@@ -2,6 +2,10 @@
 
 **[Documentation / README](https://github.com/runfence/RunFence#readme)**
 
+## Free Use
+
+Free evaluation license is available without time limit but in-app restrictions apply. All functionality except some convenience features is accessible so you can try out everything before purchasing. 
+
 ## Why Paid?
 
 RunFence is a complex security product. Building it involves deep research into Windows internals, careful threat modeling, and a level of attention to correctness that isn't optional when the whole point is isolation and access control. Every feature goes through multiple rounds of design, implementation, testing, and revision. Edge cases get tracked down. Regressions get caught and fixed. Low-quality code gets rewritten, not shipped.

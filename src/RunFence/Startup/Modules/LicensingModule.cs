@@ -15,14 +15,39 @@ public class LicensingModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<LicenseFileStore>()
+            .As<ILicenseStore>()
+            .SingleInstance();
+
+        builder.RegisterType<LicenseValidationService>()
+            .As<ILicenseValidator>()
+            .SingleInstance();
+
+        builder.RegisterType<LicenseEvaluationPolicy>()
+            .As<ILicenseEvaluationPolicy>()
+            .SingleInstance();
+
+        builder.RegisterType<FeatureRestrictionService>()
+            .As<IFeatureRestrictionService>()
+            .SingleInstance();
+
+        builder.RegisterType<LicenseMessageFormatter>()
+            .As<ILicenseMessageFormatter>()
+            .SingleInstance();
+
         builder.RegisterType<LicenseService>()
             .As<ILicenseService>()
             .As<IRequiresInitialization>()
+            .WithMetadata("Order", 0)
             .OrderBy(0)
             .SingleInstance();
 
         builder.RegisterType<MessageBoxEvaluationLimitPrompt>()
             .As<IEvaluationLimitPrompt>()
+            .SingleInstance();
+
+        builder.RegisterType<EvaluationCredentialCounter>()
+            .As<IEvaluationCredentialCounter>()
             .SingleInstance();
 
         builder.RegisterType<EvaluationLimitHelper>()

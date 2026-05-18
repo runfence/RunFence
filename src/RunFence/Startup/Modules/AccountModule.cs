@@ -7,6 +7,7 @@ using RunFence.Account.UI.AppContainer;
 using RunFence.Account.UI.Forms;
 using RunFence.Acl.Traverse;
 using RunFence.Core;
+using RunFence.Groups;
 using RunFence.Infrastructure;
 using RunFence.SidMigration;
 using RunFence.Startup;
@@ -28,6 +29,10 @@ public class AccountModule : Module
             .As<IWindowsAccountService>()
             .SingleInstance();
 
+        builder.RegisterType<WindowsAccountQueryService>()
+            .As<IWindowsAccountQueryService>()
+            .SingleInstance();
+
         builder.RegisterType<LocalAccountProvisioningService>()
             .As<ILocalAccountProvisioningService>()
             .SingleInstance();
@@ -37,6 +42,10 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<CredentialFilterHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<CredentialDisplayItemFactory>()
             .AsSelf()
             .SingleInstance();
 
@@ -50,10 +59,18 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<AccountRestrictionCoordinator>()
+            .As<IAccountRestrictionCoordinator>()
+            .SingleInstance();
+
         builder.RegisterType<LogonScriptIniManager>().AsSelf().SingleInstance();
 
         builder.RegisterType<GroupPolicyScriptHelper>()
             .As<IGroupPolicyScriptHelper>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<GroupDeletionService>()
             .AsSelf()
             .SingleInstance();
 
@@ -80,6 +97,10 @@ public class AccountModule : Module
         builder.RegisterType<SidReconciler>().AsSelf().SingleInstance();
 
         builder.RegisterType<GrantReconciliationService>().AsSelf().SingleInstance();
+
+        builder.RegisterType<AccountGrantReconciliationRunner>()
+            .As<IAccountGrantReconciliationRunner>()
+            .SingleInstance();
 
         builder.RegisterType<AccountLifecycleManager>()
             .As<IAccountLifecycleManager>()
@@ -131,6 +152,10 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<AccountGridSorter>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountGridIconLifetimeManager>()
             .AsSelf()
             .SingleInstance();
 
@@ -194,7 +219,16 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<PackageInstallScriptStore>()
+            .As<IPackageInstallScriptStore>()
+            .SingleInstance();
+
+        builder.RegisterType<PackageInstallLauncher>()
+            .As<IPackageInstallLauncher>()
+            .SingleInstance();
+
         builder.RegisterType<PackageInstallService>()
+            .As<IPackageInstallService>()
             .AsSelf()
             .SingleInstance();
 
@@ -238,11 +272,27 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<AccountCreationProgressRunner>()
+            .As<IAccountCreationProgressRunner>()
+            .SingleInstance();
+
         builder.RegisterType<AccountCreationCommitService>()
             .As<IAccountCreationCommitService>()
             .SingleInstance();
 
+        builder.RegisterType<CreatedAccountRollbackExecutor>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountCreationRollbackService>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<AccountCreationOrchestrator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountDeletionPreflightService>()
             .AsSelf()
             .SingleInstance();
 
@@ -295,6 +345,7 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<AppContainerEditService>()
+            .As<IAppContainerEditService>()
             .AsSelf()
             .SingleInstance();
 
@@ -307,6 +358,7 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<EditAccountDialog>()
+            .As<IAccountCreationDialog>()
             .AsSelf()
             .InstancePerDependency();
 

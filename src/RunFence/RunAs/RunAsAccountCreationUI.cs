@@ -1,4 +1,5 @@
 using RunFence.Account;
+using RunFence.Account.UI;
 using RunFence.Account.UI.AppContainer;
 using RunFence.Account.UI.Forms;
 using RunFence.Core;
@@ -11,16 +12,17 @@ namespace RunFence.RunAs;
 /// Handles dialog creation and display for the RunAs account and container creation flows.
 /// </summary>
 /// <remarks>Asymmetric by design: account dialog needs post-creation credential flow (password entry → encrypt → save), container dialog does not (profile created by OS).</remarks>
-public class RunAsAccountCreationUI(
+internal class RunAsAccountCreationUI(
     Func<EditAccountDialog> editAccountDialogFactory,
-    AppContainerEditService containerEditService,
-    IModalCoordinator modalCoordinator)
+    Func<AppContainerEditDialog> appContainerEditDialogFactory,
+    IModalCoordinator modalCoordinator) : IRunAsAccountCreationUI, IRunAsContainerCreationUI
 {
     /// <summary>
     /// Shows the EditAccountDialog for account creation wrapped with <see cref="IModalCoordinator.BeginModal"/>.
     /// On success (DialogResult.OK and CreatedSid set), returns the dialog WITH modal still active —
     /// the caller is responsible for calling <see cref="IModalCoordinator.EndModal"/> in a finally block
-    /// that also wraps all post-dialog work (permission prompts, settings application).
+    /// that also wraps all post-dialog work (permission prompts, settings application), including the
+    /// cleanup-state-save-failed case where Windows created the account but later setup must stop.
     /// On cancel, EndModal is called here and the result has <see cref="ShowCreateAccountResult.WasCancelled"/> set.
     /// Caller must dispose the returned dialog.
     /// </summary>
@@ -45,7 +47,11 @@ public class RunAsAccountCreationUI(
             }
 
             // Modal remains active — caller owns EndModal to cover post-dialog work.
-            return new ShowCreateAccountResult(dlg, WasCancelled: false);
+            return new ShowCreateAccountResult(
+                dlg,
+                WasCancelled: false,
+                dlg.CreatedAccountStatus == CreateAccountStatus.Succeeded ? CreateAccountStatus.Succeeded : dlg.CreatedAccountStatus,
+                dlg.CreatedAccountErrorMessage);
         }
         catch
         {
@@ -65,7 +71,8 @@ public class RunAsAccountCreationUI(
         AppContainerEditDialog? dlg = null;
         try
         {
-            dlg = new AppContainerEditDialog(null, containerEditService);
+            dlg = appContainerEditDialogFactory();
+            dlg.Initialize(existing: null);
             dlg.StartPosition = FormStartPosition.CenterScreen;
             dlg.Shown += (_, _) => { WindowForegroundHelper.ForceToForeground(dlg.Handle); dlg.BringToFront(); };
             var result = dlg.ShowDialog();

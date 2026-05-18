@@ -11,7 +11,11 @@ namespace RunFence.SidMigration;
 /// scans for files/directories with ACEs referencing given SIDs, and applies SID replacements.
 /// Extracted from <see cref="SidMigrationService"/> to separate the ACL traversal concern.
 /// </summary>
-public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IFileSystemAclTraverser traverser) : ISidAclScanService
+public class SidAclScanService(
+    ILoggingService log,
+    ISidResolver sidResolver,
+    IFileSystemAclTraverser traverser,
+    IAclAccessor aclAccessor) : ISidAclScanService
 {
     public async Task<List<OrphanedSid>> DiscoverOrphanedSidsAsync(
         IReadOnlyList<string> rootPaths,
@@ -20,6 +24,7 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
     {
         return await Task.Run(() =>
         {
+            ValidateRootAccessibility(rootPaths);
             var sidCounts = new Dictionary<string, OrphanedSid>(StringComparer.OrdinalIgnoreCase);
 
             // Privileges (SeBackup/SeRestore/SeTakeOwnership) are enabled once at startup.
@@ -77,9 +82,9 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                 });
 
             // Resolve each unique SID — filter to orphaned only
-            var failedDomainPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var unresolvedDomainPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var orphanedList = new List<OrphanedSid>();
-            int orphanedTaskCount = 0;
+            int unresolvedTaskCount = 0;
 
             foreach (var (sidStr, orphanedSid) in sidCounts)
             {
@@ -91,10 +96,10 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                     ? string.Join("-", parts.Take(7))
                     : sidStr;
 
-                bool isOrphaned;
-                if (failedDomainPrefixes.Contains(domainPrefix))
+                OrphanedSidClassification? classification = null;
+                if (unresolvedDomainPrefixes.Contains(domainPrefix))
                 {
-                    isOrphaned = true;
+                    classification = OrphanedSidClassification.Unresolved;
                 }
                 else
                 {
@@ -106,29 +111,48 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                     // The failedDomainPrefixes cache prevents repeated waits for the same domain prefix.
                     using var resolveCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
                     var resolveTask = Task.Run(() => sidResolver.TryResolveName(sidStr), resolveCts.Token);
-                    var completed = resolveTask.Wait(3000, ct);
-                    if (!completed || !resolveTask.IsCompletedSuccessfully || resolveTask.Result == null)
+                    bool completed;
+                    try
                     {
-                        isOrphaned = true;
-                        if (!completed)
-                        {
-                            log.Warn($"SidAclScanService: SID resolution timed out for {sidStr} (domain prefix {domainPrefix}); treating as orphaned.");
-                            failedDomainPrefixes.Add(domainPrefix);
-                            orphanedTaskCount++;
-                        }
+                        completed = resolveTask.Wait(3000, ct);
+                    }
+                    catch (AggregateException)
+                    {
+                        completed = true;
+                    }
+
+                    if (!completed)
+                    {
+                        log.Warn($"SidAclScanService: SID resolution timed out for {sidStr} (domain prefix {domainPrefix}); marking as unresolved.");
+                        unresolvedDomainPrefixes.Add(domainPrefix);
+                        unresolvedTaskCount++;
+                        classification = OrphanedSidClassification.Unresolved;
+                    }
+                    else if (resolveTask.IsFaulted || resolveTask.IsCanceled)
+                    {
+                        log.Warn($"SidAclScanService: SID resolution failed for {sidStr} (domain prefix {domainPrefix}); marking as unresolved.");
+                        unresolvedDomainPrefixes.Add(domainPrefix);
+                        classification = OrphanedSidClassification.Unresolved;
+                    }
+                    else if (resolveTask.Result == null)
+                    {
+                        classification = OrphanedSidClassification.ConfirmedOrphaned;
                     }
                     else
                     {
-                        isOrphaned = false;
+                        classification = null;
                     }
                 }
 
-                if (isOrphaned)
+                if (classification != null)
+                {
+                    orphanedSid.Classification = classification.Value;
                     orphanedList.Add(orphanedSid);
+                }
             }
 
-            if (orphanedTaskCount > 0)
-                log.Warn($"SidAclScanService: {orphanedTaskCount} SID resolution task(s) timed out and were left running in the background. Affected domain prefix(es): {string.Join(", ", failedDomainPrefixes)}");
+            if (unresolvedTaskCount > 0)
+                log.Warn($"SidAclScanService: {unresolvedTaskCount} SID resolution task(s) timed out and were left running in the background. Affected domain prefix(es): {string.Join(", ", unresolvedDomainPrefixes)}");
 
             return orphanedList;
         }, ct);
@@ -142,6 +166,8 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
         CancellationToken ct)
     {
         var migrateSids = new HashSet<string>(mappings.Select(m => m.OldSid), StringComparer.OrdinalIgnoreCase);
+        var ownerSids = new HashSet<string>(migrateSids, StringComparer.OrdinalIgnoreCase);
+        ownerSids.UnionWith(sidsToDelete);
         var aceSids = new HashSet<string>(migrateSids, StringComparer.OrdinalIgnoreCase);
         aceSids.UnionWith(sidsToDelete);
         var aceSidObjects = new HashSet<SecurityIdentifier>();
@@ -158,6 +184,7 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
 
         return await Task.Run(() =>
         {
+            ValidateRootAccessibility(rootPaths);
             var matches = new List<SidMigrationMatch>();
             long foundCount = 0;
 
@@ -183,7 +210,7 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
                     try
                     {
                         var owner = security.GetOwner(typeof(SecurityIdentifier));
-                        if (owner is SecurityIdentifier ownerSid && migrateSids.Contains(ownerSid.Value))
+                        if (owner is SecurityIdentifier ownerSid && ownerSids.Contains(ownerSid.Value))
                         {
                             matchType |= SidMigrationMatchType.Owner;
                             ownerOldSid = ownerSid.Value;
@@ -236,68 +263,59 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
 
                 try
                 {
-                    FileSystemSecurity security;
-                    bool isDir = hit.IsDirectory;
+                    aclAccessor.ModifyOwnerAndAclWithFallback(hit.Path, hit.IsDirectory, security =>
+                    {
+                        bool changed = false;
 
-                    if (isDir)
-                    {
-                        var dirInfo = new DirectoryInfo(hit.Path);
-                        security = dirInfo.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
-                    }
-                    else
-                    {
-                        var fileInfo = new FileInfo(hit.Path);
-                        security = fileInfo.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
-                    }
-
-                    // Replace ACEs — collect matching rules first, then remove+add
-                    // in a separate pass to avoid modifying the collection during enumeration.
-                    if (hit.MatchType.HasFlag(SidMigrationMatchType.Ace))
-                    {
-                        var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
-                        var replacements = new List<(FileSystemAccessRule old, FileSystemAccessRule replacement)>();
-                        var removals = new List<FileSystemAccessRule>();
-                        foreach (FileSystemAccessRule rule in rules)
+                        // Replace ACEs — collect matching rules first, then remove+add
+                        // in a separate pass to avoid modifying the collection during enumeration.
+                        if (hit.MatchType.HasFlag(SidMigrationMatchType.Ace))
                         {
-                            if (rule.IdentityReference is not SecurityIdentifier oldSid)
-                                continue;
+                            var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
+                            var replacements = new List<(FileSystemAccessRule old, FileSystemAccessRule replacement)>();
+                            var removals = new List<FileSystemAccessRule>();
+                            foreach (FileSystemAccessRule rule in rules)
+                            {
+                                if (rule.IdentityReference is not SecurityIdentifier oldSid)
+                                    continue;
 
-                            if (sidMap.TryGetValue(oldSid.Value, out var newSidStr))
-                            {
-                                var newSid = new SecurityIdentifier(newSidStr);
-                                replacements.Add((rule, new FileSystemAccessRule(
-                                    newSid, rule.FileSystemRights,
-                                    rule.InheritanceFlags, rule.PropagationFlags,
-                                    rule.AccessControlType)));
+                                if (sidMap.TryGetValue(oldSid.Value, out var newSidStr))
+                                {
+                                    var newSid = new SecurityIdentifier(newSidStr);
+                                    replacements.Add((rule, new FileSystemAccessRule(
+                                        newSid, rule.FileSystemRights,
+                                        rule.InheritanceFlags, rule.PropagationFlags,
+                                        rule.AccessControlType)));
+                                }
+                                else if (deleteSids.Contains(oldSid.Value))
+                                {
+                                    removals.Add(rule);
+                                }
                             }
-                            else if (deleteSids.Contains(oldSid.Value))
+
+                            if (removals.Count > 0 || replacements.Count > 0)
+                                changed = true;
+
+                            foreach (var removal in removals)
+                                security.RemoveAccessRuleSpecific(removal);
+
+                            foreach (var (old, replacement) in replacements)
                             {
-                                removals.Add(rule);
+                                security.RemoveAccessRuleSpecific(old);
+                                security.AddAccessRule(replacement);
                             }
                         }
 
-                        foreach (var removal in removals)
-                            security.RemoveAccessRuleSpecific(removal);
-
-                        foreach (var (old, replacement) in replacements)
+                        if (hit.MatchType.HasFlag(SidMigrationMatchType.Owner) &&
+                            hit.OwnerOldSid != null &&
+                            sidMap.TryGetValue(hit.OwnerOldSid, out var newOwnerStr))
                         {
-                            security.RemoveAccessRuleSpecific(old);
-                            security.AddAccessRule(replacement);
+                            security.SetOwner(new SecurityIdentifier(newOwnerStr));
+                            changed = true;
                         }
-                    }
 
-                    // Replace owner
-                    if (hit.MatchType.HasFlag(SidMigrationMatchType.Owner) && hit.OwnerOldSid != null &&
-                        sidMap.TryGetValue(hit.OwnerOldSid, out var newOwnerStr))
-                    {
-                        security.SetOwner(new SecurityIdentifier(newOwnerStr));
-                    }
-
-                    // Write back
-                    if (isDir)
-                        new DirectoryInfo(hit.Path).SetAccessControl((DirectorySecurity)security);
-                    else
-                        new FileInfo(hit.Path).SetAccessControl((FileSecurity)security);
+                        return changed;
+                    });
 
                     applied++;
                 }
@@ -320,5 +338,22 @@ public class SidAclScanService(ILoggingService log, ISidResolver sidResolver, IF
     {
         foreach (var (path, isFolder, security) in traverser.Traverse(rootPaths, progress, ct))
             process(path, isFolder, security);
+    }
+
+    private void ValidateRootAccessibility(IReadOnlyList<string> rootPaths)
+    {
+        foreach (var root in rootPaths)
+        {
+            if (!aclAccessor.PathExists(root, out bool isFolder) || !isFolder)
+                continue;
+            try
+            {
+                _ = aclAccessor.GetSecurity(root);
+            }
+            catch (Exception ex)
+            {
+                throw new IOException($"Protected root ACL could not be read: '{root}'.", ex);
+            }
+        }
     }
 }

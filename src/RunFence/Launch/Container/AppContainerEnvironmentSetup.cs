@@ -1,24 +1,95 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
+using RunFence.Core.Models;
+using RunFence.Launching.Environment;
 
 namespace RunFence.Launch.Container;
 
 /// <summary>
 /// Handles environment variable overriding, VirtualStore access, and shell folder redirects
-/// for AppContainer process launches. All methods are best-effort and log warnings on failure.
+/// for AppContainer process launches.
 /// </summary>
-public class AppContainerEnvironmentSetup(ILoggingService log, IShortcutComHelper shortcutHelper, IAppContainerSidProvider sidProvider) : IAppContainerEnvironmentSetup
+public class AppContainerEnvironmentSetup(
+    ILoggingService log,
+    IShortcutComHelper shortcutHelper,
+    IAppContainerSidProvider sidProvider,
+    IAppContainerPathProvider pathProvider,
+    IAppContainerUserRegistryRoot userRegistryRoot)
+    : IAppContainerEnvironmentSetup
 {
-    public IntPtr OverrideProfileEnvironment(IntPtr originalEnv, string profileName)
+    private readonly IAppContainerPathProvider _pathProvider = pathProvider;
+    private readonly RegistryKey _usersRoot = userRegistryRoot.UsersRoot;
+
+    public EnvironmentBlock CreateLaunchEnvironment(
+        IntPtr explorerToken,
+        AppContainerEntry entry,
+        string containerSid,
+        string exePath)
     {
+        if (!ProcessLaunchNative.CreateEnvironmentBlock(out var originalEnvironment, explorerToken, false)
+            || originalEnvironment == IntPtr.Zero)
+        {
+            return BuildMinimalEnvironmentBlock(entry.Name);
+        }
+
+        Dictionary<string, string> baseVariables;
         try
         {
-            var vars = NativeEnvironmentBlock.Read(originalEnv);
+            baseVariables = NativeEnvironmentBlockReader.Read(originalEnvironment);
+        }
+        catch
+        {
+            ProcessLaunchNative.DestroyEnvironmentBlock(originalEnvironment);
+            throw;
+        }
 
-            var dataPath = AppContainerPaths.GetContainerDataPath(profileName);
+        var localAppData = baseVariables.GetValueOrDefault("LOCALAPPDATA");
+        IntPtr overriddenEnvironment = IntPtr.Zero;
+        try
+        {
+            var overrideResult = OverrideProfileEnvironment(
+                originalEnvironment,
+                entry.Name,
+                out overriddenEnvironment);
+            if (overrideResult.Status != AppContainerProfileSetupStatus.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    overrideResult.ErrorMessage ?? $"Environment override failed for '{entry.Name}'.");
+            }
+        }
+        finally
+        {
+            ProcessLaunchNative.DestroyEnvironmentBlock(originalEnvironment);
+        }
+
+        if (overriddenEnvironment == IntPtr.Zero)
+            throw new InvalidOperationException($"Environment override returned no environment block for '{entry.Name}'.");
+
+        var launchEnvironment = EnvironmentBlock.Own(overriddenEnvironment, Marshal.FreeHGlobal);
+        if (localAppData != null)
+        {
+            TryGrantVirtualStoreAccess(containerSid, localAppData);
+            TryCreateVirtualStoreShortcut(exePath, entry.Name, localAppData);
+        }
+
+        return launchEnvironment;
+    }
+
+    public AppContainerProfileSetupResult OverrideProfileEnvironment(
+        IntPtr originalEnv,
+        string profileName,
+        out IntPtr rewrittenEnvironment)
+    {
+        rewrittenEnvironment = IntPtr.Zero;
+        try
+        {
+            var vars = NativeEnvironmentBlockReader.Read(originalEnv);
+
+            var dataPath = _pathProvider.GetContainerDataPath(profileName);
             var drive = Path.GetPathRoot(dataPath)?.TrimEnd('\\') ?? "C:";
 
             vars["TEMP"] = Path.Combine(dataPath, "Temp");
@@ -30,14 +101,15 @@ public class AppContainerEnvironmentSetup(ILoggingService log, IShortcutComHelpe
             vars["HOMEPATH"] = dataPath;
             vars["HOMEDRIVE"] = drive;
 
-            var newEnv = NativeEnvironmentBlock.Build(vars);
-            ProcessLaunchNative.DestroyEnvironmentBlock(originalEnv);
-            return newEnv;
+            using var newEnv = EnvironmentBlock.Build(vars);
+            rewrittenEnvironment = newEnv.Detach();
+            return AppContainerProfileSetupResult.Success(environmentRewritten: true);
         }
-        catch
+        catch (Exception ex)
         {
-            ProcessLaunchNative.DestroyEnvironmentBlock(originalEnv);
-            return IntPtr.Zero;
+            return AppContainerProfileSetupResult.Failure(
+                AppContainerProfileSetupStatus.EnvironmentRewriteFailed,
+                $"OverrideProfileEnvironment failed for '{profileName}': {ex.Message}");
         }
     }
 
@@ -133,7 +205,7 @@ public class AppContainerEnvironmentSetup(ILoggingService log, IShortcutComHelpe
             var virtualStorePath = Path.Combine(localAppData, "VirtualStore", relativePath);
             var dirName = Path.GetFileName(exeDir);
             var shortcutPath = Path.Combine(
-                AppContainerPaths.GetContainerDataPath(containerName),
+                _pathProvider.GetContainerDataPath(containerName),
                 $"{dirName} - VirtualStore.lnk");
 
             shortcutHelper.WithShortcut(shortcutPath, lnk =>
@@ -154,22 +226,69 @@ public class AppContainerEnvironmentSetup(ILoggingService log, IShortcutComHelpe
     /// so SHGetFolderPath / SHGetKnownFolderPath return the container's data paths.
     /// The registry key is indexed by container SID, not profile name.
     /// </summary>
-    public void WriteShellFolderRedirects(string containerName)
+    public AppContainerProfileSetupResult WriteShellFolderRedirects(string containerName, string interactiveUserSid)
     {
         try
         {
-            var sidStr = sidProvider.GetSidString(containerName);
-            var dataPath = AppContainerPaths.GetContainerDataPath(containerName);
+            using var interactiveHive = _usersRoot.OpenSubKey(interactiveUserSid, writable: true);
+            if (interactiveHive == null)
+            {
+                return AppContainerProfileSetupResult.Failure(
+                    AppContainerProfileSetupStatus.ShellFolderRedirectFailed,
+                    $"Interactive user hive '{interactiveUserSid}' is not loaded.");
+            }
 
-            var keyPath = $@"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{sidStr}\User Shell Folders";
-            using RegistryKey key = Registry.CurrentUser.CreateSubKey(keyPath);
+            var sidStr = sidProvider.GetSidString(containerName);
+            var dataPath = _pathProvider.GetContainerDataPath(containerName);
+
+            var keyPath = $@"{interactiveUserSid}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{sidStr}\User Shell Folders";
+            using RegistryKey key = _usersRoot.CreateSubKey(keyPath)
+                ?? throw new InvalidOperationException($"Unable to create registry key '{keyPath}'.");
             key.SetValue("AppData", Path.Combine(dataPath, "Roaming"), RegistryValueKind.ExpandString);
             key.SetValue("Local AppData", Path.Combine(dataPath, "Local"), RegistryValueKind.ExpandString);
             key.SetValue("Cache", Path.Combine(dataPath, "Temp"), RegistryValueKind.ExpandString);
+            return AppContainerProfileSetupResult.Success(shellFolderRedirectsWritten: true);
         }
         catch (Exception ex)
         {
-            log.Warn($"WriteShellFolderRedirects failed for '{containerName}': {ex.Message}");
+            return AppContainerProfileSetupResult.Failure(
+                AppContainerProfileSetupStatus.ShellFolderRedirectFailed,
+                $"WriteShellFolderRedirects failed for '{containerName}': {ex.Message}");
         }
+    }
+
+    private EnvironmentBlock BuildMinimalEnvironmentBlock(string profileName)
+    {
+        var dataPath = _pathProvider.GetContainerDataPath(profileName);
+        var drive = Path.GetPathRoot(dataPath)?.TrimEnd('\\') ?? "C:";
+        var vars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["TEMP"] = Path.Combine(dataPath, "Temp"),
+            ["TMP"] = Path.Combine(dataPath, "Temp"),
+            ["APPDATA"] = Path.Combine(dataPath, "Roaming"),
+            ["LOCALAPPDATA"] = Path.Combine(dataPath, "Local"),
+            ["PROGRAMDATA"] = Path.Combine(dataPath, "ProgramData"),
+            ["USERPROFILE"] = dataPath,
+            ["HOMEPATH"] = dataPath,
+            ["HOMEDRIVE"] = drive
+        };
+
+        CopyCurrentEnvironmentVariable(vars, "ComSpec");
+        CopyCurrentEnvironmentVariable(vars, "OS");
+        CopyCurrentEnvironmentVariable(vars, "Path");
+        CopyCurrentEnvironmentVariable(vars, "PATHEXT");
+        CopyCurrentEnvironmentVariable(vars, "SystemDrive");
+        CopyCurrentEnvironmentVariable(vars, "SystemRoot");
+        CopyCurrentEnvironmentVariable(vars, "windir");
+
+        using var block = EnvironmentBlock.Build(vars);
+        return EnvironmentBlock.Own(block.Detach(), Marshal.FreeHGlobal);
+    }
+
+    private static void CopyCurrentEnvironmentVariable(IDictionary<string, string> destination, string variableName)
+    {
+        var value = Environment.GetEnvironmentVariable(variableName);
+        if (!string.IsNullOrEmpty(value))
+            destination[variableName] = value;
     }
 }

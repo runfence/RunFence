@@ -1,7 +1,7 @@
+using RunFence.Account.UI;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
-using RunFence.Persistence;
 
 namespace RunFence.RunAs;
 
@@ -11,21 +11,24 @@ namespace RunFence.RunAs;
 public class RunAsContainerCreator(
     IAppStateProvider appState,
     IDataChangeNotifier dataChangeNotifier,
-    SessionContext session,
-    IDatabaseService databaseService,
-    RunAsAccountCreationUI creationUi,
+    IRunAsContainerCreationUI creationUi,
+    IAccountMessageBoxService messageBoxService,
     ILicenseService licenseService) : IRunAsContainerCreator
 {
     /// <summary>
     /// Opens AppContainerEditDialog for inline container creation from the RunAs flow.
-    /// Saves the new container to the database and returns it, or null if cancelled.
+    /// Returns the created container entry or null if cancelled.
     /// </summary>
     public AppContainerEntry? CreateNewContainer()
     {
         if (!licenseService.CanCreateContainer(appState.Database.AppContainers.Count))
         {
-            MessageBox.Show(licenseService.GetRestrictionMessage(EvaluationFeature.Containers, appState.Database.AppContainers.Count),
-                "License Limit", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            messageBoxService.Show(
+                owner: null,
+                licenseService.GetRestrictionMessage(EvaluationFeature.Containers, appState.Database.AppContainers.Count) ?? string.Empty,
+                "License Limit",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
             return null;
         }
 
@@ -33,8 +36,6 @@ public class RunAsContainerCreator(
         if (newContainer == null)
             return null;
 
-        using var scope = session.PinDerivedKey.Unprotect();
-        databaseService.SaveConfig(appState.Database, scope.Data, session.CredentialStore.ArgonSalt);
         dataChangeNotifier.NotifyDataChanged();
         return newContainer;
     }

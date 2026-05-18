@@ -1,23 +1,24 @@
 using RunFence.Core;
 using RunFence.Core.Models;
+using System.Linq;
 
 namespace RunFence.Firewall.UI;
 
 /// <summary>
 /// Encapsulates the try/catch pattern for applying firewall settings with rollback on failure.
 /// On <see cref="FirewallApplyPhase.AccountRules"/> failure: restores DB to previous settings,
-/// calls <c>saveAction</c>, and reports/shows the error.
-/// On <see cref="FirewallApplyPhase.GlobalIcmp"/> failure: reports a warning only
-/// (rules were applied; only global ICMP enforcement failed; no rollback).
+/// persists the rollback only when the failed apply had already been saved, and reports/shows the error.
+/// Global ICMP enforcement failures are returned as warnings in
+/// <see cref="FirewallApplyResult.EnforcementEntries"/> (no rollback).
 /// </summary>
 public class FirewallApplyHelper(
     IAccountFirewallSettingsApplier firewallSettingsApplier,
     DynamicPortRangeChecker portRangeChecker,
-    ILoggingService log)
+    ILoggingService log) : IFirewallApplyHelper
 {
     /// <summary>
     /// Applies firewall settings synchronously. On <see cref="FirewallApplyPhase.AccountRules"/> failure,
-    /// rolls back the database to <paramref name="previous"/>, calls <paramref name="saveAction"/>,
+    /// rolls back the database to <paramref name="previous"/>, persists the rollback only when needed,
     /// and shows an error dialog.
     /// </summary>
     /// <returns><c>true</c> if a rollback occurred (caller should update UI accordingly).</returns>
@@ -32,7 +33,32 @@ public class FirewallApplyHelper(
     {
         try
         {
-            firewallSettingsApplier.ApplyAccountFirewallSettings(sid, username, previous, final, database);
+            var result = firewallSettingsApplier.ApplyAccountFirewallSettings(sid, username, previous, final, database, saveAction);
+            if (result.HasBlockingFailure)
+            {
+                var blockingFailure = result.FirstBlockingFailure!;
+                log.Error($"Failed to apply firewall rules for {username}", new InvalidOperationException(blockingFailure.Error));
+                FirewallAccountSettings.UpdateOrRemove(database, sid, previous?.Clone() ?? new FirewallAccountSettings());
+                var rollbackError = result.ConfigSaved ? TrySave(saveAction, sid) : null;
+                var applyException = new FirewallApplyException(
+                    FirewallApplyPhase.AccountRules,
+                    sid,
+                    new InvalidOperationException(blockingFailure.Error ?? "Firewall enforcement failed."));
+                FirewallApplyErrorHandler.ShowApplyFailure(owner, applyException, rollbackError);
+                return true;
+            }
+
+            var warningEntries = (result.EnforcementEntries ?? [])
+                .Where(entry => entry.Status == FirewallEnforcementStatus.RetryScheduled)
+                .ToList();
+            if (warningEntries.Count > 0)
+            {
+                MessageBox.Show(owner,
+                    BuildEnforcementWarningMessage(result, warningEntries),
+                    "RunFence",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
             _ = portRangeChecker.CheckIfNeededAsync(final);
             return false;
         }
@@ -44,21 +70,11 @@ public class FirewallApplyHelper(
             FirewallApplyErrorHandler.ShowApplyFailure(owner, ex, rollbackError);
             return true;
         }
-        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.GlobalIcmp)
-        {
-            log.Error($"Failed to enforce global ICMP after applying firewall rules for {username}", ex);
-            MessageBox.Show(owner,
-                $"Firewall rules were saved and applied, but global ICMP enforcement failed: {ex.CauseMessage}",
-                "RunFence",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            return false;
-        }
     }
 
     /// <summary>
     /// Applies firewall settings asynchronously. On <see cref="FirewallApplyPhase.AccountRules"/> failure,
-    /// rolls back the database to <paramref name="previous"/>, calls <paramref name="saveAction"/>,
+    /// rolls back the database to <paramref name="previous"/>, persists the rollback only when needed,
     /// and reports errors via <paramref name="reportError"/>.
     /// On <see cref="FirewallApplyPhase.GlobalIcmp"/> failure, reports a warning via <paramref name="reportError"/>.
     /// </summary>
@@ -74,8 +90,32 @@ public class FirewallApplyHelper(
     {
         try
         {
-            await firewallSettingsApplier.ApplyAccountFirewallSettingsAsync(sid, username, previous, final, database);
+            var result = await firewallSettingsApplier.ApplyAccountFirewallSettingsAsync(sid, username, previous, final, database, saveAction);
+            if (result == null)
+                return false;
+            if (result.HasBlockingFailure)
+            {
+                var blockingFailure = result.FirstBlockingFailure!;
+                log.Error($"Failed to apply firewall rules for {username}", new InvalidOperationException(blockingFailure.Error));
+                FirewallAccountSettings.UpdateOrRemove(database, sid, previous?.Clone() ?? new FirewallAccountSettings());
+                var rollbackError = result.ConfigSaved ? TrySave(saveAction, sid) : null;
+                reportError($"Firewall rules: {blockingFailure.Error}");
+                if (rollbackError != null)
+                    reportError($"Firewall rollback save: {rollbackError.Message}");
+                return true;
+            }
+
+            var warningEntries = (result.EnforcementEntries ?? [])
+                .Where(entry => entry.Status == FirewallEnforcementStatus.RetryScheduled)
+                .ToList();
+            if (warningEntries.Count > 0)
+                reportError(BuildEnforcementWarningMessage(result, warningEntries));
             await portRangeChecker.CheckIfNeededAsync(final);
+            return false;
+        }
+        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.GlobalIcmp)
+        {
+            reportError($"Global ICMP firewall rule: {ex.CauseMessage}");
             return false;
         }
         catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.AccountRules)
@@ -87,12 +127,6 @@ public class FirewallApplyHelper(
             if (rollbackError != null)
                 reportError($"Firewall rollback save: {rollbackError.Message}");
             return true;
-        }
-        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.GlobalIcmp)
-        {
-            log.Error($"Failed to enforce global ICMP after applying firewall rules for {username}", ex);
-            reportError($"Global ICMP firewall rule: {ex.CauseMessage}");
-            return false;
         }
     }
 
@@ -108,5 +142,18 @@ public class FirewallApplyHelper(
             log.Error($"Failed to save firewall settings rollback for SID '{sid}'", ex);
             return ex;
         }
+    }
+
+    private static string BuildEnforcementWarningMessage(
+        FirewallApplyResult result,
+        IReadOnlyList<FirewallEnforcementEntry> warningEntries)
+    {
+        var warningText = string.Join(
+            Environment.NewLine,
+            warningEntries.Select(entry =>
+                $"{entry.Layer}: {entry.Error ?? "enforcement retry scheduled"}"));
+        return result.ConfigSaved
+            ? $"Firewall settings were saved, but some enforcement actions will retry:{Environment.NewLine}{warningText}"
+            : $"Firewall settings were not saved because some enforcement actions did not complete:{Environment.NewLine}{warningText}";
     }
 }

@@ -6,7 +6,8 @@ public record struct ContainerTraverseGrant(AppContainerEntry Container, string 
 
 public record EnforcementResult(
     Dictionary<string, DateTime> TimestampUpdates,
-    List<ContainerTraverseGrant> TraverseGrants);
+    List<ContainerTraverseGrant> TraverseGrants,
+    List<string>? Warnings = null);
 
 public interface IStartupEnforcementService
 {

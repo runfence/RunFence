@@ -18,81 +18,138 @@ public class AppEditCommitService(
     AppEntryPersistenceOrchestrator persistenceOrchestrator,
     IAppStateProvider appState) : IAppEditCommitService
 {
-    public bool Commit(AppEntry newApp, AppEntry? previousApp, string? configPath)
+    public RunAsAppEntryPersistenceResult Commit(AppEntry newApp, AppEntry? previousApp, string? configPath)
     {
         try
         {
             if (previousApp != null)
             {
-                var index = appState.Database.Apps.FindIndex(a => a.Id == previousApp.Id);
-                if (index < 0)
-                    return false;
-
-                var originalConfigPath = appConfigService.GetConfigPath(previousApp.Id);
-                appEntryManager.RevertAppChanges(previousApp);
-                appState.Database.Apps[index] = newApp;
-                appConfigService.AssignApp(newApp.Id, configPath);
-                try
-                {
-                    appEntryManager.ApplyAppChanges(newApp);
-                    SaveAllConfigsCore();
-                }
-                catch (Exception applyEx)
-                {
-                    appState.Database.Apps[index] = previousApp;
-                    appConfigService.AssignApp(previousApp.Id, originalConfigPath);
-                    try
-                    {
-                        appEntryManager.ApplyAppChanges(previousApp);
-                    }
-                    catch (Exception restoreEx)
-                    {
-                        log.Error("AppEditCommitService: failed to restore ACL after edit failure", restoreEx);
-                        throw new AggregateException("Edit failed and ACL restore also failed.", applyEx, restoreEx);
-                    }
-
-                    throw;
-                }
-            }
-            else
-            {
-                if (!persistenceOrchestrator.PersistNewAppEntry(newApp, configPath))
-                    return false;
+                return CommitExistingApp(newApp, previousApp, configPath);
             }
 
-            try
-            {
-                dataChangeNotifier.NotifyDataChanged();
-            }
-            catch (Exception ex)
-            {
-                log.Warn($"AppEditCommitService: failed to refresh UI: {ex.Message}");
-            }
-
-            return true;
+            return persistenceOrchestrator.PersistNewAppEntry(newApp, configPath);
         }
         catch (Exception ex)
         {
             log.Error("AppEditCommitService: commit failed", ex);
-            return false;
+            return new RunAsAppEntryPersistenceResult(
+                RunAsAppEntryPersistenceStatus.SaveFailed,
+                newApp,
+                ex.Message);
         }
     }
 
-    public void SaveAllConfigs()
+    private RunAsAppEntryPersistenceResult CommitExistingApp(AppEntry newApp, AppEntry previousApp, string? configPath)
+    {
+        if (!string.Equals(newApp.Id, previousApp.Id, StringComparison.Ordinal))
+        {
+            return new RunAsAppEntryPersistenceResult(
+                RunAsAppEntryPersistenceStatus.SaveFailed,
+                newApp,
+                "Existing application edits must preserve the application ID.");
+        }
+
+        var index = appState.Database.Apps.FindIndex(a => a.Id == previousApp.Id);
+        if (index < 0)
+        {
+            return new RunAsAppEntryPersistenceResult(
+                RunAsAppEntryPersistenceStatus.SaveFailed,
+                newApp,
+                "The application no longer exists.");
+        }
+
+        var originalConfigPath = appConfigService.GetConfigPath(previousApp.Id);
+        var cleanupResult = appEntryManager.RevertAppChanges(previousApp);
+        if (cleanupResult.Status != RunAsAppEntryPersistenceStatus.Succeeded)
+            return cleanupResult;
+
+        try
+        {
+            appState.Database.Apps[index] = newApp;
+            appConfigService.AssignApp(newApp.Id, configPath);
+            appConfigService.SaveAllConfigs(
+                appState.Database,
+                session.PinDerivedKey,
+                session.CredentialStore.ArgonSalt);
+        }
+        catch (Exception mutationOrSaveEx)
+        {
+            log.Error("AppEditCommitService: save failed for existing app edit", mutationOrSaveEx);
+            var restoreFailures = new List<string>();
+            try
+            {
+                appState.Database.Apps[index] = previousApp;
+                appConfigService.AssignApp(previousApp.Id, originalConfigPath);
+                try
+                {
+                    appConfigService.SaveAllConfigs(
+                        appState.Database,
+                        session.PinDerivedKey,
+                        session.CredentialStore.ArgonSalt);
+                }
+                catch (Exception restoreSaveException)
+                {
+                    log.Error("AppEditCommitService: failed to restore previous persisted app state after save failure",
+                        restoreSaveException);
+                    restoreFailures.Add(restoreSaveException.Message);
+                }
+
+                var restoreResult = appEntryManager.ApplyAppChanges(previousApp);
+                if (restoreResult.Status != RunAsAppEntryPersistenceStatus.Succeeded)
+                {
+                    log.Error("AppEditCommitService: failed to restore previous app state after save failure",
+                        new InvalidOperationException(
+                            restoreResult.WarningMessage ??
+                            restoreResult.ErrorMessage ??
+                            "Unknown restore failure."));
+                    restoreFailures.Add(
+                        restoreResult.WarningMessage ??
+                        restoreResult.ErrorMessage ??
+                        "Unknown restore failure.");
+                }
+
+                return new RunAsAppEntryPersistenceResult(
+                    RunAsAppEntryPersistenceStatus.SaveFailed,
+                    newApp,
+                    restoreFailures.Count == 0
+                        ? mutationOrSaveEx.Message
+                        : $"{mutationOrSaveEx.Message}{Environment.NewLine}{Environment.NewLine}" +
+                          $"Restoring the previous application state also failed: {string.Join("; ", restoreFailures)}");
+            }
+            catch (Exception restoreException)
+            {
+                log.Error("AppEditCommitService: failed to restore previous app state after save failure", restoreException);
+                return new RunAsAppEntryPersistenceResult(
+                    RunAsAppEntryPersistenceStatus.SaveFailed,
+                    newApp,
+                    $"{mutationOrSaveEx.Message}{Environment.NewLine}{Environment.NewLine}" +
+                    $"Restoring the previous application state also failed: {restoreException.Message}");
+            }
+        }
+
+        var applyResult = appEntryManager.ApplyAppChanges(newApp);
+        if (applyResult.Status != RunAsAppEntryPersistenceStatus.Succeeded)
+        {
+            NotifyDataChangedBestEffort();
+            return applyResult;
+        }
+
+        NotifyDataChangedBestEffort();
+
+        return new RunAsAppEntryPersistenceResult(
+            RunAsAppEntryPersistenceStatus.Succeeded,
+            newApp);
+    }
+
+    private void NotifyDataChangedBestEffort()
     {
         try
         {
-            SaveAllConfigsCore();
+            dataChangeNotifier.NotifyDataChanged();
         }
         catch (Exception ex)
         {
-            log.Error("AppEditCommitService: SaveAllConfigs failed", ex);
+            log.Warn($"AppEditCommitService: failed to refresh UI: {ex.Message}");
         }
-    }
-
-    private void SaveAllConfigsCore()
-    {
-        using var scope = session.PinDerivedKey.Unprotect();
-        appConfigService.SaveAllConfigs(appState.Database, scope.Data, session.CredentialStore.ArgonSalt);
     }
 }

@@ -13,12 +13,10 @@ public class DragBridgeModule : Module
 {
     protected override void Load(ContainerBuilder builder)
     {
-        builder.Register(c => new DragBridgeProcessLauncher(
-                c.Resolve<IDragBridgeLauncher>(),
-                c.Resolve<ILoggingService>(),
-                c.Resolve<IUiThreadInvoker>(),
-                c.Resolve<IKernelObjectMandatoryLabelService>(),
-                dragBridgeExePath: Path.Combine(AppContext.BaseDirectory, PathConstants.DragBridgeExeName)))
+        builder.RegisterType<DragBridgeProcessLauncher>()
+            .WithParameter(
+                "dragBridgeExePath",
+                Path.Combine(AppContext.BaseDirectory, PathConstants.DragBridgeExeName))
             .As<IDragBridgeProcessLauncher>()
             .As<IDragBridgeSessionManager>()
             .As<IDragBridgePipeLauncher>()
@@ -56,6 +54,10 @@ public class DragBridgeModule : Module
             .OrderBy(1)
             .SingleInstance();
 
+        builder.RegisterType<LowLevelKeyboardHotkeySource>()
+            .As<IHotkeySource>()
+            .SingleInstance();
+
         builder.RegisterType<CoreAudioSessionChecker>()
             .As<ICoreAudioSessionChecker>()
             .SingleInstance();
@@ -82,13 +84,10 @@ public class DragBridgeModule : Module
             .As<ITempDirectoryAclHelper>()
             .SingleInstance();
 
-        builder.Register(c => new DragBridgeTempFileManager(
-                c.Resolve<ILoggingService>(),
-                c.Resolve<IPathGrantService>(),
-                c.Resolve<ISessionSaver>(),
-                c.Resolve<IUiThreadInvoker>(),
-                c.Resolve<ITempDirectoryAclHelper>(),
-                tempRoot: Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir)))
+        builder.RegisterType<DragBridgeTempFileManager>()
+            .WithParameter(
+                "tempRoot",
+                Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir))
             .As<IDragBridgeTempFileManager>()
             .SingleInstance();
 

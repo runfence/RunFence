@@ -11,6 +11,7 @@ public interface ITraverseAcl
 {
     void AddAllowAce(string path, SecurityIdentifier sid);
     bool HasExplicitTraverseAce(string dirPath, SecurityIdentifier sid);
+    bool HasExplicitTraverseAceOrThrow(string dirPath, SecurityIdentifier sid);
     void RemoveTraverseOnlyAce(string path, SecurityIdentifier sid);
 }
 
@@ -43,6 +44,17 @@ public class TraverseAcl : ITraverseAcl
     /// Returns false on any error.
     /// </summary>
     public bool HasExplicitTraverseAce(string dirPath, SecurityIdentifier sid)
+        => HasExplicitTraverseAceCore(dirPath, sid, swallowErrors: true);
+
+    /// <summary>
+    /// Returns true if <paramref name="dirPath"/> exists and has an explicit non-inheritable Allow ACE
+    /// for <paramref name="sid"/> that grants exactly <see cref="TraverseRightsHelper.TraverseRights"/>.
+    /// Unlike <see cref="HasExplicitTraverseAce"/>, unexpected ACL read failures are propagated.
+    /// </summary>
+    public bool HasExplicitTraverseAceOrThrow(string dirPath, SecurityIdentifier sid)
+        => HasExplicitTraverseAceCore(dirPath, sid, swallowErrors: false);
+
+    private static bool HasExplicitTraverseAceCore(string dirPath, SecurityIdentifier sid, bool swallowErrors)
     {
         if (!Directory.Exists(dirPath))
             return false;
@@ -56,6 +68,8 @@ public class TraverseAcl : ITraverseAcl
         }
         catch
         {
+            if (!swallowErrors)
+                throw;
             return false;
         }
     }

@@ -7,9 +7,13 @@ public sealed class JobKeeperChildProcessLauncher(
     IJobKeeperExecutablePathResolver executablePathResolver,
     IJobKeeperEnvironmentSnapshotReader environmentSnapshotReader,
     IJobKeeperEnvironmentBlockFactory environmentBlockFactory,
-    IJobKeeperNativeProcessApi nativeProcessApi) : IJobKeeperChildProcessLauncher
+    IJobKeeperNativeProcessApi nativeProcessApi,
+    IJobKeeperChildProcessRegistry childProcessRegistry) : IJobKeeperChildProcessLauncher
 {
     private const uint CreateUnicodeEnvironment = 0x00000400;
+    private const int Win32ErrorElevationRequired = 740;
+    private const string CompatLayerVariableName = "__COMPAT_LAYER";
+    private const string RunAsInvokerCompatLayerValue = "RunAsInvoker";
 
     public JobKeeperLaunchResponse Launch(JobKeeperLaunchRequest request)
     {
@@ -27,28 +31,66 @@ public sealed class JobKeeperChildProcessLauncher(
         if (!string.IsNullOrEmpty(request.Arguments))
             cmdLine.Append(' ').Append(request.Arguments);
 
-        var envBlock = environmentBlockFactory.Build(environment);
-
-        try
+        using var envBlock = environmentBlockFactory.Build(environment);
+        var applicationName = Path.IsPathFullyQualified(exePath) ? exePath : null;
+        if (!TryCreateProcess(
+                applicationName,
+                cmdLine,
+                envBlock.Pointer,
+                request.WorkingDirectory,
+                request.HideWindow,
+                request.SuppressStartupFeedback,
+                out var processInfo))
         {
-            if (!nativeProcessApi.CreateProcess(
-                    cmdLine,
-                    CreateUnicodeEnvironment,
-                    envBlock,
-                    request.WorkingDirectory,
-                    request.HideWindow,
-                    out var processInfo))
+            var error = nativeProcessApi.GetLastWin32Error();
+            if (error == Win32ErrorElevationRequired
+                && !environment.ContainsKey(CompatLayerVariableName))
             {
-                return new JobKeeperLaunchResponse(0, nativeProcessApi.GetLastWin32Error());
+                var retryEnvironment = new Dictionary<string, string>(environment, StringComparer.OrdinalIgnoreCase)
+                {
+                    [CompatLayerVariableName] = RunAsInvokerCompatLayerValue
+                };
+                using var retryEnvBlock = environmentBlockFactory.Build(retryEnvironment);
+                if (TryCreateProcess(
+                        applicationName,
+                        cmdLine,
+                        retryEnvBlock.Pointer,
+                        request.WorkingDirectory,
+                        request.HideWindow,
+                        request.SuppressStartupFeedback,
+                        out processInfo))
+                {
+                    nativeProcessApi.CloseHandle(processInfo.ThreadHandle);
+                    childProcessRegistry.Register(processInfo.ProcessHandle);
+                    return new JobKeeperLaunchResponse((int)processInfo.ProcessId, 0);
+                }
+
+                error = nativeProcessApi.GetLastWin32Error();
             }
 
-            nativeProcessApi.CloseHandle(processInfo.ThreadHandle);
-            nativeProcessApi.CloseHandle(processInfo.ProcessHandle);
-            return new JobKeeperLaunchResponse((int)processInfo.ProcessId, 0);
+            return new JobKeeperLaunchResponse(0, error);
         }
-        finally
-        {
-            environmentBlockFactory.Free(envBlock);
-        }
+
+        nativeProcessApi.CloseHandle(processInfo.ThreadHandle);
+        childProcessRegistry.Register(processInfo.ProcessHandle);
+        return new JobKeeperLaunchResponse((int)processInfo.ProcessId, 0);
     }
+
+    private bool TryCreateProcess(
+        string? applicationName,
+        StringBuilder commandLine,
+        IntPtr environmentBlock,
+        string? workingDirectory,
+        bool hideWindow,
+        bool suppressStartupFeedback,
+        out JobKeeperProcessInformation processInfo)
+        => nativeProcessApi.CreateProcess(
+            applicationName,
+            new StringBuilder(commandLine.ToString()),
+            CreateUnicodeEnvironment,
+            environmentBlock,
+            string.IsNullOrWhiteSpace(workingDirectory) ? null : workingDirectory,
+            hideWindow,
+            suppressStartupFeedback,
+            out processInfo);
 }

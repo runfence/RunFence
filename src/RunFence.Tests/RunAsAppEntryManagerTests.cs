@@ -56,15 +56,16 @@ public class RunAsAppEntryManagerTests
         var manager = CreateManager();
 
         // Act
-        manager.RevertAppChanges(app);
+        var result = manager.RevertAppChanges(app);
 
         // Assert: ACL reverted and ancestor ACLs recomputed (without the reverted app)
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
         _aclService.Verify(s => s.RevertAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
         _aclService.Verify(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
     }
 
     [Fact]
-    public void RevertAppChanges_RevertAclThrows_LogsError()
+    public void RevertAppChanges_RevertAclThrows_ReturnsSaveFailedAndLogsError()
     {
         // Arrange
         var app = new AppEntry { Name = "BrokenApp", AccountSid = UserSid, RestrictAcl = true };
@@ -74,10 +75,40 @@ public class RunAsAppEntryManagerTests
         var manager = CreateManager();
 
         // Act — must not throw
-        manager.RevertAppChanges(app);
+        var result = manager.RevertAppChanges(app);
 
         // Assert
+        Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
+        Assert.Equal("Access denied", result.ErrorMessage);
         _log.Verify(l => l.Error(It.Is<string>(s => s.Contains("BrokenApp")), It.IsAny<Exception>()), Times.Once);
+        _aclService.Verify(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
+    }
+
+    [Fact]
+    public void RevertAppChanges_RecomputeAncestorAclsThrows_RestoresPreviousEnforcementAndReturnsSaveFailed()
+    {
+        var app = new AppEntry { Name = "BrokenApp", AccountSid = UserSid, RestrictAcl = true };
+        _database.Apps.Add(app);
+        var callOrder = new List<string>();
+        _aclService.Setup(s => s.RevertAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Callback(() => callOrder.Add("revert"));
+        int recomputeCount = 0;
+        _aclService.Setup(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Callback(() =>
+            {
+                callOrder.Add("recompute");
+                recomputeCount++;
+                if (recomputeCount == 1)
+                    throw new InvalidOperationException("ancestor failed");
+            });
+        _aclService.Setup(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Callback(() => callOrder.Add("apply"));
+
+        var result = CreateManager().RevertAppChanges(app);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
+        Assert.Equal("ancestor failed", result.ErrorMessage);
+        Assert.Equal(["revert", "recompute", "apply", "recompute"], callOrder);
     }
 
     // ── ApplyAppChanges ───────────────────────────────────────────────────
@@ -91,11 +122,54 @@ public class RunAsAppEntryManagerTests
         var manager = CreateManager();
 
         // Act
-        manager.ApplyAppChanges(app);
+        var result = manager.ApplyAppChanges(app);
 
         // Assert
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
         _aclService.Verify(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
         _aclService.Verify(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
+    }
+
+    [Fact]
+    public void ApplyAppChanges_DenyAclFailure_ReturnsConvenienceEnforcementFailed()
+    {
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, RestrictAcl = true, AclMode = AclMode.Deny };
+        _database.Apps.Add(app);
+        _aclService.Setup(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Throws(new InvalidOperationException("acl failed"));
+
+        var result = CreateManager().ApplyAppChanges(app);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.ConvenienceEnforcementFailed, result.Status);
+        Assert.Equal("acl failed", result.WarningMessage);
+    }
+
+    [Fact]
+    public void ApplyAppChanges_ShortcutRelatedFailure_ReturnsConvenienceEnforcementFailed()
+    {
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
+        _database.Apps.Add(app);
+        _iconService.Setup(s => s.CreateBadgedIcon(app))
+            .Throws(new InvalidOperationException("icon failed"));
+
+        var result = CreateManager().ApplyAppChanges(app);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.ConvenienceEnforcementFailed, result.Status);
+        Assert.Equal("icon failed", result.WarningMessage);
+    }
+
+    [Fact]
+    public void ApplyAppChanges_AncestorAclFailure_ReturnsRequiredEnforcementFailed()
+    {
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid };
+        _database.Apps.Add(app);
+        _aclService.Setup(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Throws(new InvalidOperationException("ancestor failed"));
+
+        var result = CreateManager().ApplyAppChanges(app);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.RequiredEnforcementFailed, result.Status);
+        Assert.Equal("ancestor failed", result.WarningMessage);
     }
 
     // ── TEST-10: RevertShortcuts + RemoveBesideTargetShortcut ordering ────
@@ -118,9 +192,10 @@ public class RunAsAppEntryManagerTests
         var manager = CreateManager();
 
         // Act
-        manager.RevertAppChanges(app);
+        var result = manager.RevertAppChanges(app);
 
         // Assert: both shortcut operations called, RevertShortcuts before RemoveBesideTargetShortcut
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
         Assert.Contains("RevertShortcuts", callOrder);
         Assert.Contains("RemoveBesideTargetShortcut", callOrder);
         Assert.True(callOrder.IndexOf("RevertShortcuts") < callOrder.IndexOf("RemoveBesideTargetShortcut"),

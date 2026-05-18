@@ -2,6 +2,7 @@ using System.Security.Principal;
 using RunFence.Acl;
 using RunFence.Core;
 using RunFence.UI;
+using RunFence.Wizard.Templates;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
 
@@ -15,6 +16,7 @@ public class PrepareSystemDriveStep : WizardStepPage
     private readonly Action<List<(string DrivePath, string TargetSid)>> _setDriveSelections;
     private readonly IReadOnlyDictionary<string, string> _sidNames;
     private readonly DriveAclReplacer _driveAclReplacer;
+    private readonly IPrepareSystemDriveInfoSource _driveInfoSource;
 
     private Label _infoLabel = null!;
     private DataGridView _driveGrid = null!;
@@ -31,11 +33,13 @@ public class PrepareSystemDriveStep : WizardStepPage
     public PrepareSystemDriveStep(
         Action<List<(string DrivePath, string TargetSid)>> setDriveSelections,
         IReadOnlyDictionary<string, string> sidNames,
-        DriveAclReplacer driveAclReplacer)
+        DriveAclReplacer driveAclReplacer,
+        IPrepareSystemDriveInfoSource driveInfoSource)
     {
         _setDriveSelections = setDriveSelections;
         _sidNames = sidNames;
         _driveAclReplacer = driveAclReplacer;
+        _driveInfoSource = driveInfoSource;
         BuildContent();
     }
 
@@ -186,37 +190,30 @@ public class PrepareSystemDriveStep : WizardStepPage
             ? BuildTargetDisplay(interactiveSid, "Interactive user")
             : null;
 
-        var systemDrive = Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\";
-
-        foreach (var drive in DriveInfo.GetDrives().Where(d =>
-                     d.DriveType == DriveType.Fixed &&
-                     !string.Equals(d.RootDirectory.FullName, systemDrive, StringComparison.OrdinalIgnoreCase)))
+        IReadOnlyList<PrepareSystemDriveInfo> drives;
+        try
         {
-            var drivePath = drive.RootDirectory.FullName;
+            drives = _driveInfoSource.GetNonSystemFixedDrives();
+        }
+        catch
+        {
+            NotifyCanProceedChanged();
+            return;
+        }
+
+        foreach (var drive in drives)
+        {
+            if (!drive.IsReady || !string.IsNullOrEmpty(drive.InspectionError))
+                continue;
+
+            var drivePath = drive.RootPath;
 
             // Skip drives where root ACL is inaccessible or has no replaceable broad ACEs
             if (!_driveAclReplacer.HasReplaceableBroadAces(drivePath))
                 continue;
 
-            string sizeText;
-            try
-            {
-                sizeText = FormatSize(drive.TotalSize);
-            }
-            catch
-            {
-                sizeText = "N/A";
-            }
-
-            string fsType;
-            try
-            {
-                fsType = drive.DriveFormat;
-            }
-            catch
-            {
-                fsType = string.Empty;
-            }
+            var sizeText = drive.TotalSize.HasValue ? FormatSize(drive.TotalSize.Value) : "N/A";
+            var fsType = drive.DriveFormat ?? string.Empty;
 
             var targets = new List<(string Display, string Sid)> { (adminDisplay, adminsSid) };
             if (interactiveSid != null && interactiveDisplay != null)

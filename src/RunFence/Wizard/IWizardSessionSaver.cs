@@ -8,6 +8,11 @@ namespace RunFence.Wizard;
 public interface IWizardSessionSaver
 {
     /// <summary>
+    /// Saves the current session state to disk.
+    /// </summary>
+    void SaveConfig();
+
+    /// <summary>
     /// Saves the current session state to disk and refreshes all panels.
     /// </summary>
     void SaveAndRefresh();

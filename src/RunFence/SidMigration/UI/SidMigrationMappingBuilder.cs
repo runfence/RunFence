@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using RunFence.Account.UI;
+using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.SidMigration.UI.Forms;
@@ -17,9 +18,13 @@ public class SidMigrationMappingBuilder(
     SidMigrationMappingLogic logic,
     SidMigrationMappingValidator validator,
     ILoggingService log,
+    IMessageBoxService messageBoxService,
     IEnumerable<OrphanedSid> orphanedSids)
 {
     private Dictionary<string, string> _sidDisplayNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, OrphanedSid> _orphanedBySid =
+        orphanedSids.ToDictionary(o => o.Sid, StringComparer.OrdinalIgnoreCase);
+    private string? _lastConfirmedUnresolvedSelectionKey;
 
     public event Action? Ready;
     public event Action? Failed;
@@ -70,8 +75,8 @@ public class SidMigrationMappingBuilder(
     private void PopulatePanel(Panel panel, Dictionary<string, (string guessedName, string? newSid)> allMappings)
     {
         _sidDisplayNames = logic.BuildSidDisplayNames();
-
-        var orphanedLookup = orphanedSids.ToDictionary(o => o.Sid, StringComparer.OrdinalIgnoreCase);
+        var confirmedCount = _orphanedBySid.Values.Count(o => o.Classification == OrphanedSidClassification.ConfirmedOrphaned);
+        var unresolvedCount = _orphanedBySid.Values.Count(o => o.Classification == OrphanedSidClassification.Unresolved);
 
         MappingGrid = new DataGridView
         {
@@ -90,6 +95,7 @@ public class SidMigrationMappingBuilder(
             Items = { "Skip", "Migrate", "Delete" }, FlatStyle = FlatStyle.Flat
         });
         MappingGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Name", HeaderText = "Name", FillWeight = 20 });
+        MappingGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Discovery", HeaderText = "Discovery", FillWeight = 16, ReadOnly = true });
         MappingGrid.Columns.Add(new DataGridViewTextBoxColumn { Name = "OldSid", HeaderText = "Old SID", FillWeight = 30 });
 
         var newSidCol = new DataGridViewComboBoxColumn
@@ -124,8 +130,14 @@ public class SidMigrationMappingBuilder(
             var displayName = name;
             if (name == "(unknown)")
                 displayName = validator.ResolveSidName(oldSid) ?? "(unknown)";
-            var idx = MappingGrid.Rows.Add(action, displayName, oldSid, newSid ?? "");
+            var discovery = _orphanedBySid.TryGetValue(oldSid, out var orphan)
+                ? orphan.Classification == OrphanedSidClassification.Unresolved
+                    ? "Unresolved lookup"
+                    : "Confirmed orphan"
+                : "Mapped credential";
+            var idx = MappingGrid.Rows.Add(action, displayName, discovery, oldSid, newSid ?? "");
             MappingGrid.Rows[idx].Cells["Name"].ReadOnly = true;
+            MappingGrid.Rows[idx].Cells["Discovery"].ReadOnly = true;
             MappingGrid.Rows[idx].Cells["OldSid"].ReadOnly = true;
             MappingGrid.Rows[idx].Cells["NewSid"].ReadOnly = action != "Migrate";
         }
@@ -146,9 +158,13 @@ public class SidMigrationMappingBuilder(
             if (string.IsNullOrEmpty(oldSid))
                 return;
 
-            if (orphanedLookup.TryGetValue(oldSid, out var orphan) && orphan.SamplePaths.Count > 0)
+            if (_orphanedBySid.TryGetValue(oldSid, out var orphan) && orphan.SamplePaths.Count > 0)
             {
                 var total = orphan.AceCount + orphan.OwnerCount;
+                if (orphan.Classification == OrphanedSidClassification.Unresolved)
+                    pathsDetail.Items.Add("Lookup status: unresolved. Include only if you have independently confirmed this SID is stale.");
+                else
+                    pathsDetail.Items.Add("Lookup status: confirmed orphaned.");
                 pathsDetail.Items.Add($"{total} reference(s) found (showing up to {OrphanedSid.MaxSamplePaths} paths):");
                 foreach (var p in orphan.SamplePaths)
                     pathsDetail.Items.Add(p);
@@ -173,115 +189,91 @@ public class SidMigrationMappingBuilder(
         var toolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden };
         toolStrip.Items.Add(addButton);
 
+        var summaryLabel = new Label
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            Padding = new Padding(4, 0, 4, 8),
+            Text = unresolvedCount > 0
+                ? $"Confirmed orphaned: {confirmedCount}. Unresolved lookups: {unresolvedCount}. Unresolved rows stay skipped unless you explicitly include them."
+                : $"Confirmed orphaned: {confirmedCount}."
+        };
+
         var pathsPanel = new Panel { Dock = DockStyle.Bottom, Height = 100 };
         pathsPanel.Controls.Add(pathsDetail);
 
         panel.Controls.Add(MappingGrid);     // Fill: index 0
         panel.Controls.Add(pathsPanel);      // Bottom: index 1
-        panel.Controls.Add(toolStrip);       // Top: index 2 (last added = topmost)
+        panel.Controls.Add(toolStrip);       // Top: index 2
+        panel.Controls.Add(summaryLabel);    // Top: index 3 (last added = topmost)
     }
 
-    public bool TryCollectMappingsFromGrid(out List<SidMigrationMapping> mappings)
+    public bool TryCollectSelectionsFromGrid(out List<SidMigrationMapping> mappings, out List<string> deleteSids)
     {
-        var result = new List<SidMigrationMapping>();
-        mappings = result;
         if (MappingGrid == null)
+        {
+            mappings = [];
+            deleteSids = [];
+            return true;
+        }
+
+        var collector = new SidMigrationSelectionCollector(
+            validator,
+            messageBoxService,
+            _sidDisplayNames,
+            _orphanedBySid);
+        var rows = MappingGrid.Rows
+            .Cast<DataGridViewRow>()
+            .Select(row => new SidMigrationSelectionRow(
+                row.Index,
+                row.Cells["Action"].Value?.ToString() ?? "",
+                row.Cells["OldSid"].Value?.ToString()?.Trim() ?? "",
+                row.Cells["NewSid"].Value?.ToString()?.Trim() ?? "",
+                row.Cells["Name"].Value?.ToString() ?? ""))
+            .ToList();
+        var selectionResult = collector.Collect(rows, ConfirmUnresolvedSelections);
+        mappings = selectionResult.Mappings;
+        deleteSids = selectionResult.DeleteSids;
+        foreach (DataGridViewRow gridRow in MappingGrid!.Rows)
+            gridRow.ErrorText = string.Empty;
+
+        foreach (var (rowIndex, errorText) in selectionResult.RowErrors)
+            MappingGrid.Rows[rowIndex].ErrorText = errorText;
+
+        return selectionResult.Success;
+    }
+    private bool ConfirmUnresolvedSelections(IEnumerable<string> selectedSids)
+    {
+        var unresolved = selectedSids
+            .Where(sid => _orphanedBySid.TryGetValue(sid, out var orphan)
+                          && orphan.Classification == OrphanedSidClassification.Unresolved)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(sid => sid, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (unresolved.Count == 0)
             return true;
 
-        var rowsByNewSid = new Dictionary<string, List<DataGridViewRow>>(StringComparer.OrdinalIgnoreCase);
-        var validationErrors = new List<string>();
+        var selectionKey = string.Join("|", unresolved);
+        if (string.Equals(_lastConfirmedUnresolvedSelectionKey, selectionKey, StringComparison.Ordinal))
+            return true;
 
-        foreach (DataGridViewRow row in MappingGrid.Rows)
-        {
-            if (row.Cells["Action"].Value?.ToString() != "Migrate")
-                continue;
-            var oldSid = row.Cells["OldSid"].Value?.ToString()?.Trim() ?? "";
-            var newSidInput = row.Cells["NewSid"].Value?.ToString()?.Trim() ?? "";
-            var name = row.Cells["Name"].Value?.ToString() ?? "";
-            if (string.IsNullOrEmpty(oldSid) || string.IsNullOrEmpty(newSidInput))
-                continue;
-
-            // Validate SID format for manually-entered old SIDs
-            if (name == "(manual)" && !SidMigrationMappingValidator.TryParseSid(oldSid, out _))
-            {
-                var error = $"'{oldSid}' is not a valid SID.";
-                row.ErrorText = error;
-                validationErrors.Add(error);
-                continue;
-            }
-
-            // Validate new SID format (user may type a free-form value in the combo)
-            if (!SidMigrationMappingValidator.TryResolveSidInput(newSidInput, _sidDisplayNames, out var newSid))
-            {
-                var error = $"'{newSidInput}' is not a valid SID.";
-                row.ErrorText = error;
-                validationErrors.Add(error);
-                continue;
-            }
-
-            row.Cells["NewSid"].Value = newSid;
-            if (!rowsByNewSid.TryGetValue(newSid, out var rowList))
-            {
-                rowList = [];
-                rowsByNewSid[newSid] = rowList;
-            }
-            rowList.Add(row);
-
-            result.Add(new SidMigrationMapping(oldSid, newSid, name));
-        }
-
-        // Check for duplicate NewSid values across rows
-        var duplicateNewSids = validator.FindDuplicateNewSids(result);
-        if (duplicateNewSids.Count > 0)
-        {
-            foreach (var (newSid, rows) in rowsByNewSid)
-            {
-                if (duplicateNewSids.Contains(newSid))
-                {
-                    const string error = "Duplicate target SID — each old SID must map to a unique new SID.";
-                    foreach (var row in rows)
-                        row.ErrorText = error;
-                    validationErrors.Add($"Duplicate target SID: {newSid}");
-                }
-            }
-        }
-
-        if (validationErrors.Count > 0)
-        {
-            MessageBox.Show(
-                "Please fix the following validation errors before proceeding:\n\n" +
-                string.Join("\n", validationErrors),
-                "Validation Errors",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            mappings = [];
-            return false;
-        }
-
-        mappings = result;
-        return true;
-    }
-
-    public List<string> CollectDeleteSidsFromGrid()
-    {
-        var result = new List<string>();
-        if (MappingGrid == null)
-            return result;
-
-        result.AddRange(from DataGridViewRow row in MappingGrid.Rows
-            where row.Cells["Action"].Value?.ToString() == "Delete"
-            select row.Cells["OldSid"].Value?.ToString()?.Trim() ?? ""
-            into oldSid
-            where !string.IsNullOrEmpty(oldSid)
-            select oldSid);
-
-        return result;
+        var result = messageBoxService.Show(
+            "Some selected SIDs could not be resolved because lookup timed out or failed.\n\n" +
+            string.Join("\n", unresolved.Select(sid => validator.ResolveSidName(sid) ?? sid)) +
+            "\n\nInclude these unresolved SIDs anyway?",
+            "Include Unresolved SIDs",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (result == DialogResult.Yes)
+            _lastConfirmedUnresolvedSelectionKey = selectionKey;
+        return result == DialogResult.Yes;
     }
 
     private void OnMappingGridCellValueChanged(object? sender, DataGridViewCellEventArgs args)
     {
         if (args.RowIndex < 0)
             return;
+        _lastConfirmedUnresolvedSelectionKey = null;
         if (MappingGrid!.Columns[args.ColumnIndex].Name == "Action")
         {
             var action = MappingGrid.Rows[args.RowIndex].Cells["Action"].Value?.ToString();
@@ -329,7 +321,10 @@ public class SidMigrationMappingBuilder(
     private void OnMappingGridCellEndEdit(object? sender, DataGridViewCellEventArgs e)
     {
         if (e.RowIndex >= 0)
+        {
             MappingGrid!.Rows[e.RowIndex].ErrorText = "";
+            _lastConfirmedUnresolvedSelectionKey = null;
+        }
     }
 
     private void OnNewSidComboFormat(object? sender, ListControlConvertEventArgs e)

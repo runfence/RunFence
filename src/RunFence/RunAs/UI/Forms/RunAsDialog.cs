@@ -9,11 +9,12 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Launching.Resolution;
 using RunFence.UI;
+using RunFence.UI.Forms;
 
 namespace RunFence.RunAs.UI.Forms;
 
 /// <remarks>Methods above threshold: 22 methods, 435 lines: already has Populator and Renderer extracted. Remaining methods are event handlers + <c>CaptureResult</c>. Extracting layout helpers creates 1:1 coupling with the dialog's controls. Extracting state management duplicates control references. Reviewed 2026-04-09.</remarks>
-public partial class RunAsDialog : Form
+public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private string _filePath = null!;
     private string? _arguments;
@@ -46,33 +47,32 @@ public partial class RunAsDialog : Form
     private IReadOnlyDictionary<string, string>? _sidNames;
     private IReadOnlyDictionary<string, PrivilegeLevel>? _accountPrivilegeLevels;
     private readonly ISidResolver _sidResolver;
-    private readonly IWindowsAccountService _windowsAccountService;
+    private readonly IAccountPasswordService _accountPasswordService;
     private readonly RunAsCredentialListPopulator _populator;
     private readonly RunAsCredentialListRenderer _renderer;
     private readonly IAclPermissionService _aclPermission;
     private readonly IExecutableKindService _executableKindService;
     private readonly ToolTip _toolTip = new();
 
-    internal RunAsDialog(
+    public RunAsDialog(
         ISidResolver sidResolver,
         IAclPermissionService aclPermission,
         RunAsCredentialListPopulator populator,
         RunAsCredentialListRenderer renderer,
-        IWindowsAccountService windowsAccountService,
+        IAccountPasswordService accountPasswordService,
         IExecutableKindService executableKindService)
     {
         _sidResolver = sidResolver;
         _aclPermission = aclPermission;
         _populator = populator;
         _renderer = renderer;
-        _windowsAccountService = windowsAccountService;
+        _accountPasswordService = accountPasswordService;
         _executableKindService = executableKindService;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
-        _toolTip.SetToolTip(_privilegeLevelComboBox, LaunchUiConstants.PrivilegeLevelTooltip);
     }
 
-    private static readonly PrivilegeLevel[] PrivilegeLevelMapping = [PrivilegeLevel.HighestAllowed, PrivilegeLevel.AboveBasic, PrivilegeLevel.Basic, PrivilegeLevel.LowIntegrity];
+    private static readonly PrivilegeLevel[] PrivilegeLevelMapping = [PrivilegeLevel.HighestAllowed, PrivilegeLevel.Basic, PrivilegeLevel.Isolated, PrivilegeLevel.LowIntegrity];
 
     /// <summary>
     /// Initializes per-use dialog data. Must be called before <see cref="Form.ShowDialog()"/>.
@@ -209,6 +209,14 @@ public partial class RunAsDialog : Form
 
         if (_credentialListBox.Items.Count > 0)
             _credentialListBox.SelectedIndex = initialSelection;
+
+        RegisterContextHelp();
+    }
+
+    private void RegisterContextHelp()
+    {
+        SetContextHelp(_argsTextBox, ContextHelpTextCatalog.Launch_Arguments);
+        SetContextHelp(_privilegeLevelComboBox, ContextHelpTextCatalog.Launch_PrivilegeLevel);
     }
 
     private int FindManagedAppSelection()
@@ -319,7 +327,7 @@ public partial class RunAsDialog : Form
         {
             case CreateAccountItem:
                 _currentExistingApp = null;
-                SetPrivilegeLevel(SuggestPrivilegeLevel(PrivilegeLevel.Basic), enabled: true);
+                SetPrivilegeLevel(SuggestPrivilegeLevel(PrivilegeLevel.Isolated), enabled: true);
                 UpdateLaunchButtonState();
                 _addAppButton.Text = "Add app entry\u2026";
                 return;
@@ -349,8 +357,8 @@ public partial class RunAsDialog : Form
                     string.Equals(a.ExePath, _filePath, StringComparison.OrdinalIgnoreCase));
 
                 _currentExistingApp = existingApp;
-                var accountMode = _accountPrivilegeLevels?.GetValueOrDefault(item.Credential.Sid, PrivilegeLevel.Basic)
-                    ?? PrivilegeLevel.Basic;
+                var accountMode = _accountPrivilegeLevels?.GetValueOrDefault(item.Credential.Sid, PrivilegeLevel.Isolated)
+                    ?? PrivilegeLevel.Isolated;
                 bool isSystem = SidResolutionHelper.IsSystemSid(item.Credential.Sid);
 
                 if (existingApp != null && !isSystem)
@@ -367,7 +375,7 @@ public partial class RunAsDialog : Form
             }
             default:
                 _currentExistingApp = null;
-                SetPrivilegeLevel(PrivilegeLevel.Basic, enabled: false);
+                SetPrivilegeLevel(PrivilegeLevel.Isolated, enabled: false);
                 break;
         }
 
@@ -412,8 +420,8 @@ public partial class RunAsDialog : Form
     }
 
     private PrivilegeLevel SuggestPrivilegeLevel(PrivilegeLevel accountMode)
-        => accountMode == PrivilegeLevel.Basic && _executableKindService.SuggestsAboveBasicPrivilegeLevel(_filePath)
-            ? PrivilegeLevel.AboveBasic
+        => accountMode == PrivilegeLevel.Isolated && _executableKindService.SuggestsBasicPrivilegeLevel(_filePath)
+            ? PrivilegeLevel.Basic
             : accountMode;
 
     private void OnLaunchClick(object? sender, EventArgs e)
@@ -444,7 +452,7 @@ public partial class RunAsDialog : Form
         var displayName = item.ToString();
         var usernameFallback = SidNameResolver.ResolveUsername(item.Credential.Sid, _sidResolver, _sidNames) ?? displayName;
 
-        using var dlg = new RunAsPasswordDialog(displayName, _windowsAccountService, item.Credential.Sid, usernameFallback);
+        using var dlg = new RunAsPasswordDialog(displayName, _accountPasswordService, item.Credential.Sid, usernameFallback);
         if (dlg.ShowDialog(this) != DialogResult.OK)
             return false;
 

@@ -1,61 +1,25 @@
-using System.Diagnostics;
-using System.Diagnostics.Eventing.Reader;
 using RunFence.Core;
 
 namespace RunFence.Firewall;
 
-public class EventLogBlockedConnectionReader(ILoggingService log) : IBlockedConnectionReader
+public class EventLogBlockedConnectionReader(
+    ILoggingService log,
+    IBlockedConnectionEventSource eventSource,
+    IAuditPolCommandRunner auditPolCommandRunner)
+    : IBlockedConnectionReader, IAuditPolicyService
 {
     private const string AuditSubcategoryGuid = "{0CCE9226-69AE-11D9-BED3-505054503030}";
-
-    private const int EventId5157 = 5157;
-
-    // Event 5157 property indices
-    private const int PropDestAddress = 5;
-    private const int PropDestPort = 6;
-    private const int PropProtocol = 7;
-    private const int PropDirection = 2;
-    private const string OutboundDirection = "%%14593";
 
     public List<BlockedConnection> ReadBlockedConnections(TimeSpan lookback)
     {
         var result = new List<BlockedConnection>();
         var since = DateTime.UtcNow - lookback;
 
-        // XPath filter: Event ID 5157 within the time window
-        var query = new EventLogQuery(
-            "Security",
-            PathType.LogName,
-            $"*[System[(EventID={EventId5157}) and TimeCreated[@SystemTime>='{since:yyyy-MM-ddTHH:mm:ss.000Z}']]]");
-
         try
         {
-            using var reader = new EventLogReader(query);
-            while (reader.ReadEvent() is { } record)
+            foreach (var record in eventSource.ReadBlockedConnectionEvents(since))
             {
-                using (record)
-                {
-                    var props = record.Properties;
-                    if (props.Count <= PropProtocol)
-                        continue;
-
-                    var direction = props[PropDirection].Value?.ToString();
-                    if (direction != OutboundDirection)
-                        continue;
-
-                    var destAddress = props[PropDestAddress].Value?.ToString();
-                    if (string.IsNullOrEmpty(destAddress))
-                        continue;
-
-                    if (!int.TryParse(props[PropDestPort].Value?.ToString(), out var destPort))
-                        continue;
-                    // Protocol parsing serves as a validation gate — events with non-integer
-                    // protocol values are malformed and intentionally skipped, not dead code.
-                    if (!int.TryParse(props[PropProtocol].Value?.ToString(), out _))
-                        continue;
-
-                    result.Add(new BlockedConnection(destAddress, destPort, record.TimeCreated ?? DateTime.UtcNow));
-                }
+                result.Add(new BlockedConnection(record.DestAddress, record.DestPort, record.TimeCreatedUtc));
             }
         }
         catch (Exception ex)
@@ -66,50 +30,110 @@ public class EventLogBlockedConnectionReader(ILoggingService log) : IBlockedConn
         return result;
     }
 
-    public bool IsAuditPolicyEnabled()
+    public AuditPolicyResult ReadBlockedConnectionAuditingState()
     {
         try
         {
-            var output = RunAuditPol($"/get /subcategory:{AuditSubcategoryGuid}");
-            return output.Contains("Failure", StringComparison.OrdinalIgnoreCase);
+            var commandResult = auditPolCommandRunner.Run($"/get /subcategory:{AuditSubcategoryGuid}");
+            if (!TryValidateAuditPolResult(commandResult, requestedState: false, out var failureResult))
+                return failureResult!;
+
+            if (!TryParseAuditState(commandResult.StandardOutput, out var enabled))
+                return new AuditPolicyResult(AuditPolicyStatus.Failed, false, null, "Failed to parse auditpol output.", IsRetryable: true);
+
+            return new AuditPolicyResult(AuditPolicyStatus.Succeeded, enabled, enabled, null, IsRetryable: false);
         }
         catch (Exception ex)
         {
             log.Error("BlockedConnectionReader: failed to query audit policy", ex);
-            return false;
+            return new AuditPolicyResult(AuditPolicyStatus.Failed, false, null, ex.Message, IsRetryable: true);
         }
     }
 
-    public void SetAuditPolicyEnabled(bool enabled)
+    public AuditPolicyResult EnableBlockedConnectionAuditing()
+    {
+        return SetAuditPolicyEnabledCore(true);
+    }
+
+    public AuditPolicyResult DisableBlockedConnectionAuditing()
+    {
+        return SetAuditPolicyEnabledCore(false);
+    }
+
+    private AuditPolicyResult SetAuditPolicyEnabledCore(bool enabled)
     {
         var failure = enabled ? "enable" : "disable";
         try
         {
-            RunAuditPol($"/set /subcategory:{AuditSubcategoryGuid} /failure:{failure}");
+            var commandResult = auditPolCommandRunner.Run($"/set /subcategory:{AuditSubcategoryGuid} /failure:{failure}");
+            if (!TryValidateAuditPolResult(commandResult, enabled, out var failureResult))
+                return failureResult!;
+
+            var readback = ReadBlockedConnectionAuditingState();
+            if (readback.Status == AuditPolicyStatus.Succeeded && readback.ObservedState != enabled)
+                return new AuditPolicyResult(AuditPolicyStatus.ReadbackMismatch, enabled, readback.ObservedState, null, IsRetryable: true);
+
+            if (readback.Status != AuditPolicyStatus.Succeeded)
+                return new AuditPolicyResult(AuditPolicyStatus.Failed, enabled, readback.ObservedState, readback.Error, IsRetryable: true);
+
+            return new AuditPolicyResult(AuditPolicyStatus.Succeeded, enabled, readback.ObservedState, null, IsRetryable: false);
         }
         catch (Exception ex)
         {
             log.Error($"BlockedConnectionReader: failed to set audit policy (enabled={enabled})", ex);
-            throw;
+            return new AuditPolicyResult(AuditPolicyStatus.Failed, enabled, null, ex.Message, IsRetryable: true);
         }
     }
 
-    private string RunAuditPol(string args)
+    private static bool TryParseAuditState(string output, out bool enabled)
     {
-        var psi = new ProcessStartInfo("auditpol.exe", args)
+        if (output.Contains("Failure", StringComparison.OrdinalIgnoreCase))
         {
-            RedirectStandardOutput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-        using var proc = Process.Start(psi)
-                         ?? throw new InvalidOperationException("Failed to start auditpol.exe");
-        var readTask = proc.StandardOutput.ReadToEndAsync();
-        if (!readTask.Wait(5000)) { proc.Kill(); throw new TimeoutException("auditpol.exe timed out"); }
-        var output = readTask.Result;
-        proc.WaitForExit();
-        if (proc.ExitCode != 0)
-            log.Warn($"auditpol.exe exited with code {proc.ExitCode} (args: {args})");
-        return output;
+            enabled = true;
+            return true;
+        }
+
+        if (output.Contains("No Auditing", StringComparison.OrdinalIgnoreCase))
+        {
+            enabled = false;
+            return true;
+        }
+
+        enabled = false;
+        return false;
+    }
+
+    private static bool TryValidateAuditPolResult(
+        AuditPolCommandResult commandResult,
+        bool requestedState,
+        out AuditPolicyResult? failureResult)
+    {
+        failureResult = null;
+        var combinedError = string.Join(
+            Environment.NewLine,
+            new[] { commandResult.StandardError, commandResult.StandardOutput }
+                .Where(text => !string.IsNullOrWhiteSpace(text)));
+        var normalized = combinedError.Trim();
+
+        if (commandResult.ExitCode == 0 && string.IsNullOrWhiteSpace(commandResult.StandardError))
+            return true;
+
+        var status = normalized.Contains("access is denied", StringComparison.OrdinalIgnoreCase)
+            ? AuditPolicyStatus.AccessDenied
+            : normalized.Contains("not supported", StringComparison.OrdinalIgnoreCase)
+              || normalized.Contains("unknown", StringComparison.OrdinalIgnoreCase)
+              || normalized.Contains("invalid", StringComparison.OrdinalIgnoreCase)
+                ? AuditPolicyStatus.Unsupported
+                : AuditPolicyStatus.Failed;
+        var retryable = status == AuditPolicyStatus.Failed;
+        failureResult = new AuditPolicyResult(
+            status,
+            requestedState,
+            null,
+            string.IsNullOrWhiteSpace(normalized)
+                ? $"auditpol.exe exited with code {commandResult.ExitCode}."
+                : normalized,
+            retryable);
+        return false;
     }
 }

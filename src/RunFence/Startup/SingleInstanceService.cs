@@ -22,6 +22,9 @@ public class SingleInstanceService : ISingleInstanceService
             adminSid,
             MutexRights.FullControl,
             AccessControlType.Allow));
+        AdminOperationMockAccessHelper.AddCurrentProcessMutexAccess(
+            security,
+            MutexRights.FullControl);
 
         _mutex = MutexAcl.Create(false, mutexName, out bool createdNew, security);
 

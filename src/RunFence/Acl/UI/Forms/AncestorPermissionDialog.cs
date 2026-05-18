@@ -3,7 +3,7 @@ using RunFence.Apps.UI;
 
 namespace RunFence.Acl.UI.Forms;
 
-public partial class AncestorPermissionDialog : Form
+public partial class AncestorPermissionDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly IReadOnlyList<string> _ancestors;
     private readonly FileSystemRights _baseRights;

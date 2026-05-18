@@ -3,7 +3,7 @@ namespace RunFence.UI.Forms;
 /// <summary>
 /// Simple single-line text input prompt dialog.
 /// </summary>
-public partial class InputPromptDialog : Form
+public partial class InputPromptDialog : ContextHelpForm
 {
     public string? Value { get; private set; }
 

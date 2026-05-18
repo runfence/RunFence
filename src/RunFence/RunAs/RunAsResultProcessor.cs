@@ -1,4 +1,5 @@
 using RunFence.Apps.Shortcuts;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.RunAs.UI;
@@ -38,7 +39,8 @@ public class RunAsResultProcessor(
         // PathGrantService handles: ACE grant + AddGrant + traverse on ancestor directories
         // + container auto-grant for interactive user (AppContainer dual access check step 1).
         if (result.PermissionGrant != null)
-            permissionApplier.ApplyContainerGrant(result.PermissionGrant, result.SelectedContainer.Sid);
+            ApplyGrantWithUserMessage(() =>
+                permissionApplier.ApplyContainerGrant(result.PermissionGrant, result.SelectedContainer.Sid));
 
         launchDispatcher.DispatchContainerResult(result, filePath, arguments, launcherWorkingDirectory, isFolder, originalLnkPath);
     }
@@ -52,8 +54,26 @@ public class RunAsResultProcessor(
         credentialPersister.TrySaveRememberedPassword(result);
 
         if (result.PermissionGrant != null)
-            permissionApplier.ApplyCredentialGrant(result.PermissionGrant, result.Credential.Sid);
+            ApplyGrantWithUserMessage(() =>
+                permissionApplier.ApplyCredentialGrant(result.PermissionGrant, result.Credential.Sid));
 
         launchDispatcher.DispatchCredentialResult(result, filePath, arguments, launcherWorkingDirectory, isFolder, originalLnkPath);
     }
+
+    private static void ApplyGrantWithUserMessage(Action applyGrant)
+    {
+        try
+        {
+            applyGrant();
+        }
+        catch (GrantOperationException ex)
+        {
+            throw new InvalidOperationException(FormatGrantFailure(ex), ex);
+        }
+    }
+
+    private static string FormatGrantFailure(GrantOperationException ex)
+        => GrantApplyFailureFormatter.IsSaveFailureStep(ex.Step)
+            ? $"RunFence could not save the permission grant before applying it: {ex.Cause.Message}"
+            : $"RunFence saved the permission grant, but applying filesystem access failed: {ex.Cause.Message}";
 }

@@ -1,9 +1,10 @@
 using System.Runtime.InteropServices;
+using System.Windows.Forms;
 using Moq;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Security;
-using System.Windows.Forms;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -13,12 +14,18 @@ public class InputInjectionBlockerServiceTests : IDisposable
     private readonly Mock<ILoggingService> _log = new();
     private readonly FakeHookApi _hooks = new();
     private readonly FakeForegroundWindowResolver _foreground = new();
-    private readonly FakeProcessIdentityReader _process = new();
+    private readonly FakeProcessOwnerSidReader _process = new();
+    private readonly ManualUiTimerFactory _timerFactory = new();
     private readonly InputInjectionBlockerService _service;
 
     public InputInjectionBlockerServiceTests()
     {
-        _service = new InputInjectionBlockerService(_log.Object, _hooks, _foreground, _process, _process);
+        _service = new InputInjectionBlockerService(
+            _log.Object,
+            _hooks,
+            _foreground,
+            _process,
+            _timerFactory);
     }
 
     public void Dispose() => _service.Dispose();
@@ -40,74 +47,40 @@ public class InputInjectionBlockerServiceTests : IDisposable
     }
 
     [Fact]
-    public void ApplyConfigSetting_False_DisablesBlocking()
+    public void SetTimedDisable_UsesInjectedTimerFactory()
     {
-        _service.ApplyConfigSetting(false);
+        _service.SetTimedDisable(TimeSpan.FromSeconds(7));
 
-        Assert.False(_service.IsEnabled);
+        var timer = Assert.Single(_timerFactory.Timers);
+        Assert.True(timer.Enabled);
+        Assert.Equal(7000, timer.Interval);
+        Assert.Equal(1, timer.StartCallCount);
     }
 
     [Fact]
-    public void SetTemporarilyDisabled_OverridesConfigEnabled()
+    public void TimedDisable_TimerTick_ReEnablesBlockingAndDisposesTimer()
     {
-        _service.ApplyConfigSetting(true);
+        _service.SetTimedDisable(TimeSpan.FromSeconds(7));
+        var timer = Assert.Single(_timerFactory.Timers);
 
-        _service.SetTemporarilyDisabled();
-
-        Assert.False(_service.IsEnabled);
-    }
-
-    [Fact]
-    public void ApplyConfigSetting_DoesNotResetTemporaryOverride()
-    {
-        _service.SetTemporarilyDisabled();
-
-        _service.ApplyConfigSetting(true);
-
-        Assert.False(_service.IsEnabled);
-    }
-
-    [Fact]
-    public void ApplyConfigSetting_DoesNotResetTimedOverride()
-    {
-        _service.SetTimedDisable(TimeSpan.FromMinutes(10));
-
-        _service.ApplyConfigSetting(true);
-
-        Assert.False(_service.IsEnabled);
-    }
-
-    [Fact]
-    public void ReEnable_ClearsTemporaryOverride()
-    {
-        _service.SetTemporarilyDisabled();
-
-        _service.ReEnable();
+        timer.Fire();
 
         Assert.True(_service.IsEnabled);
-    }
-
-    [Fact]
-    public void ReEnable_WhenConfigDisabled_StaysDisabled()
-    {
-        _service.ApplyConfigSetting(false);
-        _service.SetTemporarilyDisabled();
-
-        _service.ReEnable();
-
-        Assert.False(_service.IsEnabled);
+        Assert.Equal(1, timer.StopCallCount);
+        Assert.Equal(1, timer.DisposeCallCount);
     }
 
     [Fact]
     public void SetTimedDisable_CalledTwice_DisposesOldTimer()
     {
-        var ex = Record.Exception(() =>
-        {
-            _service.SetTimedDisable(TimeSpan.FromMinutes(10));
-            _service.SetTimedDisable(TimeSpan.FromMinutes(5));
-        });
+        _service.SetTimedDisable(TimeSpan.FromMinutes(10));
+        var first = Assert.Single(_timerFactory.Timers);
 
-        Assert.Null(ex);
+        _service.SetTimedDisable(TimeSpan.FromMinutes(5));
+
+        Assert.Equal(1, first.StopCallCount);
+        Assert.Equal(1, first.DisposeCallCount);
+        Assert.Equal(2, _timerFactory.Timers.Count);
         Assert.False(_service.IsEnabled);
     }
 
@@ -115,40 +88,29 @@ public class InputInjectionBlockerServiceTests : IDisposable
     public void SetTemporarilyDisabled_StopsRunningTimer()
     {
         _service.SetTimedDisable(TimeSpan.FromMinutes(10));
+        var timer = Assert.Single(_timerFactory.Timers);
 
         _service.SetTemporarilyDisabled();
 
         Assert.False(_service.IsEnabled);
+        Assert.Equal(1, timer.StopCallCount);
+        Assert.Equal(1, timer.DisposeCallCount);
     }
 
     [Fact]
-    public void Initialize_KeyboardFailureMouseSuccess_DisableUnhooksMouse()
-    {
-        _hooks.KeyboardInstallResults.Enqueue(IntPtr.Zero);
-        _hooks.MouseInstallResults.Enqueue((IntPtr)22);
-
-        _service.Initialize();
-        _service.ApplyConfigSetting(false);
-
-        Assert.Equal(1, _hooks.KeyboardInstallCalls);
-        Assert.Equal(1, _hooks.MouseInstallCalls);
-        Assert.DoesNotContain(IntPtr.Zero, _hooks.Unhooked);
-        Assert.Contains((IntPtr)22, _hooks.Unhooked);
-    }
-
-    [Fact]
-    public void Initialize_MouseFailureKeyboardSuccess_DisableUnhooksKeyboard()
+    public void ApplyConfigSetting_False_DisablesBlockingAndUnhooksInstalledHandles()
     {
         _hooks.KeyboardInstallResults.Enqueue((IntPtr)11);
-        _hooks.MouseInstallResults.Enqueue(IntPtr.Zero);
+        _hooks.MouseInstallResults.Enqueue((IntPtr)22);
 
-        _service.Initialize();
+        _service.ApplyConfigSetting(true);
         _service.ApplyConfigSetting(false);
 
         Assert.Equal(1, _hooks.KeyboardInstallCalls);
         Assert.Equal(1, _hooks.MouseInstallCalls);
-        Assert.Contains((IntPtr)11, _hooks.Unhooked);
         Assert.DoesNotContain(IntPtr.Zero, _hooks.Unhooked);
+        Assert.Contains((IntPtr)11, _hooks.Unhooked);
+        Assert.Contains((IntPtr)22, _hooks.Unhooked);
     }
 
     [Fact]
@@ -157,52 +119,22 @@ public class InputInjectionBlockerServiceTests : IDisposable
         _hooks.KeyboardInstallResults.Enqueue((IntPtr)11);
         _hooks.MouseInstallResults.Enqueue((IntPtr)22);
 
-        _service.Initialize();
         _service.ApplyConfigSetting(true);
-        _service.ReEnable();
+        _service.ApplyConfigSetting(true);
 
         Assert.Equal(1, _hooks.KeyboardInstallCalls);
         Assert.Equal(1, _hooks.MouseInstallCalls);
     }
 
     [Fact]
-    public void RepeatedEnable_InstallsOnlyMissingHook()
+    public void ApplyConfigSetting_True_InstallsBothKeyboardAndMouseHooks()
     {
-        _hooks.KeyboardInstallResults.Enqueue(IntPtr.Zero);
-        _hooks.KeyboardInstallResults.Enqueue((IntPtr)33);
-        _hooks.MouseInstallResults.Enqueue((IntPtr)22);
-
-        _service.Initialize();
         _service.ApplyConfigSetting(true);
 
-        Assert.Equal(2, _hooks.KeyboardInstallCalls);
+        Assert.Equal(1, _hooks.KeyboardInstallCalls);
         Assert.Equal(1, _hooks.MouseInstallCalls);
-    }
-
-    [Fact]
-    public void Disable_UnhooksEveryInstalledHandle()
-    {
-        _hooks.KeyboardInstallResults.Enqueue((IntPtr)11);
-        _hooks.MouseInstallResults.Enqueue((IntPtr)22);
-
-        _service.Initialize();
-        _service.ApplyConfigSetting(false);
-
-        Assert.Contains((IntPtr)11, _hooks.Unhooked);
-        Assert.Contains((IntPtr)22, _hooks.Unhooked);
-    }
-
-    [Fact]
-    public void Dispose_UnhooksEveryInstalledHandle()
-    {
-        _hooks.KeyboardInstallResults.Enqueue((IntPtr)11);
-        _hooks.MouseInstallResults.Enqueue((IntPtr)22);
-
-        _service.Initialize();
-        _service.Dispose();
-
-        Assert.Contains((IntPtr)11, _hooks.Unhooked);
-        Assert.Contains((IntPtr)22, _hooks.Unhooked);
+        Assert.NotNull(_hooks.KeyboardCallback);
+        Assert.NotNull(_hooks.MouseCallback);
     }
 
     [Fact]
@@ -216,12 +148,23 @@ public class InputInjectionBlockerServiceTests : IDisposable
     }
 
     [Fact]
-    public void KeyboardCallback_LowerIlInjectedAllowedKey_PassesThrough()
+    public void KeyboardCallback_LowerIlInjectedAllowlistedKey_PassesThrough()
     {
         _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 123, "Edit");
         _hooks.NextHookResult = (IntPtr)77;
 
-        var result = InvokeKeyboardHook((uint)Keys.VolumeUp, 0x02);
+        var result = InvokeKeyboardHook((uint)Keys.VolumeDown, 0x02);
+
+        Assert.Equal((IntPtr)77, result);
+    }
+
+    [Fact]
+    public void KeyboardCallback_NonLowerIl_PassesThrough()
+    {
+        _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 123, "Edit");
+        _hooks.NextHookResult = (IntPtr)77;
+
+        var result = InvokeKeyboardHook((uint)Keys.A, 0x00);
 
         Assert.Equal((IntPtr)77, result);
     }
@@ -240,11 +183,44 @@ public class InputInjectionBlockerServiceTests : IDisposable
     }
 
     [Fact]
-    public void MouseCallback_LowerIlInjectedUnsafeProcess_Blocks()
+    public void KeyboardCallback_nCodeLessThanZero_PassesThrough()
+    {
+        _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 123, "Edit");
+        _hooks.NextHookResult = (IntPtr)77;
+
+        var result = InvokeKeyboardHook((uint)Keys.A, 0x02, -1);
+
+        Assert.Equal((IntPtr)77, result);
+    }
+
+    [Fact]
+    public void KeyboardCallback_EmptyExemptSet_IsExemptedProcessReturnsFalse()
     {
         _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 123, "Edit");
 
-        var result = InvokeMouseHook(0x02);
+        var result = InvokeKeyboardHook((uint)Keys.A, 0x02);
+
+        Assert.Equal((IntPtr)1, result);
+    }
+
+    [Fact]
+    public void KeyboardCallback_UnknownOwnerPid_IsExemptedProcessReturnsFalse()
+    {
+        _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 123, "Edit");
+        _process.OwnerSids[123] = "S-1-5-21-3";
+        _service.UpdateExemptedSids(["S-1-5-21-1"]);
+
+        var result = InvokeKeyboardHook((uint)Keys.A, 0x02);
+
+        Assert.Equal((IntPtr)1, result);
+    }
+
+    [Fact]
+    public void KeyboardCallback_PidZero_IsExemptedProcessReturnsFalse()
+    {
+        _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 0, "Edit");
+
+        var result = InvokeKeyboardHook((uint)Keys.A, 0x02);
 
         Assert.Equal((IntPtr)1, result);
     }
@@ -263,24 +239,84 @@ public class InputInjectionBlockerServiceTests : IDisposable
     }
 
     [Fact]
+    public void MouseCallback_NonLowerIlInjected_PassesThrough()
+    {
+        _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 123, "Edit");
+        _hooks.NextHookResult = (IntPtr)77;
+
+        var result = InvokeMouseHook(0x00);
+
+        Assert.Equal((IntPtr)77, result);
+    }
+
+    [Fact]
+    public void MouseCallback_LowerIlInjectedUnsafeFromNonExemptProcess_Blocks()
+    {
+        _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 123, "Edit");
+
+        var result = InvokeMouseHook(0x02);
+
+        Assert.Equal((IntPtr)1, result);
+    }
+
+    [Fact]
+    public void MouseCallback_nCodeLessThanZero_PassesThrough()
+    {
+        _foreground.Info = new ForegroundWindowInfo((IntPtr)1, 123, "Edit");
+        _hooks.NextHookResult = (IntPtr)77;
+
+        var result = InvokeMouseHook(0x02, -1);
+
+        Assert.Equal((IntPtr)77, result);
+    }
+
+    [Fact]
+    public void ReEnable_WhenConfigDisabled_StaysDisabled()
+    {
+        _service.ApplyConfigSetting(false);
+        _service.SetTemporarilyDisabled();
+        _service.ReEnable();
+
+        Assert.False(_service.IsEnabled);
+    }
+
+    [Fact]
+    public void Dispose_UnhooksInstalledHandles()
+    {
+        _hooks.KeyboardInstallResults.Enqueue((IntPtr)11);
+        _hooks.MouseInstallResults.Enqueue((IntPtr)22);
+
+        _service.ApplyConfigSetting(true);
+        _service.Dispose();
+
+        Assert.Contains((IntPtr)11, _hooks.Unhooked);
+        Assert.Contains((IntPtr)22, _hooks.Unhooked);
+    }
+
+    [Fact]
     public void Dispose_DoesNotThrow()
     {
-        var service = new InputInjectionBlockerService(_log.Object, _hooks, _foreground, _process, _process);
+        var service = new InputInjectionBlockerService(
+            _log.Object,
+            _hooks,
+            _foreground,
+            _process,
+            _timerFactory);
 
-        var ex = Record.Exception(() => service.Dispose());
+        var ex = Record.Exception(service.Dispose);
 
         Assert.Null(ex);
     }
 
-    private IntPtr InvokeKeyboardHook(uint vkCode, uint flags)
+    private IntPtr InvokeKeyboardHook(uint vkCode, uint flags, int nCode = 0)
     {
         EnsureHookCallbacksInstalled();
         var hookStruct = new WindowNative.KBDLLHOOKSTRUCT { vkCode = vkCode, flags = flags };
-        IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf<WindowNative.KBDLLHOOKSTRUCT>());
+        var ptr = Marshal.AllocHGlobal(Marshal.SizeOf<WindowNative.KBDLLHOOKSTRUCT>());
         try
         {
             Marshal.StructureToPtr(hookStruct, ptr, false);
-            return _hooks.KeyboardCallback!(0, (IntPtr)WindowNative.WM_KEYDOWN, ptr);
+            return _hooks.KeyboardCallback!(nCode, (IntPtr)WindowNative.WM_KEYDOWN, ptr);
         }
         finally
         {
@@ -288,15 +324,15 @@ public class InputInjectionBlockerServiceTests : IDisposable
         }
     }
 
-    private IntPtr InvokeMouseHook(uint flags)
+    private IntPtr InvokeMouseHook(uint flags, int nCode = 0)
     {
         EnsureHookCallbacksInstalled();
         var hookStruct = new WindowNative.MSLLHOOKSTRUCT { flags = flags };
-        IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf<WindowNative.MSLLHOOKSTRUCT>());
+        var ptr = Marshal.AllocHGlobal(Marshal.SizeOf<WindowNative.MSLLHOOKSTRUCT>());
         try
         {
             Marshal.StructureToPtr(hookStruct, ptr, false);
-            return _hooks.MouseCallback!(0, IntPtr.Zero, ptr);
+            return _hooks.MouseCallback!(nCode, IntPtr.Zero, ptr);
         }
         finally
         {
@@ -307,7 +343,7 @@ public class InputInjectionBlockerServiceTests : IDisposable
     private void EnsureHookCallbacksInstalled()
     {
         if (_hooks.KeyboardCallback == null || _hooks.MouseCallback == null)
-            _service.Initialize();
+            _service.ApplyConfigSetting(true);
     }
 
     private sealed class FakeHookApi : ILowLevelHookApi
@@ -350,23 +386,11 @@ public class InputInjectionBlockerServiceTests : IDisposable
         public ForegroundWindowInfo GetForegroundWindow() => Info;
     }
 
-    private sealed class FakeProcessIdentityReader : IProcessIdentityReader
+    private sealed class FakeProcessOwnerSidReader : IProcessOwnerSidReader
     {
         public Dictionary<uint, string> OwnerSids { get; } = [];
-        public Dictionary<uint, string> ImageFileNames { get; } = [];
-
-        public uint GetWindowProcessId(IntPtr hWnd) => 0;
-
-        public bool TryGetConsoleHostProcessId(int processId, out int consoleHostProcessId)
-        {
-            consoleHostProcessId = 0;
-            return false;
-        }
 
         public string? TryGetProcessOwnerSid(uint processId) =>
             OwnerSids.TryGetValue(processId, out var sid) ? sid : null;
-
-        public string? TryGetProcessImageFileName(uint processId) =>
-            ImageFileNames.TryGetValue(processId, out var fileName) ? fileName : null;
     }
 }

@@ -13,6 +13,7 @@ public interface IDragBridgePipeLauncher
     NamedPipeServerStream CreatePipeServer(
         string pipeName,
         SecurityIdentifier targetUserSid,
+        SecurityIdentifier? targetAppContainerSid,
         bool allowLowIntegrityClient);
     ProcessInfo? LaunchForSid(WindowOwnerInfo ownerInfo, IReadOnlyList<string> args, INotificationService notifications);
     void SignalReady(NamedPipeServerStream pipe);

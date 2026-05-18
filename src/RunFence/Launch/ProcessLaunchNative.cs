@@ -8,7 +8,7 @@ namespace RunFence.Launch;
 /// <summary>
 /// Core P/Invoke declarations, structs, and constants shared by launchers.
 /// Token acquisition helpers live in <see cref="NativeTokenAcquisition"/>.
-/// Environment block helpers live in <see cref="NativeEnvironmentBlock"/>.
+/// Environment block helpers live in <see cref="RunFence.Launching.Environment.EnvironmentBlock"/>.
 /// </summary>
 /// <remarks>Methods above threshold: thin P/Invoke wrappers: <c>CreateProcessWithToken</c>/<c>CreateProcessWithLogon</c> each build STARTUPINFO, construct command lines, call native API, handle errors. Extracting "business logic" from these would split security-critical native resource management (ProtectedString→pointer, handle cleanup) from the API call itself, creating unsafe partial operations. Reviewed 2026-04-09.</remarks>
 public static class ProcessLaunchNative
@@ -20,6 +20,7 @@ public static class ProcessLaunchNative
     public const uint WAIT_OBJECT_0 = 0;
     public const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     public const uint STARTF_USESHOWWINDOW = 0x00000001;
+    public const uint STARTF_FORCEOFFFEEDBACK = 0x00000080;
     public const ushort SW_SHOWNORMAL = 1;
     public const int TOKEN_LINKED_TOKEN = 19; // TokenLinkedToken
     public const int TOKEN_VIRTUALIZATION_ALLOWED = 23; // TokenVirtualizationAllowed
@@ -39,6 +40,7 @@ public static class ProcessLaunchNative
     // Win32 logon error codes
     public const int Win32ErrorLogonFailure = 1326; // ERROR_LOGON_FAILURE
     public const int Win32ErrorLogonTypeNotGranted = 1385; // ERROR_LOGON_TYPE_NOT_GRANTED
+    public const int Win32ErrorElevationRequired = 740; // ERROR_ELEVATION_REQUIRED
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct STARTUPINFO
@@ -230,7 +232,7 @@ public static class ProcessLaunchNative
         {
             cb = Marshal.SizeOf<STARTUPINFO>(),
             lpDesktop = lpDesktop,
-            dwFlags = STARTF_USESHOWWINDOW,
+            dwFlags = STARTF_USESHOWWINDOW | (psi.SuppressStartupFeedback ? STARTF_FORCEOFFFEEDBACK : 0u),
             wShowWindow = psi.HideWindow ? (ushort)0 : SW_SHOWNORMAL
         };
         var workDir = string.IsNullOrEmpty(psi.WorkingDirectory) ? null : psi.WorkingDirectory;
@@ -257,23 +259,22 @@ public static class ProcessLaunchNative
         ref STARTUPINFO lpStartupInfo,
         out PROCESS_INFORMATION lpProcessInformation);
 
-    public static PROCESS_INFORMATION CreateProcessWithLogon(ProcessLaunchTarget psi, LaunchCredentials credentials, ILoggingService log)
+    public static PROCESS_INFORMATION CreateProcessWithLogon(
+        ProcessLaunchTarget psi,
+        LaunchCredentials credentials,
+        ILoggingService log)
     {
         if (psi.EnvironmentVariables?.Count > 0)
             throw new ArgumentException("Environment variables are not supported, use token launch instead");
         
-        IntPtr passwordPtr = IntPtr.Zero;
-
-        try
+        return credentials.Password!.UseUnicodeSnapshot(snapshot =>
         {
-            passwordPtr = credentials.Password!.AllocUnicode();
-
             var si = new STARTUPINFO
             {
                 cb = Marshal.SizeOf<STARTUPINFO>(),
                 // DO NOT assign desktop here - it will not work
                 //lpDesktop = ProcessLaunchNative.DefaultInteractiveDesktop,
-                dwFlags = STARTF_USESHOWWINDOW,
+                dwFlags = STARTF_USESHOWWINDOW | (psi.SuppressStartupFeedback ? STARTF_FORCEOFFFEEDBACK : 0u),
                 wShowWindow = psi.HideWindow ? (ushort)0 : SW_SHOWNORMAL
             };
 
@@ -286,7 +287,7 @@ public static class ProcessLaunchNative
             if (!CreateProcessWithLogonW(
                     credentials.Username!,
                     credentials.Domain,
-                    passwordPtr,
+                    snapshot.DangerousGetIntPtr(),
                     LOGON_WITH_PROFILE,
                     null,
                     cmdLine,
@@ -300,13 +301,6 @@ public static class ProcessLaunchNative
             }
 
             return pi;
-        }
-        finally
-        {
-            if (passwordPtr != IntPtr.Zero)
-            {
-                Marshal.ZeroFreeGlobalAllocUnicode(passwordPtr);
-            }
-        }
+        });
     }
 }

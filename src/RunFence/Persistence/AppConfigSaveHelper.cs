@@ -9,96 +9,111 @@ namespace RunFence.Persistence;
 /// load/unload/mapping state management.
 /// </summary>
 public class AppConfigSaveHelper(
-    IGrantConfigTracker grantTracker,
+    Func<IGrantIntentStoreProvider> grantIntentStoreProvider,
     IHandlerMappingService handlerMappings,
     IDatabaseService databaseService)
 {
     public void SaveConfigForApp(string? configPath, List<AppEntry> appsForConfig,
-        AppDatabase database, byte[] pinDerivedKey, byte[] argonSalt)
-    {
-        if (configPath != null)
-        {
-            databaseService.SaveAppConfig(
-                new AppConfig
-                {
-                    Apps = appsForConfig,
-                    Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, configPath),
-                    SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
-                        WellKnownSecuritySids.AllApplicationPackagesSid,
-                        database.SharedContainerTraverseGrants,
-                        configPath),
-                    HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(configPath)
-                },
-                configPath, pinDerivedKey, argonSalt);
-        }
-        else
-        {
-            databaseService.SaveConfig(database, pinDerivedKey, argonSalt);
-        }
-    }
+        AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
+        => SaveConfigForAppCore(
+            configPath,
+            appsForConfig,
+            database,
+            saveMainConfig: () => databaseService.SaveConfig(database, pinDerivedKey, argonSalt),
+            saveAdditionalConfig: (path, config) => databaseService.SaveAppConfig(config, path, pinDerivedKey, argonSalt));
 
     public void SaveConfigAtPath(string normalizedPath, List<AppEntry> apps,
-        AppDatabase database, byte[] pinDerivedKey, byte[] argonSalt)
-    {
-        databaseService.SaveAppConfig(
-            new AppConfig
-            {
-                Apps = apps,
-                Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, normalizedPath),
-                SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
-                    WellKnownSecuritySids.AllApplicationPackagesSid,
-                    database.SharedContainerTraverseGrants,
-                    normalizedPath),
-                HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(normalizedPath)
-            },
-            normalizedPath, pinDerivedKey, argonSalt);
-    }
+        AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
+        => SaveAdditionalConfig(
+            normalizedPath,
+            apps,
+            database,
+            config => databaseService.SaveAppConfig(config, normalizedPath, pinDerivedKey, argonSalt));
 
     public void SaveAllConfigs(IReadOnlyList<(string Path, List<AppEntry> Apps)> additionalConfigs,
-        AppDatabase database, byte[] pinDerivedKey, byte[] argonSalt)
-    {
-        databaseService.SaveConfig(database, pinDerivedKey, argonSalt);
-
-        foreach (var (path, apps) in additionalConfigs)
-        {
-            databaseService.SaveAppConfig(
-                new AppConfig
-                {
-                    Apps = apps,
-                    Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, path),
-                    SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
-                        WellKnownSecuritySids.AllApplicationPackagesSid,
-                        database.SharedContainerTraverseGrants,
-                        path),
-                    HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(path)
-                },
-                path, pinDerivedKey, argonSalt);
-        }
-    }
+        AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
+        => SaveAllConfigsCore(
+            additionalConfigs,
+            database,
+            saveMainConfig: () => databaseService.SaveConfig(database, pinDerivedKey, argonSalt),
+            saveAdditionalConfig: (path, config) => databaseService.SaveAppConfig(config, path, pinDerivedKey, argonSalt));
 
     public void ReencryptAndSaveAll(CredentialStore store,
         IReadOnlyList<(string Path, List<AppEntry> Apps)> additionalConfigs,
-        AppDatabase database, byte[] newPinDerivedKey)
+        AppDatabase database, ISecureSecretSnapshotSource newPinDerivedKey)
     {
-        var configs = additionalConfigs.Select(c => (c.Path,
-            new AppConfig
-            {
-                Apps = c.Apps,
-                Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, c.Path),
-                SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
-                    WellKnownSecuritySids.AllApplicationPackagesSid,
-                    database.SharedContainerTraverseGrants,
-                    c.Path),
-                HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(c.Path)
-            })).ToList();
+        var configs = BuildSavedConfigs(additionalConfigs, database);
 
         databaseService.SaveCredentialStoreAndAllConfigs(store, database, newPinDerivedKey, configs);
     }
 
     public void SaveImportedConfig(string path, AppConfig config,
-        byte[] pinDerivedKey, byte[] argonSalt)
+        ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
     {
         var normalized = Path.GetFullPath(path);
         databaseService.SaveAppConfig(config, normalized, pinDerivedKey, argonSalt);
+    }
+
+    private void SaveConfigForAppCore(
+        string? configPath,
+        List<AppEntry> appsForConfig,
+        AppDatabase database,
+        Action saveMainConfig,
+        Action<string, AppConfig> saveAdditionalConfig)
+    {
+        if (configPath == null)
+        {
+            saveMainConfig();
+            return;
+        }
+
+        SaveAdditionalConfig(
+            configPath,
+            appsForConfig,
+            database,
+            config => saveAdditionalConfig(configPath, config));
+    }
+
+    private void SaveAllConfigsCore(
+        IReadOnlyList<(string Path, List<AppEntry> Apps)> additionalConfigs,
+        AppDatabase database,
+        Action saveMainConfig,
+        Action<string, AppConfig> saveAdditionalConfig)
+    {
+        saveMainConfig();
+
+        foreach (var (path, apps) in additionalConfigs)
+        {
+            SaveAdditionalConfig(
+                path,
+                apps,
+                database,
+                config => saveAdditionalConfig(path, config));
+        }
+    }
+
+    private void SaveAdditionalConfig(
+        string configPath,
+        List<AppEntry> apps,
+        AppDatabase database,
+        Action<AppConfig> saveConfig)
+        => saveConfig(BuildSavedConfig(configPath, apps, database));
+
+    private List<(string path, AppConfig config)> BuildSavedConfigs(
+        IReadOnlyList<(string Path, List<AppEntry> Apps)> additionalConfigs,
+        AppDatabase database)
+        => additionalConfigs
+            .Select(config => (config.Path, BuildSavedConfig(config.Path, config.Apps, database)))
+            .ToList();
+
+    private AppConfig BuildSavedConfig(string configPath, List<AppEntry> apps, AppDatabase database)
+    {
+        var store = grantIntentStoreProvider().ResolveStore(configPath);
+        return new AppConfig
+        {
+            Apps = apps,
+            Accounts = GrantIntentStoreConfigDataBuilder.BuildAccounts(store, database),
+            HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(configPath)
+        };
     }
 }

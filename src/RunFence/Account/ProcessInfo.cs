@@ -3,4 +3,4 @@ namespace RunFence.Account;
 /// <summary>
 /// Snapshot of a running process.
 /// </summary>
-public record ProcessInfo(int Pid, string? ExecutablePath, string? CommandLine);
+public record ProcessInfo(int Pid, string? ExecutablePath, string? CommandLine, long? StartTimeUtcTicks = null);

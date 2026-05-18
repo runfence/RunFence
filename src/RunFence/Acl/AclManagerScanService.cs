@@ -1,12 +1,17 @@
 using RunFence.Core;
+using RunFence.Infrastructure;
 
 namespace RunFence.Acl;
 
 /// <summary>
 /// Thin file system enumerator that calls <see cref="IPathGrantService.UpdateFromPath"/>
 /// for each discovered path, delegating all ACL reading and DB classification to the service.
+/// Successful scans save tracked changes once at the workflow boundary.
 /// </summary>
-public class AclManagerScanService(IPathGrantService pathGrantService, ILoggingService log) : IAclManagerScanService
+public class AclManagerScanService(
+    IPathGrantService pathGrantService,
+    Func<ISessionSaver> sessionSaver,
+    ILoggingService log) : IAclManagerScanService
 {
     /// <summary>
     /// Enumerates all entries under <paramref name="rootPath"/> recursively and all ancestor
@@ -23,6 +28,7 @@ public class AclManagerScanService(IPathGrantService pathGrantService, ILoggingS
         {
             int updated = 0;
             long scanned = 0;
+            var failures = new List<string>();
 
             var queue = new Queue<string>();
             queue.Enqueue(rootPath);
@@ -46,6 +52,7 @@ public class AclManagerScanService(IPathGrantService pathGrantService, ILoggingS
                 catch (Exception ex)
                 {
                     log.Warn($"Scan: failed to process '{dir}': {ex.Message}");
+                    failures.Add(dir);
                 }
 
                 try
@@ -81,6 +88,7 @@ public class AclManagerScanService(IPathGrantService pathGrantService, ILoggingS
                         catch (Exception ex)
                         {
                             log.Warn($"Scan: failed to process '{entry}': {ex.Message}");
+                            failures.Add(entry);
                         }
                     }
                 }
@@ -91,6 +99,7 @@ public class AclManagerScanService(IPathGrantService pathGrantService, ILoggingS
                 catch (Exception ex)
                 {
                     log.Warn($"Scan: failed to enumerate '{dir}': {ex.Message}");
+                    failures.Add(dir);
                 }
             }
 
@@ -115,10 +124,21 @@ public class AclManagerScanService(IPathGrantService pathGrantService, ILoggingS
                 catch (Exception ex)
                 {
                     log.Warn($"Scan: failed to process ancestor '{ancestor.FullName}': {ex.Message}");
+                    failures.Add(ancestor.FullName);
                 }
 
                 ancestor = ancestor.Parent;
             }
+
+            if (failures.Count > 0)
+            {
+                throw new IOException(
+                    $"ACL scan completed with {failures.Count} inaccessible/protected path(s). " +
+                    $"First failure: '{failures[0]}'.");
+            }
+
+            if (updated > 0)
+                sessionSaver().SaveConfig();
 
             return updated;
         }, ct);

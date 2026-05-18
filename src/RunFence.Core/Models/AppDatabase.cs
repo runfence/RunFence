@@ -9,7 +9,6 @@ public class AppDatabase
     public List<AppEntry> Apps { get; set; } = new();
     public List<AccountEntry> Accounts { get; set; } = new();
     public List<AppContainerEntry> AppContainers { get; set; } = new();
-    public List<GrantedPathEntry> SharedContainerTraverseGrants { get; set; } = new();
     public AppSettings Settings { get; set; } = new();
     public string? LastPrefsFilePath { get; set; }
 
@@ -85,9 +84,8 @@ public class AppDatabase
     public AppDatabase CreateSnapshot() => new()
     {
         Version = Version,
-        Apps = Apps.ToList(),
-        AppContainers = AppContainers.ToList(),
-        SharedContainerTraverseGrants = SharedContainerTraverseGrants.Select(g => g.Clone()).ToList(),
+        Apps = Apps.Select(a => a.Clone()).ToList(),
+        AppContainers = AppContainers.Select(c => c.Clone()).ToList(),
         Settings = Settings.Clone(),
         LastPrefsFilePath = LastPrefsFilePath,
         SidNames = new Dictionary<string, string>(SidNames, StringComparer.OrdinalIgnoreCase),
@@ -98,4 +96,27 @@ public class AppDatabase
             kvp => kvp.Key, kvp => kvp.Value.ToList(), StringComparer.OrdinalIgnoreCase),
         ShowSystemInRunAs = ShowSystemInRunAs,
     };
+
+    /// <summary>
+    /// Replaces this instance with the provided snapshot contents.
+    /// </summary>
+    public void ReplaceWithSnapshot(AppDatabase snapshot)
+    {
+        Version = snapshot.Version;
+        Apps = snapshot.Apps.Select(a => a.Clone()).ToList();
+        Accounts = snapshot.Accounts.Select(a => a.Clone()).ToList();
+        AppContainers = snapshot.AppContainers.Select(c => c.Clone()).ToList();
+        Settings = snapshot.Settings.Clone();
+        LastPrefsFilePath = snapshot.LastPrefsFilePath;
+        SidNames = new Dictionary<string, string>(snapshot.SidNames, StringComparer.OrdinalIgnoreCase);
+        JobKeeperInstances = snapshot.JobKeeperInstances?.ToDictionary(
+            kvp => kvp.Key,
+            kvp => kvp.Value with { },
+            StringComparer.OrdinalIgnoreCase);
+        AccountGroupSnapshots = snapshot.AccountGroupSnapshots?.ToDictionary(
+            kvp => kvp.Key,
+            kvp => kvp.Value.ToList(),
+            StringComparer.OrdinalIgnoreCase);
+        ShowSystemInRunAs = snapshot.ShowSystemInRunAs;
+    }
 }

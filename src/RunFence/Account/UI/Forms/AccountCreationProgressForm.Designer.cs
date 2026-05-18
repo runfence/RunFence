@@ -67,6 +67,7 @@ partial class AccountCreationProgressForm
         MinimizeBox = false;
         ControlBox = false;
         StartPosition = FormStartPosition.CenterScreen;
+        CancelButton = _cancelButton;
 
         _buttonPanel.ResumeLayout(false);
         ResumeLayout(false);

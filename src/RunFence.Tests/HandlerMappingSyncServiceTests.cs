@@ -30,67 +30,43 @@ public class HandlerMappingSyncServiceTests
         return (syncService, mappingService, registrationService, autoSetService, db);
     }
 
-    private static HandlerMappingMutationHandler MakeHandler(AppDatabase db)
-    {
-        var svc = new Mock<IHandlerMappingService>();
-        svc.Setup(s => s.GetAllHandlerMappings(db))
-            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>(StringComparer.OrdinalIgnoreCase));
-        var autoSet = new Mock<IAssociationAutoSetService>();
-        return new HandlerMappingMutationHandler(svc.Object, autoSet.Object, new LambdaDatabaseProvider(() => db), new Mock<IHandlerMappingNotifier>().Object);
-    }
-
-    [Fact]
-    public void Initialize_WhenHandlerMutates_CallsSync()
-    {
-        // Arrange
-        var (syncService, _, registrationService, autoSetService, db) = Make();
-        var handler = MakeHandler(db);
-        syncService.Initialize(handler);
-
-        // Act — trigger a mutation to fire Changed
-        handler.RemoveDirectHandler(new DirectHandlerRowTag(".nonexistent"));
-
-        // Assert — Sync was triggered via Changed event
-        registrationService.Verify(r => r.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()), Times.Once);
-        autoSetService.Verify(a => a.AutoSetForAllUsers(), Times.Once);
-    }
-
-    [Fact]
-    public void Initialize_ReplacingPreviousHandler_UnsubscribesOldAndSubscribesToNew()
-    {
-        // Arrange
-        var (syncService, _, registrationService, autoSetService, db) = Make();
-        var firstHandler = MakeHandler(db);
-        var secondHandler = MakeHandler(db);
-
-        syncService.Initialize(firstHandler);
-        syncService.Initialize(secondHandler);
-
-        // Act — mutate first handler (should not trigger sync since unsubscribed)
-        firstHandler.RemoveDirectHandler(new DirectHandlerRowTag(".orphan"));
-
-        // Assert — still only zero from the first handler (unsubscribed)
-        registrationService.Verify(r => r.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()), Times.Never);
-
-        // Act — mutate second handler (should trigger sync)
-        secondHandler.RemoveDirectHandler(new DirectHandlerRowTag(".active"));
-
-        // Assert — sync called once from second handler
-        registrationService.Verify(r => r.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()), Times.Once);
-        autoSetService.Verify(a => a.AutoSetForAllUsers(), Times.Once);
-    }
-
     [Fact]
     public void Sync_CallsRegistrationServiceAndAutoSet()
     {
-        // Arrange
         var (syncService, _, registrationService, autoSetService, _) = Make();
 
-        // Act
-        syncService.Sync();
+        var result = syncService.Sync();
 
-        // Assert
+        Assert.True(result.Succeeded);
+        Assert.Null(result.WarningMessage);
         registrationService.Verify(r => r.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()), Times.Once);
         autoSetService.Verify(a => a.AutoSetForAllUsers(), Times.Once);
+    }
+
+    [Fact]
+    public void Sync_WhenRegistrationThrows_ReturnsWarningInsteadOfThrowing()
+    {
+        var (syncService, _, registrationService, autoSetService, _) = Make();
+        registrationService.Setup(r => r.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()))
+            .Throws(new InvalidOperationException("sync failed"));
+
+        var result = syncService.Sync();
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("sync failed", result.WarningMessage);
+        autoSetService.Verify(a => a.AutoSetForAllUsers(), Times.Never);
+    }
+
+    [Fact]
+    public void Sync_WithRestoreKeys_RestoresDistinctKeysBeforeSync()
+    {
+        var (syncService, _, registrationService, autoSetService, _) = Make();
+
+        var result = syncService.Sync([".txt", ".TXT", "http"]);
+
+        Assert.True(result.Succeeded);
+        autoSetService.Verify(a => a.RestoreKeyForAllUsers(".txt"), Times.Once);
+        autoSetService.Verify(a => a.RestoreKeyForAllUsers("http"), Times.Once);
+        registrationService.Verify(r => r.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()), Times.Once);
     }
 }

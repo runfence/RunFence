@@ -6,5 +6,5 @@ public interface IExecutableKindService
 
     bool IsUwpExeFile(string path);
 
-    bool SuggestsAboveBasicPrivilegeLevel(string path);
+    bool SuggestsBasicPrivilegeLevel(string path);
 }

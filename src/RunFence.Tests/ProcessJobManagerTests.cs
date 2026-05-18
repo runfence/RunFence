@@ -1,6 +1,7 @@
 using Moq;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using System.Security.Principal;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -18,7 +19,7 @@ public class ProcessJobManagerTests
     public void TryAssignToJob_AssignFails_ReturnsFailureBeforeUiPolicy()
     {
         var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
-        _jobApi.Setup(a => a.CreateJobObject("job", ProcessJobManager.RestrictedJobSecurityDescriptor))
+        _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.GetLastWin32Error()).Returns(0);
         _jobApi.Setup(a => a.AssignProcessToJobObject(JobHandle, ProcessHandle)).Returns(false);
@@ -38,7 +39,7 @@ public class ProcessJobManagerTests
     public void TryAssignToJob_SetUiRestrictionsFails_ReturnsFailure()
     {
         var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
-        _jobApi.Setup(a => a.CreateJobObject("job", ProcessJobManager.RestrictedJobSecurityDescriptor))
+        _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.GetLastWin32Error()).Returns(0);
         _jobApi.Setup(a => a.AssignProcessToJobObject(JobHandle, ProcessHandle)).Returns(true);
@@ -56,7 +57,7 @@ public class ProcessJobManagerTests
     public void TryAssignToJob_PrecreatedRestrictedJob_ReturnsFailureWithoutAssigning()
     {
         var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
-        _jobApi.Setup(a => a.CreateJobObject("job", ProcessJobManager.RestrictedJobSecurityDescriptor))
+        _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.GetLastWin32Error()).Returns(183);
 
@@ -73,7 +74,7 @@ public class ProcessJobManagerTests
     public void TryAssignToJob_RestrictedSuccess_ReturnsTypedSuccess()
     {
         var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
-        _jobApi.Setup(a => a.CreateJobObject("job", ProcessJobManager.RestrictedJobSecurityDescriptor))
+        _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.GetLastWin32Error()).Returns(0);
         _jobApi.Setup(a => a.AssignProcessToJobObject(JobHandle, ProcessHandle)).Returns(true);
@@ -111,7 +112,7 @@ public class ProcessJobManagerTests
     {
         var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
         var secondProcessHandle = new IntPtr(11);
-        _jobApi.Setup(a => a.CreateJobObject("job", ProcessJobManager.RestrictedJobSecurityDescriptor))
+        _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.SetupSequence(a => a.GetLastWin32Error()).Returns(0).Returns(0);
         _jobApi.Setup(a => a.AssignProcessToJobObject(JobHandle, ProcessHandle)).Returns(true);
@@ -134,7 +135,7 @@ public class ProcessJobManagerTests
     {
         var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
         var secondProcessHandle = new IntPtr(11);
-        _jobApi.Setup(a => a.CreateJobObject("job", ProcessJobManager.RestrictedJobSecurityDescriptor))
+        _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.SetupSequence(a => a.GetLastWin32Error()).Returns(0).Returns(0);
         _jobApi.Setup(a => a.AssignProcessToJobObject(JobHandle, ProcessHandle)).Returns(true);
@@ -167,4 +168,25 @@ public class ProcessJobManagerTests
         Assert.Equal(new HashSet<int> { 1234 }, manager.GetKeeperJobMembers(Sid, isLow: false));
         Assert.Equal(JobHandle, manager.TryGetRestrictedJobForPid(1234));
     }
+
+    [Fact]
+    public void GetRestrictedJobSecurityDescriptor_WhenUsingAdminOperationMocks_AppendsCurrentUserAce()
+    {
+        var descriptor = GetExpectedRestrictedJobSecurityDescriptor();
+
+        if (!DebugHelper.UseAdminOperationMocks)
+        {
+            Assert.Equal(ProcessJobManager.RestrictedJobSecurityDescriptor, descriptor);
+            return;
+        }
+
+        var currentSid = WindowsIdentity.GetCurrent().User;
+        Assert.NotNull(currentSid);
+        Assert.StartsWith(ProcessJobManager.RestrictedJobSecurityDescriptor, descriptor, StringComparison.Ordinal);
+        Assert.Contains($"(A;;GA;;;{currentSid!.Value})", descriptor, StringComparison.Ordinal);
+    }
+
+    private static string GetExpectedRestrictedJobSecurityDescriptor()
+        => AdminOperationMockAccessHelper.AppendCurrentProcessGenericAllAce(
+            ProcessJobManager.RestrictedJobSecurityDescriptor);
 }

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using RunFence.Core;
+using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.UI;
@@ -23,16 +24,20 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
     private DropFilesInterceptor? _dropFilesInterceptor;
 
     // IApplicationsPanelContext explicit implementations
-    AppDatabase IApplicationsPanelContext.Database => Database;
     CredentialStore IApplicationsPanelContext.CredentialStore => CredentialStore;
     DataGridView IApplicationsPanelContext.Grid => _grid;
     void IApplicationsPanelContext.ShowModalDialog(Form dialog) => ShowModalDialog(dialog);
-
-    void IApplicationsPanelContext.SaveAndRefresh(string? selectAppId, int fallbackIndex, bool targetedSave)
-        => SaveAndRefresh(selectAppId, fallbackIndex, targetedSave);
-
     void IApplicationsPanelContext.LaunchApp(AppEntry app, string? launcherArguments)
         => LaunchApp(app, launcherArguments);
+    
+    // IApplicationMutationContext explicit implementations
+    AppDatabase IApplicationMutationContext.Database => Database;
+
+    void IApplicationMutationContext.SaveAndRefresh(string? selectAppId, int fallbackIndex, bool targetedSave)
+        => SaveAndRefresh(selectAppId, fallbackIndex, targetedSave);
+
+    void IApplicationMutationContext.RefreshAfterInMemoryMutation(string? selectAppId, int fallbackIndex)
+        => RefreshAfterInMemoryMutation(selectAppId, fallbackIndex);
 
     // IApplicationsPanelState explicit implementations
     AppDatabase IApplicationsPanelState.Database => Database;
@@ -76,8 +81,14 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         _dragDropHandler = dragDropHandler;
         _launchHandler = launchHandler;
         _saveHelper = saveHelper;
+        _contextMenuHandler = contextMenuOrchestrator;
         _handlerSyncHelper = handlerSyncHelper;
         InitializeComponent();
+        BuildDynamicContent();
+    }
+
+    private void BuildDynamicContent()
+    {
         _gridPopulator.Initialize(_grid, this, (items, key) => SortByActiveColumn(items, key));
         _crudHandler.Initialize(this);
         _dragDropHandler.Initialize(_grid, this, appId => SaveAndRefresh(appId));
@@ -104,9 +115,8 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         _ctxOpenInFolderBrowser.Image = UiIconFactory.CreateToolbarIcon("\U0001F4C2", Color.FromArgb(0xCC, 0x88, 0x22), 16);
         _hdrAdd.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 16);
         _associationsButton.Image = UiIconFactory.CreateToolbarIcon("\u21C4", Color.FromArgb(0x33, 0x66, 0x99), 42);
-        _associationsButton.Visible = handlerSyncHelper != null;
+        _associationsButton.Visible = _handlerSyncHelper != null;
         _runAsButton.Image = UiIconFactory.CreateToolbarIcon("\u26A1", Color.FromArgb(0xCC, 0x77, 0x00), 42);
-        _contextMenuHandler = contextMenuOrchestrator;
         _contextMenuHandler.AccountNavigationRequested += accountSid => AccountNavigationRequested?.Invoke(accountSid);
         _contextMenuHandler.DataSaveAndRefreshRequested += OnContextMenuDataSaveAndRefresh;
     }
@@ -252,7 +262,6 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
 
     private void OnContextMenuDataSaveAndRefresh()
     {
-        _saveHelper.SaveAll();
         RefreshGrid();
         DataChanged?.Invoke();
     }
@@ -357,6 +366,11 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         else
             _saveHelper.SaveAll();
 
+        RefreshAfterInMemoryMutation(selectAppId, fallbackIndex);
+    }
+
+    private void RefreshAfterInMemoryMutation(string? selectAppId = null, int fallbackIndex = -1)
+    {
         RefreshGrid();
         if (selectAppId != null)
             SelectAppById(selectAppId);

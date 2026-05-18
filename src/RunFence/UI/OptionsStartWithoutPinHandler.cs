@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -25,14 +24,13 @@ public class OptionsStartWithoutPinHandler(
 
     /// <summary>
     /// Enables or disables the "Start without PIN" feature.
-    /// <paramref name="onKeyRotated"/> is called after successful key rotation
-    /// with (oldBuffer, newStore, newPinDerivedKey).
+    /// <paramref name="onKeyRotated"/> is called after successful key rotation.
     /// Failures (TPM unavailable, PIN rejected, user cancelled) are handled internally;
     /// callers should re-read <see cref="IsStartWithoutPinEnabled"/> to sync UI state.
     /// </summary>
     public void SetStartWithoutPin(
         bool enable,
-        Action<ProtectedBuffer, CredentialStore, ProtectedBuffer> onKeyRotated)
+        Action onKeyRotated)
     {
         if (enable)
             EnableStartWithoutPin(onKeyRotated);
@@ -40,7 +38,7 @@ public class OptionsStartWithoutPinHandler(
             DisableStartWithoutPin(onKeyRotated);
     }
 
-    private void EnableStartWithoutPin(Action<ProtectedBuffer, CredentialStore, ProtectedBuffer> onKeyRotated)
+    private void EnableStartWithoutPin(Action onKeyRotated)
     {
         if (!promptService.ConfirmSecurityWarning())
             return;
@@ -56,28 +54,10 @@ public class OptionsStartWithoutPinHandler(
         var rotationResult = rotationRunner.Run("Confirm PIN to enable Start Without PIN:", session);
         if (rotationResult == null)
             return;
-
-        var result = rotationResult.Value;
-        var newKey = result.NewKey;
-        ProtectedBuffer? newKeyBuffer = null;
-        try
+        using (rotationResult)
         {
-            newKeyBuffer = new ProtectedBuffer(newKey);
-            newKey = [];
+            RunRotationAndApply(session, rotationResult, onKeyRotated);
         }
-        catch (Exception ex)
-        {
-            log.Error("Failed to prepare rotated key for PIN bypass enable", ex);
-            promptService.ShowError($"Failed to enable PIN bypass: {ex.Message}", "Error");
-            return;
-        }
-        finally
-        {
-            if (newKey.Length > 0)
-                CryptographicOperations.ZeroMemory(newKey);
-        }
-
-        RunRotationAndApply(session, result, newKeyBuffer!, onKeyRotated);
 
         try
         {
@@ -107,54 +87,36 @@ public class OptionsStartWithoutPinHandler(
         }
     }
 
-    private void DisableStartWithoutPin(Action<ProtectedBuffer, CredentialStore, ProtectedBuffer> onKeyRotated)
+    private void DisableStartWithoutPin(Action onKeyRotated)
     {
         var session = sessionProvider.GetSession();
         var rotationResult = rotationRunner.Run("Confirm PIN to disable Start Without PIN:", session);
         if (rotationResult == null)
             return;
 
-        var result = rotationResult.Value;
-        var newKey = result.NewKey;
-        ProtectedBuffer? newKeyBuffer = null;
         try
         {
-            newKeyBuffer = new ProtectedBuffer(newKey);
-            newKey = [];
             rememberPinService.Disable();
         }
         catch (Exception ex)
         {
+            rotationResult.Dispose();
             log.Error("Failed to disable remembered PIN key", ex);
             promptService.ShowError($"Failed to disable PIN bypass: {ex.Message}", "Error");
             return;
         }
-        finally
-        {
-            if (newKey.Length > 0)
-                CryptographicOperations.ZeroMemory(newKey);
-        }
 
-        RunRotationAndApply(session, result, newKeyBuffer!, onKeyRotated);
+        using (rotationResult)
+        {
+            RunRotationAndApply(session, rotationResult, onKeyRotated);
+        }
     }
 
     private void RunRotationAndApply(
         SessionContext session,
-        PinRotationResult result,
-        ProtectedBuffer newKeyBuffer,
-        Action<ProtectedBuffer, CredentialStore, ProtectedBuffer> onKeyRotated)
-    {
-        ProtectedBuffer? ownedBuffer = newKeyBuffer;
-        try
-        {
-            pinChangeOrchestrator.ApplyKeyRotation(session, result.NewStore, ownedBuffer, onKeyRotated, updateRememberPin: false);
-            ownedBuffer = null;
-        }
-        finally
-        {
-            ownedBuffer?.Dispose();
-        }
-    }
+        PinKeyRotationResult result,
+        Action onKeyRotated)
+        => pinChangeOrchestrator.ApplyKeyRotation(session, result, onKeyRotated, updateRememberPin: false);
 
     private void TryDisableRememberPinAfterFailure()
     {

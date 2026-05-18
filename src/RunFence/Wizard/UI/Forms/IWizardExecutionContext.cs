@@ -15,7 +15,7 @@ public interface IWizardExecutionContext
     /// <summary>The currently selected template, or null when on the picker.</summary>
     IWizardTemplate? SelectedTemplate { get; set; }
 
-    /// <summary>All available templates shown in the picker.</summary>
+    /// <summary>All templates participating in the wizard session, including currently hidden ones.</summary>
     IReadOnlyList<IWizardTemplate> Templates { get; }
 
     /// <summary>Whether a template is currently executing.</summary>
@@ -42,10 +42,19 @@ public interface IWizardExecutionContext
     /// <summary>Enables or disables all navigation buttons.</summary>
     void SetNavigationEnabled(bool enabled);
 
+    /// <summary>Enables or disables the Next button only.</summary>
+    void SetNextEnabled(bool enabled);
+
+    /// <summary>Enables or disables the Cancel button only.</summary>
+    void SetCancelEnabled(bool enabled);
+
+    /// <summary>Sets the Cancel button text only.</summary>
+    void SetCancelText(string text);
+
     /// <summary>Sets the status label text, marshalling to the UI thread if needed.</summary>
     void SetStatusText(string text);
 
-    /// <summary>Enables or disables the Next button and sets the Cancel button text. Back is unaffected.</summary>
+    /// <summary>Sets completion/picker button state without changing Back.</summary>
     void SetCompletionButtonsState(bool showNavigation, string cancelText);
 
     /// <summary>Sets Back button enabled state.</summary>

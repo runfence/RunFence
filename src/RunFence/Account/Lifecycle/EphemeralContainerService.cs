@@ -15,7 +15,8 @@ public class EphemeralContainerService(
     ILoggingService log,
     ISessionProvider sessionProvider,
     IUiThreadInvoker uiThreadInvoker,
-    IProcessListService processListService)
+    IProcessListService processListService,
+    ITrayBalloonService trayBalloonService)
     : IDisposable, IBackgroundService, IEphemeralContainerChangeSource
 {
     private EphemeralTimerHelper? _timer;
@@ -34,39 +35,35 @@ public class EphemeralContainerService(
     {
         var session = sessionProvider.GetSession();
         var database = session.Database;
-        bool changed = false;
-
         var (orphaned, expired) = ClassifyEntries(database.AppContainers);
-        changed |= await ProcessOrphanedEntries(orphaned, containerDeletion);
-        changed |= await ProcessExpiredEntries(expired, containerDeletion, log, processListService);
+        var result = await ProcessEntries(orphaned, expired, containerDeletion, log, processListService);
 
-        if (changed)
+        if (result.Changed)
         {
-            using var scope = session.PinDerivedKey.Unprotect();
-            databaseService.SaveConfig(database, scope.Data, session.CredentialStore.ArgonSalt);
+            databaseService.SaveConfig(database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
             ContainersChanged?.Invoke();
         }
+
+        ShowWarnings(result.Warnings);
     }
 
     /// <summary>
     /// Processes expired ephemeral containers at startup before the timer service starts.
-    /// Returns true if any changes were made.
+    /// Returns whether any changes were made plus warning-grade cleanup issues from completed work.
     /// </summary>
-    public static async Task<bool> ProcessExpiredAtStartup(
+    public static async Task<EphemeralContainerProcessingResult> ProcessExpiredAtStartup(
         AppDatabase database,
         IContainerDeletionService containerDeletion, ILoggingService log,
         IProcessListService processListService)
     {
-        bool changed = false;
         var (orphaned, expired) = ClassifyEntries(database.AppContainers);
 
         log.Info($"EphemeralContainerService: processing expired containers at startup ({orphaned.Count} orphaned, {expired.Count} expired).");
 
-        changed |= await ProcessOrphanedEntries(orphaned, containerDeletion);
-        changed |= await ProcessExpiredEntries(expired, containerDeletion, log, processListService);
+        var result = await ProcessEntries(orphaned, expired, containerDeletion, log, processListService);
 
         log.Info("EphemeralContainerService: startup container processing complete.");
-        return changed;
+        return result;
     }
 
     /// <summary>
@@ -77,32 +74,31 @@ public class EphemeralContainerService(
     public async Task ProcessExpiredContainersAtStartup()
     {
         var session = sessionProvider.GetSession();
-        if (await ProcessExpiredAtStartup(session.Database, containerDeletion, log, processListService))
-        {
-            using var scope = session.PinDerivedKey.Unprotect();
-            databaseService.SaveConfig(session.Database, scope.Data, session.CredentialStore.ArgonSalt);
-        }
+        var result = await ProcessExpiredAtStartup(session.Database, containerDeletion, log, processListService);
+        if (result.Changed)
+            databaseService.SaveConfig(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
+
+        ShowWarnings(result.Warnings);
     }
 
-    private static async Task<bool> ProcessOrphanedEntries(List<AppContainerEntry> orphaned,
-        IContainerDeletionService containerDeletion)
-    {
-        bool anyRemoved = false;
-        foreach (var entry in orphaned)
-        {
-            if (!await RunDeletion(entry, containerDeletion))
-                continue; // preserve entry — skip DB cleanup so it can be retried next time
-            anyRemoved = true;
-        }
-
-        return anyRemoved;
-    }
-
-    private static async Task<bool> ProcessExpiredEntries(List<AppContainerEntry> expired,
-        IContainerDeletionService containerDeletion, ILoggingService log,
+    private static async Task<EphemeralContainerProcessingResult> ProcessEntries(
+        List<AppContainerEntry> orphaned,
+        List<AppContainerEntry> expired,
+        IContainerDeletionService containerDeletion,
+        ILoggingService log,
         IProcessListService processListService)
     {
+        var warnings = new List<string>();
         bool changed = false;
+        foreach (var entry in orphaned)
+        {
+            var containerSid = string.IsNullOrEmpty(entry.Sid) ? null : entry.Sid;
+            var result = await containerDeletion.DeleteContainer(entry, containerSid);
+            warnings.AddRange(result.Warnings);
+            if (!result.Succeeded)
+                continue; // preserve entry - skip DB cleanup so it can be retried next time
+            changed = true;
+        }
 
         var expiredSids = expired
             .Where(e => !string.IsNullOrEmpty(e.Sid))
@@ -122,18 +118,24 @@ public class EphemeralContainerService(
                 continue;
             }
 
-            if (!await RunDeletion(entry, containerDeletion))
+            var containerSid = string.IsNullOrEmpty(entry.Sid) ? null : entry.Sid;
+            var result = await containerDeletion.DeleteContainer(entry, containerSid);
+            warnings.AddRange(result.Warnings);
+            if (!result.Succeeded)
                 continue;
             changed = true;
         }
 
-        return changed;
+        return EphemeralContainerProcessingResult.Create(changed, warnings);
     }
 
-    private static Task<bool> RunDeletion(AppContainerEntry entry, IContainerDeletionService containerDeletion)
+    private void ShowWarnings(IReadOnlyList<string> warnings)
     {
-        var containerSid = string.IsNullOrEmpty(entry.Sid) ? null : entry.Sid;
-        return containerDeletion.DeleteContainer(entry, containerSid);
+        foreach (var warning in warnings)
+        {
+            log.Warn($"EphemeralContainerService: {warning}");
+            uiThreadInvoker.BeginInvoke(() => trayBalloonService.ShowWarning(warning));
+        }
     }
 
     private static (List<AppContainerEntry> orphaned, List<AppContainerEntry> expired) ClassifyEntries(

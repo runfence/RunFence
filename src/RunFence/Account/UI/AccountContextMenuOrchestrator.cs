@@ -25,6 +25,7 @@ public class AccountContextMenuOrchestrator
 
     private DataGridView _grid = null!;
     private ContextMenuStrip _contextMenu = null!;
+    private IAccountsPanelOperationContext _panelContext = null!;
 
     public event Action<string>? AppNavigationRequested;
     public event Action<string>? NewAppRequested;
@@ -61,6 +62,7 @@ public class AccountContextMenuOrchestrator
     {
         _grid = grid;
         _contextMenu = contextMenu;
+        _panelContext = panelContext;
         Items = AccountContextMenuBuilder.Build(contextMenu);
 
         _processMenuHandler.Initialize(grid, Items, panelContext);
@@ -82,10 +84,10 @@ public class AccountContextMenuOrchestrator
         Items.FolderBrowser.Click += (_, _) => OpenFolderBrowser();
         Items.Cmd.Click += (_, _) => OpenCmd();
         Items.EnvironmentVariables.Click += (_, _) => OpenEnvironmentVariables();
-        Items.KillAllProcesses.Click += (_, _) =>
+        Items.KillAllProcesses.Click += async (_, _) =>
         {
             if (GetSelectedAccountRow() is { } ar)
-                _accountHandler.KillAllProcesses(ar);
+                await RunKillAllProcessesAsync(ar);
         };
         Items.NewApp.Click += (_, _) =>
         {
@@ -299,5 +301,47 @@ public class AccountContextMenuOrchestrator
     {
         if (GetSelectedAccountRow() is { } accountRow)
             _firewallHandler.OpenFirewallAllowlist(accountRow);
+    }
+
+    private async Task RunKillAllProcessesAsync(AccountRow accountRow)
+    {
+        await ExecuteBusyAccountActionAsync(_panelContext, Items, () => _accountHandler.KillAllProcessesAsync(accountRow));
+    }
+
+    private static async Task ExecuteBusyAccountActionAsync(
+        IAccountsPanelOperationContext panelContext,
+        AccountContextMenuItems items,
+        Func<Task> action)
+    {
+        SetBusyAccountActions(items, enabled: false);
+        panelContext.SetControlsEnabled(false);
+        panelContext.OperationGuard.Begin(panelContext.OwnerControl);
+        try
+        {
+            await action();
+        }
+        finally
+        {
+            panelContext.OperationGuard.End(panelContext.OwnerControl);
+            panelContext.SetControlsEnabled(true);
+            SetBusyAccountActions(items, enabled: true);
+            panelContext.UpdateButtonState();
+            panelContext.RefreshGrid();
+            var generation = panelContext.BeginProcessRefreshGeneration();
+            panelContext.TriggerProcessRefresh(generation, 1000);
+        }
+    }
+
+    private static void SetBusyAccountActions(AccountContextMenuItems items, bool enabled)
+    {
+        items.ManageSubmenu.Enabled = enabled;
+        items.EditSubmenu.Enabled = enabled;
+        items.AddCredential.Enabled = enabled;
+        items.CopyPassword.Enabled = enabled;
+        items.TypePassword.Enabled = enabled;
+        items.NewApp.Enabled = enabled;
+        items.KillAllProcesses.Enabled = enabled;
+        items.ManageAssociations.Enabled = enabled;
+        items.ReceiveInjectedInput.Enabled = enabled;
     }
 }

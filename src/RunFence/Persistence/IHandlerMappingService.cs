@@ -43,6 +43,15 @@ public interface IHandlerMappingService
     Dictionary<string, HandlerMappingEntry>? GetHandlerMappingsForConfig(string configPath);
 
     /// <summary>
+    /// Clones and validates handler mappings for a staged additional-config load.
+    /// Renamed app IDs from collision repair are applied before validation.
+    /// </summary>
+    Dictionary<string, HandlerMappingEntry> StageConfigMappings(
+        Dictionary<string, HandlerMappingEntry>? mappings,
+        IReadOnlyDictionary<string, string> renamedAppIds,
+        ISet<string> validAppIds);
+
+    /// <summary>
     /// Renames loaded handler mappings for a specific extra config from <paramref name="oldAppId"/>
     /// to <paramref name="newAppId"/> without changing the mapping keys or other entry data.
     /// </summary>
@@ -80,5 +89,4 @@ public interface IHandlerMappingService
     /// Returns true when <paramref name="appId"/> has all four browser handler keys
     /// (http, https, .htm, .html) registered across all configs in <paramref name="allMappings"/>.
     /// </summary>
-    bool IsDefaultBrowser(string appId, IReadOnlyDictionary<string, IReadOnlyList<HandlerMappingEntry>> allMappings);
 }

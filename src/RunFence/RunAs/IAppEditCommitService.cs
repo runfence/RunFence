@@ -4,6 +4,5 @@ namespace RunFence.RunAs;
 
 public interface IAppEditCommitService
 {
-    bool Commit(AppEntry newApp, AppEntry? previousApp, string? configPath);
-    void SaveAllConfigs();
+    RunAsAppEntryPersistenceResult Commit(AppEntry newApp, AppEntry? previousApp, string? configPath);
 }

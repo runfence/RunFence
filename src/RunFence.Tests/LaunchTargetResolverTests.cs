@@ -5,6 +5,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
+using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -20,7 +21,7 @@ public class LaunchTargetResolverTests : IDisposable
     private readonly Mock<IInteractiveUserResolver> _interactiveUserResolver = new();
     private readonly Mock<IAssociationLaunchResolver> _associationLaunchResolver = new();
     private readonly Mock<ISessionProvider> _sessionProvider = new();
-    private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
+    private readonly IUiThreadInvoker _uiThreadInvoker = new InlineUiThreadInvoker(action => action());
     private readonly Mock<ILoggingService> _log = new();
     private readonly AppDatabase _database = new();
 
@@ -28,24 +29,26 @@ public class LaunchTargetResolverTests : IDisposable
     {
         _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns(InteractiveSid);
         _associationLaunchResolver
-            .Setup(r => r.Resolve(It.IsAny<AppDatabase>(), It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<bool>()))
+            .Setup(r => r.Resolve(It.IsAny<AppDatabase>(), It.IsAny<AssociationLaunchRequest>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<bool>()))
             .Returns(new AssociationLaunchResolution(AssociationLaunchResolutionStatus.UnknownAssociation));
         _sessionProvider.Setup(s => s.GetSession()).Returns(new SessionContext
-        {
+{
             Database = _database,
             CredentialStore = new CredentialStore(),
-            PinDerivedKey = null!
-        });
-        _uiThreadInvoker.Setup(u => u.Invoke(It.IsAny<Func<AssociationLaunchResolution>>()))
-            .Returns<Func<AssociationLaunchResolution>>(func => func());
+        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32)));
     }
 
     public void Dispose() => _registry.Dispose();
 
-    private LaunchTargetResolver CreateResolver(IShortcutComHelper? shortcutComHelper = null)
+    private LaunchTargetResolver CreateResolver(
+        IShortcutComHelper? shortcutComHelper = null,
+        IAssociationExecutablePathResolver? associationExecutablePathResolver = null,
+        IUiThreadInvoker? uiThreadInvoker = null,
+        ISessionProvider? sessionProvider = null)
     {
         var registryResolver = new AssociationRegistryResolver(_log.Object, _registry.HklmRoot, _registry.HkuRoot);
-        var materializer = new AssociationCommandMaterializer(_log.Object);
+        var executablePathResolver = associationExecutablePathResolver ?? CreateValidAssociationExecutablePathResolver();
+        var materializer = new AssociationCommandMaterializer(_log.Object, executablePathResolver);
         var leaseCoordinator = new LaunchHiveLeaseCoordinator(_registry.HiveManager.Object);
 
         var shortcutTargetResolver = new ShortcutTargetResolver(shortcutComHelper!);
@@ -54,20 +57,29 @@ public class LaunchTargetResolverTests : IDisposable
             registryResolver,
             materializer,
             _associationLaunchResolver.Object,
-            _uiThreadInvoker.Object,
+            new UiThreadDatabaseAccessor(
+                new LambdaDatabaseProvider(() => (sessionProvider ?? _sessionProvider.Object).GetSession().Database),
+                () => uiThreadInvoker ?? _uiThreadInvoker),
             leaseCoordinator,
             shortcutTargetResolver,
-            _sessionProvider.Object,
             _log.Object);
     }
 
+    private static IAssociationExecutablePathResolver CreateValidAssociationExecutablePathResolver()
+    {
+        var resolver = new Mock<IAssociationExecutablePathResolver>();
+        resolver.Setup(r => r.Resolve(It.IsAny<string>()))
+            .Returns<string>(exePath => AssociationExecutablePathResolution.Valid(exePath));
+        return resolver.Object;
+    }
+
     private static AccountLaunchIdentity BasicIdentity(string sid = TestSid)
-        => new(sid) { PrivilegeLevel = PrivilegeLevel.Basic };
+        => new(sid) { PrivilegeLevel = PrivilegeLevel.Isolated };
 
     private static AccountLaunchIdentity BasicIdentityAllowingAccountRedirection(string sid = TestSid)
         => new(sid)
         {
-            PrivilegeLevel = PrivilegeLevel.Basic,
+            PrivilegeLevel = PrivilegeLevel.Isolated,
             AssociationResolutionPolicy = AssociationResolutionPolicy.AllowAccountRedirection
         };
 
@@ -140,6 +152,29 @@ public class LaunchTargetResolverTests : IDisposable
         key.SetValue(null, command);
     }
 
+    private void SetMachineProtocolDelegateExecute(string scheme, string clsid)
+    {
+        using var protocolKey = _registry.HklmRoot.CreateSubKey($@"Software\Classes\{scheme}");
+        protocolKey.SetValue("URL Protocol", string.Empty);
+        using var commandKey = _registry.HklmRoot.CreateSubKey($@"Software\Classes\{scheme}\shell\open\command");
+        commandKey.SetValue("DelegateExecute", clsid);
+    }
+
+    private void SetMachineProtocolCommandAndDelegateExecute(string scheme, string command, string clsid)
+    {
+        using var protocolKey = _registry.HklmRoot.CreateSubKey($@"Software\Classes\{scheme}");
+        protocolKey.SetValue("URL Protocol", string.Empty);
+        using var commandKey = _registry.HklmRoot.CreateSubKey($@"Software\Classes\{scheme}\shell\open\command");
+        commandKey.SetValue(null, command);
+        commandKey.SetValue("DelegateExecute", clsid);
+    }
+
+    private void SetMachineProgIdDelegateExecute(string progId, string clsid)
+    {
+        using var commandKey = _registry.HklmRoot.CreateSubKey($@"Software\Classes\{progId}\shell\open\command");
+        commandKey.SetValue("DelegateExecute", clsid);
+    }
+
     [Fact]
     public void ResolveAssociation_DirectExecutable_PassesThroughUnchanged()
     {
@@ -155,14 +190,73 @@ public class LaunchTargetResolverTests : IDisposable
     [Fact]
     public void ResolveAssociation_Script_UsesCurrentWrapperBehaviorWithoutRegistryResolution()
     {
-        var originalTarget = new ProcessLaunchTarget(@"C:\Scripts\run.bat", "--flag", @"C:\Work");
+        var originalTarget = new ProcessLaunchTarget(@"C:\Scripts\run.bat", "--flag", @"C:\Work", SuppressStartupFeedback: true);
 
         using var result = CreateResolver().ResolveFileHandler(BasicIdentity(), originalTarget);
 
         Assert.Equal("cmd.exe", result.Target.ExePath);
         Assert.Contains(@"""C:\Scripts\run.bat""", result.Target.Arguments);
+        Assert.True(result.Target.SuppressStartupFeedback);
         Assert.NotEqual(LaunchResolutionKind.ShellWrapped, result.Kind);
         _registry.HiveManager.Verify(h => h.EnsureHiveLoaded(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void ResolveAssociation_UsesPassedExtensionForDirectDetection()
+    {
+        var originalTarget = new ProcessLaunchTarget(
+            @"C:\Targets\tool.pdf");
+
+        using var result = CreateResolver().ResolveFileHandler(BasicIdentity(), originalTarget, ".exe");
+
+        Assert.Same(originalTarget, result.Target);
+        Assert.Equal(LaunchResolutionKind.Direct, result.Kind);
+        _registry.HiveManager.Verify(h => h.EnsureHiveLoaded(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void ResolveAssociation_UsesPassedExtensionForScriptWrapping()
+    {
+        var originalTarget = new ProcessLaunchTarget(
+            @"C:\Targets\run.exe",
+            "--flag",
+            @"C:\Work",
+            SuppressStartupFeedback: true);
+
+        using var result = CreateResolver().ResolveFileHandler(BasicIdentity(), originalTarget, ".bat");
+
+        Assert.Equal("cmd.exe", result.Target.ExePath);
+        Assert.Contains(@"""C:\Targets\run.exe""", result.Target.Arguments);
+        Assert.True(result.Target.SuppressStartupFeedback);
+        Assert.Equal(LaunchResolutionKind.Script, result.Kind);
+        _registry.HiveManager.Verify(h => h.EnsureHiveLoaded(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void ResolveAssociation_ResolvedHandler_PreservesSuppressStartupFeedback()
+    {
+        SetMachineExtension(".pdf", "Pdf.Handler");
+        SetMachineProgIdCommand("Pdf.Handler", @"""C:\Apps\viewer.exe"" ""%1""");
+        var originalTarget = new ProcessLaunchTarget(@"C:\Docs\report.pdf", SuppressStartupFeedback: true);
+
+        using var result = CreateResolver().ResolveFileHandler(BasicIdentity(), originalTarget);
+
+        Assert.Equal("viewer.exe", ExeName(result.Target));
+        Assert.True(result.Target.SuppressStartupFeedback);
+    }
+
+    [Fact]
+    public void ResolveAssociation_UsesPassedExtensionForAssociationLookup()
+    {
+        SetMachineExtension(".pdf", "Pdf.Handler");
+        SetMachineProgIdCommand("Pdf.Handler", @"""C:\Apps\viewer.exe"" ""%1""");
+        var originalTarget = new ProcessLaunchTarget(
+            @"C:\Targets\report.exe");
+
+        using var result = CreateResolver().ResolveFileHandler(BasicIdentity(), originalTarget, ".pdf");
+
+        Assert.Equal("viewer.exe", ExeName(result.Target));
+        Assert.Equal(@"""C:\Targets\report.exe""", result.Target.Arguments);
     }
 
     [Fact]
@@ -177,6 +271,52 @@ public class LaunchTargetResolverTests : IDisposable
 
         Assert.Equal("choice.exe", ExeName(result.Target));
         Assert.Equal(@"""C:\Docs\report.pdf""", result.Target.Arguments);
+    }
+
+    [Fact]
+    public void ResolveAssociation_MissingUserChoiceExecutable_SkipsToFallbackCandidate()
+    {
+        SetFileUserChoice(TestSid, ".log", "Choice.Log");
+        SetUserProgIdCommand(TestSid, "Choice.Log", @"""C:\Missing\stale.exe"" ""%1""");
+        SetUserExtension(TestSid, ".log", "Fallback.Log");
+        SetUserProgIdCommand(TestSid, "Fallback.Log", @"""C:\Apps\fallback.exe"" ""%1""");
+        var executablePathResolver = new Mock<IAssociationExecutablePathResolver>();
+        executablePathResolver.Setup(r => r.Resolve(@"C:\Missing\stale.exe"))
+            .Returns(AssociationExecutablePathResolution.Invalid(@"C:\Missing\stale.exe", "rooted executable path does not exist"));
+        executablePathResolver.Setup(r => r.Resolve(@"C:\Apps\fallback.exe"))
+            .Returns(AssociationExecutablePathResolution.Valid(@"C:\Apps\fallback.exe"));
+
+        using var result = CreateResolver(associationExecutablePathResolver: executablePathResolver.Object)
+            .ResolveFileHandler(BasicIdentity(), FileTarget(@"C:\Docs\runfence.log"));
+
+        Assert.Equal(@"C:\Apps\fallback.exe", result.Target.ExePath);
+        Assert.Equal(@"""C:\Docs\runfence.log""", result.Target.Arguments);
+    }
+
+    [Fact]
+    public void ResolveAssociation_RepairedExecutablePath_PreservesAssociationArguments()
+    {
+        var stalePath = Path.Combine(
+            @"C:\Program Files\WindowsApps",
+            "Microsoft.WindowsNotepad_11.2510.14.0_x64__8wekyb3d8bbwe",
+            "Notepad",
+            "Notepad.exe");
+        var repairedPath = Path.Combine(
+            @"C:\Program Files\WindowsApps",
+            "Microsoft.WindowsNotepad_11.2512.1.0_x64__8wekyb3d8bbwe",
+            "Notepad",
+            "Notepad.exe");
+        SetFileUserChoice(TestSid, ".log", "Choice.Log");
+        SetUserProgIdCommand(TestSid, "Choice.Log", $@"""{stalePath}"" ""%1""");
+        var executablePathResolver = new Mock<IAssociationExecutablePathResolver>();
+        executablePathResolver.Setup(r => r.Resolve(stalePath))
+            .Returns(AssociationExecutablePathResolution.Valid(repairedPath, wasRepaired: true));
+
+        using var result = CreateResolver(associationExecutablePathResolver: executablePathResolver.Object)
+            .ResolveFileHandler(BasicIdentity(), FileTarget(@"C:\Docs\runfence.log"));
+
+        Assert.Equal(repairedPath, result.Target.ExePath);
+        Assert.Equal(@"""C:\Docs\runfence.log""", result.Target.Arguments);
     }
 
     [Fact]
@@ -248,6 +388,18 @@ public class LaunchTargetResolverTests : IDisposable
         Assert.Equal(@"--open ""C:\Docs\My File.pdf""", result.Target.Arguments);
     }
 
+    [Fact]
+    public void ResolveAssociation_CommandWithTabSeparators_ParsesAndMaterializesCorrectly()
+    {
+        SetFileUserChoice(TestSid, ".pdf", "Choice.Pdf");
+        SetUserProgIdCommand(TestSid, "Choice.Pdf", "\"C:\\Apps\\viewer.exe\"\t\"%1\"");
+
+        using var result = CreateResolver().ResolveFileHandler(BasicIdentity(), FileTarget(@"C:\Docs\My File.pdf"));
+
+        Assert.Equal("viewer.exe", ExeName(result.Target));
+        Assert.Equal(@"""C:\Docs\My File.pdf""", result.Target.Arguments);
+    }
+
     [Theory]
     [InlineData("%1")]
     [InlineData("%L")]
@@ -304,7 +456,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetFileUserChoice(TestSid, ".pdf", PathConstants.HandlerProgIdPrefix + ".pdf");
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + ".pdf", $"\"{LauncherPath}\" --resolve \".pdf\" \"%L\"");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, ".pdf", @"C:\Docs\report.pdf", null, TestSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == ".pdf" && x.RawArgument == @"""C:\Docs\report.pdf"""),
+                null,
+                TestSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry
@@ -328,7 +485,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetFileUserChoice(TestSid, ".pdf", PathConstants.HandlerProgIdPrefix + ".pdf");
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + ".pdf", $"\"{LauncherPath}\" --resolve \".pdf\" \"%1\"");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, ".pdf", @"C:\Docs\report.pdf", null, TestSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == ".pdf" && x.RawArgument == @"""C:\Docs\report.pdf"""),
+                null,
+                TestSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry
@@ -441,7 +603,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetUserExtension(InteractiveSid, ".pdf", "Interactive.Pdf");
         SetUserProgIdCommand(InteractiveSid, "Interactive.Pdf", @"""C:\Apps\direct-viewer.exe"" ""%1""");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, ".pdf", @"C:\Docs\report.pdf", null, InteractiveSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == ".pdf" && x.RawArgument == @"""C:\Docs\report.pdf"""),
+                null,
+                InteractiveSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry { Id = "viewer04", AccountSid = InteractiveSid, ExePath = @"C:\Users\Test\AppData\Local\Viewer\viewer.exe" },
@@ -457,8 +624,9 @@ public class LaunchTargetResolverTests : IDisposable
     {
         var resolver = CreateResolver();
 
-        Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<AssociationResolutionException>(() =>
             resolver.ResolveFileHandler(HighestAllowedIdentity(), FileTarget(@"C:\Docs\report.pdf")));
+        Assert.Equal("No usable association handler found for 'C:\\Docs\\report.pdf'.", ex.Message);
     }
 
     [Fact]
@@ -601,6 +769,18 @@ public class LaunchTargetResolverTests : IDisposable
     }
 
     [Fact]
+    public void ResolveUrlTarget_CommandWithTabSeparators_ParsesAndMaterializesCorrectly()
+    {
+        SetUrlUserChoice(TestSid, "https", "Choice.Web");
+        SetUserProgIdCommand(TestSid, "Choice.Web", "\"C:\\Apps\\browser.exe\"\t\"%U\"");
+
+        using var result = CreateResolver().ResolveUrlHandler(BasicIdentity(), "https://example.com/a%20b");
+
+        Assert.Equal("browser.exe", ExeName(result.Target));
+        Assert.Equal(@"""https://example.com/a%20b""", result.Target.Arguments);
+    }
+
+    [Fact]
     public void ResolveUrlTarget_RunFenceExecutableCommand_ContinuesToDirectProtocolHandler()
     {
         SetUrlUserChoice(TestSid, "mailto", "Choice.Mail");
@@ -618,7 +798,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetUrlUserChoice(TestSid, "https", PathConstants.HandlerProgIdPrefix + "https");
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + "https", $"\"{LauncherPath}\" --resolve \"https\" \"%U\"");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, "https", "https://github.com/RunFence/", null, TestSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == "https" && x.RawArgument == @"""https://github.com/RunFence/"""),
+                null,
+                TestSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry
@@ -643,7 +828,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + "https", $"\"{LauncherPath}\" --resolve \"https\" \"%1\"");
         SetUserProtocol(TestSid, "https", @"""C:\Apps\direct-browser.exe"" ""%1""");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, "https", "https://github.com/RunFence/", null, TestSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == "https" && x.RawArgument == @"""https://github.com/RunFence/"""),
+                null,
+                TestSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry
@@ -666,7 +856,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetUrlUserChoice(TestSid, "https", PathConstants.HandlerProgIdPrefix + "https");
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + "https", $"\"{LauncherPath}\" --resolve \"https\" \"%1\"");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, "https", "https://github.com/RunFence/", null, TestSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == "https" && x.RawArgument == @"""https://github.com/RunFence/"""),
+                null,
+                TestSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry
@@ -693,7 +888,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + "https", $"\"{LauncherPath}\" --resolve \"https\" \"%1\"");
         SetUserProtocol(TestSid, "https", @"""C:\Apps\direct-browser.exe"" ""%1""");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, "https", "https://github.com/RunFence/", null, TestSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == "https" && x.RawArgument == @"""https://github.com/RunFence/"""),
+                null,
+                TestSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry { Id = "browser03", AccountSid = TestSid, ExePath = "https://example.com", IsUrlScheme = true },
@@ -711,7 +911,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + "https", $"\"{LauncherPath}\" --resolve \"https\" \"%1\"");
         SetUserProtocol(TestSid, "https", @"""C:\Apps\direct-browser.exe"" ""%1""");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, "https", "https://github.com/RunFence/", null, TestSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == "https" && x.RawArgument == @"""https://github.com/RunFence/"""),
+                null,
+                TestSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry
@@ -736,7 +941,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + "https", $"\"{LauncherPath}\" --resolve \"https\" \"%1\"");
         SetUserProtocol(InteractiveSid, "https", @"""C:\Apps\direct-browser.exe"" ""%1""");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, "https", "https://github.com/RunFence/", null, InteractiveSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == "https" && x.RawArgument == @"""https://github.com/RunFence/"""),
+                null,
+                InteractiveSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry { Id = "browser04", AccountSid = InteractiveSid, ExePath = @"C:\Users\Test\AppData\Local\Browser\browser.exe" },
@@ -754,7 +964,12 @@ public class LaunchTargetResolverTests : IDisposable
         SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + "https", $"\"{LauncherPath}\" --resolve \"https\" \"%1\"");
         SetUserProtocol(InteractiveSid, "https", @"""C:\Apps\direct-browser.exe"" ""%1""");
         _associationLaunchResolver
-            .Setup(r => r.Resolve(_database, "https", "https://github.com/RunFence/", null, InteractiveSid, true))
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == "https" && x.RawArgument == @"""https://github.com/RunFence/"""),
+                null,
+                InteractiveSid,
+                true))
             .Returns(new AssociationLaunchResolution(
                 AssociationLaunchResolutionStatus.Success,
                 new AppEntry { Id = "browser05", AccountSid = InteractiveSid, ExePath = @"C:\Users\Test\AppData\Local\Browser\run.cmd" },
@@ -774,6 +989,61 @@ public class LaunchTargetResolverTests : IDisposable
         using var result = CreateResolver().ResolveUrlHandler(BasicIdentity(), "myapp://value");
 
         Assert.Equal("machine.exe", ExeName(result.Target));
+    }
+
+    [Fact]
+    public void ResolveUrlTarget_MachineProtocolDelegateExecute_UsesShellUrlWrapper()
+    {
+        SetMachineProtocolDelegateExecute("ms-settings", "{4ed3a719-cea8-4bd9-910d-e252f997afc2}");
+
+        using var result = CreateResolver().ResolveUrlHandler(BasicIdentity(), "ms-settings:defaultapps");
+
+        Assert.Equal("rundll32.exe", result.Target.ExePath);
+        Assert.Equal("url.dll,FileProtocolHandler ms-settings:defaultapps", result.Target.Arguments);
+        Assert.Equal(LaunchResolutionKind.Handler, result.Kind);
+    }
+
+    [Fact]
+    public void ResolveUrlTarget_UserChoiceProgIdWithDelegateExecute_UsesShellUrlWrapper()
+    {
+        SetUrlUserChoice(TestSid, "ms-settings", "Windows.Settings");
+        SetMachineProgIdDelegateExecute("Windows.Settings", "{4ed3a719-cea8-4bd9-910d-e252f997afc2}");
+
+        using var result = CreateResolver().ResolveUrlHandler(BasicIdentity(), "ms-settings:defaultapps");
+
+        Assert.Equal("rundll32.exe", result.Target.ExePath);
+        Assert.Equal("url.dll,FileProtocolHandler ms-settings:defaultapps", result.Target.Arguments);
+        Assert.Equal(LaunchResolutionKind.Handler, result.Kind);
+    }
+
+    [Fact]
+    public void ResolveUrlTarget_MachineProtocolCommandTakesPriorityOverDelegateExecute()
+    {
+        SetMachineProtocolCommandAndDelegateExecute(
+            "ms-settings",
+            @"""C:\Apps\settings-proxy.exe"" ""%1""",
+            "{4ed3a719-cea8-4bd9-910d-e252f997afc2}");
+
+        using var result = CreateResolver().ResolveUrlHandler(BasicIdentity(), "ms-settings:defaultapps");
+
+        Assert.Equal("settings-proxy.exe", ExeName(result.Target));
+        Assert.Equal(@"""ms-settings:defaultapps""", result.Target.Arguments);
+        Assert.Equal(LaunchResolutionKind.Handler, result.Kind);
+    }
+
+    [Fact]
+    public void ResolveUrlTarget_MachineProtocolBrokenCommandFallsBackToDelegateExecute()
+    {
+        SetMachineProtocolCommandAndDelegateExecute(
+            "ms-settings",
+            @"""C:\Apps\broken.exe %1",
+            "{4ed3a719-cea8-4bd9-910d-e252f997afc2}");
+
+        using var result = CreateResolver().ResolveUrlHandler(BasicIdentity(), "ms-settings:defaultapps");
+
+        Assert.Equal("rundll32.exe", result.Target.ExePath);
+        Assert.Equal("url.dll,FileProtocolHandler ms-settings:defaultapps", result.Target.Arguments);
+        Assert.Equal(LaunchResolutionKind.Handler, result.Kind);
     }
 
     [Fact]
@@ -829,8 +1099,9 @@ public class LaunchTargetResolverTests : IDisposable
     {
         var resolver = CreateResolver();
 
-        Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<AssociationResolutionException>(() =>
             resolver.ResolveUrlHandler(HighestAllowedIdentity(), "steam://run/12345"));
+        Assert.Equal("No usable association handler found for 'steam://run/12345'.", ex.Message);
     }
 
     [Fact]
@@ -921,6 +1192,83 @@ public class LaunchTargetResolverTests : IDisposable
     }
 
     [Fact]
+    public async Task TraversePath_WorkerThread_UsesUiThreadSnapshotForManagedShortcutLookup()
+    {
+        var lnkPath = @"C:\Shortcuts\managed-worker.lnk";
+        var app = new AppEntry { Id = "workerapp", ExePath = @"C:\Apps\worker.exe", AccountSid = TestSid };
+        var liveDatabase = new AppDatabase();
+        liveDatabase.Apps.Add(app);
+        var session = new SessionContext
+{
+            Database = liveDatabase,
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        var sessionProvider = new Mock<ISessionProvider>();
+        var sessionThreadId = 0;
+        sessionProvider.Setup(s => s.GetSession())
+            .Callback(() => sessionThreadId = Environment.CurrentManagedThreadId)
+            .Returns(session);
+        var shortcutHelper = new Mock<IShortcutComHelper>();
+        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
+            .Returns(new ShortcutDefinition(lnkPath, LauncherPath, app.Id, null));
+
+        using var uiInvoker = new DedicatedThreadUiInvoker();
+        var resolver = CreateResolver(
+            shortcutComHelper: shortcutHelper.Object,
+            uiThreadInvoker: uiInvoker,
+            sessionProvider: sessionProvider.Object);
+
+        var result = await Task.Run(() => resolver.TraversePath(lnkPath, BasicIdentity()));
+
+        Assert.Equal(app.ExePath, result.TraversedPath);
+        Assert.Equal(uiInvoker.ThreadId, sessionThreadId);
+    }
+
+    [Fact]
+    public async Task ResolveUrlTarget_WorkerThread_UsesUiThreadSnapshotBeforeAssociationResolution()
+    {
+        SetUrlUserChoice(TestSid, "https", PathConstants.HandlerProgIdPrefix + "https");
+        SetMachineProgIdCommand(PathConstants.HandlerProgIdPrefix + "https", $"\"{LauncherPath}\" --resolve \"https\" \"%1\"");
+
+        var liveDatabase = new AppDatabase();
+        liveDatabase.Apps.Add(new AppEntry { Id = "browser01", AccountSid = TestSid, ExePath = @"C:\Apps\browser.exe" });
+        var session = new SessionContext
+{
+            Database = liveDatabase,
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        var sessionProvider = new Mock<ISessionProvider>();
+        var sessionThreadId = 0;
+        sessionProvider.Setup(s => s.GetSession())
+            .Callback(() => sessionThreadId = Environment.CurrentManagedThreadId)
+            .Returns(session);
+
+        AppDatabase? resolvedDatabase = null;
+        _associationLaunchResolver
+            .Setup(r => r.Resolve(
+                It.IsAny<AppDatabase>(),
+                It.Is<AssociationLaunchRequest>(x => x.AssociationKey == "https" && x.RawArgument == @"""https://github.com/RunFence/"""),
+                null,
+                TestSid,
+                true))
+            .Callback<AppDatabase, AssociationLaunchRequest, string?, string?, bool>((db, _, _, _, _) => resolvedDatabase = db)
+            .Returns(new AssociationLaunchResolution(
+                AssociationLaunchResolutionStatus.Success,
+                new AppEntry { Id = "browser01", AccountSid = TestSid, ExePath = @"C:\Apps\browser.exe" },
+                new HandlerMappingEntry("browser01")));
+
+        using var uiInvoker = new DedicatedThreadUiInvoker();
+        var resolver = CreateResolver(uiThreadInvoker: uiInvoker, sessionProvider: sessionProvider.Object);
+
+        using var result = await Task.Run(() => resolver.ResolveUrlHandler(BasicIdentity(), "https://github.com/RunFence/"));
+
+        Assert.Equal(PathConstants.LauncherExeName, Path.GetFileName(result.Target.ExePath));
+        Assert.Equal(uiInvoker.ThreadId, sessionThreadId);
+        Assert.NotNull(resolvedDatabase);
+        Assert.NotSame(liveDatabase, resolvedDatabase);
+    }
+
+    [Fact]
     public void TraversePath_FolderPath_ReturnsFolderKind()
     {
         var folderPath = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
@@ -941,6 +1289,7 @@ public class LaunchTargetResolverTests : IDisposable
         Assert.False(result.IsFolder);
         Assert.Equal(exePath, result.TraversedPath);
         Assert.Null(result.ShortcutArguments);
+        Assert.Equal(".exe", result.Extension);
     }
 
     [Fact]
@@ -949,14 +1298,15 @@ public class LaunchTargetResolverTests : IDisposable
         var lnkPath = @"C:\Shortcuts\notepad.lnk";
         var targetPath = @"C:\Windows\system32\notepad.exe";
         var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutTargetAndArgs(lnkPath))
-            .Returns(new ShortcutInfo(targetPath, null, null));
+        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
+            .Returns(new ShortcutDefinition(lnkPath, targetPath, null, null));
 
         var result = CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity());
 
         Assert.False(result.IsFolder);
         Assert.Equal(targetPath, result.TraversedPath);
         Assert.Null(result.ShortcutArguments);
+        Assert.Equal(".exe", result.Extension);
     }
 
     [Fact]
@@ -966,8 +1316,8 @@ public class LaunchTargetResolverTests : IDisposable
         var app = new AppEntry { Id = "app01", ExePath = @"C:\Apps\managed.exe", AccountSid = TestSid };
         _database.Apps.Add(app);
         var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutTargetAndArgs(lnkPath))
-            .Returns(new ShortcutInfo(LauncherPath, app.Id, null));
+        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
+            .Returns(new ShortcutDefinition(lnkPath, LauncherPath, app.Id, null));
 
         var result = CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity());
 
@@ -981,8 +1331,8 @@ public class LaunchTargetResolverTests : IDisposable
         var lnkPath = @"C:\Shortcuts\myfolder.lnk";
         var folderPath = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
         var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutTargetAndArgs(lnkPath))
-            .Returns(new ShortcutInfo(folderPath, null, null));
+        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
+            .Returns(new ShortcutDefinition(lnkPath, folderPath, null, null));
 
         var result = CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity());
 
@@ -995,8 +1345,8 @@ public class LaunchTargetResolverTests : IDisposable
     {
         var lnkPath = @"C:\Shortcuts\broken.lnk";
         var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutTargetAndArgs(lnkPath))
-            .Returns(new ShortcutInfo(null, null, null));
+        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
+            .Returns(new ShortcutDefinition(lnkPath, null, null, null));
 
         Assert.Throws<InvalidOperationException>(() =>
             CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity()));
@@ -1008,8 +1358,8 @@ public class LaunchTargetResolverTests : IDisposable
         var lnkPath = @"C:\Shortcuts\script.lnk";
         var targetPath = @"C:\Scripts\run.exe";
         var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutTargetAndArgs(lnkPath))
-            .Returns(new ShortcutInfo(targetPath, "--from-lnk", null));
+        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
+            .Returns(new ShortcutDefinition(lnkPath, targetPath, "--from-lnk", null));
 
         var result = CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity());
 

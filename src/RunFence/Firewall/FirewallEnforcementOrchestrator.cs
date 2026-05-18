@@ -10,7 +10,10 @@ public class FirewallEnforcementOrchestrator(
     IFirewallAccountRuleApplier accountRuleApplier,
     IFirewallCleanupService cleanupService,
     IGlobalIcmpPendingDomainProcessor globalIcmpPendingDomainProcessor,
-    IGlobalIcmpEnforcementTrigger globalIcmpEnforcementTrigger)
+    IGlobalIcmpEnforcementTrigger globalIcmpEnforcementTrigger,
+    FirewallApplyPlanner applyPlanner,
+    FirewallApplyRetryCoordinator applyRetryCoordinator,
+    FirewallApplyPhaseExecutor applyPhaseExecutor)
     : IAccountFirewallSettingsApplier, IFirewallEnforcementOrchestrator
 {
     public async Task<FirewallApplyResult> ApplyAccountFirewallSettingsAsync(
@@ -19,107 +22,89 @@ public class FirewallEnforcementOrchestrator(
         FirewallAccountSettings? previousSettings,
         FirewallAccountSettings settings,
         AppDatabase database,
+        Action? saveAction = null,
         CancellationToken cancellationToken = default)
     {
-        var settingsForWorker = settings.Clone();
-        var previousSettingsForWorker = previousSettings?.Clone();
-        var accountResolvedDomains = domainCache.GetAccountSnapshot(settings);
+        var plan = applyPlanner.BuildApplyPlan(sid, previousSettings, settings);
+        var entries = new List<FirewallEnforcementEntry>();
+        var pendingDomains = new List<FirewallPendingDomainResolution>();
+        var hasSaveAction = saveAction is not null;
 
-        FirewallAccountRuleApplyResult accountResult;
-        try
+        foreach (var phase in plan.Phases)
         {
-            accountResult = await Task.Run(
-                () => ApplyFirewallCore(sid, username, settingsForWorker, previousSettingsForWorker, accountResolvedDomains),
+            var phaseResult = await applyPhaseExecutor.ExecutePhaseAsync(
+                phase,
+                _ =>
+                {
+                    saveAction?.Invoke();
+                    return Task.CompletedTask;
+                },
+                database,
+                sid,
+                username,
                 cancellationToken);
-        }
-        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.AccountRules)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new FirewallApplyException(FirewallApplyPhase.AccountRules, sid, ex);
+            CompletePhase(plan, phaseResult);
+            ApplyPhaseOutcome(plan, phaseResult, sid, database, entries, pendingDomains);
+            if (!phaseResult.CanContinue)
+            {
+                return BuildApplyResult(plan, hasSaveAction, pendingDomains, entries);
+            }
         }
 
-        ProcessAccountResult(accountResult, database);
-
-        var globalIcmpInput = CreateGlobalIcmpWorkerInput(database);
-        try
-        {
-            await globalIcmpEnforcementTrigger.EnforceGlobalIcmpBlockAsync(globalIcmpInput, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            throw new FirewallApplyException(FirewallApplyPhase.GlobalIcmp, sid, ex);
-        }
-
-        return new FirewallApplyResult(
-            AccountRulesApplied: accountResult.AccountRulesApplied,
-            GlobalIcmpApplied: true,
-            PendingDomains: accountResult.PendingDomains);
+        return BuildApplyResult(plan, hasSaveAction, pendingDomains, entries);
     }
-
-    private static GlobalIcmpPolicyInput CreateGlobalIcmpWorkerInput(AppDatabase database) =>
-        new(
-            database.Settings.BlockIcmpWhenInternetBlocked,
-            database.Accounts
-            .Where(account => !account.Firewall.AllowInternet)
-            .Select(account => account.Clone())
-            .ToList());
 
     public FirewallApplyResult ApplyAccountFirewallSettings(
         string sid,
         string username,
         FirewallAccountSettings? previousSettings,
         FirewallAccountSettings settings,
-        AppDatabase database)
+        AppDatabase database,
+        Action? saveAction = null)
     {
-        FirewallAccountRuleApplyResult accountResult;
-        try
+        var plan = applyPlanner.BuildApplyPlan(sid, previousSettings, settings);
+        var entries = new List<FirewallEnforcementEntry>();
+        var pendingDomains = new List<FirewallPendingDomainResolution>();
+        var hasSaveAction = saveAction is not null;
+
+        foreach (var phase in plan.Phases)
         {
-            accountResult = ApplyFirewallCore(sid, username, settings, previousSettings,
-                domainCache.GetAccountSnapshot(settings));
-        }
-        catch (FirewallApplyException ex) when (ex.Phase == FirewallApplyPhase.AccountRules)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            throw new FirewallApplyException(FirewallApplyPhase.AccountRules, sid, ex);
+            var phaseResult = applyPhaseExecutor.ExecutePhase(
+                phase,
+                () =>
+                {
+                    saveAction?.Invoke();
+                },
+                database,
+                sid,
+                username,
+                CancellationToken.None);
+            CompletePhase(plan, phaseResult);
+            ApplyPhaseOutcome(plan, phaseResult, sid, database, entries, pendingDomains);
+            if (!phaseResult.CanContinue)
+            {
+                return BuildApplyResult(plan, hasSaveAction, pendingDomains, entries);
+            }
         }
 
-        ProcessAccountResult(accountResult, database);
-
-        try
-        {
-            globalIcmpEnforcementTrigger.EnforceGlobalIcmpBlock(database);
-        }
-        catch (Exception ex)
-        {
-            throw new FirewallApplyException(FirewallApplyPhase.GlobalIcmp, sid, ex);
-        }
-
-        return new FirewallApplyResult(
-            AccountRulesApplied: accountResult.AccountRulesApplied,
-            GlobalIcmpApplied: true,
-            PendingDomains: accountResult.PendingDomains);
+        return BuildApplyResult(plan, hasSaveAction, pendingDomains, entries);
     }
 
-    private FirewallAccountRuleApplyResult ApplyFirewallCore(
-        string sid,
-        string username,
-        FirewallAccountSettings settings,
-        FirewallAccountSettings? previousSettings,
-        IReadOnlyDictionary<string, IReadOnlyList<string>> resolvedDomains)
-        => accountRuleApplier.ApplyFirewallRules(sid, username, settings, previousSettings, resolvedDomains);
-
-    public void EnforceAll(AppDatabase database)
+    public EnforceAllResult EnforceAll(AppDatabase database)
     {
         log.Info("FirewallEnforcementOrchestrator: enforcing all firewall rules.");
 
-        domainCache.Prune(database);
-        retryState.Prune(database);
+        var failures = new List<FirewallEnforcementFailure>();
+
+        try
+        {
+            domainCache.Prune(database);
+            retryState.Prune(database);
+        }
+        catch (Exception ex)
+        {
+            failures.Add(new FirewallEnforcementFailure(FirewallEnforcementLayer.DnsRefresh, null, ex.Message));
+        }
 
         var activeSids = new HashSet<string>(
             database.Accounts.Where(account => !account.Firewall.IsDefault).Select(account => account.Sid),
@@ -138,17 +123,44 @@ public class FirewallEnforcementOrchestrator(
                     account.Firewall,
                     account.Firewall,
                     domainCache.GetAccountSnapshot(account.Firewall));
+                if (!result.Succeeded)
+                {
+                    applyRetryCoordinator.MarkAccountEnforcementRetryPending(
+                        account.Sid,
+                        result.ErrorMessage ?? "Firewall account enforcement failed.");
+                    failures.Add(new FirewallEnforcementFailure(
+                        result.FailedLayer ?? FirewallEnforcementLayer.AccountRules,
+                        account.Sid,
+                        result.ErrorMessage ?? "Firewall account enforcement failed."));
+                    continue;
+                }
+
                 FirewallPendingDomainHelper.AddUnique(pendingDomains, pendingKeys, result.PendingDomains);
             }
             catch (Exception ex)
             {
-                log.Error($"FirewallEnforcementOrchestrator: Failed to apply rules for {account.Sid} during EnforceAll", ex);
+                applyRetryCoordinator.MarkAccountEnforcementRetryPending(account.Sid, ex.Message);
+                failures.Add(new FirewallEnforcementFailure(FirewallEnforcementLayer.AccountRules, account.Sid, ex.Message));
             }
         }
 
-        globalIcmpPendingDomainProcessor.ProcessPendingDomains(pendingDomains);
+        try
+        {
+            globalIcmpPendingDomainProcessor.ProcessPendingDomains(pendingDomains);
+        }
+        catch (Exception ex)
+        {
+            failures.Add(new FirewallEnforcementFailure(FirewallEnforcementLayer.DnsRefresh, null, ex.Message));
+        }
 
-        cleanupService.CleanupOrphanedRules(activeSids, database.SidNames.Keys);
+        try
+        {
+            cleanupService.CleanupOrphanedRules(activeSids, database.SidNames.Keys);
+        }
+        catch (Exception ex)
+        {
+            failures.Add(new FirewallEnforcementFailure(FirewallEnforcementLayer.AccountRules, null, ex.Message));
+        }
 
         try
         {
@@ -156,10 +168,78 @@ public class FirewallEnforcementOrchestrator(
         }
         catch (Exception ex)
         {
-            log.Error("FirewallEnforcementOrchestrator: Failed to enforce global ICMP block during EnforceAll", ex);
+            applyRetryCoordinator.MarkGlobalIcmpRetryPending(ex.Message);
+            failures.Add(new FirewallEnforcementFailure(FirewallEnforcementLayer.GlobalIcmp, null, ex.Message));
         }
 
         log.Info($"FirewallEnforcementOrchestrator: enforcement complete ({activeSids.Count} account(s)).");
+        return new EnforceAllResult(failures);
+    }
+
+    private static void CompletePhase(FirewallApplyPlan plan, FirewallApplyPhaseResult phaseResult)
+    {
+        if (phaseResult.PersistenceCompleted)
+            plan.MarkPersistenceCompleted();
+    }
+
+    private void ApplyPhaseOutcome(
+        FirewallApplyPlan plan,
+        FirewallApplyPhaseResult phaseResult,
+        string sid,
+        AppDatabase database,
+        List<FirewallEnforcementEntry> entries,
+        List<FirewallPendingDomainResolution> pendingDomains)
+    {
+        entries.AddRange(phaseResult.Entries);
+
+        if (phaseResult.AccountApplyResult is not null)
+        {
+            if (!phaseResult.AccountApplyResult.Succeeded)
+            {
+                if (plan.UpdatesAccountRetryState)
+                {
+                    applyRetryCoordinator.MarkAccountEnforcementRetryPending(
+                        sid,
+                        phaseResult.AccountApplyResult.ErrorMessage ?? "Firewall account enforcement failed.");
+                }
+
+                return;
+            }
+
+            entries.Add(new(FirewallEnforcementLayer.AccountRules, FirewallEnforcementStatus.Succeeded));
+            entries.Add(new(FirewallEnforcementLayer.WfpFilters, FirewallEnforcementStatus.Succeeded));
+            pendingDomains.AddRange(phaseResult.AccountApplyResult.PendingDomains);
+            ProcessAccountResult(phaseResult.AccountApplyResult, database);
+        }
+
+        if (phaseResult.GlobalIcmpError is not null)
+        {
+            if (plan.UpdatesGlobalIcmpRetryState)
+                applyRetryCoordinator.MarkGlobalIcmpRetryPending(phaseResult.GlobalIcmpError);
+
+            return;
+        }
+
+        if (phaseResult.GlobalIcmpApplied)
+            entries.Add(new(FirewallEnforcementLayer.GlobalIcmp, FirewallEnforcementStatus.Succeeded));
+    }
+
+    private FirewallApplyResult BuildApplyResult(
+        FirewallApplyPlan plan,
+        bool hasSaveAction,
+        List<FirewallPendingDomainResolution> pendingDomains,
+        List<FirewallEnforcementEntry> entries)
+    {
+        if (plan.RequiresNoOpSuccessEntries)
+        {
+            entries.Add(new(FirewallEnforcementLayer.AccountRules, FirewallEnforcementStatus.Succeeded));
+            entries.Add(new(FirewallEnforcementLayer.WfpFilters, FirewallEnforcementStatus.Succeeded));
+        }
+
+        return new FirewallApplyResult(
+            ConfigSaved: hasSaveAction && plan.PersistenceAlreadyHappened,
+            pendingDomains,
+            entries);
     }
 
     private void ProcessAccountResult(FirewallAccountRuleApplyResult accountResult, AppDatabase database)

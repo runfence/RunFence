@@ -25,14 +25,19 @@ public class RememberPinServiceTests : IDisposable
     private readonly Mock<ITpmKeyProvider> _tpmKeyProvider = new();
     private readonly TempDirectory _tempDir = new("RememberPinService");
     private readonly string _startKeyPath;
+    private readonly IDpapiProtector _dpapiProtector;
     private readonly RememberPinService _service;
 
     public RememberPinServiceTests()
     {
         _startKeyPath = Path.Combine(_tempDir.Path, "startkey.dat");
         _configPaths.Setup(p => p.RememberPinFilePath).Returns(_startKeyPath);
-        _machineIdProvider.Setup(m => m.MachineIdHash).Returns([0x6B, 0x29, 0xFC, 0x40, 0xCA, 0x47, 0x10, 0x67, 0xB3, 0x1D, 0x00, 0xDD]);
-        _service = new RememberPinService(_log.Object, _machineIdProvider.Object, _configPaths.Object, _tpmKeyProvider.Object);
+        var hash = new byte[] { 0x6B, 0x29, 0xFC, 0x40, 0xCA, 0x47, 0x10, 0x67, 0xB3, 0x1D, 0x00, 0xDD };
+        _machineIdProvider.Setup(m => m.MachineIdHash).Returns(hash);
+        _machineIdProvider.Setup(m => m.GetMachineIdentity())
+            .Returns(new MachineIdentityResult(MachineIdentityStatus.Available, MachineIdentitySource.SmbiosUuid, "TEST", hash, MachineIdProvider.FormatMachineCode(hash), null));
+        _dpapiProtector = new NativeDpapiProtector();
+        _service = new RememberPinService(_log.Object, _machineIdProvider.Object, _configPaths.Object, _tpmKeyProvider.Object, _dpapiProtector);
     }
 
     public void Dispose() => _tempDir.Dispose();
@@ -48,6 +53,21 @@ public class RememberPinServiceTests : IDisposable
     {
         ushort wrappedKeyLength = BitConverter.ToUInt16(fileContent, WrappedKeyLengthOffset);
         return fileContent.AsSpan(WrappedKeyDataOffset, wrappedKeyLength).ToArray();
+    }
+
+    private bool TryDecryptKey(out byte[] pinDerivedKey)
+    {
+        if (!_service.TryDecryptSecret(out var secret))
+        {
+            pinDerivedKey = [];
+            return false;
+        }
+
+        using (secret)
+        {
+            pinDerivedKey = secret!.TransformSnapshot(data => data.ToArray());
+            return true;
+        }
     }
 
     [Fact]
@@ -77,7 +97,7 @@ public class RememberPinServiceTests : IDisposable
     public void EnableWithTpm_WritesHybridEnvelope_AndWrapsFixedSizeDataKey()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
         var fakeWrappedKey = new byte[] { 0xAA, 0xBB, 0xCC };
         byte[]? wrappedKeyInput = null;
         _tpmKeyProvider.Setup(t => t.Encrypt(LegacyTpmKeyName, It.IsAny<byte[]>()))
@@ -102,7 +122,7 @@ public class RememberPinServiceTests : IDisposable
     public void EnableDpapiOnly_WritesFileWithModeByte0_AndNoTpmCalls()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
 
         _service.EnableDpapiOnly(protectedPinDerivedKey);
 
@@ -119,10 +139,10 @@ public class RememberPinServiceTests : IDisposable
     public void TryDecrypt_DpapiMode_ReturnsCorrectKey_WithNoTpmCalls()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
         _service.EnableDpapiOnly(protectedPinDerivedKey);
 
-        var result = _service.TryDecrypt(out var decryptedKey);
+        var result = TryDecryptKey(out var decryptedKey);
 
         Assert.True(result);
         Assert.Equal(pinDerivedKey, decryptedKey);
@@ -134,7 +154,7 @@ public class RememberPinServiceTests : IDisposable
     public void TryDecrypt_TpmMode_CallsTpmDecryptAndReturnsCorrectKey()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
 
         byte[]? capturedDataKey = null;
         _tpmKeyProvider.Setup(t => t.Encrypt(LegacyTpmKeyName, It.IsAny<byte[]>()))
@@ -147,7 +167,7 @@ public class RememberPinServiceTests : IDisposable
 
         _service.EnableWithTpm(protectedPinDerivedKey);
 
-        var result = _service.TryDecrypt(out var decryptedKey);
+        var result = TryDecryptKey(out var decryptedKey);
 
         Assert.True(result);
         Assert.Equal(pinDerivedKey, decryptedKey);
@@ -160,7 +180,7 @@ public class RememberPinServiceTests : IDisposable
     public void TryDecrypt_TpmMode_LegacyVersion1Payload_RemainsCompatible()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
 
         _service.EnableDpapiOnly(protectedPinDerivedKey);
         var dpapiContent = File.ReadAllBytes(_startKeyPath);
@@ -170,7 +190,7 @@ public class RememberPinServiceTests : IDisposable
         _tpmKeyProvider.Setup(t => t.Decrypt(LegacyTpmKeyName, It.IsAny<byte[]>()))
             .Returns(dpapiBlob.ToArray());
 
-        var result = _service.TryDecrypt(out var decryptedKey);
+        var result = TryDecryptKey(out var decryptedKey);
 
         Assert.True(result);
         Assert.Equal(pinDerivedKey, decryptedKey);
@@ -182,7 +202,7 @@ public class RememberPinServiceTests : IDisposable
     public void TryDecrypt_TpmPcrMismatch_ReturnsFalse()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
         _tpmKeyProvider.Setup(t => t.Encrypt(It.IsAny<string>(), It.IsAny<byte[]>())).Returns(new byte[] { 0xAA, 0xBB });
         _tpmKeyProvider.Setup(t => t.Decrypt(LegacyTpmKeyName, It.IsAny<byte[]>()))
             .Throws(new CryptographicException("TPM PCR mismatch"));
@@ -191,7 +211,7 @@ public class RememberPinServiceTests : IDisposable
 
         _service.EnableWithTpm(protectedPinDerivedKey);
 
-        var result = _service.TryDecrypt(out var decryptedKey);
+        var result = TryDecryptKey(out var decryptedKey);
 
         Assert.False(result);
         Assert.Empty(decryptedKey);
@@ -200,7 +220,7 @@ public class RememberPinServiceTests : IDisposable
     [Fact]
     public void TryDecrypt_MissingFile_ReturnsFalse()
     {
-        var result = _service.TryDecrypt(out var key);
+        var result = TryDecryptKey(out var key);
 
         Assert.False(result);
         Assert.Empty(key);
@@ -211,7 +231,7 @@ public class RememberPinServiceTests : IDisposable
     {
         File.WriteAllBytes(_startKeyPath, [DpapiOnlyVersion]);
 
-        var result = _service.TryDecrypt(out var key);
+        var result = TryDecryptKey(out var key);
 
         Assert.False(result);
         Assert.Empty(key);
@@ -222,17 +242,40 @@ public class RememberPinServiceTests : IDisposable
     {
         File.WriteAllBytes(_startKeyPath, [0x03, DpapiMode, 0x01, 0x02, 0x03]);
 
-        var result = _service.TryDecrypt(out var key);
+        var result = TryDecryptKey(out var key);
 
         Assert.False(result);
         Assert.Empty(key);
     }
 
     [Fact]
+    public void TryDecryptSecret_InvalidDecryptedKeyLength_ReturnsFalse_DisposesSecret_AndLogsWarning()
+    {
+        File.WriteAllBytes(_startKeyPath, [DpapiOnlyVersion, DpapiMode, 0xAA, 0xBB, 0xCC]);
+        SecureSecret invalidSecret = TestSecretFactory.Create(Constants.Argon2OutputBytes - 1, fillValue: 0x5A);
+        var service = new RememberPinService(
+            _log.Object,
+            _machineIdProvider.Object,
+            _configPaths.Object,
+            _tpmKeyProvider.Object,
+            new FakeDpapiProtector
+            {
+                UnprotectToSecretFunc = (_, _) => invalidSecret
+            });
+
+        var result = service.TryDecryptSecret(out var pinDerivedKey);
+
+        Assert.False(result);
+        Assert.Null(pinDerivedKey);
+        Assert.Throws<ObjectDisposedException>(() => invalidSecret.TransformSnapshot(data => data.Length));
+        _log.Verify(l => l.Warn("RememberPinService: decrypted PIN key length is invalid."), Times.Once);
+    }
+
+    [Fact]
     public void Disable_TpmMode_DeletesFileAndCallsTpmDeleteKey()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
         _tpmKeyProvider.Setup(t => t.Encrypt(LegacyTpmKeyName, It.IsAny<byte[]>()))
             .Returns(new byte[] { 0xAA, 0xBB, 0xCC });
         _service.EnableWithTpm(protectedPinDerivedKey);
@@ -248,7 +291,7 @@ public class RememberPinServiceTests : IDisposable
     public void Disable_TpmMode_WhenDeleteKeyThrows_StillDeletesFile()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
         _tpmKeyProvider.Setup(t => t.Encrypt(LegacyTpmKeyName, It.IsAny<byte[]>()))
             .Returns(new byte[] { 0xAA, 0xBB, 0xCC });
         _tpmKeyProvider.Setup(t => t.DeleteKey(LegacyTpmKeyName))
@@ -266,7 +309,7 @@ public class RememberPinServiceTests : IDisposable
     public void Disable_DpapiMode_DeletesFileWithoutCallingTpmDelete()
     {
         var pinDerivedKey = MakePinDerivedKey();
-        using var protectedPinDerivedKey = new ProtectedBuffer(pinDerivedKey, protect: false);
+        using var protectedPinDerivedKey = TestSecretFactory.FromBytes(pinDerivedKey);
         _service.EnableDpapiOnly(protectedPinDerivedKey);
         Assert.True(File.Exists(_startKeyPath));
 
@@ -288,7 +331,7 @@ public class RememberPinServiceTests : IDisposable
     public void UpdateForPinChange_WhenNotEnabled_IsNoOp()
     {
         var newKey = MakePinDerivedKey();
-        using var protectedNewKey = new ProtectedBuffer(newKey, protect: false);
+        using var protectedNewKey = TestSecretFactory.FromBytes(newKey);
 
         _service.UpdateForPinChange(protectedNewKey);
 
@@ -301,12 +344,12 @@ public class RememberPinServiceTests : IDisposable
     public void UpdateForPinChange_DpapiMode_PreservesDpapiMode()
     {
         var oldKey = MakePinDerivedKey();
-        using var protectedOldKey = new ProtectedBuffer(oldKey, protect: false);
+        using var protectedOldKey = TestSecretFactory.FromBytes(oldKey);
         _service.EnableDpapiOnly(protectedOldKey);
 
         var newKey = new byte[32];
         new Random(99).NextBytes(newKey);
-        using var protectedNewKey = new ProtectedBuffer(newKey, protect: false);
+        using var protectedNewKey = TestSecretFactory.FromBytes(newKey);
 
         _service.UpdateForPinChange(protectedNewKey);
 
@@ -322,8 +365,8 @@ public class RememberPinServiceTests : IDisposable
         var oldKey = MakePinDerivedKey();
         var newKey = new byte[32];
         new Random(99).NextBytes(newKey);
-        using var protectedOldKey = new ProtectedBuffer(oldKey, protect: false);
-        using var protectedNewKey = new ProtectedBuffer(newKey, protect: false);
+        using var protectedOldKey = TestSecretFactory.FromBytes(oldKey);
+        using var protectedNewKey = TestSecretFactory.FromBytes(newKey);
 
         var fakeWrappedKey1 = new byte[] { 0xAA, 0xBB };
         var fakeWrappedKey2 = new byte[] { 0xCC, 0xDD };
@@ -348,7 +391,7 @@ public class RememberPinServiceTests : IDisposable
         File.WriteAllBytes(_startKeyPath, [0x03, DpapiMode, 0x01, 0x02, 0x03]);
 
         var newKey = MakePinDerivedKey();
-        using var protectedNewKey = new ProtectedBuffer(newKey, protect: false);
+        using var protectedNewKey = TestSecretFactory.FromBytes(newKey);
 
         _service.UpdateForPinChange(protectedNewKey);
 
@@ -364,8 +407,8 @@ public class RememberPinServiceTests : IDisposable
         var oldKey = MakePinDerivedKey();
         var newKey = new byte[32];
         new Random(99).NextBytes(newKey);
-        using var protectedOldKey = new ProtectedBuffer(oldKey, protect: false);
-        using var protectedNewKey = new ProtectedBuffer(newKey, protect: false);
+        using var protectedOldKey = TestSecretFactory.FromBytes(oldKey);
+        using var protectedNewKey = TestSecretFactory.FromBytes(newKey);
 
         _tpmKeyProvider.Setup(t => t.Encrypt(LegacyTpmKeyName, It.IsAny<byte[]>()))
             .Returns(new byte[] { 0xAA, 0xBB });
@@ -379,5 +422,23 @@ public class RememberPinServiceTests : IDisposable
         var content = File.ReadAllBytes(_startKeyPath);
         Assert.Equal(DpapiOnlyVersion, content[0]);
         Assert.Equal(DpapiMode, content[1]);
+    }
+
+    private sealed class FakeDpapiProtector : IDpapiProtector
+    {
+        public Func<byte[], byte[], byte[]>? ProtectFunc { get; init; }
+        public Func<byte[], byte[], SecureSecret>? UnprotectToSecretFunc { get; init; }
+        public Func<byte[], byte[], ProtectedString>? UnprotectToProtectedStringFunc { get; init; }
+
+        public byte[] Protect(ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> entropy)
+            => ProtectFunc?.Invoke(plaintext.ToArray(), entropy.ToArray()) ?? plaintext.ToArray();
+
+        public SecureSecret UnprotectToSecret(byte[] protectedData, ReadOnlySpan<byte> entropy)
+            => UnprotectToSecretFunc?.Invoke(protectedData, entropy.ToArray())
+                ?? throw new NotSupportedException();
+
+        public ProtectedString UnprotectToProtectedString(byte[] protectedData, ReadOnlySpan<byte> entropy)
+            => UnprotectToProtectedStringFunc?.Invoke(protectedData, entropy.ToArray())
+                ?? throw new NotSupportedException();
     }
 }

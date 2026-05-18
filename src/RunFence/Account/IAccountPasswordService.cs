@@ -4,6 +4,7 @@ namespace RunFence.Account;
 
 public interface IAccountPasswordService
 {
-    void ChangeAccountPassword(string sid, ProtectedString oldPassword, ProtectedString newPassword);
-    void AdminResetAccountPassword(string sid, ProtectedString newPassword);
+    AccountPasswordResult ValidatePassword(string sid, ProtectedString password, string usernameFallback);
+    AccountPasswordResult ChangeAccountPassword(string sid, ProtectedString oldPassword, ProtectedString newPassword);
+    AccountPasswordResult AdminResetAccountPassword(string sid, ProtectedString newPassword);
 }

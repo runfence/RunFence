@@ -14,6 +14,7 @@ namespace RunFence.Apps.UI;
 public class ApplicationsHandlerSyncHelper(
     IAppHandlerRegistrationService handlerRegistrationService,
     IHandlerMappingService handlerMappingService,
+    IAssociationPolicyService associationPolicyService,
     IAssociationAutoSetService autoSetService,
     ISidNameCacheService sidNameCache,
     IDatabaseProvider databaseProvider,
@@ -32,7 +33,7 @@ public class ApplicationsHandlerSyncHelper(
     /// Returns true when <paramref name="appId"/> has all four browser handler keys registered.
     /// </summary>
     public bool IsDefaultBrowser(string appId)
-        => handlerMappingService.IsDefaultBrowser(appId, GetAllMappings());
+        => associationPolicyService.IsDefaultBrowser(appId, GetAllMappings());
 
     /// <summary>
     /// Opens the handler associations management dialog.
@@ -41,9 +42,12 @@ public class ApplicationsHandlerSyncHelper(
     {
         var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
         var interactiveUsername = interactiveSid != null ? sidNameCache.GetDisplayName(interactiveSid) : "User";
+        var persistence = new HandlerMappingDialogPersistenceContext(
+            databaseProvider.GetDatabase(),
+            saveDatabase);
 
         using var dlg = handlerMappingsDialogFactory();
-        dlg.Initialize(() => databaseProvider.GetDatabase(), saveDatabase, interactiveUsername);
+        dlg.Initialize(persistence, interactiveUsername);
         dlg.ShowDialog(owner);
     }
 

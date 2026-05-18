@@ -135,6 +135,7 @@ public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclChe
                 }
                 catch
                 {
+                    // Unloaded profiles are intentionally skipped; this scanner never loads HKU hives as a side effect.
                     /* HKU hive not loaded */
                 }
 
@@ -147,6 +148,7 @@ public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclChe
                 }
                 catch
                 {
+                    // Unloaded profiles are intentionally skipped; this scanner never loads HKU hives as a side effect.
                     /* HKU hive not loaded */
                 }
 
@@ -162,6 +164,7 @@ public class PerUserScanner(IScannerDataAccess dataAccess, AclCheckHelper aclChe
                     }
                     catch
                     {
+                        // Unloaded profiles are intentionally skipped; this scanner never loads HKU hives as a side effect.
                         /* HKU hive not loaded */
                     }
                 }

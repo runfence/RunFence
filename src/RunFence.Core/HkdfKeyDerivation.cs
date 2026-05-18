@@ -16,18 +16,30 @@ public static class HkdfKeyDerivation
     /// <summary>
     /// Derives a 32-byte key for use as DPAPI additional entropy.
     /// </summary>
-    public static byte[] DeriveDpapiEntropy(byte[] pinDerivedKey)
-        => HKDF.Expand(HashAlgorithmName.SHA256, pinDerivedKey, 32, DpapiEntropyInfo);
+    public static byte[] DeriveDpapiEntropy(ReadOnlySpan<byte> pinDerivedKey)
+    {
+        byte[] derived = new byte[32];
+        HKDF.Expand(HashAlgorithmName.SHA256, pinDerivedKey, derived, DpapiEntropyInfo);
+        return derived;
+    }
 
     /// <summary>
     /// Derives a 32-byte AES-256 key for encrypting config files.
     /// </summary>
-    public static byte[] DeriveConfigEncryptionKey(byte[] pinDerivedKey)
-        => HKDF.Expand(HashAlgorithmName.SHA256, pinDerivedKey, 32, ConfigEncryptionInfo);
+    public static byte[] DeriveConfigEncryptionKey(ReadOnlySpan<byte> pinDerivedKey)
+    {
+        byte[] derived = new byte[32];
+        HKDF.Expand(HashAlgorithmName.SHA256, pinDerivedKey, derived, ConfigEncryptionInfo);
+        return derived;
+    }
 
     /// <summary>
     /// Derives a 32-byte AES-256 key for encrypting the PIN canary.
     /// </summary>
-    public static byte[] DeriveCanaryEncryptionKey(byte[] pinDerivedKey)
-        => HKDF.Expand(HashAlgorithmName.SHA256, pinDerivedKey, 32, CanaryEncryptionInfo);
+    public static byte[] DeriveCanaryEncryptionKey(ReadOnlySpan<byte> pinDerivedKey)
+    {
+        byte[] derived = new byte[32];
+        HKDF.Expand(HashAlgorithmName.SHA256, pinDerivedKey, derived, CanaryEncryptionInfo);
+        return derived;
+    }
 }

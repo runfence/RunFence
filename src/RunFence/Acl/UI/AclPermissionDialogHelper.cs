@@ -60,7 +60,8 @@ public static class AclPermissionDialogHelper
             Text = text + "\n\nYou can add permissions, proceed without them, or cancel.",
             Icon = TaskDialogIcon.ShieldWarningYellowBar,
             Buttons = { addPermsBtn, skipBtn, cancelBtn },
-            DefaultButton = addPermsBtn
+            DefaultButton = addPermsBtn,
+            AllowCancel = true
         };
 
         var result = owner != null

@@ -12,31 +12,49 @@ namespace RunFence.Persistence;
 public class AppConfigService(
     ILoggingService log,
     AppConfigIndex index,
-    IGrantConfigTracker grantTracker,
+    GrantIntentOwnershipProjectionService ownershipProjection,
+    Func<IGrantIntentStoreProvider> grantIntentStoreProvider,
     IHandlerMappingService handlerMappings,
     IDatabaseService databaseService,
     AppConfigSaveHelper saveHelper,
-    IAppEntryIdGenerator idGenerator)
+    IAppEntryIdGenerator idGenerator,
+    AppIdValidator appIdValidator)
     : IAppConfigService
 {
-    // --- Query ---
-
     public string? GetConfigPath(string appId) => index.GetConfigPath(appId);
 
     public List<AppEntry> GetAppsForConfig(string path, AppDatabase database) =>
         index.GetAppsForConfig(Normalize(path), database);
 
-    public AppConfig GetConfigForExport(string path, AppDatabase database)
+    public AppConfig GetConfigForExport(string? path, AppDatabase database)
     {
+        if (path == null)
+        {
+            var mainDb = index.FilterForMainConfig(database);
+            return new AppConfig
+            {
+                Apps = mainDb.Apps,
+                Accounts = mainDb.Accounts.Count == 0
+                    ? null
+                    : mainDb.Accounts.Select(account => new AppConfigAccountEntry
+                    {
+                        Sid = account.Sid,
+                        Grants = account.Grants.Select(entry => entry.Clone()).ToList()
+                    }).ToList(),
+                HandlerMappings = database.Settings.HandlerMappings != null
+                    ? new Dictionary<string, HandlerMappingEntry>(
+                        database.Settings.HandlerMappings,
+                        StringComparer.OrdinalIgnoreCase)
+                    : null,
+            };
+        }
+
         var normalized = Normalize(path);
+        var store = grantIntentStoreProvider().ResolveStore(normalized);
         return new AppConfig
         {
             Apps = GetAppsForConfig(normalized, database),
-            Accounts = grantTracker.FilterGrantsForConfig(database.Accounts, normalized),
-            SharedContainerTraverseGrants = grantTracker.FilterGrantsForConfig(
-                WellKnownSecuritySids.AllApplicationPackagesSid,
-                database.SharedContainerTraverseGrants,
-                normalized),
+            Accounts = GrantIntentStoreConfigDataBuilder.BuildAccounts(store, database),
             HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(normalized),
         };
     }
@@ -45,14 +63,53 @@ public class AppConfigService(
 
     public bool HasLoadedConfigs => index.HasLoadedConfigs;
 
-    // --- Load / Unload ---
+    public AppConfigRuntimeStateSnapshot CaptureRuntimeStateSnapshot()
+    {
+        var indexSnapshot = index.CaptureStateSnapshot();
+        var handlerMappingsByConfigPath = indexSnapshot.LoadedPaths.ToDictionary(
+            path => path,
+            path => (IReadOnlyDictionary<string, HandlerMappingEntry>)CloneHandlerMappings(
+                handlerMappings.GetHandlerMappingsForConfig(path)),
+            StringComparer.OrdinalIgnoreCase);
+        return new AppConfigRuntimeStateSnapshot(
+            indexSnapshot.AppConfigMap,
+            indexSnapshot.LoadedPaths,
+            handlerMappingsByConfigPath,
+            ownershipProjection.CaptureSnapshot());
+    }
 
-    public List<AppEntry> LoadAdditionalConfig(string path, AppDatabase database,
-        byte[] pinDerivedKey)
+    public void RestoreRuntimeStateSnapshot(AppConfigRuntimeStateSnapshot snapshot)
+    {
+        var currentLoadedPaths = index.GetLoadedConfigPaths().ToList();
+        foreach (var path in currentLoadedPaths)
+            handlerMappings.UnregisterConfigMappings(path);
+
+        index.RestoreStateSnapshot(new AppConfigIndexStateSnapshot(
+            snapshot.AppConfigMap,
+            snapshot.LoadedPaths));
+
+        foreach (var configPath in snapshot.LoadedPaths)
+        {
+            snapshot.HandlerMappingsByConfigPath.TryGetValue(configPath, out var mappings);
+            handlerMappings.RegisterConfigMappings(configPath, CloneHandlerMappings(mappings));
+        }
+
+        ownershipProjection.RestoreSnapshot(snapshot.OwnershipProjectionSnapshot);
+    }
+
+    public AdditionalConfigLoadData ReadAdditionalConfig(string path, AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey)
+        => ReadAdditionalConfigCore(path, database, normalizedPath => databaseService.LoadAppConfigFromPath(normalizedPath, pinDerivedKey));
+
+    public AdditionalConfigLoadData ReadAdditionalConfigFromBackup(string configPath, AppConfig backupConfig, AppDatabase database)
+        => ReadAdditionalConfigCore(configPath, database, _ => backupConfig);
+
+    private AdditionalConfigLoadData ReadAdditionalConfigCore(
+        string path,
+        AppDatabase database,
+        Func<string, AppConfig> loadConfig)
     {
         var normalized = Normalize(path);
 
-        // Validate: reject paths under app's own data directories
         var roaming = NormalizeDir(PathConstants.RoamingAppDataDir);
         var local = NormalizeDir(PathConstants.LocalAppDataDir);
         if (normalized.StartsWith(roaming, StringComparison.OrdinalIgnoreCase) ||
@@ -62,17 +119,21 @@ public class AppConfigService(
                 "Cannot load config from app's own data directories.", nameof(path));
         }
 
-        // Guard against duplicate loads (List lacks HashSet's implicit deduplication)
         if (index.ContainsLoadedPath(normalized))
         {
             log.Warn($"Config path already loaded, ignoring duplicate load: {normalized}");
-            return [];
+            return new AdditionalConfigLoadData(
+                normalized,
+                [],
+                [],
+                new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase),
+                SkipCommit: true);
         }
 
         AppConfig config;
         try
         {
-            config = databaseService.LoadAppConfig(normalized, pinDerivedKey);
+            config = loadConfig(normalized);
         }
         catch (CryptographicException ex)
         {
@@ -82,68 +143,85 @@ public class AppConfigService(
 
         var currentSid = SidResolutionHelper.GetCurrentUserSid();
         var existingIds = database.Apps.Select(a => a.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var databaseIds = new HashSet<string>(existingIds, StringComparer.OrdinalIgnoreCase);
+        var seenImportedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var renamedAppIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var loadedApps = new List<AppEntry>();
         foreach (var app in config.Apps)
         {
+            appIdValidator.EnsureValidAppId(app.Id, $"Imported app ID for '{app.Name}'");
+
             if (string.IsNullOrEmpty(app.AccountSid) && app.AppContainerName == null)
                 app.AccountSid = currentSid;
 
-            // ID collision: regenerate if already used
-            if (existingIds.Contains(app.Id))
+            var originalId = app.Id;
+            var firstImportedOccurrence = seenImportedIds.Add(originalId);
+            if (existingIds.Contains(originalId))
             {
                 var newId = idGenerator.GenerateUniqueId(existingIds);
-                log.Info($"App '{app.Name}' had ID collision, regenerated: {app.Id} → {newId}");
+                log.Info($"App '{app.Name}' had ID collision, regenerated: {app.Id} -> {newId}");
                 app.Id = newId;
+                if (firstImportedOccurrence && databaseIds.Contains(originalId))
+                    renamedAppIds[originalId] = newId;
             }
 
             existingIds.Add(app.Id);
-            database.Apps.Add(app);
-            index.AssignApp(app.Id, normalized);
             loadedApps.Add(app);
         }
 
-        // Merge grants from this config into the database and register in the grant tracker
-        if (config.Accounts != null)
-        {
-            foreach (var configAccount in config.Accounts)
-            {
-                var dbAccount = database.GetOrCreateAccount(configAccount.Sid);
-                foreach (var entry in configAccount.Grants)
-                {
-                    if (dbAccount.Grants.Any(e =>
-                            string.Equals(e.Path, entry.Path, StringComparison.OrdinalIgnoreCase) &&
-                            e.IsDeny == entry.IsDeny &&
-                            e.IsTraverseOnly == entry.IsTraverseOnly))
-                        continue;
+        var accounts = config.Accounts ?? [];
+        return new AdditionalConfigLoadData(
+            normalized,
+            loadedApps,
+            accounts,
+            handlerMappings.StageConfigMappings(
+                config.HandlerMappings,
+                renamedAppIds,
+                loadedApps.Select(app => app.Id).ToHashSet(StringComparer.OrdinalIgnoreCase)));
+    }
 
-                    dbAccount.Grants.Add(entry);
-                    grantTracker.AssignGrant(configAccount.Sid, entry, normalized);
-                }
-            }
+    public List<AppEntry> ApplyAdditionalConfig(AdditionalConfigLoadData configData, AppDatabase database)
+    {
+        if (configData.SkipCommit)
+            return [];
+
+        if (!index.HasLoadedConfigs)
+            ownershipProjection.CaptureMainOwnershipBaseline(database);
+
+        grantIntentStoreProvider().RegisterAdditionalStore(
+            configData.NormalizedPath,
+            configData.Accounts);
+        index.AddLoadedPath(configData.NormalizedPath);
+
+        foreach (var app in configData.Apps)
+        {
+            database.Apps.Add(app);
+            index.AssignApp(app.Id, configData.NormalizedPath);
         }
 
-        if (config.SharedContainerTraverseGrants != null)
+        foreach (var configAccount in configData.Accounts.ToList())
         {
-            foreach (var entry in config.SharedContainerTraverseGrants)
+            var dbAccount = database.GetOrCreateAccount(configAccount.Sid);
+            foreach (var entry in (configAccount.Grants ?? []).ToList())
             {
-                if (database.SharedContainerTraverseGrants.Any(e =>
-                        string.Equals(e.Path, entry.Path, StringComparison.OrdinalIgnoreCase) &&
-                        e.IsDeny == entry.IsDeny &&
-                        e.IsTraverseOnly == entry.IsTraverseOnly))
+                var existingEntry = FindEquivalentEntry(dbAccount.Grants, entry);
+                if (existingEntry != null)
                     continue;
 
-                database.SharedContainerTraverseGrants.Add(entry);
-                grantTracker.AssignGrant(WellKnownSecuritySids.AllApplicationPackagesSid, entry, normalized);
+                dbAccount.Grants.Add(entry);
             }
         }
 
-        // Register extra config with the handler mapping service (always, to maintain load order
-        // for GetEffectiveHandlerMappings overlay, even if this config has no handler mappings now).
-        handlerMappings.RegisterConfigMappings(normalized, config.HandlerMappings ?? new Dictionary<string, HandlerMappingEntry>());
+        handlerMappings.RegisterConfigMappings(configData.NormalizedPath, configData.HandlerMappings);
 
-        index.AddLoadedPath(normalized);
-        log.Info($"Loaded {loadedApps.Count} app(s) from {normalized}");
-        return loadedApps;
+        log.Info($"Loaded {configData.Apps.Count} app(s) from {configData.NormalizedPath}");
+        return configData.Apps;
+    }
+
+    public List<AppEntry> LoadAdditionalConfig(string path, AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey)
+    {
+        var configData = ReadAdditionalConfig(path, database, pinDerivedKey);
+        return ApplyAdditionalConfig(configData, database);
     }
 
     public List<AppEntry> UnloadConfig(string path, AppDatabase database)
@@ -155,6 +233,12 @@ public class AppConfigService(
             return [];
         }
 
+        var configForRemoval = GetConfigForExport(normalized, database);
+        var removableAccountEntries = GetEntriesWithoutRemainingOwnership(
+            configForRemoval.Accounts,
+            normalized);
+        grantIntentStoreProvider().UnregisterAdditionalStore(normalized);
+
         var removedApps = index.GetAppsForConfig(normalized, database);
         foreach (var app in removedApps)
         {
@@ -162,46 +246,23 @@ public class AppConfigService(
             index.UnassignApp(app.Id);
         }
 
-        // Remove grants tracked to this config
-        var removedGrants = grantTracker.UnregisterConfigGrants(normalized);
-
-        foreach (var (sid, grantPath, isDeny, isTraverseOnly) in removedGrants)
-        {
-            if (string.Equals(sid, WellKnownSecuritySids.AllApplicationPackagesSid, StringComparison.OrdinalIgnoreCase))
-            {
-                database.SharedContainerTraverseGrants.RemoveAll(e =>
-                    string.Equals(e.Path, grantPath, StringComparison.OrdinalIgnoreCase) &&
-                    e.IsDeny == isDeny && e.IsTraverseOnly == isTraverseOnly);
-                continue;
-            }
-
-            var account = database.GetAccount(sid);
-            if (account != null)
-            {
-                account.Grants.RemoveAll(e =>
-                    string.Equals(e.Path, grantPath, StringComparison.OrdinalIgnoreCase) &&
-                    e.IsDeny == isDeny && e.IsTraverseOnly == isTraverseOnly);
-                database.RemoveAccountIfEmpty(sid);
-            }
-        }
-
         handlerMappings.UnregisterConfigMappings(normalized);
         index.RemoveLoadedPath(normalized);
+        RemoveAccountGrants(removableAccountEntries, database);
         log.Info($"Unloaded {removedApps.Count} app(s) from {normalized}");
         return removedApps;
     }
 
-    public void CreateEmptyConfig(string path, byte[] pinDerivedKey, byte[] argonSalt)
+    public void CreateEmptyConfig(string path, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
     {
         var normalized = Normalize(path);
         databaseService.SaveAppConfig(new AppConfig(), normalized, pinDerivedKey, argonSalt);
         log.Info($"Created empty config at {normalized}");
     }
 
-    // --- Mapping ---
-
     public void AssignApp(string appId, string? configPath)
     {
+        appIdValidator.EnsureValidAppId(appId, "App ID");
         var normalized = configPath != null ? Normalize(configPath) : null;
         if (normalized == null)
             index.UnassignApp(appId);
@@ -214,25 +275,21 @@ public class AppConfigService(
         index.UnassignApp(appId);
     }
 
-    // --- Save (delegated to AppConfigSaveHelper) ---
-
-    public void SaveConfigForApp(string appId, AppDatabase database,
-        byte[] pinDerivedKey, byte[] argonSalt)
+    public void SaveConfigForApp(string appId, AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
     {
         var configPath = GetConfigPath(appId);
         var apps = configPath != null ? GetAppsForConfig(configPath, database) : [];
         saveHelper.SaveConfigForApp(configPath, apps, database, pinDerivedKey, argonSalt);
     }
 
-    public void SaveConfigAtPath(string configPath, AppDatabase database,
-        byte[] pinDerivedKey, byte[] argonSalt)
+    public void SaveConfigAtPath(string configPath, AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
     {
         var normalized = Path.GetFullPath(configPath);
         var apps = GetAppsForConfig(normalized, database);
         saveHelper.SaveConfigAtPath(normalized, apps, database, pinDerivedKey, argonSalt);
     }
 
-    public void SaveAllConfigs(AppDatabase database, byte[] pinDerivedKey, byte[] argonSalt)
+    public void SaveAllConfigs(AppDatabase database, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
     {
         var additionalConfigs = GetLoadedConfigPaths()
             .Select(path => (path, GetAppsForConfig(path, database)))
@@ -240,8 +297,7 @@ public class AppConfigService(
         saveHelper.SaveAllConfigs(additionalConfigs, database, pinDerivedKey, argonSalt);
     }
 
-    public void ReencryptAndSaveAll(CredentialStore store, AppDatabase database,
-        byte[] newPinDerivedKey)
+    public void ReencryptAndSaveAll(CredentialStore store, AppDatabase database, ISecureSecretSnapshotSource newPinDerivedKey)
     {
         var additionalConfigs = GetLoadedConfigPaths()
             .Select(path => (path, GetAppsForConfig(path, database)))
@@ -249,11 +305,23 @@ public class AppConfigService(
         saveHelper.ReencryptAndSaveAll(store, additionalConfigs, database, newPinDerivedKey);
     }
 
-    public void SaveImportedConfig(string path, AppConfig config,
-        byte[] pinDerivedKey, byte[] argonSalt)
-        => saveHelper.SaveImportedConfig(path, config, pinDerivedKey, argonSalt);
+    public void SaveImportedConfig(string path, AppConfig config, ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
+    {
+        ValidateAppIds(config.Apps);
+        saveHelper.SaveImportedConfig(path, config, pinDerivedKey, argonSalt);
+    }
 
-    // --- Private helpers ---
+    private static Dictionary<string, HandlerMappingEntry> CloneHandlerMappings(
+        IReadOnlyDictionary<string, HandlerMappingEntry>? mappings)
+        => mappings?.ToDictionary(
+               kvp => kvp.Key,
+               kvp => new HandlerMappingEntry(
+                   kvp.Value.AppId,
+                   kvp.Value.ArgumentsTemplate,
+                   kvp.Value.PathPrefixes?.ToList(),
+                   kvp.Value.ReplacePrefixes),
+               StringComparer.OrdinalIgnoreCase)
+           ?? new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase);
 
     private static string Normalize(string path) => Path.GetFullPath(path);
 
@@ -262,4 +330,73 @@ public class AppConfigService(
         var p = Path.GetFullPath(dir);
         return p.EndsWith(Path.DirectorySeparatorChar) ? p : p + Path.DirectorySeparatorChar;
     }
+
+    private void ValidateAppIds(IEnumerable<AppEntry> apps)
+    {
+        foreach (var app in apps)
+            appIdValidator.EnsureValidAppId(app.Id, $"App ID for '{app.Name}'");
+    }
+
+    private static void RemoveAccountGrants(
+        List<AppConfigAccountEntry>? accounts,
+        AppDatabase database)
+    {
+        if (accounts == null)
+            return;
+
+        foreach (var account in accounts)
+        {
+            var dbAccount = database.GetAccount(account.Sid);
+            if (dbAccount == null)
+                continue;
+
+            foreach (var grant in account.Grants)
+            {
+                var identity = GrantIntentEntryIdentity.From(account.Sid, grant);
+                dbAccount.Grants.RemoveAll(existing =>
+                    GrantIntentEntryIdentity.From(account.Sid, existing) == identity);
+            }
+
+            database.RemoveAccountIfEmpty(account.Sid);
+        }
+    }
+
+    private static GrantedPathEntry? FindEquivalentEntry(
+        IEnumerable<GrantedPathEntry> entries,
+        GrantedPathEntry candidate)
+        => entries.FirstOrDefault(entry =>
+            GrantIntentEntryIdentity.From("", entry) == GrantIntentEntryIdentity.From("", candidate));
+
+    private List<AppConfigAccountEntry>? GetEntriesWithoutRemainingOwnership(
+        List<AppConfigAccountEntry>? accounts,
+        string unloadingConfigPath)
+    {
+        if (accounts == null)
+            return null;
+
+        var result = new List<AppConfigAccountEntry>();
+        foreach (var account in accounts)
+        {
+            var removableEntries = account.Grants
+                .Where(entry => !HasRemainingGrantLocationOutsideConfig(account.Sid, entry, unloadingConfigPath))
+                .Select(entry => entry.Clone())
+                .ToList();
+            if (removableEntries.Count == 0)
+                continue;
+
+            result.Add(new AppConfigAccountEntry
+            {
+                Sid = account.Sid,
+                Grants = removableEntries
+            });
+        }
+
+        return result.Count == 0 ? null : result;
+    }
+
+    private bool HasRemainingGrantLocationOutsideConfig(
+        string sid,
+        GrantedPathEntry entry,
+        string unloadingConfigPath)
+        => ownershipProjection.HasOwnershipOutsideConfig(unloadingConfigPath, sid, entry);
 }

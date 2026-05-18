@@ -125,9 +125,8 @@ public class AccountGridEditHandler(IAccountToggleService accountToggle, Account
         var cell = (DataGridViewCheckBoxCell)row.Cells["colAllowInternet"];
         var allowInternet = cell.Value is true;
 
-        var error = accountToggle.SetAllowInternet(accountRow.Sid, allowInternet);
-        if (error != null)
-            MessageBox.Show(error, "RunFence", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        _context.SaveAndRefresh();
+        var result = accountToggle.SetAllowInternet(accountRow.Sid, allowInternet);
+        if (result.Message != null)
+            MessageBox.Show(result.Message, "RunFence", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 }

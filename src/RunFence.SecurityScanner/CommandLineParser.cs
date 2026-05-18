@@ -12,6 +12,12 @@ public static class CommandLineParser
     private static readonly string[] s_psNoValueFlags =
         ["-NoLogo", "-NoExit", "-NonInteractive", "-NoProfile", "-MTA", "-STA", "-Help"];
 
+    public record CommandResolution(
+        string? ExecutablePath,
+        string? WrapperPayloadPath,
+        bool IsWrapperCommand,
+        bool WrapperPayloadParseFailed);
+
     public static string? ExtractExecutablePath(string commandLine)
     {
         if (string.IsNullOrWhiteSpace(commandLine))
@@ -32,6 +38,94 @@ public static class CommandLineParser
             return TryExtractPowerShellTarget(remaining) ?? firstToken;
 
         return firstToken;
+    }
+
+    public static CommandResolution ResolveCommand(
+        string? executablePath,
+        string? arguments,
+        string? workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath))
+            return new CommandResolution(null, null, false, false);
+
+        var expandedExecutable = SecurityScanner.ExpandEnvVars(executablePath.Trim());
+        var resolvedExecutable = ResolvePath(expandedExecutable, workingDirectory);
+        var isWrapper = IsWrapperExecutable(expandedExecutable);
+        if (!isWrapper || string.IsNullOrWhiteSpace(arguments))
+            return new CommandResolution(resolvedExecutable, null, isWrapper, false);
+
+        var extracted = ExtractExecutablePath(BuildCommandLine(expandedExecutable, arguments));
+        if (string.IsNullOrWhiteSpace(extracted) || RefersToSameExecutable(expandedExecutable, extracted))
+            return new CommandResolution(resolvedExecutable, null, true, true);
+
+        return new CommandResolution(
+            resolvedExecutable,
+            ResolvePath(extracted, workingDirectory),
+            true,
+            false);
+    }
+
+    public static string? ResolvePath(string? path, string? workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+
+        var expanded = SecurityScanner.ExpandEnvVars(path.Trim().Trim('"'));
+        if (Path.IsPathRooted(expanded))
+            return expanded;
+
+        bool hasExplicitRelativePath =
+            expanded.StartsWith(@".\", StringComparison.OrdinalIgnoreCase) ||
+            expanded.StartsWith(@"..\", StringComparison.OrdinalIgnoreCase) ||
+            expanded.Contains('\\') ||
+            expanded.Contains('/');
+
+        if (!hasExplicitRelativePath)
+        {
+            var viaPath = ResolveViaPath(expanded);
+            if (viaPath != null)
+                return viaPath;
+        }
+
+        if (!string.IsNullOrWhiteSpace(workingDirectory))
+        {
+            try
+            {
+                var workingDir = SecurityScanner.ExpandEnvVars(workingDirectory.Trim().Trim('"'));
+                if (workingDir.Length > 0)
+                    return Path.GetFullPath(Path.Combine(workingDir, expanded));
+            }
+            catch
+            {
+                /* invalid working directory */
+            }
+        }
+
+        return ResolveViaPath(expanded) ?? expanded;
+    }
+
+    public static bool IsWrapperExecutable(string? executablePath)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath))
+            return false;
+
+        var fileName = Path.GetFileNameWithoutExtension(SecurityScanner.ExpandEnvVars(executablePath.Trim().Trim('"')));
+        return fileName.Equals("cmd", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Equals("powershell", StringComparison.OrdinalIgnoreCase) ||
+               fileName.Equals("pwsh", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildCommandLine(string executablePath, string? arguments)
+    {
+        var target = executablePath.Contains(' ') ? $"\"{executablePath}\"" : executablePath;
+        return string.IsNullOrWhiteSpace(arguments) ? target : $"{target} {arguments.Trim()}";
+    }
+
+    private static bool RefersToSameExecutable(string executablePath, string extractedPath)
+    {
+        var left = Path.GetFileNameWithoutExtension(SecurityScanner.ExpandEnvVars(executablePath.Trim().Trim('"')));
+        var right = Path.GetFileNameWithoutExtension(SecurityScanner.ExpandEnvVars(extractedPath.Trim().Trim('"')));
+        return left.Equals(right, StringComparison.OrdinalIgnoreCase);
     }
 
     // Extracts the first executable token from a command line (quoted or unquoted).

@@ -13,7 +13,7 @@ internal sealed class WfpTransactionHelper(ILoggingService log)
     /// Returns <see langword="true"/> if the transaction committed successfully, <see langword="false"/> otherwise.
     /// Failures are logged; exceptions from <paramref name="work"/> are caught and logged.
     /// </summary>
-    public bool ExecuteInTransaction(string callerName, Action<IntPtr> work)
+    public WfpTransactionResult ExecuteInTransaction(string callerName, Action<IntPtr> work)
     {
         try
         {
@@ -22,7 +22,7 @@ internal sealed class WfpTransactionHelper(ILoggingService log)
             if (rc != WfpNative.ERROR_SUCCESS)
             {
                 log.Warn($"{callerName}: FwpmEngineOpen0 failed (0x{rc:X8})");
-                return false;
+                return new WfpTransactionResult(false, $"FwpmEngineOpen0 failed (0x{rc:X8})");
             }
             try
             {
@@ -36,7 +36,7 @@ internal sealed class WfpTransactionHelper(ILoggingService log)
         catch (Exception ex)
         {
             log.Error($"{callerName}: transaction failed", ex);
-            return false;
+            return new WfpTransactionResult(false, ex.Message, ex);
         }
     }
 
@@ -46,7 +46,7 @@ internal sealed class WfpTransactionHelper(ILoggingService log)
     /// Returns <see langword="true"/> if the transaction committed successfully, <see langword="false"/> otherwise.
     /// Failures are logged; exceptions from <paramref name="work"/> are caught and logged.
     /// </summary>
-    public bool ExecuteOnHandle(string callerName, IntPtr handle, Action<IntPtr> work)
+    public WfpTransactionResult ExecuteOnHandle(string callerName, IntPtr handle, Action<IntPtr> work)
     {
         try
         {
@@ -54,15 +54,19 @@ internal sealed class WfpTransactionHelper(ILoggingService log)
             if (rc != WfpNative.ERROR_SUCCESS)
             {
                 log.Warn($"{callerName}: FwpmTransactionBegin0 failed (0x{rc:X8})");
-                return false;
+                return new WfpTransactionResult(false, $"FwpmTransactionBegin0 failed (0x{rc:X8})");
             }
             bool committed = false;
+            string? error = null;
             try
             {
                 work(handle);
                 rc = WfpNative.FwpmTransactionCommit0(handle);
                 if (rc != WfpNative.ERROR_SUCCESS)
+                {
                     log.Warn($"{callerName}: FwpmTransactionCommit0 failed (0x{rc:X8})");
+                    error = $"FwpmTransactionCommit0 failed (0x{rc:X8})";
+                }
                 else
                     committed = true;
             }
@@ -71,12 +75,12 @@ internal sealed class WfpTransactionHelper(ILoggingService log)
                 if (!committed)
                     WfpNative.FwpmTransactionAbort0(handle);
             }
-            return committed;
+            return new WfpTransactionResult(committed, error);
         }
         catch (Exception ex)
         {
             log.Error($"{callerName}: transaction failed", ex);
-            return false;
+            return new WfpTransactionResult(false, ex.Message, ex);
         }
     }
 }

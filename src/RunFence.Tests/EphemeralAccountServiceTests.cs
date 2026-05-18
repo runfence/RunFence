@@ -21,9 +21,11 @@ public class EphemeralAccountServiceTests
         EphemeralAccountService Service,
         Mock<ICredentialRepository> CredRepo,
         Mock<ILocalUserProvider> LocalUserProvider,
+        Mock<ILoggingService> Log,
+        Mock<ITrayBalloonService> TrayBalloon,
         Mock<IAccountDeletionService> AccountDeletion,
         Mock<IPathGrantService> PathGrantService,
-        ProtectedBuffer PinKey) : IDisposable
+        SecureSecret PinKey) : IDisposable
     {
         public void Dispose()
         {
@@ -34,7 +36,8 @@ public class EphemeralAccountServiceTests
 
     private static ServiceScope BuildService(AppDatabase database, CredentialStore store,
         IAccountValidationService? accountValidation = null,
-        Mock<IAccountDeletionService>? accountDeletion = null)
+        Mock<IAccountDeletionService>? accountDeletion = null,
+        Mock<IPathGrantService>? pathGrantService = null)
     {
         var credRepo = new Mock<ICredentialRepository>();
         var configRepo = new Mock<IConfigRepository>();
@@ -43,26 +46,26 @@ public class EphemeralAccountServiceTests
         var orphanedProfiles = new Mock<IOrphanedProfileService>();
         var aclCleanup = new Mock<IOrphanedAclCleanupService>();
         var log = new Mock<ILoggingService>();
+        var trayBalloon = new Mock<ITrayBalloonService>();
 
         var sidNameCache = new Mock<ISidNameCacheService>();
         var sidResolver = new Mock<ISidResolver>();
         var persistenceHelper = new SessionPersistenceHelper(
-            credRepo.Object, configRepo.Object, sidNameCache.Object, log.Object);
+            credRepo.Object,
+            configRepo.Object,
+            sidNameCache.Object,
+            () => new InlineUiThreadInvoker(a => a()),
+            log.Object);
         var loginRestriction = new Mock<IAccountLoginRestrictionService>();
         var lsaRestriction = new Mock<IAccountLsaRestrictionService>();
         var accountValidationForLifecycle = new Mock<IAccountValidationService>();
-        var lifecycleManager = new AccountLifecycleManager(
-            windowsService.Object, loginRestriction.Object, lsaRestriction.Object,
-            new Mock<IGroupPolicyScriptHelper>().Object, orphanedProfiles.Object,
-            aclCleanup.Object, log.Object, accountValidationForLifecycle.Object, new Mock<IProfilePathResolver>().Object,
-            new ValidationRunner(log.Object));
 
         bool customDeletion = accountDeletion != null;
         accountDeletion ??= new Mock<IAccountDeletionService>();
         if (!customDeletion)
         {
             // Default: DeleteAccount succeeds (no exception) and removes the AccountEntry + credential
-            accountDeletion.Setup(d => d.DeleteAccount(
+            accountDeletion.Setup(d => d.DeleteAccountAsync(
                     It.IsAny<string>(), It.IsAny<string>(),
                     It.IsAny<CredentialStore>(),
                     It.IsAny<bool>()))
@@ -74,11 +77,16 @@ public class EphemeralAccountServiceTests
                         database.Accounts.Remove(entry);
                     cs.Credentials.RemoveAll(c =>
                         string.Equals(c.Sid, sid, StringComparison.OrdinalIgnoreCase));
-                });
+                })
+                .ReturnsAsync(AccountDeletionCleanupResult.Success());
         }
 
-        var pinKey = new ProtectedBuffer(new byte[32], protect: false);
-        var session = new SessionContext { Database = database, CredentialStore = store, PinDerivedKey = pinKey };
+        var pinKey = TestSecretFactory.Create(32);
+        var session = new SessionContext
+        {
+            Database = database,
+            CredentialStore = store
+        }.WithOwnedPinDerivedKey(pinKey);
 
         IAccountValidationService resolvedValidation;
         if (accountValidation != null)
@@ -92,18 +100,19 @@ public class EphemeralAccountServiceTests
             resolvedValidation = defaultValidation.Object;
         }
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService ??= new Mock<IPathGrantService>();
         var service = new EphemeralAccountService(
-            lifecycleManager, accountDeletion.Object, persistenceHelper, localUserProvider.Object, log.Object, resolvedValidation,
-            new LambdaSessionProvider(() => session), new InlineUiThreadInvoker(a => a()), sidResolver.Object,
+            accountDeletion.Object, persistenceHelper, localUserProvider.Object, log.Object, resolvedValidation,
+            new LambdaSessionProvider(() => session), new InlineUiThreadInvoker(a => a()), trayBalloon.Object,
+            sidResolver.Object,
             pathGrantService.Object);
         service.Start();
 
-        return new ServiceScope(service, credRepo, localUserProvider, accountDeletion, pathGrantService, pinKey);
+        return new ServiceScope(service, credRepo, localUserProvider, log, trayBalloon, accountDeletion, pathGrantService, pinKey);
     }
 
     [Fact]
-    public void ProcessExpiredAccounts_ExpiredEntry_DeletesAndRaisesAccountsChangedAndSaves()
+    public async Task ProcessExpiredAccounts_ExpiredEntry_DeletesAndRaisesAccountsChangedAndSaves()
     {
         // Arrange
         var database = new AppDatabase();
@@ -119,22 +128,58 @@ public class EphemeralAccountServiceTests
         scope.Service.AccountsChanged += () => accountsChangedRaised = true;
 
         // Act
-        scope.Service.ProcessExpiredAccounts();
+        await scope.Service.ProcessExpiredAccountsAsync();
 
         // Assert
         Assert.Null(database.GetAccount(sid));
         Assert.Empty(store.Credentials);
         Assert.True(accountsChangedRaised);
-        scope.AccountDeletion.Verify(d => d.DeleteAccount(sid, username, store, true), Times.Once);
+        scope.AccountDeletion.Verify(d => d.DeleteAccountAsync(sid, username, store, true), Times.Once);
         scope.LocalUserProvider.Verify(s => s.InvalidateCache(), Times.Once);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
-            store, database, It.IsAny<byte[]>()), Times.Once);
+            store, database, It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
         // Normal deletion path: grants cleared by DeleteAccount/CleanupSidFromAppData, not by pathGrantService
-        scope.PathGrantService.Verify(p => p.RemoveAll(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        scope.PathGrantService.Verify(p => p.RemoveAll(It.IsAny<string>()), Times.Never);
     }
 
     [Fact]
-    public void ProcessExpiredAccounts_OrphanedEntry_RemovesWithoutDeletionAndRaisesEvent()
+    public async Task ProcessExpiredAccounts_ExpiredEntry_WithDeleteWarnings_LogsAndShowsWarnings()
+    {
+        // Arrange
+        var database = new AppDatabase();
+        var store = new CredentialStore();
+        const string sid = "S-1-5-21-0-0-0-9907";
+        const string username = "testeph_warning";
+        database.SidNames[sid] = username;
+        store.Credentials.Add(new CredentialEntry { Sid = sid, EncryptedPassword = [1] });
+        database.GetOrCreateAccount(sid).DeleteAfterUtc = DateTime.UtcNow.AddHours(-1);
+        var warning = "Delete account grant cleanup completed with warning.";
+
+        var accountDeletion = new Mock<IAccountDeletionService>();
+        accountDeletion.Setup(d => d.DeleteAccountAsync(sid, username, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
+            .Callback<string, string, CredentialStore, bool>((s, _, cs, _) =>
+            {
+                var entry = database.GetAccount(s);
+                if (entry != null)
+                    database.Accounts.Remove(entry);
+                cs.Credentials.RemoveAll(c => string.Equals(c.Sid, s, StringComparison.OrdinalIgnoreCase));
+            })
+            .ReturnsAsync(new AccountDeletionCleanupResult([warning]));
+
+        using var scope = BuildService(database, store, accountDeletion: accountDeletion);
+
+        // Act
+        await scope.Service.ProcessExpiredAccountsAsync();
+
+        // Assert: warnings are logged and surfaced through tray
+        scope.Log.Verify(l => l.Warn(It.Is<string>(w => w == warning)), Times.Once);
+        scope.TrayBalloon.Verify(t => t.ShowWarning(warning), Times.Once);
+        // Simulate cleanup still completed
+        Assert.Null(database.GetAccount(sid));
+    }
+
+    [Fact]
+    public async Task ProcessExpiredAccounts_OrphanedEntry_RemovesWithoutDeletionAndRaisesEvent()
     {
         // Arrange: SID not resolvable, no credential → orphaned
         var database = new AppDatabase();
@@ -147,21 +192,21 @@ public class EphemeralAccountServiceTests
         scope.Service.AccountsChanged += () => accountsChangedRaised = true;
 
         // Act
-        scope.Service.ProcessExpiredAccounts();
+        await scope.Service.ProcessExpiredAccountsAsync();
 
         // Assert: entry removed (AccountEntry becomes empty → RemoveAccountIfEmpty removes it), no OS-level deletion, event raised, save called
         Assert.Null(database.GetAccount(orphanSid));
         Assert.True(accountsChangedRaised);
-        scope.AccountDeletion.Verify(d => d.DeleteAccount(
+        scope.AccountDeletion.Verify(d => d.DeleteAccountAsync(
             It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<CredentialStore>(), It.IsAny<bool>()), Times.Never);
-        scope.PathGrantService.Verify(p => p.RemoveAll(orphanSid, false), Times.Once);
+        scope.PathGrantService.Verify(p => p.UntrackAll(orphanSid), Times.Once);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
-            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<byte[]>()), Times.Once);
+            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
     }
 
     [Fact]
-    public void ProcessExpiredAccounts_ExpiredEntryUsernameUnresolvable_PermanentizesAndClearsGrants()
+    public async Task ProcessExpiredAccounts_ExpiredEntryUsernameUnresolvable_PermanentizesAndClearsGrants()
     {
         // Arrange: entry has a credential (not orphaned) but SID cannot be resolved to a username
         var database = new AppDatabase();
@@ -177,21 +222,55 @@ public class EphemeralAccountServiceTests
         scope.Service.AccountsChanged += () => accountsChangedRaised = true;
 
         // Act
-        scope.Service.ProcessExpiredAccounts();
+        await scope.Service.ProcessExpiredAccountsAsync();
 
         // Assert: entry permanentized (DeleteAfterUtc cleared → entry becomes empty → removed), grants reverted, no OS-level deletion
         Assert.Null(database.GetAccount(sid));
         Assert.True(accountsChangedRaised);
-        scope.PathGrantService.Verify(p => p.RemoveAll(sid, false), Times.Once);
-        scope.AccountDeletion.Verify(d => d.DeleteAccount(
+        scope.PathGrantService.Verify(p => p.UntrackAll(sid), Times.Once);
+        scope.AccountDeletion.Verify(d => d.DeleteAccountAsync(
             It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<CredentialStore>(), It.IsAny<bool>()), Times.Never);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
-            store, database, It.IsAny<byte[]>()), Times.Once);
+            store, database, It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
     }
 
     [Fact]
-    public void ProcessExpiredAccounts_NothingToProcess_NoEventNoSave()
+    public async Task ProcessExpiredAccounts_ExpiredEntryUsernameUnresolvable_UntrackAllWarning_LoggedAndShown()
+    {
+        // Arrange
+        var database = new AppDatabase();
+        var store = new CredentialStore();
+        const string sid = "S-1-5-21-0-0-0-9905";
+        store.Credentials.Add(new CredentialEntry { Sid = sid, EncryptedPassword = [1] });
+        var warning = new GrantApplyWarning(
+            GrantApplyFailureStep.UntrackAllSave,
+            @"C:\Untracked",
+            null,
+            new InvalidOperationException("temporary warning"));
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService.Setup(p => p.UntrackAll(sid))
+            .Returns(new GrantApplyResult(
+                DatabaseModified: true,
+                Warnings: [warning]));
+
+        database.GetOrCreateAccount(sid).DeleteAfterUtc = DateTime.UtcNow.AddHours(-1);
+
+        var accountDeletion = new Mock<IAccountDeletionService>();
+        using var scope = BuildService(database, store, pathGrantService: pathGrantService, accountDeletion: accountDeletion);
+
+        // Act
+        await scope.Service.ProcessExpiredAccountsAsync();
+
+        // Assert: warning is logged and surfaced as tray notification
+        var formattedWarning = GrantApplyFailureFormatter.Format(warning);
+        scope.Log.Verify(l => l.Warn(formattedWarning), Times.Once);
+        scope.TrayBalloon.Verify(t => t.ShowWarning(formattedWarning), Times.Once);
+        Assert.Null(database.GetAccount(sid));
+    }
+
+    [Fact]
+    public async Task ProcessExpiredAccounts_NothingToProcess_NoEventNoSave()
     {
         // Arrange: entry with future expiry, has a credential → neither orphaned nor expired
         var database = new AppDatabase();
@@ -205,17 +284,17 @@ public class EphemeralAccountServiceTests
         scope.Service.AccountsChanged += () => accountsChangedRaised = true;
 
         // Act
-        scope.Service.ProcessExpiredAccounts();
+        await scope.Service.ProcessExpiredAccountsAsync();
 
         // Assert: no changes, no event, no save
         Assert.False(accountsChangedRaised);
         Assert.Equal(1, database.Accounts.Count(a => a.DeleteAfterUtc.HasValue));
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
-            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<byte[]>()), Times.Never);
+            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
     [Fact]
-    public void ProcessExpiredAccounts_ExpiredEntryWithRunningProcesses_PostponedBy24h()
+    public async Task ProcessExpiredAccounts_ExpiredEntryWithRunningProcesses_PostponedBy24h()
     {
         // Arrange
         var database = new AppDatabase();
@@ -235,22 +314,22 @@ public class EphemeralAccountServiceTests
         scope.Service.AccountsChanged += () => accountsChangedRaised = true;
 
         // Act
-        scope.Service.ProcessExpiredAccounts();
+        await scope.Service.ProcessExpiredAccountsAsync();
 
         // Assert: entry preserved and expiry extended by 24h; no deletion performed
         var entry = database.GetAccount(sid)!;
         Assert.True(entry.DeleteAfterUtc > originalExpiry.AddHours(23));
-        scope.AccountDeletion.Verify(d => d.DeleteAccount(
+        scope.AccountDeletion.Verify(d => d.DeleteAccountAsync(
             It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<CredentialStore>(), It.IsAny<bool>()), Times.Never);
         // AccountsChanged is still raised because DeleteAfterUtc was updated (changed=true)
         Assert.True(accountsChangedRaised);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
-            store, database, It.IsAny<byte[]>()), Times.Once);
+            store, database, It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
     }
 
     [Fact]
-    public void ProcessExpiredAccounts_DeleteAccountThrows_EntryKeptAndContinues()
+    public async Task ProcessExpiredAccounts_DeleteAccountThrows_EntryKeptAndContinues()
     {
         // Arrange: expired entry whose DeleteAccount throws (DeleteUser failed internally)
         var database = new AppDatabase();
@@ -262,31 +341,28 @@ public class EphemeralAccountServiceTests
         database.GetOrCreateAccount(sid).DeleteAfterUtc = DateTime.UtcNow.AddHours(-1);
 
         var accountDeletion = new Mock<IAccountDeletionService>();
-        accountDeletion.Setup(d => d.DeleteAccount(
+        accountDeletion.Setup(d => d.DeleteAccountAsync(
                 sid, username, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
-            .Throws(new InvalidOperationException("Access denied"));
+            .ThrowsAsync(new InvalidOperationException("Access denied"));
 
         using var scope = BuildService(database, store, accountDeletion: accountDeletion);
 
         // Act
-        scope.Service.ProcessExpiredAccounts();
+        await scope.Service.ProcessExpiredAccountsAsync();
 
         // Assert: deletion failed → entry NOT removed, no change committed (no save/event)
         Assert.NotNull(database.GetAccount(sid));
         Assert.True(database.GetAccount(sid)!.DeleteAfterUtc.HasValue);
         Assert.Single(store.Credentials);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
-            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<byte[]>()), Times.Never);
+            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
-    // ── TC-17: profile deletion failure logging ──────────────────────────────
+    // ── Profile cleanup ownership moved into AccountDeletionService ──────────
 
     [Fact]
-    public void ProcessExpiredAccounts_ProfileDeletionFails_LogsWarningAndContinues()
+    public async Task ProcessExpiredAccounts_DoesNotDeleteProfileDirectly()
     {
-        // Arrange — expired account whose DeleteAccount succeeds but DeleteProfileAsync throws.
-        // The profile deletion is fire-and-forget: failure must be logged as Warn, but the
-        // overall ProcessExpiredAccounts call must succeed (account removed, save called).
         var database = new AppDatabase();
         var store = new CredentialStore();
         const string sid = "S-1-5-21-0-0-0-9920";
@@ -295,69 +371,28 @@ public class EphemeralAccountServiceTests
         store.Credentials.Add(new CredentialEntry { Sid = sid, EncryptedPassword = [1] });
         database.GetOrCreateAccount(sid).DeleteAfterUtc = DateTime.UtcNow.AddHours(-1);
 
-        // Signal set when the fire-and-forget Warn callback executes — eliminates timing dependency.
-        using var warnSignal = new ManualResetEventSlim(false);
-
-        var log = new Mock<ILoggingService>();
-        log.Setup(l => l.Warn(It.Is<string>(m => m.Contains(sid) && m.Contains("profile"))))
-            .Callback(() => warnSignal.Set());
-
-        var credRepo = new Mock<ICredentialRepository>();
-        var configRepo = new Mock<IConfigRepository>();
-        var localUserProvider = new Mock<ILocalUserProvider>();
-        var sidNameCache = new Mock<ISidNameCacheService>();
-        var sidResolver = new Mock<ISidResolver>();
-        sidResolver.Setup(r => r.TryResolveName(sid)).Returns(username);
-        var persistenceHelper = new SessionPersistenceHelper(
-            credRepo.Object, configRepo.Object, sidNameCache.Object, log.Object);
-
-        // Use a mock IAccountLifecycleManager so DeleteProfileAsync can be controlled directly.
-        var lifecycleManager = new Mock<IAccountLifecycleManager>();
-        lifecycleManager.Setup(m => m.DeleteProfileAsync(sid))
-            .Returns(Task.FromException<string?>(new InvalidOperationException("Simulated profile deletion failure")));
-
         var accountDeletion = new Mock<IAccountDeletionService>();
-        accountDeletion.Setup(d => d.DeleteAccount(
+        accountDeletion.Setup(d => d.DeleteAccountAsync(
                 sid, username, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
             .Callback<string, string, CredentialStore, bool>((s, _, cs, _) =>
             {
                 var entry = database.GetAccount(s);
                 if (entry != null) database.Accounts.Remove(entry);
                 cs.Credentials.RemoveAll(c => string.Equals(c.Sid, s, StringComparison.OrdinalIgnoreCase));
-            });
+            })
+            .ReturnsAsync(AccountDeletionCleanupResult.Success());
 
-        var defaultValidation = new Mock<IAccountValidationService>();
-        defaultValidation.Setup(v => v.GetProcessesRunningAsSid(It.IsAny<string>())).Returns([]);
+        using var scope = BuildService(database, store, accountDeletion: accountDeletion);
 
-        var pathGrantService = new Mock<IPathGrantService>();
-        var pinKey = new ProtectedBuffer(new byte[32], protect: false);
-        var session = new SessionContext { Database = database, CredentialStore = store, PinDerivedKey = pinKey };
+        await scope.Service.ProcessExpiredAccountsAsync();
 
-        using var service = new EphemeralAccountService(
-            lifecycleManager.Object, accountDeletion.Object, persistenceHelper, localUserProvider.Object,
-            log.Object, defaultValidation.Object, new LambdaSessionProvider(() => session),
-            new InlineUiThreadInvoker(a => a()), sidResolver.Object, pathGrantService.Object);
-        service.Start();
-
-        // Act
-        service.ProcessExpiredAccounts();
-
-        // Wait for the fire-and-forget continuation to log its warning (deterministic — no sleep).
-        Assert.True(warnSignal.Wait(TimeSpan.FromSeconds(5)), "Profile deletion warning was not logged within timeout.");
-
-        // Assert — account was deleted (main path succeeded)
         Assert.Null(database.GetAccount(sid));
         Assert.Empty(store.Credentials);
-
-        // Confirm Warn was called with the expected message (already guaranteed by warnSignal above).
-        log.Verify(l => l.Warn(It.Is<string>(m =>
-            m.Contains(sid) && m.Contains("profile"))), Times.AtLeastOnce);
-
-        pinKey.Dispose();
+        accountDeletion.Verify(d => d.DeleteAccountAsync(sid, username, store, true), Times.Once);
     }
 
     [Fact]
-    public void ProcessExpiredAccounts_MultipleEntries_OneFailsOneSucceeds_PartialSuccess()
+    public async Task ProcessExpiredAccounts_MultipleEntries_OneFailsOneSucceeds_PartialSuccess()
     {
         // Arrange — R2_TL10: two expired entries; one deletion throws, the other succeeds.
         // Verify: the successful entry is removed, the failed entry is kept, and save is called once.
@@ -379,25 +414,26 @@ public class EphemeralAccountServiceTests
         var accountDeletion = new Mock<IAccountDeletionService>();
 
         // goodSid succeeds: simulate CleanupSidFromAppData removing the AccountEntry + credential
-        accountDeletion.Setup(d => d.DeleteAccount(goodSid, goodUsername, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
+        accountDeletion.Setup(d => d.DeleteAccountAsync(goodSid, goodUsername, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
             .Callback<string, string, CredentialStore, bool>((s, _, cs, _) =>
             {
                 var entry = database.GetAccount(s);
                 if (entry != null)
                     database.Accounts.Remove(entry);
                 cs.Credentials.RemoveAll(c => string.Equals(c.Sid, s, StringComparison.OrdinalIgnoreCase));
-            });
+            })
+            .ReturnsAsync(AccountDeletionCleanupResult.Success());
 
         // failSid fails: throws, entry must be kept
-        accountDeletion.Setup(d => d.DeleteAccount(failSid, failUsername, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
-            .Throws(new InvalidOperationException("Access denied"));
+        accountDeletion.Setup(d => d.DeleteAccountAsync(failSid, failUsername, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
+            .ThrowsAsync(new InvalidOperationException("Access denied"));
 
         using var scope = BuildService(database, store, accountDeletion: accountDeletion);
         bool accountsChangedRaised = false;
         scope.Service.AccountsChanged += () => accountsChangedRaised = true;
 
         // Act
-        scope.Service.ProcessExpiredAccounts();
+        await scope.Service.ProcessExpiredAccountsAsync();
 
         // Assert: successful entry removed, failed entry kept
         Assert.Null(database.GetAccount(goodSid));
@@ -407,6 +443,6 @@ public class EphemeralAccountServiceTests
         // The one successful deletion caused a save and event
         Assert.True(accountsChangedRaised);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
-            store, database, It.IsAny<byte[]>()), Times.Once);
+            store, database, It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
     }
 }

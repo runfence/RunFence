@@ -7,19 +7,21 @@ namespace RunFence.Acl;
 /// Scans a folder tree for explicit NTFS ACEs belonging to any known SID,
 /// building per-account results for bulk import into the ACL Manager.
 /// </summary>
-public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAccountAclBulkScanService
+public class AccountAclBulkScanService(
+    IFileSystemAclTraverser traverser,
+    IAclAccessor aclAccessor) : IAccountAclBulkScanService
 {
     /// <summary>
     /// Accumulated NTFS rights for a single path during a bulk ACL scan.
     /// OR-merged across multiple ACEs for the same SID+path.
     /// </summary>
     private record struct PathAclAccumulator(
+        bool IsDirectory,
         bool HasAllow,
         bool HasDeny,
         FileSystemRights AllowRights,
         FileSystemRights DenyRights,
-        bool IsAccountOwner,
-        bool IsAdminOwner);
+        bool IsAccountOwner);
 
     public Task<Dictionary<string, AccountScanResult>> ScanAllAccountsAsync(
         string rootPath,
@@ -36,7 +38,7 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
         IProgress<long> progress,
         CancellationToken ct)
     {
-        var adminsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        ValidateRootAccessibility(rootPath);
 
         // Per-SID: accumulated rights per path (OR-merged across multiple ACEs for the same SID+path)
         var grantRights = new Dictionary<string, Dictionary<string, PathAclAccumulator>>(StringComparer.OrdinalIgnoreCase);
@@ -51,7 +53,7 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
         }
 
         // Privileges (SeBackup/SeRestore/SeTakeOwnership) are enabled once at startup.
-        foreach (var (path, _, security) in traverser.Traverse([rootPath], progress, ct))
+        foreach (var (path, isDirectory, security) in traverser.Traverse([rootPath], progress, ct))
         {
             var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
 
@@ -76,13 +78,22 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
                     var perSidGrants = grantRights[ruleSidValue];
                     perSidGrants.TryGetValue(path, out var existing);
                     bool isOwner = string.Equals(ownerSid, ruleSidValue, StringComparison.OrdinalIgnoreCase);
-                    bool isAdminOwner = ownerSid != null && string.Equals(ownerSid, adminsSid.Value, StringComparison.OrdinalIgnoreCase);
                     if (isDeny)
-                        perSidGrants[path] = new PathAclAccumulator(existing.HasAllow, true, existing.AllowRights, existing.DenyRights | rule.FileSystemRights,
-                            isOwner || existing.IsAccountOwner, isAdminOwner || existing.IsAdminOwner);
+                        perSidGrants[path] = new PathAclAccumulator(
+                            IsDirectory: isDirectory,
+                            HasAllow: existing.HasAllow,
+                            HasDeny: true,
+                            AllowRights: existing.AllowRights,
+                            DenyRights: existing.DenyRights | rule.FileSystemRights,
+                            IsAccountOwner: existing.IsAccountOwner);
                     else
-                        perSidGrants[path] = new PathAclAccumulator(true, existing.HasDeny, existing.AllowRights | rule.FileSystemRights, existing.DenyRights,
-                            isOwner || existing.IsAccountOwner, isAdminOwner || existing.IsAdminOwner);
+                        perSidGrants[path] = new PathAclAccumulator(
+                            IsDirectory: isDirectory,
+                            HasAllow: true,
+                            HasDeny: existing.HasDeny,
+                            AllowRights: existing.AllowRights | rule.FileSystemRights,
+                            DenyRights: existing.DenyRights,
+                            IsAccountOwner: isOwner || existing.IsAccountOwner);
                 }
             }
         }
@@ -96,8 +107,7 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
 
             foreach (var (path, acc) in perSidGrants)
             {
-                bool isDirectory = Directory.Exists(path);
-                var specialMask = isDirectory ? GrantRightsMapper.SpecialFolderMask : GrantRightsMapper.SpecialFileMask;
+                var specialMask = acc.IsDirectory ? GrantRightsMapper.SpecialFolderMask : GrantRightsMapper.SpecialFileMask;
 
                 if (acc.HasAllow)
                 {
@@ -120,13 +130,19 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
                         Write: (acc.DenyRights & (GrantRightsMapper.WriteFolderMask | GrantRightsMapper.WriteFileMask)) != 0,
                         Read: (acc.DenyRights & GrantRightsMapper.ReadMask) != 0,
                         Special: (acc.DenyRights & specialMask) != 0,
-                        IsOwner: acc.IsAccountOwner));
+                        IsOwner: false));
                 }
             }
 
-            // Traverse paths that are not already classified as full grants
+            // Traverse paths that are not already classified as non-traverse allow grants.
+            // Deny-only entries on the same path must not hide traverse-only grants.
             var traversePaths = traverseSeen[sid]
-                .Where(p => !perSidGrants.ContainsKey(p))
+                .Where(p =>
+                {
+                    if (!perSidGrants.TryGetValue(p, out var acc))
+                        return true;
+                    return !acc.HasAllow;
+                })
                 .ToList();
 
             if (grants.Count > 0 || traversePaths.Count > 0)
@@ -134,5 +150,19 @@ public class AccountAclBulkScanService(IFileSystemAclTraverser traverser) : IAcc
         }
 
         return results;
+    }
+
+    private void ValidateRootAccessibility(string rootPath)
+    {
+        if (!aclAccessor.PathExists(rootPath, out bool isFolder) || !isFolder)
+            return;
+        try
+        {
+            _ = aclAccessor.GetSecurity(rootPath);
+        }
+        catch (Exception ex)
+        {
+            throw new IOException($"Protected root ACL could not be read: '{rootPath}'.", ex);
+        }
     }
 }

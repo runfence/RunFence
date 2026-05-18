@@ -13,6 +13,7 @@ partial class SidMigrationPreviewStep
     private DataGridViewTextBoxColumn Path;
     private DataGridViewTextBoxColumn Type;
     private DataGridViewTextBoxColumn Changes;
+    private Label _descriptionLabel;
     private Label _summaryLabel;
     private Label _warningLabel;
 
@@ -31,15 +32,22 @@ partial class SidMigrationPreviewStep
         Path = new DataGridViewTextBoxColumn();
         Type = new DataGridViewTextBoxColumn();
         Changes = new DataGridViewTextBoxColumn();
+        _descriptionLabel = new Label();
         _summaryLabel = new Label();
         _warningLabel = new Label();
 
         SuspendLayout();
         Size = new Size(595, 385);
 
+        // _descriptionLabel
+        _descriptionLabel.Location = new Point(15, 10);
+        _descriptionLabel.Size = new Size(560, 45);
+        _descriptionLabel.Text = "This is the last dry-run review before any filesystem changes are written. Check that the paths, change types, and affected identities match what you intend, because the next step applies these changes to disk. Use this screen to catch wrong replacements, overly broad scope, or stale entries before the real write begins.";
+        _descriptionLabel.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+
         // _grid
-        _grid.Location = new Point(15, 10);
-        _grid.Size = new Size(560, 300);
+        _grid.Location = new Point(15, 60);
+        _grid.Size = new Size(560, 250);
         _grid.ReadOnly = true;
         _grid.MultiSelect = true;
         _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
@@ -72,7 +80,7 @@ partial class SidMigrationPreviewStep
         _warningLabel.Visible = false;
         _warningLabel.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
-        Controls.AddRange(new Control[] { _grid, _summaryLabel, _warningLabel });
+        Controls.AddRange(new Control[] { _descriptionLabel, _grid, _summaryLabel, _warningLabel });
 
         AutoScaleMode = AutoScaleMode.Font;
         ResumeLayout(false);

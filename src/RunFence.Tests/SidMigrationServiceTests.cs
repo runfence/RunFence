@@ -2,6 +2,7 @@ using Moq;
 using RunFence.Account;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.SidMigration;
 using Xunit;
@@ -13,6 +14,7 @@ public class SidMigrationServiceTests
     private readonly SidMigrationService _service;
     private readonly Mock<ISidNameCacheService> _sidNameCache;
     private readonly Mock<ISidAclScanService> _aclScan;
+    private readonly Mock<IInteractiveUserSidResolver> _interactiveUserSidResolver;
     private AppDatabase _testDatabase = new();
 
     private const string OldSid1 = "S-1-5-21-9999999999-9999999999-9999999999-1001";
@@ -25,13 +27,14 @@ public class SidMigrationServiceTests
         var sidResolver = new Mock<ISidResolver>();
         _aclScan = new Mock<ISidAclScanService>();
         _sidNameCache = new Mock<ISidNameCacheService>();
+        _interactiveUserSidResolver = new Mock<IInteractiveUserSidResolver>();
         var sidCleanupHelper = new Mock<ISidCleanupHelper>();
         var dbProvider = new LambdaDatabaseProvider(() => _testDatabase);
         var realCleanupHelper = new SidCleanupHelper(dbProvider);
         sidCleanupHelper
             .Setup(h => h.CleanupSidFromAppData(It.IsAny<string>(), It.IsAny<bool>()))
             .Returns((string sid, bool removeApps) => realCleanupHelper.CleanupSidFromAppData(sid, removeApps));
-        _service = new SidMigrationService(sidResolver.Object, new Mock<IProfilePathResolver>().Object, sidCleanupHelper.Object, _aclScan.Object, _sidNameCache.Object, dbProvider);
+        _service = new SidMigrationService(sidResolver.Object, new Mock<IProfilePathResolver>().Object, sidCleanupHelper.Object, _aclScan.Object, _sidNameCache.Object, _interactiveUserSidResolver.Object, dbProvider);
     }
 
     // --- BuildMappings tests ---
@@ -114,6 +117,35 @@ public class SidMigrationServiceTests
         Assert.Equal(NewSid1, database.Apps[0].AccountSid);
         Assert.True(database.GetAccount(NewSid1)?.IsIpcCaller);
         Assert.Equal(NewSid1, credentialStore.Credentials[0].Sid);
+    }
+
+    [Fact]
+    public void MigrateAppData_LeavesJobKeeperIdentitiesOnOldSid()
+    {
+        var oldKey = JobKeeperInstanceIdentity.CreateKey(OldSid1, isLow: false);
+        var database = new AppDatabase
+        {
+            JobKeeperInstances = new Dictionary<string, JobKeeperInstanceIdentity>(StringComparer.OrdinalIgnoreCase)
+            {
+                [oldKey] = new()
+                {
+                    TargetSid = OldSid1,
+                    ExpectedMode = JobKeeperIntegrityMode.Restricted,
+                    InstanceId = "old-instance",
+                    PipeName = "old-pipe",
+                    JobName = "old-job",
+                    LastVerifiedKeeperPid = 1234
+                }
+            }
+        };
+
+        _testDatabase = database;
+        _service.MigrateAppData([new SidMigrationMapping(OldSid1, NewSid1, "TestUser")], new CredentialStore());
+
+        Assert.NotNull(database.JobKeeperInstances);
+        Assert.True(database.JobKeeperInstances!.ContainsKey(oldKey));
+        Assert.False(database.JobKeeperInstances.ContainsKey(JobKeeperInstanceIdentity.CreateKey(NewSid1, isLow: false)));
+        Assert.Equal(OldSid1, database.JobKeeperInstances[oldKey].TargetSid);
     }
 
     [Fact]
@@ -346,6 +378,43 @@ public class SidMigrationServiceTests
         Assert.Equal("a2", database.Apps[0].Id);
         Assert.Single(database.Accounts, a => a.IsIpcCaller);
         Assert.Single(store.Credentials);
+    }
+
+    [Fact]
+    public void DeleteSidsFromAppData_DoesNotRewriteOrRemoveJobKeeperIdentities()
+    {
+        var oldKey = JobKeeperInstanceIdentity.CreateKey(OldSid1, isLow: false);
+        var newKey = JobKeeperInstanceIdentity.CreateKey(NewSid1, isLow: false);
+        var oldIdentity = new JobKeeperInstanceIdentity
+        {
+            TargetSid = OldSid1,
+            ExpectedMode = JobKeeperIntegrityMode.Restricted,
+            InstanceId = "old-instance",
+            PipeName = "old-pipe",
+            JobName = "old-job"
+        };
+        var newIdentity = new JobKeeperInstanceIdentity
+        {
+            TargetSid = NewSid1,
+            ExpectedMode = JobKeeperIntegrityMode.Restricted,
+            InstanceId = "new-instance",
+            PipeName = "new-pipe",
+            JobName = "new-job"
+        };
+        var database = new AppDatabase
+        {
+            JobKeeperInstances = new Dictionary<string, JobKeeperInstanceIdentity>(StringComparer.OrdinalIgnoreCase)
+            {
+                [oldKey] = oldIdentity,
+                [newKey] = newIdentity
+            }
+        };
+
+        _testDatabase = database;
+        _service.DeleteSidsFromAppData([OldSid1], new CredentialStore());
+
+        Assert.Same(oldIdentity, database.JobKeeperInstances![oldKey]);
+        Assert.Same(newIdentity, database.JobKeeperInstances[newKey]);
     }
 
     [Fact]
@@ -741,7 +810,7 @@ public class SidMigrationServiceTests
     // --- PrivilegeLevel migration/deletion ---
 
     [Theory]
-    [InlineData(PrivilegeLevel.Basic)]
+    [InlineData(PrivilegeLevel.Isolated)]
     [InlineData(PrivilegeLevel.HighestAllowed)]
     [InlineData(PrivilegeLevel.LowIntegrity)]
     public void MigrateAppData_UpdatesPrivilegeLevel(PrivilegeLevel privilegeLevel)
@@ -768,7 +837,7 @@ public class SidMigrationServiceTests
     {
         // When two SIDs map to the same new SID, the higher PrivilegeLevel wins.
         var database = new AppDatabase();
-        database.GetOrCreateAccount(OldSid1).PrivilegeLevel = PrivilegeLevel.Basic;
+        database.GetOrCreateAccount(OldSid1).PrivilegeLevel = PrivilegeLevel.Isolated;
         database.GetOrCreateAccount(OldSid2).PrivilegeLevel = PrivilegeLevel.LowIntegrity;
 
         var mappings = new List<SidMigrationMapping>
@@ -983,13 +1052,8 @@ public class SidMigrationServiceTests
     [Fact]
     public void BuildMappings_InteractiveUserCredential_Excluded()
     {
-        // A CredentialEntry whose SID matches the current interactive user SID must be skipped.
-        // IsInteractiveUser uses SidResolutionHelper.GetInteractiveUserSid() — if null (no explorer),
-        // this credential is treated as a regular account and may be included instead.
-        // The test only verifies exclusion when the interactive SID is resolvable.
-        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-        if (interactiveSid == null)
-            return; // no active desktop session — test is not applicable
+        var interactiveSid = "S-1-5-21-7777777777-7777777777-7777777777-1001";
+        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
 
         var creds = new List<CredentialEntry>
         {
@@ -1003,7 +1067,6 @@ public class SidMigrationServiceTests
 
         var result = _service.BuildMappings(creds, localAccounts, sidNames);
 
-        // Interactive user credential is excluded from migration
         Assert.Empty(result);
     }
 

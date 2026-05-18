@@ -9,10 +9,10 @@ namespace RunFence.Account.UI;
 /// Menu creation and event wiring remain in <see cref="AccountContextMenuHandler"/>.
 /// </summary>
 public class AccountMenuStateConfigurator(
-    IWindowsAccountService windowsAccountService,
+    IWindowsAccountQueryService windowsAccountQueryService,
     ISessionProvider sessionProvider,
     AccountToolResolver toolResolver,
-    PackageInstallService packageInstallService)
+    IPackageInstallService packageInstallService)
 {
     public void ConfigureMenuState(
         AccountRow accountRow,
@@ -55,7 +55,7 @@ public class AccountMenuStateConfigurator(
                                          (db.GetAccount(accountRow.Sid)?.ReceiveInjectedInput == true);
         i.CopySid.Enabled = !string.IsNullOrEmpty(accountRow.Sid);
         i.CopyProfilePath.Enabled = !isUnavailable && !string.IsNullOrEmpty(accountRow.Sid);
-        var profilePath = windowsAccountService.GetProfilePath(accountRow.Sid);
+        var profilePath = windowsAccountQueryService.GetProfilePath(accountRow.Sid).ProfilePath;
         i.OpenProfileFolder.Enabled = !isUnavailable && !string.IsNullOrEmpty(profilePath) && Directory.Exists(profilePath);
         i.CopyPassword.Enabled = accountRow.Credential != null && !isCurrentAccount && !isUnavailable && accountRow.HasStoredPassword;
         i.TypePassword.Enabled = accountRow.Credential != null && !isCurrentAccount && !isUnavailable && accountRow.HasStoredPassword;

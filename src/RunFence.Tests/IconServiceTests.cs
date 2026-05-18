@@ -18,7 +18,7 @@ public class IconServiceTests : IDisposable
         _tempDir = new TempDirectory("RunFence_IconTest");
         _iconDir = Path.Combine(_tempDir.Path, "icons");
         Directory.CreateDirectory(_iconDir);
-        _service = new IconService(log.Object, iconDir: _iconDir);
+        _service = new IconService(log.Object, iconDir: _iconDir, new AppIdValidator());
     }
 
     public void Dispose()
@@ -139,5 +139,31 @@ public class IconServiceTests : IDisposable
     public void DeleteIcon_NonExistentFile_DoesNotThrow()
     {
         _service.DeleteIcon(AppEntry.GenerateId());
+    }
+
+    [Fact]
+    public void DeleteIcon_InvalidAppId_ThrowsInvalidAppIdException()
+    {
+        var ex = Assert.Throws<InvalidAppIdException>(() => _service.DeleteIcon(@"..\escape"));
+
+        Assert.Equal(@"..\escape", ex.AppId);
+    }
+
+    [Fact]
+    public void GetIconPath_ValidId_ReturnsPathInsideIconDirectory()
+    {
+        var appId = AppEntry.GenerateId();
+
+        var iconPath = _service.GetIconPath(appId);
+
+        Assert.Equal(Path.Combine(_iconDir, $"{appId}.ico"), iconPath);
+    }
+
+    [Fact]
+    public void GetIconPath_InvalidAppId_ThrowsInvalidAppIdException()
+    {
+        var ex = Assert.Throws<InvalidAppIdException>(() => _service.GetIconPath(@"..\escape"));
+
+        Assert.Equal(@"..\escape", ex.AppId);
     }
 }

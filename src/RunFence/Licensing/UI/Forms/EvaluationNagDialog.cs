@@ -5,7 +5,7 @@ using Timer = System.Windows.Forms.Timer;
 
 namespace RunFence.Licensing.UI.Forms;
 
-public partial class EvaluationNagDialog : Form
+public partial class EvaluationNagDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly ILicenseService _licenseService;
     private readonly IShellHelper _shellHelper;
@@ -20,6 +20,11 @@ public partial class EvaluationNagDialog : Form
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         _machineCodeTextBox.Text = licenseService.MachineCode;
+        if (string.Equals(_machineCodeTextBox.Text, "Unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            _machineCodeTextBox.Text = "Machine identity unavailable. Activation is blocked until identity is available.";
+            _copyMachineCodeButton.Enabled = false;
+        }
         _featuresLabel.Text =
             $"  \u2713  Unlimited app entries  (evaluation: up to {EvaluationConstants.EvaluationMaxApps})\r\n" +
             $"  \u2713  Unlimited stored credentials  (evaluation: up to {EvaluationConstants.EvaluationMaxCredentials})\r\n" +

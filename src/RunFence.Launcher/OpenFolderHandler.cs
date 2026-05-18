@@ -10,9 +10,13 @@ namespace RunFence.Launcher;
 /// Handles the <c>--open-folder</c> mode invoked by the custom folder shell handler
 /// registered in HKU\&lt;sid&gt;\Software\Classes\Directory\shell\open.
 /// </summary>
-public static class OpenFolderHandler
+public class OpenFolderHandler(
+    ILauncherIpcCommandSender commandSender,
+    ILauncherProcessStarter processStarter)
 {
-    public static int Handle(string folderPath)
+    private const string DefaultClassesRootPath = @"Software\Classes";
+
+    public int Handle(string folderPath)
     {
         // 1. Admin check: if this process is admin-capable, unregister own handler
         //    (account was elevated since registration) and launch explorer directly.
@@ -38,8 +42,7 @@ public static class OpenFolderHandler
             Command = IpcCommands.OpenFolder,
             Arguments = folderPath
         };
-        var helper = new LauncherIpcHelper(new LauncherIpcClient(), new LauncherGuiController(), new LauncherWaitDelay());
-        var response = helper.SendWithAutoStart(message);
+        var response = commandSender.SendWithAutoStart(message);
         if (response == null)
             return 1;
         if (!response.Success)
@@ -51,9 +54,13 @@ public static class OpenFolderHandler
         return 0;
     }
 
-    // ── Admin check ───────────────────────────────────────────────────────────
+    public int Unregister()
+    {
+        UnregisterOwnHandler();
+        return 0;
+    }
 
-    private static bool IsCurrentProcessAdmin()
+    protected virtual bool IsCurrentProcessAdmin()
     {
         try
         {
@@ -67,9 +74,7 @@ public static class OpenFolderHandler
         }
     }
 
-    // ── Own-explorer detection ────────────────────────────────────────────────
-
-    private static bool IsOwnExplorerRunning()
+    protected virtual bool IsOwnExplorerRunning()
     {
         try
         {
@@ -77,29 +82,23 @@ public static class OpenFolderHandler
             if (string.IsNullOrEmpty(ownSid))
                 return false;
 
-            var procs = Process.GetProcessesByName("explorer");
-            try
+            foreach (var process in GetExplorerProcesses())
             {
-                foreach (var proc in procs)
-                {
-                    try
-                    {
-                        var sid = NativeTokenHelper.TryGetProcessOwnerSid((uint)proc.Id);
-                        if (string.Equals(sid?.Value, ownSid, StringComparison.OrdinalIgnoreCase))
-                            return true;
-                    }
-                    catch
-                    {
-                    }
-                }
+                if (process.SessionId != GetCurrentSessionId())
+                    continue;
 
-                return false;
+                try
+                {
+                    var sid = TryGetProcessOwnerSid(process.ProcessId);
+                    if (string.Equals(sid?.Value, ownSid, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                catch
+                {
+                }
             }
-            finally
-            {
-                foreach (var proc in procs)
-                    proc.Dispose();
-            }
+
+            return false;
         }
         catch
         {
@@ -107,84 +106,72 @@ public static class OpenFolderHandler
         }
     }
 
-    // ── Direct explorer launch ────────────────────────────────────────────────
+    protected virtual int GetCurrentSessionId() => Process.GetCurrentProcess().SessionId;
 
-    private static void LaunchExplorerDirect(string folderPath)
+    protected virtual IEnumerable<ExplorerProcessInfo> GetExplorerProcesses()
+    {
+        var procs = NativeTokenHelper.GetProcessesByNameInCurrentSession("explorer");
+        try
+        {
+            foreach (var proc in procs)
+                yield return new ExplorerProcessInfo((uint)proc.Id, proc.SessionId);
+        }
+        finally
+        {
+            foreach (var proc in procs)
+                proc.Dispose();
+        }
+    }
+
+    protected virtual SecurityIdentifier? TryGetProcessOwnerSid(uint processId)
+        => NativeTokenHelper.TryGetProcessOwnerSid(processId);
+
+    protected virtual void LaunchExplorerDirect(string folderPath)
+    {
+        var folderArguments = CommandLineHelper.MaterializeProcessArguments([folderPath]) ?? string.Empty;
+        processStarter.Start(new ProcessStartInfo
+        {
+            FileName = "explorer.exe",
+            Arguments = folderArguments,
+            UseShellExecute = false
+        });
+    }
+
+    protected virtual void UnregisterOwnHandler()
     {
         try
         {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                Arguments = $"\"{folderPath}\"",
-                UseShellExecute = false
-            });
+            CreateOwnedRegistryCleaner().UnregisterOwnedFolderHandler();
+            NotifyShellAssociationsChanged();
         }
         catch
         {
         }
     }
 
-    // ── Self-unregister handler when admin ────────────────────────────────────
+    protected virtual string GetClassesRootPath() => DefaultClassesRootPath;
 
-    private static void UnregisterOwnHandler()
+    protected virtual void NotifyShellAssociationsChanged()
     {
-        try
-        {
-            Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Directory\shell\open",
-                throwOnMissingSubKey: false);
-            Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Directory\shell\explore",
-                throwOnMissingSubKey: false);
-            try
-            {
-                using var shellKey = Registry.CurrentUser.OpenSubKey(
-                    @"Software\Classes\Directory\shell", writable: true);
-                shellKey?.DeleteValue("", throwOnMissingValue: false);
-            }
-            catch
-            {
-            }
-
-            Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Folder\shell\open",
-                throwOnMissingSubKey: false);
-
-            // Only delete RunFence-registered subkeys under the CLSID, preserving
-            // other software's per-user CLSID overrides.
-            const string clsidPath = @"Software\Classes\CLSID\{9BA05972-F6A8-11CF-A442-00A0C90A8F39}";
-            try
-            {
-                Registry.CurrentUser.DeleteSubKeyTree(clsidPath + @"\shell\open\command",
-                    throwOnMissingSubKey: false);
-                DeleteEmptySubKey(clsidPath + @"\shell\open");
-                DeleteEmptySubKey(clsidPath + @"\shell");
-                Registry.CurrentUser.DeleteSubKeyTree(clsidPath + @"\LocalServer32",
-                    throwOnMissingSubKey: false);
-                DeleteEmptySubKey(clsidPath);
-            }
-            catch
-            {
-            }
-
-            OpenFolderNative.SHChangeNotify(OpenFolderNative.SHCNE_ASSOCCHANGED, OpenFolderNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
-        }
-        catch
-        {
-        }
+        OpenFolderNative.SHChangeNotify(
+            OpenFolderNative.SHCNE_ASSOCCHANGED,
+            OpenFolderNative.SHCNF_IDLIST,
+            IntPtr.Zero,
+            IntPtr.Zero);
     }
 
-    /// <summary>
-    /// Deletes a registry key only if it has no subkeys, preserving other software's entries.
-    /// </summary>
-    private static void DeleteEmptySubKey(string subKeyPath)
+    protected virtual string GetOwnedLauncherExeName() => PathConstants.LauncherExeName;
+
+    protected virtual string GetOwnedShellServerExeName() => PathConstants.ShellServerExeName;
+
+    private FolderHandlerOwnedRegistryCleaner CreateOwnedRegistryCleaner()
     {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(subKeyPath);
-            if (key is { SubKeyCount: 0 })
-                Registry.CurrentUser.DeleteSubKey(subKeyPath, throwOnMissingSubKey: false);
-        }
-        catch
-        {
-        }
+        return new FolderHandlerOwnedRegistryCleaner(
+            Registry.CurrentUser,
+            GetClassesRootPath(),
+            GetOwnedLauncherExeName(),
+            GetOwnedShellServerExeName());
     }
+
+    protected readonly record struct ExplorerProcessInfo(uint ProcessId, int SessionId);
 }

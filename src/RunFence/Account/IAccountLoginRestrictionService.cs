@@ -3,7 +3,9 @@ namespace RunFence.Account;
 public interface IAccountLoginRestrictionService
 {
     bool IsAccountHidden(string username);
+    bool GetAccountHiddenStateOrThrow(string username);
     void SetAccountHidden(string username, string sid, bool hidden);
+    void RestoreAccountHiddenState(string username, bool hidden);
     bool IsLoginBlockedBySid(string sid);
     SetLoginBlockedResult SetLoginBlockedBySid(string sid, string username, bool blocked);
 

@@ -10,6 +10,9 @@ internal sealed class HandlerMappingDirectModePresenter
     private readonly IInteractiveUserAssociationReader _interactiveReader;
     private readonly ComboBox _keyCombo;
     private readonly TextBox _handlerTextBox;
+    private string? _lastAutoFilledHandlerValue;
+    private bool _handlerValueWasUserEdited;
+    private bool _suppressUserEditTracking;
 
     public HandlerMappingDirectModePresenter(
         IInteractiveUserAssociationReader interactiveReader,
@@ -53,11 +56,55 @@ internal sealed class HandlerMappingDirectModePresenter
     public void TryAutoFillHandler()
     {
         var key = HandlerAssociationDialogValueHelper.NormalizeKey(_keyCombo.Text);
-        if (!string.IsNullOrEmpty(key) && AppHandlerRegistrationService.IsValidKey(key))
+        if (string.IsNullOrEmpty(key) || !AppHandlerRegistrationService.IsValidKey(key))
         {
-            var handler = _interactiveReader.GetAssociationHandler(key);
-            if (handler.HasValue)
-                _handlerTextBox.Text = handler.Value.ClassName ?? handler.Value.Command ?? string.Empty;
+            ClearAutoFilledHandlerIfStillCurrent();
+            return;
+        }
+
+        var handler = _interactiveReader.GetAssociationHandler(key);
+        if (!handler.HasValue)
+        {
+            ClearAutoFilledHandlerIfStillCurrent();
+            return;
+        }
+
+        SetHandlerText(handler.Value.ClassName ?? handler.Value.Command ?? string.Empty);
+        _lastAutoFilledHandlerValue = _handlerTextBox.Text;
+        _handlerValueWasUserEdited = false;
+    }
+
+    public void NotifyHandlerTextEditedByUser()
+    {
+        if (_suppressUserEditTracking)
+            return;
+
+        _handlerValueWasUserEdited = true;
+        _lastAutoFilledHandlerValue = null;
+    }
+
+    private void ClearAutoFilledHandlerIfStillCurrent()
+    {
+        if (_handlerValueWasUserEdited || string.IsNullOrEmpty(_lastAutoFilledHandlerValue))
+            return;
+
+        if (!string.Equals(_handlerTextBox.Text, _lastAutoFilledHandlerValue, StringComparison.Ordinal))
+            return;
+
+        SetHandlerText(string.Empty);
+        _lastAutoFilledHandlerValue = null;
+    }
+
+    private void SetHandlerText(string value)
+    {
+        _suppressUserEditTracking = true;
+        try
+        {
+            _handlerTextBox.Text = value;
+        }
+        finally
+        {
+            _suppressUserEditTracking = false;
         }
     }
 }

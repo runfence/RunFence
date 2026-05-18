@@ -1,5 +1,6 @@
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Acl;
 using RunFence.Launch;
 
 namespace RunFence.Account.UI;
@@ -11,7 +12,8 @@ namespace RunFence.Account.UI;
 public class ToolLauncher(
     ILaunchFacade launchFacade,
     AccountToolResolver toolResolver,
-    PackageInstallService packageInstallService,
+    IPackageInstallService packageInstallService,
+    ILaunchFeedbackPresenter launchFeedbackPresenter,
     ILoggingService log)
 {
     public void OpenCmd(LaunchIdentity identity)
@@ -20,7 +22,11 @@ public class ToolLauncher(
         {
             var cmdExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
             RunWithErrorHandling("Launch CMD",
-                () => launchFacade.LaunchFile(new ProcessLaunchTarget(cmdExe), identity, permissionPrompt: (_, _) => true));
+                () =>
+                {
+                    using var launch = launchFacade.LaunchFile(new ProcessLaunchTarget(cmdExe), identity, permissionPrompt: (_, _) => true);
+                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("Command Prompt", LaunchFeedbackSource.InteractiveUi));
+                });
         }
         else
         {
@@ -28,18 +34,23 @@ public class ToolLauncher(
             var profilePath = toolResolver.GetProfileRoot(identity.Sid);
             var isWt = !terminalExe.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
             var launchIdentity = isWt && identity is AccountLaunchIdentity { PrivilegeLevel: null } acctIdentity
-                ? acctIdentity with { PrivilegeLevel = PrivilegeLevel.AboveBasic }
+                ? acctIdentity with { PrivilegeLevel = PrivilegeLevel.Basic }
                 : identity;
             RunWithErrorHandling("Launch CMD", () =>
             {
                 try
                 {
-                    launchFacade.LaunchFile(new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath), launchIdentity, permissionPrompt: (_, _) => true);
+                    using var launch = launchFacade.LaunchFile(new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath), launchIdentity, permissionPrompt: (_, _) => true);
+                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The terminal", LaunchFeedbackSource.InteractiveUi)
+                    {
+                        SummaryName = Path.GetFileName(terminalExe)
+                    });
                 }
-                catch (Exception ex) when (isWt && ex is not OperationCanceledException)
+                catch (Exception ex) when (isWt && ex is not OperationCanceledException && ex is not GrantOperationException)
                 {
                     log.Error($"Launch {terminalExe} failed, falling back to cmd.exe", ex);
-                    launchFacade.LaunchFile(new ProcessLaunchTarget("cmd.exe", WorkingDirectory: profilePath), identity, permissionPrompt: (_, _) => true);
+                    using var launch = launchFacade.LaunchFile(new ProcessLaunchTarget("cmd.exe", WorkingDirectory: profilePath), identity, permissionPrompt: (_, _) => true);
+                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("Command Prompt", LaunchFeedbackSource.InteractiveUi));
                 }
             });
         }
@@ -48,24 +59,39 @@ public class ToolLauncher(
     public void OpenFolderBrowser(LaunchIdentity identity, Func<string, string, bool>? permissionPrompt = null)
     {
         RunWithErrorHandling("Launch Folder Browser", () =>
-            launchFacade.LaunchFolderBrowser(identity, folderPermissionPrompt: permissionPrompt));
+        {
+            using var launch = launchFacade.LaunchFolderBrowser(identity, folderPermissionPrompt: permissionPrompt);
+            launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The folder browser", LaunchFeedbackSource.InteractiveUi));
+        });
     }
 
     public void OpenEnvironmentVariables(LaunchIdentity identity)
     {
         RunWithErrorHandling("Launch Environment Variables", () =>
-            launchFacade.LaunchFile(new ProcessLaunchTarget("rundll32.exe", Arguments: "sysdm.cpl,EditEnvironmentVariables"), identity, permissionPrompt: (_, _) => true));
+        {
+            using var launch = launchFacade.LaunchFile(
+                new ProcessLaunchTarget("rundll32.exe", Arguments: "sysdm.cpl,EditEnvironmentVariables"),
+                identity,
+                permissionPrompt: (_, _) => true);
+            launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("Environment Variables", LaunchFeedbackSource.InteractiveUi));
+        });
     }
 
     public void InstallPackage(InstallablePackage package, AccountLaunchIdentity identity)
     {
         RunWithErrorHandling($"Install {package.DisplayName}",
-            () => packageInstallService.InstallPackages([package], identity));
+            () => launchFeedbackPresenter.ShowMaintenanceWarning(
+                packageInstallService.InstallPackages([package], identity),
+                new LaunchFeedbackContext("The package installer", LaunchFeedbackSource.InteractiveUi)));
     }
 
     public void InstallPackages(IReadOnlyList<InstallablePackage> packages, AccountLaunchIdentity identity)
     {
-        RunWithErrorHandling("Install packages", () => packageInstallService.InstallPackages(packages, identity));
+        RunWithErrorHandling(
+            "Install packages",
+            () => launchFeedbackPresenter.ShowMaintenanceWarning(
+                packageInstallService.InstallPackages(packages, identity),
+                new LaunchFeedbackContext("The package installer", LaunchFeedbackSource.InteractiveUi)));
     }
 
     public bool IsWindowsTerminal(string sid) => !toolResolver.ResolveTerminalExe(sid).Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
@@ -89,10 +115,15 @@ public class ToolLauncher(
         catch (OperationCanceledException)
         {
         }
+        catch (GrantOperationException ex)
+        {
+            launchFeedbackPresenter.ShowGrantFailure(ex, new LaunchFeedbackContext(label, LaunchFeedbackSource.InteractiveUi));
+        }
         catch (Exception ex)
         {
             log.Error($"{label} failed", ex);
             MessageBox.Show($"{label} failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
+
 }

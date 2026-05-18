@@ -1,5 +1,6 @@
-using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
 using Microsoft.Win32;
 using RunFence.Acl;
 using RunFence.Core;
@@ -9,66 +10,62 @@ using RunFence.Launch.Tokens;
 
 namespace RunFence.Launch.Container;
 
-public class AppContainerService(ILoggingService log, IPathGrantService pathGrantService, IAppContainerProfileSetup appContainerProfileSetup, IAppContainerDataFolderService dataFolderService, IAppContainerComAccessService comService, IExplorerTokenProvider explorerTokenProvider, IAppContainerSidProvider sidProvider)
+public class AppContainerService(
+    ILoggingService log,
+    IPathGrantService pathGrantService,
+    IAppContainerProfileSetup appContainerProfileSetup,
+    IAppContainerDataFolderService dataFolderService,
+    IAppContainerComAccessService comService,
+    IExplorerTokenProvider explorerTokenProvider,
+    IAppContainerSidProvider sidProvider,
+    IAppContainerUserRegistryRoot userRegistryRoot,
+    IAppContainerPathProvider pathProvider)
     : IAppContainerService
 {
+    private readonly RegistryKey _usersRoot = userRegistryRoot.UsersRoot;
+    private readonly IAppContainerPathProvider _pathProvider = pathProvider;
 
-    public void CreateProfile(AppContainerEntry entry)
+    public AppContainerProfileSetupResult CreateProfile(AppContainerEntry entry)
     {
         var hToken = IntPtr.Zero;
         try
         {
-            hToken = explorerTokenProvider.GetSessionExplorerToken();
-            appContainerProfileSetup.EnsureProfileUnderToken(entry, hToken);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
-        {
-            log.Warn($"AppContainerService: GetSessionExplorerToken failed for '{entry.Name}': {ex.Message} — falling back to linked token (no shell folder redirects)");
-            LinkedTokenHelper.RunUnderLinkedToken(_ =>
-            {
-                var hr = AppContainerNative.CreateAppContainerProfile(
-                    entry.Name, entry.DisplayName,
-                    $"RunFence AppContainer: {entry.DisplayName}",
-                    IntPtr.Zero, 0, out var sid);
+            hToken = explorerTokenProvider.GetExplorerToken();
+            var profileResult = appContainerProfileSetup.EnsureProfileUnderToken(entry, hToken);
+            if (profileResult.Status != AppContainerProfileSetupStatus.Succeeded)
+                return profileResult;
 
-                if (sid != IntPtr.Zero)
-                    ProcessNative.LocalFree(sid);
-
-                if (hr != 0 && hr != ProcessLaunchNative.HrAlreadyExists)
-                    throw new InvalidOperationException(
-                        $"CreateAppContainerProfile failed with HRESULT 0x{hr:X8} for '{entry.Name}'");
-            }, log);
+            var containerSid = GetSid(entry.Name);
+            dataFolderService.EnsureContainerDataFolder(entry, containerSid);
+            dataFolderService.EnsureInteractiveUserAccess(entry);
+            return profileResult;
         }
         finally
         {
             if (hToken != IntPtr.Zero)
                 ProcessNative.CloseHandle(hToken);
         }
-
-        dataFolderService.EnsureContainerDataFolder(entry, GetSid(entry.Name));
-        dataFolderService.EnsureInteractiveUserAccess(entry);
     }
 
-    public void EnsureProfile(AppContainerEntry entry)
+    public AppContainerProfileSetupResult EnsureProfile(AppContainerEntry entry)
     {
-        // Skip creation when the profile already exists to avoid the overhead of calling
-        // CreateAppContainerProfile (and the explorer token acquisition it triggers) on every launch.
         if (ProfileExists(entry.Name))
-            return;
-        CreateProfile(entry);
+            return AppContainerProfileSetupResult.Success(profileCreatedOrAlreadyExists: true);
+
+        return CreateProfile(entry);
     }
 
     public bool ProfileExists(string name)
     {
-        // Check the AppContainer Mappings registry key (under the current user's hive).
-        // This works reliably when the elevated user is the same as the interactive user.
-        // For cross-user setups, EnsureProfile's idempotent CreateProfile call is the safe fallback.
         try
         {
+            var interactiveUserSid = TryGetVerifiedExplorerSid();
+            if (string.IsNullOrWhiteSpace(interactiveUserSid))
+                return false;
+
             var sidStr = sidProvider.GetSidString(name);
-            const string mappingsPath =
-                @"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings";
-            using var key = Registry.CurrentUser.OpenSubKey($@"{mappingsPath}\{sidStr}");
+            using var key = _usersRoot.OpenSubKey(
+                $@"{interactiveUserSid}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\{sidStr}");
             return key != null;
         }
         catch
@@ -80,13 +77,21 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
     public async Task DeleteProfile(string name, bool hadLoopback = false)
     {
         if (hadLoopback)
-            await SetLoopbackExemption(name, false);
+        {
+            var loopbackRemoved = await SetLoopbackExemption(name, false);
+            if (!loopbackRemoved)
+                throw new InvalidOperationException($"Failed to remove loopback exemption for '{name}'.");
+        }
 
-        var hr = AppContainerNative.DeleteAppContainerProfile(name);
+        var hr = DeleteAppContainerProfile(name);
         if (hr != 0)
-            log.Warn($"DeleteAppContainerProfile returned HRESULT 0x{hr:X8} for '{name}'");
+            throw new InvalidOperationException(
+                $"DeleteAppContainerProfile returned HRESULT 0x{hr:X8} for '{name}'.");
 
-        var dataPath = AppContainerPaths.GetContainerDataPath(name);
+        var containerSid = GetSid(name);
+        RemoveContainerStateFromLoadedHives(containerSid);
+
+        var dataPath = _pathProvider.GetContainerDataPath(name);
         if (Directory.Exists(dataPath))
         {
             try
@@ -100,10 +105,13 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
         }
     }
 
+    protected virtual int DeleteAppContainerProfile(string name)
+        => AppContainerNative.DeleteAppContainerProfile(name);
+
     public string GetSid(string name) => sidProvider.GetSidString(name);
 
     public string GetContainerDataPath(string name)
-        => AppContainerPaths.GetContainerDataPath(name);
+        => _pathProvider.GetContainerDataPath(name);
 
     public async Task<bool> SetLoopbackExemption(string name, bool enable)
     {
@@ -116,7 +124,7 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
 
             if (!File.Exists(checkNetIsolation))
             {
-                log.Warn($"CheckNetIsolation.exe not found at '{checkNetIsolation}' — loopback exemption not changed");
+                log.Warn($"CheckNetIsolation.exe not found at '{checkNetIsolation}' - loopback exemption not changed");
                 return false;
             }
 
@@ -163,21 +171,107 @@ public class AppContainerService(ILoggingService log, IPathGrantService pathGran
         }
     }
 
-    public void GrantComAccess(string containerSid, string clsid)
+    public AppContainerComAccessResult GrantComAccess(string containerSid, string clsid)
         => comService.GrantComAccess(containerSid, clsid);
 
-    public void RevokeComAccess(string containerSid, string clsid)
+    public AppContainerComAccessResult RevokeComAccess(string containerSid, string clsid)
         => comService.RevokeComAccess(containerSid, clsid);
 
     public (bool Modified, List<string> AppliedPaths) EnsureTraverseAccess(AppContainerEntry entry, string path)
     {
         var containerSid = GetSid(entry.Name);
-        return pathGrantService.AddTraverse(containerSid, path);
+        var result = pathGrantService.AddTraverse(containerSid, path);
+        return (
+            result.DatabaseModified || result.TraverseApplied,
+            CollectTraverseCoveragePaths(path));
     }
 
-    public void RevertTraverseAccess(AppContainerEntry entry, AppDatabase database)
+    public GrantApplyResult RevertTraverseAccess(AppContainerEntry entry, AppDatabase database)
     {
-        var containerSid = GetSid(entry.Name);
-        pathGrantService.RemoveAll(containerSid, updateFileSystem: true);
+        _ = database;
+        var containerSid = !string.IsNullOrWhiteSpace(entry.Sid)
+            ? entry.Sid
+            : GetSid(entry.Name);
+        return pathGrantService.RemoveAll(containerSid);
     }
+
+    private static List<string> CollectTraverseCoveragePaths(string path)
+    {
+        var normalized = Path.GetFullPath(path);
+        var paths = new List<string>();
+        var current = new DirectoryInfo(normalized);
+        while (current != null)
+        {
+            paths.Add(current.FullName);
+            current = current.Parent;
+        }
+
+        return paths;
+    }
+
+    private string? TryGetVerifiedExplorerSid()
+    {
+        var hToken = IntPtr.Zero;
+        try
+        {
+            hToken = explorerTokenProvider.TryGetExplorerToken();
+            return hToken == IntPtr.Zero ? null : GetTokenSid(hToken);
+        }
+        finally
+        {
+            if (hToken != IntPtr.Zero)
+                ProcessNative.CloseHandle(hToken);
+        }
+    }
+
+    private static string? GetTokenSid(IntPtr hToken)
+    {
+        const int tokenUser = 1;
+        ProcessNative.GetTokenInformation(hToken, tokenUser, IntPtr.Zero, 0, out var needed);
+        if (needed <= 0)
+            return null;
+
+        var buffer = Marshal.AllocHGlobal((int)needed);
+        try
+        {
+            if (!ProcessNative.GetTokenInformation(hToken, tokenUser, buffer, needed, out _))
+                return null;
+
+            return new SecurityIdentifier(Marshal.ReadIntPtr(buffer)).Value;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    private void RemoveContainerStateFromLoadedHives(string containerSid)
+    {
+        foreach (var hiveName in _usersRoot.GetSubKeyNames())
+        {
+            if (!LooksLikeLoadedUserHive(hiveName))
+                continue;
+
+            TryDeleteUserSubKeyTree(
+                $@"{hiveName}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Mappings\{containerSid}");
+            TryDeleteUserSubKeyTree(
+                $@"{hiveName}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{containerSid}");
+        }
+    }
+
+    private void TryDeleteUserSubKeyTree(string subKeyPath)
+    {
+        try
+        {
+            _usersRoot.DeleteSubKeyTree(subKeyPath, throwOnMissingSubKey: false);
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"Failed to remove AppContainer registry state '{subKeyPath}': {ex.Message}");
+        }
+    }
+
+    private static bool LooksLikeLoadedUserHive(string hiveName)
+        => hiveName.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase)
+           && !hiveName.EndsWith("_Classes", StringComparison.OrdinalIgnoreCase);
 }

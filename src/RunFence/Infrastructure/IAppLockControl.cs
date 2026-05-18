@@ -1,3 +1,5 @@
+using RunFence.Startup.UI;
+
 namespace RunFence.Infrastructure;
 
 public interface IAppLockControl
@@ -8,4 +10,5 @@ public interface IAppLockControl
     void Unlock();
     Task<bool> TryUnlockAsync(bool isAdmin);
     Task<bool> TryUnlockForOperationAsync(bool isAdmin);
+    Task<OperationUnlockResult> TryUnlockForOperationWithResultAsync(bool isAdmin);
 }

@@ -22,33 +22,29 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
     private readonly Mock<ILicenseService> _licenseService = new();
     private readonly Mock<ILoggingService> _log = new();
 
-    private readonly ProtectedBuffer _pinKey;
+    private readonly SecureSecret _pinKey;
     private readonly SessionContext _session;
     private readonly CredentialStore _rotatedStore;
-    private readonly byte[] _rotatedKeyBytes;
     private readonly PinChangeOrchestrator _pinChangeOrchestrator;
     private readonly OptionsStartWithoutPinHandler _handler;
 
     public OptionsStartWithoutPinHandlerTests()
     {
-        _pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        _pinKey = TestSecretFactory.Create(32);
         _session = new SessionContext
-        {
+{
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32], EncryptedCanary = [1, 2, 3] },
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(_pinKey);
 
         _rotatedStore = new CredentialStore { ArgonSalt = new byte[32], EncryptedCanary = [4, 5, 6] };
-        _rotatedKeyBytes = new byte[32];
-        new Random(7).NextBytes(_rotatedKeyBytes);
 
         _sessionProvider.Setup(s => s.GetSession()).Returns(_session);
 
         _appConfigService.Setup(a => a.ReencryptAndSaveAll(
             It.IsAny<CredentialStore>(),
             It.IsAny<AppDatabase>(),
-            It.IsAny<byte[]>()));
+            It.IsAny<ISecureSecretSnapshotSource>()));
 
         _pinChangeOrchestrator = new PinChangeOrchestrator(
             Mock.Of<IPinService>(),
@@ -67,18 +63,22 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
             _log.Object);
     }
 
-    public void Dispose() => _pinKey.Dispose();
+    public void Dispose()
+    {
+        _pinKey.Dispose();
+        _session.Dispose();
+    }
 
     private void SetupRotationSuccess()
     {
         _rotationRunner.Setup(r => r.Run(It.IsAny<string>(), _session))
-            .Returns(new PinRotationResult(_rotatedStore, _rotatedKeyBytes.ToArray()));
+            .Returns(new PinKeyRotationResult(_rotatedStore, new SecureSecret(32, data => data.Fill(7))));
     }
 
     private void SetupRotationCancelled()
     {
         _rotationRunner.Setup(r => r.Run(It.IsAny<string>(), _session))
-            .Returns((PinRotationResult?)null);
+            .Returns((PinKeyRotationResult?)null);
     }
 
     [Fact]
@@ -108,22 +108,15 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(true);
         SetupRotationSuccess();
 
-        ProtectedBuffer? capturedOld = null;
-        CredentialStore? capturedStore = null;
-        ProtectedBuffer? capturedNew = null;
-        _handler.SetStartWithoutPin(true, (old, store, newKey) =>
-        {
-            capturedOld = old;
-            capturedStore = store;
-            capturedNew = newKey;
-        });
+        var callbackCalled = false;
+        _handler.SetStartWithoutPin(true, () => callbackCalled = true);
 
         _promptService.Verify(p => p.ConfirmSecurityWarning(), Times.Once);
         _rotationRunner.Verify(r => r.Run("Confirm PIN to enable Start Without PIN:", _session), Times.Once);
-        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ProtectedBuffer>()), Times.Once);
-        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ProtectedBuffer>()), Times.Never);
-        Assert.NotNull(capturedStore);
-        Assert.Equal(_rotatedStore.EncryptedCanary, capturedStore!.EncryptedCanary);
+        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
+        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
+        Assert.True(callbackCalled);
+        Assert.Same(_rotatedStore, _session.CredentialStore);
     }
 
     [Fact]
@@ -134,25 +127,33 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(false);
         SetupRotationSuccess();
 
-        _handler.SetStartWithoutPin(true, (_, _, _) => { });
+        _handler.SetStartWithoutPin(true, () => { });
 
         _promptService.Verify(p => p.ConfirmDpapiOnlyWarning(), Times.Once);
-        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ProtectedBuffer>()), Times.Once);
-        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ProtectedBuffer>()), Times.Never);
+        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
+        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
     [Fact]
-    public void Enable_CallsOnKeyRotatedWithRotatedStoreAndNewKey()
+    public void Enable_CallsOnKeyRotatedAfterSessionKeyReplacement()
     {
         _promptService.Setup(p => p.ConfirmSecurityWarning()).Returns(true);
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(true);
         SetupRotationSuccess();
 
-        CredentialStore? capturedStore = null;
-        _handler.SetStartWithoutPin(true, (_, store, _) => { capturedStore = store; });
+        var callbackCalled = false;
+        var keyBeforeCallback = _session.PinDerivedKey;
+        ISecureSecretSnapshotSource? keySeenByCallback = null;
+        _handler.SetStartWithoutPin(true, () =>
+        {
+            callbackCalled = true;
+            keySeenByCallback = _session.PinDerivedKey;
+        });
 
-        Assert.NotNull(capturedStore);
-        Assert.Equal(_rotatedStore.EncryptedCanary, capturedStore!.EncryptedCanary);
+        Assert.True(callbackCalled);
+        Assert.NotSame(keyBeforeCallback, keySeenByCallback);
+        Assert.Same(_session.PinDerivedKey, keySeenByCallback);
+        Assert.Same(_rotatedStore, _session.CredentialStore);
     }
 
     [Fact]
@@ -160,11 +161,11 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
     {
         _promptService.Setup(p => p.ConfirmSecurityWarning()).Returns(false);
 
-        _handler.SetStartWithoutPin(true, (_, _, _) => { });
+        _handler.SetStartWithoutPin(true, () => { });
 
         _rotationRunner.Verify(r => r.Run(It.IsAny<string>(), It.IsAny<SessionContext>()), Times.Never);
-        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ProtectedBuffer>()), Times.Never);
-        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ProtectedBuffer>()), Times.Never);
+        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
+        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
     [Fact]
@@ -174,11 +175,11 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(false);
         _promptService.Setup(p => p.ConfirmDpapiOnlyWarning()).Returns(false);
 
-        _handler.SetStartWithoutPin(true, (_, _, _) => { });
+        _handler.SetStartWithoutPin(true, () => { });
 
         _rotationRunner.Verify(r => r.Run(It.IsAny<string>(), It.IsAny<SessionContext>()), Times.Never);
-        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ProtectedBuffer>()), Times.Never);
-        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ProtectedBuffer>()), Times.Never);
+        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
+        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
     [Fact]
@@ -189,13 +190,13 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         SetupRotationCancelled();
 
         bool onKeyRotatedCalled = false;
-        _handler.SetStartWithoutPin(true, (_, _, _) => { onKeyRotatedCalled = true; });
+        _handler.SetStartWithoutPin(true, () => { onKeyRotatedCalled = true; });
 
         Assert.False(onKeyRotatedCalled);
-        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ProtectedBuffer>()), Times.Never);
-        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ProtectedBuffer>()), Times.Never);
+        _rememberPinService.Verify(r => r.EnableWithTpm(It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
+        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
         _appConfigService.Verify(a => a.ReencryptAndSaveAll(
-            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<byte[]>()), Times.Never);
+            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
     [Fact]
@@ -204,12 +205,12 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         _promptService.Setup(p => p.ConfirmSecurityWarning()).Returns(true);
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(true);
         SetupRotationSuccess();
-        _rememberPinService.Setup(r => r.EnableWithTpm(It.IsAny<ProtectedBuffer>()))
+        _rememberPinService.Setup(r => r.EnableWithTpm(It.IsAny<ISecureSecretSnapshotSource>()))
             .Throws(new Exception("TPM error"));
 
-        _handler.SetStartWithoutPin(true, (_, _, _) => { });
+        _handler.SetStartWithoutPin(true, () => { });
 
-        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ProtectedBuffer>()), Times.Once);
+        _rememberPinService.Verify(r => r.EnableDpapiOnly(It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
         _promptService.Verify(p => p.ShowTpmFallbackWarning(), Times.Once);
         _promptService.Verify(p => p.ShowError(It.IsAny<string>(), It.IsAny<string>()), Times.Never);
     }
@@ -221,10 +222,10 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(false);
         _promptService.Setup(p => p.ConfirmDpapiOnlyWarning()).Returns(true);
         SetupRotationSuccess();
-        _rememberPinService.Setup(r => r.EnableDpapiOnly(It.IsAny<ProtectedBuffer>()))
+        _rememberPinService.Setup(r => r.EnableDpapiOnly(It.IsAny<ISecureSecretSnapshotSource>()))
             .Throws(new Exception("DPAPI error"));
 
-        _handler.SetStartWithoutPin(true, (_, _, _) => { });
+        _handler.SetStartWithoutPin(true, () => { });
 
         _rememberPinService.Verify(r => r.Disable(), Times.Once);
         _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
@@ -238,12 +239,12 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(false);
         _promptService.Setup(p => p.ConfirmDpapiOnlyWarning()).Returns(true);
         SetupRotationSuccess();
-        _rememberPinService.Setup(r => r.EnableDpapiOnly(It.IsAny<ProtectedBuffer>()))
+        _rememberPinService.Setup(r => r.EnableDpapiOnly(It.IsAny<ISecureSecretSnapshotSource>()))
             .Throws(new Exception("DPAPI error"));
         _rememberPinService.Setup(r => r.Disable())
             .Throws(new Exception("Disable failed"));
 
-        var exception = Record.Exception(() => _handler.SetStartWithoutPin(true, (_, _, _) => { }));
+        var exception = Record.Exception(() => _handler.SetStartWithoutPin(true, () => { }));
 
         Assert.Null(exception);
         _log.Verify(l => l.Warn(It.IsAny<string>()), Times.AtLeastOnce);
@@ -258,13 +259,13 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
     {
         SetupRotationSuccess();
 
-        CredentialStore? capturedStore = null;
-        _handler.SetStartWithoutPin(false, (_, store, _) => { capturedStore = store; });
+        var callbackCalled = false;
+        _handler.SetStartWithoutPin(false, () => callbackCalled = true);
 
         _rotationRunner.Verify(r => r.Run("Confirm PIN to disable Start Without PIN:", _session), Times.Once);
         _rememberPinService.Verify(r => r.Disable(), Times.Once);
-        Assert.NotNull(capturedStore);
-        Assert.Equal(_rotatedStore.EncryptedCanary, capturedStore!.EncryptedCanary);
+        Assert.True(callbackCalled);
+        Assert.Same(_rotatedStore, _session.CredentialStore);
     }
 
     [Fact]
@@ -273,12 +274,12 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         SetupRotationCancelled();
 
         bool onKeyRotatedCalled = false;
-        _handler.SetStartWithoutPin(false, (_, _, _) => { onKeyRotatedCalled = true; });
+        _handler.SetStartWithoutPin(false, () => { onKeyRotatedCalled = true; });
 
         _rememberPinService.Verify(r => r.Disable(), Times.Never);
         Assert.False(onKeyRotatedCalled);
         _appConfigService.Verify(a => a.ReencryptAndSaveAll(
-            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<byte[]>()), Times.Never);
+            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
     [Fact]
@@ -288,13 +289,13 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         _rememberPinService.Setup(r => r.Disable()).Throws(new Exception("Disable error"));
 
         bool onKeyRotatedCalled = false;
-        _handler.SetStartWithoutPin(false, (_, _, _) => { onKeyRotatedCalled = true; });
+        _handler.SetStartWithoutPin(false, () => { onKeyRotatedCalled = true; });
 
         Assert.False(onKeyRotatedCalled);
         _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
         _promptService.Verify(p => p.ShowError(It.IsAny<string>(), It.IsAny<string>()), Times.Once);
         _appConfigService.Verify(a => a.ReencryptAndSaveAll(
-            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<byte[]>()), Times.Never);
+            It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
     }
 
     [Fact]
@@ -302,7 +303,7 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
     {
         SetupRotationSuccess();
 
-        _handler.SetStartWithoutPin(false, (_, _, _) => { });
+        _handler.SetStartWithoutPin(false, () => { });
 
         _promptService.Verify(p => p.ConfirmSecurityWarning(), Times.Never);
         _promptService.Verify(p => p.ConfirmDpapiOnlyWarning(), Times.Never);
@@ -320,12 +321,12 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(true);
         SetupRotationSuccess();
 
-        _handler.SetStartWithoutPin(true, (_, _, _) => { });
+        _handler.SetStartWithoutPin(true, () => { });
 
         _appConfigService.Verify(a => a.ReencryptAndSaveAll(
             _rotatedStore,
             _session.Database,
-            It.IsAny<byte[]>()), Times.Once);
+            It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
     }
 
     [Fact]
@@ -333,25 +334,27 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
     {
         SetupRotationSuccess();
 
-        _handler.SetStartWithoutPin(false, (_, _, _) => { });
+        _handler.SetStartWithoutPin(false, () => { });
 
         _appConfigService.Verify(a => a.ReencryptAndSaveAll(
             _rotatedStore,
             _session.Database,
-            It.IsAny<byte[]>()), Times.Once);
+            It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
     }
 
     [Fact]
-    public void Enable_OnKeyRotated_UpdatesSessionPinDerivedKey()
+    public void Enable_OnKeyRotated_UpdatesSessionPinDerivedKeyBeforeCallback()
     {
         _promptService.Setup(p => p.ConfirmSecurityWarning()).Returns(true);
         _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(true);
         SetupRotationSuccess();
 
-        ProtectedBuffer? newKeyFromCallback = null;
-        _handler.SetStartWithoutPin(true, (_, _, newKey) => { newKeyFromCallback = newKey; });
+        var oldKey = _session.PinDerivedKey;
+        ISecureSecretSnapshotSource? newKeyFromCallback = null;
+        _handler.SetStartWithoutPin(true, () => { newKeyFromCallback = _session.PinDerivedKey; });
 
         Assert.NotNull(newKeyFromCallback);
         Assert.Same(_session.PinDerivedKey, newKeyFromCallback);
+        Assert.NotSame(oldKey, newKeyFromCallback);
     }
 }

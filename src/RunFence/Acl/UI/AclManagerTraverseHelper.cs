@@ -1,4 +1,5 @@
 using RunFence.Acl.Permissions;
+using RunFence.Acl.Traverse;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -15,8 +16,10 @@ namespace RunFence.Acl.UI;
 public class AclManagerTraverseHelper(
     IAppConfigService appConfigService,
     IAclPermissionService aclPermission,
-    IGrantConfigTracker grantConfigTracker,
+    IGrantIntentRepository grantIntentRepository,
+    IGrantIntentStoreProvider grantIntentStoreProvider,
     IDatabaseProvider databaseProvider,
+    ITraverseGrantOwnerResolver traverseGrantOwnerResolver,
     AclManagerTraverseOperations traverseOperations,
     AclManagerTraverseRowBuilder rowBuilder)
 {
@@ -84,9 +87,9 @@ public class AclManagerTraverseHelper(
         var allEntriesToShow = traverseEntries.Concat(pendingNewAdds).ToList();
 
         var mainEntries = allEntriesToShow
-            .Where(e => _pending.GetEffectiveConfigPath(e, grantConfigTracker, GetConfigLookupSid(database, e)) == null)
+            .Where(e => GetEffectiveConfigPath(e) == null)
             .ToList();
-        bool hasPendingForMain = pendingNewAdds.Any(e => _pending.GetEffectiveConfigPath(e, grantConfigTracker, GetConfigLookupSid(database, e)) == null);
+        bool hasPendingForMain = pendingNewAdds.Any(e => GetEffectiveConfigPath(e) == null);
         AddTraverseRows(mainEntries, "Main Config", configPath: null,
             showIfEmpty: hasLoadedConfigs || hasPendingForMain);
 
@@ -94,7 +97,7 @@ public class AclManagerTraverseHelper(
         {
             var configEntries = allEntriesToShow
                 .Where(e => string.Equals(
-                    _pending.GetEffectiveConfigPath(e, grantConfigTracker, GetConfigLookupSid(database, e)), configPath, StringComparison.OrdinalIgnoreCase))
+                    GetEffectiveConfigPath(e), configPath, StringComparison.OrdinalIgnoreCase))
                 .ToList();
             AddTraverseRows(configEntries, Path.GetFileName(configPath), configPath, showIfEmpty: true);
         }
@@ -128,19 +131,27 @@ public class AclManagerTraverseHelper(
 
     private List<GrantedPathEntry>? GetDbTraverseEntries(AppDatabase database)
     {
-        var accountGrants = database.GetAccount(_sid)?.Grants;
-        if (!_isContainer)
-            return accountGrants;
-
-        var entries = new List<GrantedPathEntry>();
-        if (accountGrants != null)
-            entries.AddRange(accountGrants.Where(e => e.IsTraverseOnly));
-        entries.AddRange(database.SharedContainerTraverseGrants.Where(e => e.IsTraverseOnly));
-        return entries;
+        return database.GetAccount(GetTraverseLookupSid())?.Grants
+            .Where(entry => traverseGrantOwnerResolver.EntryAppliesToSid(
+                entry,
+                _sid,
+                includeManualSharedEntries: true))
+            .ToList();
     }
 
-    private string GetConfigLookupSid(AppDatabase database, GrantedPathEntry entry) =>
-        _isContainer && database.SharedContainerTraverseGrants.Contains(entry)
-            ? WellKnownSecuritySids.AllApplicationPackagesSid
-            : _sid;
+    private string GetTraverseLookupSid()
+        => traverseGrantOwnerResolver.ResolveStorageOwnerSid(_sid);
+
+    private string? GetEffectiveConfigPath(GrantedPathEntry entry)
+    {
+        var normalizedPath = Path.GetFullPath(entry.Path);
+        if (_pending.PendingTraverseConfigMoves.TryGetValue(normalizedPath, out var pendingTarget))
+            return NormalizeConfigPath(pendingTarget.TargetConfigPath);
+
+        var lookupSid = GetTraverseLookupSid();
+        return grantIntentRepository.FindTraverse(lookupSid, entry)?.Store.ConfigPath;
+    }
+
+    private string? NormalizeConfigPath(string? configPath)
+        => grantIntentStoreProvider.ResolveStore(configPath).ConfigPath;
 }

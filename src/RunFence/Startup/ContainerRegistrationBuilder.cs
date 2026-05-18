@@ -33,7 +33,7 @@ public static class ContainerRegistrationBuilder
         var sessionProvider = container.Resolve<SessionProvider>();
         sessionProvider.SetSession(session);
 
-        return container.BeginLifetimeScope(builder =>
+        var sessionScope = container.BeginLifetimeScope(builder =>
         {
             builder.RegisterInstance(session).SingleInstance();
             builder.RegisterInstance(options).AsSelf().SingleInstance();
@@ -49,5 +49,9 @@ public static class ContainerRegistrationBuilder
             builder.RegisterModule(new SidMigrationModule());
             builder.RegisterModule(new UiModule());
         });
+
+        sessionProvider.SetSessionScope(sessionScope);
+        sessionScope.CurrentScopeEnding += (_, _) => sessionProvider.ClearSessionScope(sessionScope);
+        return sessionScope;
     }
 }

@@ -2,7 +2,7 @@ namespace RunFence.Account.UI;
 
 /// <summary>
 /// Manages the install-package checklist for account dialogs.
-/// Handles package dependency enforcement (Winget required for Windows Terminal)
+/// Handles package dependency enforcement
 /// and prevents unchecking already-installed packages.
 /// </summary>
 public class InstallPackageSelector
@@ -50,20 +50,29 @@ public class InstallPackageSelector
 
         switch (newValue)
         {
-            // Auto-check Winget when Terminal is checked
-            case CheckState.Checked when KnownPackages.All[index] == KnownPackages.WindowsTerminal:
+            case CheckState.Checked:
             {
-                int wingetIndex = FindPackageIndex(KnownPackages.Winget);
-                if (wingetIndex >= 0 && !_installedPackageIndices.Contains(wingetIndex))
-                    list.BeginInvoke(() => list.SetItemChecked(wingetIndex, true));
+                foreach (var requiredPackage in KnownPackages.All[index].RequiredPackages ?? [])
+                {
+                    int requiredIndex = FindPackageIndex(requiredPackage);
+                    if (requiredIndex >= 0 && !_installedPackageIndices.Contains(requiredIndex))
+                        list.BeginInvoke(() => list.SetItemChecked(requiredIndex, true));
+                }
+
                 break;
             }
-            // Prevent unchecking Winget when Terminal is checked (dependency)
-            case CheckState.Unchecked when KnownPackages.All[index] == KnownPackages.Winget:
+            case CheckState.Unchecked:
             {
-                int terminalIndex = FindPackageIndex(KnownPackages.WindowsTerminal);
-                if (terminalIndex >= 0 && list.GetItemChecked(terminalIndex))
-                    return CheckState.Checked;
+                var package = KnownPackages.All[index];
+                for (int i = 0; i < KnownPackages.All.Count; i++)
+                {
+                    if (i == index || !list.GetItemChecked(i))
+                        continue;
+
+                    if ((KnownPackages.All[i].RequiredPackages ?? []).Contains(package))
+                        return CheckState.Checked;
+                }
+
                 break;
             }
         }
@@ -76,14 +85,14 @@ public class InstallPackageSelector
     /// </summary>
     public List<InstallablePackage> GetSelectedPackages(CheckedListBox list)
     {
-        var result = new List<InstallablePackage>();
+        var selectedPackages = new List<InstallablePackage>();
         for (int i = 0; i < list.Items.Count; i++)
         {
             if (list.GetItemChecked(i) && !_installedPackageIndices.Contains(i))
-                result.Add(KnownPackages.All[i]);
+                selectedPackages.Add(KnownPackages.All[i]);
         }
 
-        return result;
+        return KnownPackages.ExpandWithDependencies(selectedPackages).ToList();
     }
 
     private static int FindPackageIndex(InstallablePackage package)

@@ -50,6 +50,26 @@ public class FirewallModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<FirewallDnsRefreshCycleRunner>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<FirewallEnforcementRetryProcessor>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<FirewallApplyPlanner>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<FirewallApplyRetryCoordinator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<FirewallApplyPhaseExecutor>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<FirewallComRuleApplier>()
             .As<IFirewallComRuleApplier>()
             .SingleInstance();
@@ -99,6 +119,14 @@ public class FirewallModule : Module
             .As<IWfpGlobalIcmpBlocker>()
             .SingleInstance();
 
+        builder.RegisterType<EphemeralPortOwnershipSnapshotProvider>()
+            .As<IEphemeralPortOwnershipSnapshotProvider>()
+            .SingleInstance();
+
+        builder.RegisterType<EphemeralPortSnapshotReader>()
+            .As<IEphemeralPortSnapshotReader>()
+            .SingleInstance();
+
         builder.RegisterType<FirewallDnsRefreshService>()
             .AsSelf()
             .As<IBackgroundService>()
@@ -106,32 +134,50 @@ public class FirewallModule : Module
             .OrderBy(2)
             .SingleInstance();
 
-        builder.Register(c => new WfpEphemeralPortScanner(
-                c.Resolve<IWfpLocalhostBlocker>(),
-                c.Resolve<UiThreadDatabaseAccessor>(),
-                c.Resolve<ILoggingService>(),
-                startTimer: true))
+        builder.RegisterType<WfpEphemeralPortScanner>()
+            .WithParameter("startTimer", true)
             .As<IBackgroundService>()
             .OrderBy(3)
             .SingleInstance();
 
         builder.RegisterType<EventLogBlockedConnectionReader>()
             .As<IBlockedConnectionReader>()
+            .As<IAuditPolicyService>()
+            .SingleInstance();
+
+        builder.RegisterType<SecurityEventLogBlockedConnectionEventSource>()
+            .As<IBlockedConnectionEventSource>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsEventLogRecordSource>()
+            .As<IEventLogRecordSource>()
+            .SingleInstance();
+
+        builder.RegisterType<AuditPolCommandRunner>()
+            .As<IAuditPolCommandRunner>()
             .SingleInstance();
 
         builder.RegisterType<DefaultDnsResolver>()
             .As<IDnsResolver>()
             .SingleInstance();
 
+        builder.RegisterType<NetshCommandRunner>().As<INetshCommandRunner>().SingleInstance();
         builder.RegisterType<DynamicPortRangeChecker>().AsSelf().SingleInstance();
-        builder.RegisterType<FirewallApplyHelper>().AsSelf().SingleInstance();
+        builder.RegisterType<FirewallApplyHelper>()
+            .As<IFirewallApplyHelper>()
+            .AsSelf()
+            .SingleInstance();
         builder.RegisterType<FirewallAllowlistValidator>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallPortValidator>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallDomainResolver>().AsSelf().SingleInstance();
         builder.RegisterType<BlockedConnectionAggregator>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallAllowlistImportExportService>().AsSelf().SingleInstance();
         builder.RegisterType<BlockedConnectionsFlowHelper>().AsSelf().SingleInstance();
-        builder.RegisterType<FirewallDialogFactory>().AsSelf().SingleInstance();
+        builder.RegisterType<FirewallDialogApplyPresenter>().AsSelf().SingleInstance();
+        builder.RegisterType<FirewallDialogFactory>()
+            .As<IFirewallDialogFactory>()
+            .AsSelf()
+            .SingleInstance();
 
         builder.RegisterType<FirewallSettingsService>()
             .As<IFirewallSettingsService>()
@@ -148,6 +194,7 @@ public class FirewallModule : Module
             builder.RegisterDecorator<NoOpWfpIcmpBlocker, IWfpIcmpBlocker>();
             builder.RegisterDecorator<NoOpWfpGlobalIcmpBlocker, IWfpGlobalIcmpBlocker>();
             builder.RegisterDecorator<NoOpBlockedConnectionReader, IBlockedConnectionReader>();
+            builder.RegisterDecorator<NoOpAuditPolicyService, IAuditPolicyService>();
         }
     }
 }

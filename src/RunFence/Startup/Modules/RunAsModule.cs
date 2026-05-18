@@ -1,6 +1,4 @@
 using Autofac;
-using Autofac.Core.Activators.Reflection;
-using BindingFlags = System.Reflection.BindingFlags;
 using RunFence.RunAs;
 using RunFence.RunAs.UI;
 using RunFence.RunAs.UI.Forms;
@@ -9,10 +7,6 @@ namespace RunFence.Startup.Modules;
 
 public class RunAsModule : Module
 {
-    private static readonly IConstructorFinder AllInstanceConstructors =
-        new DefaultConstructorFinder(type => type.GetConstructors(
-            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic));
-
     protected override void Load(ContainerBuilder builder)
     {
         builder.RegisterType<RunAsFlowHandler>()
@@ -40,6 +34,8 @@ public class RunAsModule : Module
             .SingleInstance();
 
         builder.RegisterType<RunAsAccountCreationUI>()
+            .As<IRunAsAccountCreationUI>()
+            .As<IRunAsContainerCreationUI>()
             .AsSelf()
             .SingleInstance();
 
@@ -61,6 +57,10 @@ public class RunAsModule : Module
 
         builder.RegisterType<RunAsAppShortcutCreator>()
             .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<RunFenceLauncherPathProvider>()
+            .As<IRunFenceLauncherPathProvider>()
             .SingleInstance();
 
         builder.RegisterType<AppEntryPersistenceOrchestrator>()
@@ -88,10 +88,23 @@ public class RunAsModule : Module
             .SingleInstance();
 
         builder.RegisterType<RunAsPermissionPromptHelper>()
+            .As<IRunAsPermissionPromptHelper>()
             .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<RunAsCredentialPersister>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<RunAsCreatedAccountPersistenceCoordinator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<RunAsCreatedAccountPostSetupService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<RunAsAccountCreationErrorPresenter>()
             .AsSelf()
             .SingleInstance();
 
@@ -116,7 +129,6 @@ public class RunAsModule : Module
             .InstancePerDependency();
 
         builder.RegisterType<RunAsDialog>()
-            .FindConstructorsWith(AllInstanceConstructors)
             .AsSelf()
             .InstancePerDependency();
     }

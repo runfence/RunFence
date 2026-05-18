@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using RunFence.Account.UI;
 using RunFence.Core;
 using RunFence.Tests.Helpers;
+using RunFence.UI.Forms;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -126,6 +127,131 @@ public class SecurePasswordBoxTests
 
             spb.Dispose();
             spb.Dispose();
+        });
+    }
+
+    [Fact]
+    public void HostedByContextHelpForm_RegistersAndUnregistersSnapshotParticipant()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var host = new ContextHelpForm();
+            using var tb = new TextBox();
+            host.Controls.Add(tb);
+            using var spb = new SecurePasswordBox(tb);
+            StaTestHelper.CreateControlTree(host);
+
+            Assert.Contains(host.GetContextHelpSnapshotParticipants(), participant => ReferenceEquals(participant, spb));
+
+            spb.Dispose();
+
+            Assert.DoesNotContain(host.GetContextHelpSnapshotParticipants(), participant => ReferenceEquals(participant, spb));
+        });
+    }
+
+    [Fact]
+    public void MovingBetweenContextHelpForms_UpdatesSnapshotParticipantRegistration()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var firstHost = new ContextHelpForm();
+            using var secondHost = new ContextHelpForm();
+            using var tb = new TextBox();
+            firstHost.Controls.Add(tb);
+            using var spb = new SecurePasswordBox(tb);
+            StaTestHelper.CreateControlTree(firstHost);
+            StaTestHelper.CreateControlTree(secondHost);
+
+            Assert.Contains(firstHost.GetContextHelpSnapshotParticipants(), participant => ReferenceEquals(participant, spb));
+
+            firstHost.Controls.Remove(tb);
+
+            Assert.DoesNotContain(firstHost.GetContextHelpSnapshotParticipants(), participant => ReferenceEquals(participant, spb));
+
+            secondHost.Controls.Add(tb);
+
+            Assert.Contains(secondHost.GetContextHelpSnapshotParticipants(), participant => ReferenceEquals(participant, spb));
+        });
+    }
+
+    [Fact]
+    public void MovingAncestorContainerBetweenContextHelpForms_UpdatesSnapshotParticipantRegistration()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var firstHost = new ContextHelpForm();
+            using var secondHost = new ContextHelpForm();
+            using var panel = new Panel();
+            using var tb = new TextBox();
+            panel.Controls.Add(tb);
+            firstHost.Controls.Add(panel);
+            using var spb = new SecurePasswordBox(tb);
+            StaTestHelper.CreateControlTree(firstHost);
+            StaTestHelper.CreateControlTree(secondHost);
+
+            Assert.Contains(firstHost.GetContextHelpSnapshotParticipants(), participant => ReferenceEquals(participant, spb));
+
+            firstHost.Controls.Remove(panel);
+
+            Assert.DoesNotContain(firstHost.GetContextHelpSnapshotParticipants(), participant => ReferenceEquals(participant, spb));
+
+            secondHost.Controls.Add(panel);
+
+            Assert.Contains(secondHost.GetContextHelpSnapshotParticipants(), participant => ReferenceEquals(participant, spb));
+        });
+    }
+
+    [Fact]
+    public void PrepareForContextHelpSnapshot_HidesRevealedTextAndPreservesPassword()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var tb = new TextBox
+            {
+                Location = new Point(16, 16),
+                Width = 120,
+                Height = 24
+            };
+            using var spb = new SecurePasswordBox(tb);
+            spb.AddEyeToggle();
+            _ = tb.Handle;
+
+            SendMessage(tb.Handle, WM_CHAR, (IntPtr)'a', IntPtr.Zero);
+            SendMessage(tb.Handle, WM_CHAR, (IntPtr)'b', IntPtr.Zero);
+            Assert.IsType<Button>(Assert.Single(tb.Controls)).PerformClick();
+            Assert.Equal("ab", tb.Text);
+            Assert.Equal('\0', tb.PasswordChar);
+
+            using var host = new ContextHelpForm
+            {
+                ClientSize = new Size(240, 160)
+            };
+            using var helpButton = new ContextHelpButton
+            {
+                Location = new Point(200, 8),
+                Size = new Size(28, 28)
+            };
+            using var overlay = new ContextHelpOverlay
+            {
+                Dock = DockStyle.Fill
+            };
+
+            host.Controls.Add(tb);
+            host.Controls.Add(helpButton);
+            host.Controls.Add(overlay);
+            StaTestHelper.CreateControlTree(host);
+
+            var renderer = new ContextHelpSnapshotRenderer();
+            using var snapshot = renderer.CaptureFormSnapshot(
+                host,
+                helpButton,
+                overlay,
+                host.GetContextHelpSnapshotParticipants());
+
+            Assert.NotNull(snapshot);
+            Assert.Equal(new string(BulletChar, 2), tb.Text);
+            Assert.Equal(BulletChar, tb.PasswordChar);
+            Assert.Equal("ab", ProtectedStringToString(spb.GetPassword()));
         });
     }
 
@@ -272,19 +398,78 @@ public class SecurePasswordBoxTests
         });
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ShortcutCutVariants_DoNotExposePlaintextOrDesyncDisplay(bool revealed)
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var tb = new TextBox { Width = 100, Height = 24 };
+            var clipboard = FakeSecurePasswordClipboardService.WithText(null);
+            using var spb = new SecurePasswordBox(tb, clipboard);
+            if (revealed)
+                spb.AddEyeToggle();
+            _ = tb.Handle;
+
+            SendMessage(tb.Handle, WM_CHAR, (IntPtr)'a', IntPtr.Zero);
+            SendMessage(tb.Handle, WM_CHAR, (IntPtr)'b', IntPtr.Zero);
+            if (revealed)
+                ((Button)tb.Controls[0]).PerformClick();
+            tb.SelectionStart = 0;
+            tb.SelectionLength = 2;
+
+            Assert.True(spb.HandleShortcutKey(Keys.X, Keys.Control));
+            Assert.True(spb.HandleShortcutKey(Keys.Delete, Keys.Shift));
+            Assert.True(spb.HandleShortcutKey(Keys.Insert, Keys.Control));
+
+            Assert.Equal(3, clipboard.SuppressPasswordClipboardWriteChecks);
+            Assert.Equal("ab", ProtectedStringToString(spb.GetPassword()));
+            Assert.Equal(revealed ? "ab" : new string(BulletChar, 2), tb.Text);
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ShortcutPasteVariants_UpdateBufferAndDisplayTogether(bool revealed)
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var tb = new TextBox { Width = 100, Height = 24 };
+            using var spb = new SecurePasswordBox(tb, FakeSecurePasswordClipboardService.WithText("xy"));
+            if (revealed)
+                spb.AddEyeToggle();
+            _ = tb.Handle;
+
+            SendMessage(tb.Handle, WM_CHAR, (IntPtr)'a', IntPtr.Zero);
+            if (revealed)
+                ((Button)tb.Controls[0]).PerformClick();
+            tb.SelectionStart = 1;
+            tb.SelectionLength = 0;
+
+            Assert.True(spb.HandleShortcutKey(Keys.V, Keys.Control));
+            Assert.Equal("axy", ProtectedStringToString(spb.GetPassword()));
+            Assert.Equal(revealed ? "axy" : new string(BulletChar, 3), tb.Text);
+
+            spb.Clear();
+            if (revealed && tb.Controls.Count > 0 && tb.Text != string.Empty)
+                ((Button)tb.Controls[0]).PerformClick();
+            tb.SelectionStart = 0;
+            tb.SelectionLength = 0;
+
+            Assert.True(spb.HandleShortcutKey(Keys.Insert, Keys.Shift));
+            Assert.Equal("xy", ProtectedStringToString(spb.GetPassword()));
+            Assert.Equal(revealed ? "xy" : new string(BulletChar, 2), tb.Text);
+        });
+    }
+
     private static string ProtectedStringToString(ProtectedString value)
     {
         using (value)
         {
-            var ptr = value.AllocUnicode();
-            try
-            {
-                return Marshal.PtrToStringUni(ptr) ?? "";
-            }
-            finally
-            {
-                Marshal.ZeroFreeGlobalAllocUnicode(ptr);
-            }
+            return value.UseUnicodeSnapshot(snapshot =>
+                Marshal.PtrToStringUni(snapshot.DangerousGetIntPtr(), snapshot.CharCount) ?? string.Empty);
         }
     }
 

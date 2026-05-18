@@ -40,7 +40,12 @@ public class RunAsLaunchDispatcher(
                     AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache)),
                 filePath);
         else
-            directLauncher.LaunchWithoutAppEntryInContainer(filePath, arguments, result.SelectedContainer!, isFolder);
+            directLauncher.LaunchWithoutAppEntryInContainer(
+                filePath,
+                arguments,
+                launcherWorkingDirectory,
+                result.SelectedContainer!,
+                isFolder);
     }
 
     /// <summary>
@@ -59,7 +64,7 @@ public class RunAsLaunchDispatcher(
             else
             {
                 var acct = appState.Database.GetAccount(result.Credential!.Sid);
-                var accountDefault = acct?.PrivilegeLevel ?? PrivilegeLevel.Basic;
+                var accountDefault = acct?.PrivilegeLevel ?? PrivilegeLevel.Isolated;
                 PrivilegeLevel? privilegeLevel = result.PrivilegeLevel == accountDefault ? null : result.PrivilegeLevel;
                 dialogHandler.OpenAppEditDialog(null, filePath, result.Credential,
                     originalLnkPath, result.UpdateOriginalShortcut,
@@ -75,7 +80,7 @@ public class RunAsLaunchDispatcher(
                     AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache)),
                 filePath);
         else
-            directLauncher.LaunchWithoutAppEntry(filePath, arguments, result.Credential!, isFolder,
+            directLauncher.LaunchWithoutAppEntry(filePath, arguments, result.Credential!, launcherWorkingDirectory, isFolder,
                 result.PrivilegeLevel, result.AdHocPassword);
 
         if (result.UpdateOriginalShortcut && originalLnkPath != null)

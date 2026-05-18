@@ -29,7 +29,7 @@ public class MainFormTrayHandler(
     IGlobalHotkeyService hotkeyService,
     MainFormWindowRequestHandler windowRequestHandler,
     MainFormBackgroundAutoLockCoordinator autoLockCoordinator)
-    : IDisposable, ITrayBalloonService
+    : IDisposable, ITrayBalloonService, ITrayMenuActionHandler
 {
     private const int AltEscapeHotkeyId = 0xAE01;
     private const int MOD_ALT = 0x0001;
@@ -44,6 +44,8 @@ public class MainFormTrayHandler(
     public event Action? LicenseChangedRefreshNeeded;
 
     public LockManager LockManager { get; } = lockManager;
+    public bool IsTrayLockVisible => licenseService.IsLicensed && !LockManager.IsLocked;
+    public bool IsTrayLockEnabled => IsTrayLockVisible && !_form.IsModalActive && !_form.HasOtherWindowsOpen;
 
     /// <summary>
     /// Call once from MainForm constructor after InitializeComponent, passing the form itself.
@@ -58,16 +60,7 @@ public class MainFormTrayHandler(
         windowRequestHandler.TitleUpdateNeeded += UpdateTitleAndTooltip;
         autoLockCoordinator.Initialize(form);
 
-        trayIconManager.Initialize((ITrayOwner)form);
-        trayIconManager.AppLaunchRequested += trayLaunchHandler.LaunchApp;
-        trayIconManager.FolderBrowserLaunchRequested += (sid, shift) =>
-            trayLaunchHandler.LaunchFolderBrowser(new AccountLaunchIdentity(sid)
-                { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null });
-        trayIconManager.TerminalLaunchRequested += (sid, shift) =>
-            trayLaunchHandler.LaunchTerminal(new AccountLaunchIdentity(sid)
-                { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null });
-        trayIconManager.DiscoveredAppLaunchRequested += (exe, sid) =>
-            trayLaunchHandler.LaunchDiscoveredApp(exe, new AccountLaunchIdentity(sid));
+        trayIconManager.Initialize((ITrayOwner)form, this);
         trayIconManager.UpdateDatabase(session.CredentialStore);
         discoveryRefreshManager.SetHost(trayIconManager, formAsControl);
 
@@ -127,6 +120,20 @@ public class MainFormTrayHandler(
 
     public void ShowBalloonTip(string text) => trayIconManager.ShowBalloonTip(text);
 
+    public void LockToTrayImmediately() => autoLockCoordinator.LockToTrayImmediately();
+    public void LaunchConfiguredApp(AppEntry app) => trayLaunchHandler.LaunchApp(app);
+
+    public void LaunchFolderBrowser(string accountSid, bool shift)
+        => trayLaunchHandler.LaunchFolderBrowser(CreateTrayLaunchIdentity(accountSid, shift));
+
+    public void LaunchTerminal(string accountSid, bool shift)
+        => trayLaunchHandler.LaunchTerminal(CreateTrayLaunchIdentity(accountSid, shift));
+
+    public void LaunchDiscoveredApp(string exePath, string accountSid)
+        => trayLaunchHandler.LaunchDiscoveredApp(exePath, new AccountLaunchIdentity(accountSid));
+
+    public void ExitApplication() => Application.Exit();
+
     public void ShowWarning(string text)
     {
         if (_form == null! || _form.IsDisposed || !_form.IsHandleCreated)
@@ -174,4 +181,7 @@ public class MainFormTrayHandler(
         notifyIcon.Dispose();
         discoveryRefreshManager.Dispose();
     }
+
+    private static AccountLaunchIdentity CreateTrayLaunchIdentity(string accountSid, bool shift)
+        => new(accountSid) { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null };
 }

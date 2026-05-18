@@ -5,6 +5,6 @@ namespace RunFence.Launch.Container;
 /// </summary>
 public interface IAppContainerComAccessService
 {
-    void GrantComAccess(string containerSid, string clsid);
-    void RevokeComAccess(string containerSid, string clsid);
+    AppContainerComAccessResult GrantComAccess(string containerSid, string clsid);
+    AppContainerComAccessResult RevokeComAccess(string containerSid, string clsid);
 }

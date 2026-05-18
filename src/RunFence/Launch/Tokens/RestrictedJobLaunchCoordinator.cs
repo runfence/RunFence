@@ -15,18 +15,11 @@ public sealed class RestrictedJobLaunchCoordinator(
     IJobObjectApi jobObjectApi,
     RestrictedProcessActivationGuard restrictedProcessGuard,
     IJobKeeperLaunchProcessApi launchProcessApi,
+    IPreparedTokenProcessLauncher preparedTokenProcessLauncher,
     string jobKeeperExePath)
-    : IRestrictedJobLaunchCoordinator, IRestrictedJobLaunchCoordinatorInitializer
+    : IRestrictedJobLaunchCoordinator
 {
-    private IRestrictedJobProcessLauncher? _processLauncher;
-
-    public void Initialize(IRestrictedJobProcessLauncher processLauncher)
-    {
-        if (_processLauncher != null)
-            throw new InvalidOperationException("Restricted job launch coordinator is already initialized.");
-
-        _processLauncher = processLauncher;
-    }
+    private static readonly TimeSpan JobKeeperLaunchTimeout = TimeSpan.FromMilliseconds(IpcConstants.JobKeeperLaunchIpcTimeoutMs);
 
     public ProcessLaunchNative.PROCESS_INFORMATION SeedJobKeeperAndLaunch(
         IntPtr hToken,
@@ -35,8 +28,6 @@ public sealed class RestrictedJobLaunchCoordinator(
         bool isLow,
         ProcessLaunchTarget psi)
     {
-        var processLauncher = _processLauncher
-                              ?? throw new InvalidOperationException("Restricted job launch coordinator is not initialized.");
         var targetSid = new SecurityIdentifier(sid);
         var jobAssignment = isLow ? JobAssignment.LowIntegrity : JobAssignment.Restricted;
 
@@ -63,9 +54,10 @@ public sealed class RestrictedJobLaunchCoordinator(
                 var jobKeeperTarget = new ProcessLaunchTarget(
                     jobKeeperExePath,
                     BuildJobKeeperArguments(identity),
-                    HideWindow: true);
+                    HideWindow: true,
+                    SuppressStartupFeedback: true);
 
-                jobKeeperPi = processLauncher.LaunchWithPreparedToken(
+                jobKeeperPi = preparedTokenProcessLauncher.LaunchWithPreparedToken(
                     hToken,
                     jobKeeperTarget,
                     tokenSource,
@@ -159,11 +151,15 @@ public sealed class RestrictedJobLaunchCoordinator(
             psi.Arguments,
             psi.WorkingDirectory,
             psi.HideWindow,
+            psi.SuppressStartupFeedback,
             psi.EnvironmentVariables);
 
-        int pid = launchIpcClient.SendLaunchRequest(sid, isLow, request);
+        int pid = launchIpcClient
+            .SendLaunchRequestAsync(sid, isLow, request, JobKeeperLaunchTimeout, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
         if (pid <= 0)
-            throw new InvalidOperationException($"Job keeper failed to launch process for {sid}");
+            throw new StaleJobKeeperException(sid);
 
         var hProcess = launchProcessApi.OpenLaunchedProcess(pid);
         return new ProcessLaunchNative.PROCESS_INFORMATION { hProcess = hProcess, dwProcessId = (uint)pid };

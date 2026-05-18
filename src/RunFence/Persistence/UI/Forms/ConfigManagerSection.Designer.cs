@@ -66,7 +66,7 @@ public partial class ConfigManagerSection
         _configsGroup.Controls.Add(_configDesc);
 
         // _configDesc
-        _configDesc.Text = "Additional configs are not persisted across restarts";
+        _configDesc.Text = "";
         _configDesc.Dock = DockStyle.Top;
         _configDesc.AutoSize = false;
         _configDesc.Resize += OnConfigDescResize;

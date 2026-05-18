@@ -18,7 +18,9 @@ public class PrepareSystemTemplate(
     DriveAclReplacer driveAclReplacer,
     IWizardSessionSaver sessionSaver,
     SessionContext session,
-    IQuickAccessPinService quickAccessPinService)
+    IQuickAccessPinService quickAccessPinService,
+    IPrepareSystemDriveInfoSource driveInfoSource,
+    ILoggingService log)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -39,7 +41,7 @@ public class PrepareSystemTemplate(
     /// The result is pre-computed by <see cref="WarmCacheAsync"/> to avoid disk I/O on the UI
     /// thread; <see cref="IsAvailable"/> returns the cached value after warm-up.
     /// </summary>
-    public bool IsAvailable => _cachedIsAvailable ?? HasAnyApplicableDrive();
+    public bool IsAvailable => _cachedIsAvailable ?? SafeHasAnyApplicableDrive();
 
     private bool? _cachedIsAvailable;
 
@@ -50,24 +52,52 @@ public class PrepareSystemTemplate(
     /// </summary>
     public Task WarmCacheAsync()
     {
-        return Task.Run(() => { _cachedIsAvailable = HasAnyApplicableDrive(); });
+        return Task.Run(() =>
+        {
+            _cachedIsAvailable = SafeHasAnyApplicableDrive();
+        });
+    }
+
+    private bool SafeHasAnyApplicableDrive()
+    {
+        try
+        {
+            return HasAnyApplicableDrive();
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"PrepareSystemTemplate drive scan failed: {ex.Message}");
+            return false;
+        }
     }
 
     private bool HasAnyApplicableDrive()
     {
-        var systemDrive = Path.GetPathRoot(Environment.SystemDirectory) ?? @"C:\";
-        return DriveInfo.GetDrives().Where(drive => drive.DriveType == DriveType.Fixed)
-            .Where(drive => !string.Equals(drive.RootDirectory.FullName, systemDrive, StringComparison.OrdinalIgnoreCase))
-            .Any(drive => driveAclReplacer.HasReplaceableBroadAces(drive.RootDirectory.FullName));
+        foreach (var drive in driveInfoSource.GetNonSystemFixedDrives())
+        {
+            if (!TryUseDrive(drive, out _))
+                continue;
+
+            if (driveAclReplacer.HasReplaceableBroadAces(drive.RootPath))
+                return true;
+        }
+
+        return false;
     }
 
     public IReadOnlyList<WizardStepPage> CreateSteps() =>
     [
         new PrepareSystemDriveStep(
-            selections => _data.DriveSelections = selections,
+            SetSelectedDrives,
             session.Database.SidNames,
-            driveAclReplacer)
+            driveAclReplacer,
+            driveInfoSource)
     ];
+
+    internal void SetSelectedDrives(List<(string DrivePath, string TargetSid)> selections)
+    {
+        _data.DriveSelections = selections;
+    }
 
     public async Task ExecuteAsync(IWizardProgressReporter progress)
     {
@@ -79,21 +109,41 @@ public class PrepareSystemTemplate(
         }
 
         var backupPath = GetAclBackupPath();
+        var skippedDrives = new List<string>();
 
         foreach (var (drivePath, targetSid) in _data.DriveSelections)
         {
+            var drive = SafeInspectDrive(drivePath);
+            if (!TryUseDrive(drive, out var skipReason))
+            {
+                skippedDrives.Add($"{drivePath} ({skipReason})");
+                continue;
+            }
+
             progress.ReportStatus($"Backing up ACLs on {drivePath}...");
-            await Task.Run(() => BackupDriveAcl(drivePath, backupPath, progress));
+            if (!await Task.Run(() => BackupDriveAcl(drive, backupPath, progress)))
+            {
+                skippedDrives.Add($"{drivePath} (drive is not ready)");
+                continue;
+            }
 
             progress.ReportStatus($"Replacing ACLs on {drivePath}...");
             var error = await Task.Run(() => driveAclReplacer.ReplaceDriveAcl(drivePath, targetSid));
             if (error != null)
+            {
                 progress.ReportError($"{drivePath}: {error}");
+            }
             else
             {
                 progress.ReportStatus($"{drivePath}: done.");
                 quickAccessPinService.PinFolders(targetSid, [drivePath]);
             }
+        }
+
+        if (skippedDrives.Count > 0)
+        {
+            progress.ReportWarning(
+                $"Skipped fixed drives that were not ready or could not be inspected: {string.Join(", ", skippedDrives)}");
         }
 
         sessionSaver.SaveAndRefresh();
@@ -102,10 +152,18 @@ public class PrepareSystemTemplate(
     /// <summary>
     /// Runs <c>icacls &lt;drivePath&gt; /save &lt;tempFile&gt;</c> to capture the ACL data in icacls format,
     /// then appends a timestamp header and the saved content to <paramref name="backupFilePath"/>.
-    /// Non-fatal — errors are reported to <paramref name="progress"/> but never abort the ACL replacement.
+    /// Non-fatal - errors are reported to <paramref name="progress"/> but never abort the ACL replacement.
     /// </summary>
-    private static void BackupDriveAcl(string drivePath, string backupFilePath, IWizardProgressReporter? progress)
+    private static bool BackupDriveAcl(PrepareSystemDriveInfo drive, string backupFilePath, IWizardProgressReporter? progress)
     {
+        if (!drive.IsReady || !string.IsNullOrEmpty(drive.InspectionError))
+        {
+            progress?.ReportWarning($"Skipping {drive.RootPath}: drive is not ready.");
+            return false;
+        }
+
+        var drivePath = drive.RootPath;
+
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(backupFilePath)!);
@@ -122,8 +180,10 @@ public class PrepareSystemTemplate(
                 };
 
                 using (var proc = Process.Start(psi))
+                {
                     if (proc != null && !proc.WaitForExit(10_000))
                         proc.Kill();
+                }
 
                 var header = $"=== ACL backup: {drivePath} at {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==={Environment.NewLine}";
                 File.AppendAllText(backupFilePath, header);
@@ -150,14 +210,48 @@ public class PrepareSystemTemplate(
         }
         catch (Exception ex)
         {
-            // Backup is best-effort — report but do not abort ACL replacement on backup failure.
             progress?.ReportError($"ACL backup for {drivePath} failed: {ex.Message}");
         }
+
+        return true;
     }
 
     private static string GetAclBackupPath()
     {
         return Path.Combine(PathConstants.LocalAppDataDir, "drive-acl-backup.txt");
+    }
+
+    private PrepareSystemDriveInfo SafeInspectDrive(string drivePath)
+    {
+        try
+        {
+            return driveInfoSource.InspectDrive(drivePath);
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"PrepareSystemTemplate: drive inspection failed for '{drivePath}': {ex.Message}");
+            return new PrepareSystemDriveInfo(drivePath, IsReady: false, DriveFormat: null, TotalSize: null, InspectionError: ex.Message);
+        }
+    }
+
+    private bool TryUseDrive(PrepareSystemDriveInfo drive, out string reason)
+    {
+        if (!string.IsNullOrEmpty(drive.InspectionError))
+        {
+            reason = drive.InspectionError;
+            log.Warn($"PrepareSystemTemplate: skipping '{drive.RootPath}' because drive inspection failed: {reason}");
+            return false;
+        }
+
+        if (!drive.IsReady)
+        {
+            reason = "drive is not ready";
+            log.Warn($"PrepareSystemTemplate: skipping '{drive.RootPath}' because the drive is not ready.");
+            return false;
+        }
+
+        reason = string.Empty;
+        return true;
     }
 
     private sealed class CommitData

@@ -10,7 +10,7 @@ namespace RunFence.Acl;
 /// Uses NetUserEnum (level 0) for fast local user enumeration and the shared local SAM SID
 /// resolver to avoid per-user name-resolution calls.
 /// </summary>
-public class CachingLocalUserProvider(ILoggingService log, ILocalSamSidResolver localSamSidResolver) : ILocalUserProvider
+public class CachingLocalUserProvider(ILoggingService log, ILocalSamSidResolver localSamSidResolver, IClock clock) : ILocalUserProvider
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
 
@@ -22,11 +22,11 @@ public class CachingLocalUserProvider(ILoggingService log, ILocalSamSidResolver 
     {
         lock (_cacheLock)
         {
-            if (_cachedLocalUsers != null && DateTime.UtcNow - _cacheTimestamp < CacheTtl)
+            if (_cachedLocalUsers != null && clock.UtcNow - _cacheTimestamp < CacheTtl)
                 return _cachedLocalUsers;
 
             _cachedLocalUsers = EnumerateLocalUsers().AsReadOnly();
-            _cacheTimestamp = DateTime.UtcNow;
+            _cacheTimestamp = clock.UtcNow;
             return _cachedLocalUsers;
         }
     }
@@ -42,7 +42,7 @@ public class CachingLocalUserProvider(ILoggingService log, ILocalSamSidResolver 
     private List<LocalUserAccount> EnumerateLocalUsers()
     {
         var users = new List<LocalUserAccount>();
-        int resumeHandle = 0;
+        var resumeHandle = 0;
         int result;
 
         do

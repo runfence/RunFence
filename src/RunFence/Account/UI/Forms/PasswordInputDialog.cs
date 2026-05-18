@@ -4,7 +4,7 @@ using RunFence.Core;
 
 namespace RunFence.Account.UI.Forms;
 
-public partial class PasswordInputDialog : Form
+public partial class PasswordInputDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly SecurePasswordBox _passwordSecure;
 

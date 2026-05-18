@@ -18,10 +18,10 @@ partial class AppContainerEditDialog
     private GroupBox _capGroupBox;
     private FlowLayoutPanel _capFlow;
     private CheckBox _loopbackCheckBox;
-    private CheckBox[] _capCheckBoxes; // filled from KnownCapabilities in InitializeCapabilities
+    private CheckBox[] _capCheckBoxes; // initialized in BuildDynamicContent
     private GroupBox _comGroupBox;
     private Panel _clsidPanel;
-    private ToolStrip _comToolStrip;   // items added in SetupComToolbar — images require UiIconFactory.CreateToolbarIcon
+    private ToolStrip _comToolStrip;   // items initialized in BuildDynamicContent
     private ListBox _comCustomListBox;
     private CheckBox _ephemeralCheckBox;
     private FlowLayoutPanel _buttonPanel;
@@ -132,7 +132,7 @@ partial class AppContainerEditDialog
         _capGroupBox.Margin = new Padding(0, 8, 0, 4);
         _capGroupBox.Padding = new Padding(0, 0, 8, 8);
 
-        // _capFlow (checkboxes and _loopbackCheckBox added in InitializeCapabilities)
+        // _capFlow (checkboxes and _loopbackCheckBox added in BuildDynamicContent)
         _capFlow.FlowDirection = FlowDirection.LeftToRight;
         _capFlow.WrapContents = true;
         _capFlow.MaximumSize = new Size(424, 0);
@@ -184,7 +184,7 @@ partial class AppContainerEditDialog
 
         // _okButton
         _okButton.Text = "OK";
-        _okButton.DialogResult = DialogResult.OK;
+        _okButton.DialogResult = DialogResult.None;
         _okButton.Width = 80;
         _okButton.Height = 28;
         _okButton.Margin = new Padding(0);

@@ -116,9 +116,25 @@ public class SecurityScanner
 
     public static void AddAutorunPath(AutorunContext autorun, string path, HashSet<string>? ownerExcluded,
         StartupSecurityCategory category)
+        => AddAutorunPath(autorun, path, ownerExcluded, category, null);
+
+    public static void AddAutorunPath(AutorunContext autorun, string path, HashSet<string>? ownerExcluded,
+        StartupSecurityCategory category, AutorunCommandContext? commandContext)
     {
         autorun.Paths.Add(path);
         autorun.PathCategories.TryAdd(path, category);
+        if (commandContext != null)
+        {
+            if (!autorun.PathCommandContexts.TryGetValue(path, out var contexts))
+            {
+                contexts = [];
+                autorun.PathCommandContexts[path] = contexts;
+            }
+
+            if (!contexts.Contains(commandContext))
+                contexts.Add(commandContext);
+        }
+
         if (ownerExcluded == null)
         {
             autorun.MachineWidePaths.Add(path);
@@ -134,6 +150,12 @@ public class SecurityScanner
             existing.IntersectWith(ownerExcluded);
     }
 
+    public static void AddAutorunWarning(AutorunContext autorun, AutorunWarning warning)
+    {
+        if (!autorun.PendingWarnings.Contains(warning))
+            autorun.PendingWarnings.Add(warning);
+    }
+
     public List<StartupSecurityFinding> RunChecks(CancellationToken ct = default)
     {
         var findings = new List<StartupSecurityFinding>();
@@ -144,7 +166,9 @@ public class SecurityScanner
             new HashSet<string>(StringComparer.OrdinalIgnoreCase),
             new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase),
             new HashSet<string>(StringComparer.OrdinalIgnoreCase),
-            new Dictionary<string, StartupSecurityCategory>(StringComparer.OrdinalIgnoreCase));
+            new Dictionary<string, StartupSecurityCategory>(StringComparer.OrdinalIgnoreCase),
+            new Dictionary<string, List<AutorunCommandContext>>(StringComparer.OrdinalIgnoreCase),
+            []);
 
         var currentUserSid = _dataAccess.GetCurrentUserSid();
         var interactiveUserSid = _dataAccess.GetInteractiveUserSid();

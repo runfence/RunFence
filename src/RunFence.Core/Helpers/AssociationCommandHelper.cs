@@ -1,4 +1,3 @@
-using Microsoft.Win32;
 using System.Text;
 
 namespace RunFence.Core.Helpers;
@@ -71,7 +70,7 @@ public static class AssociationCommandHelper
             ExpandedCommand: Environment.ExpandEnvironmentVariables(command),
             MaterializedCommand: materializedCommand,
             ExePath: exePath,
-            Arguments: CommandLineHelper.SkipArgs(materializedCommand, 1),
+            Arguments: CommandLineHelper.SliceVerbatimTail(materializedCommand, 1),
             UsedSupportedPlaceholder: usedSupportedPlaceholder);
         rejectionReason = string.Empty;
         return true;
@@ -126,7 +125,7 @@ public static class AssociationCommandHelper
         {
             if (builder.Length > 0)
                 builder.Append(' ');
-            builder.Append(CommandLineHelper.JoinArgs([rawArguments]));
+            builder.Append(CommandLineHelper.MaterializeProcessArguments([rawArguments]));
         }
 
         materializedCommand = builder.ToString();
@@ -192,91 +191,146 @@ public static class AssociationCommandHelper
         if (!IsRunFenceLauncherExecutablePath(exePath))
             return false;
 
-        var remaining = CommandLineHelper.SkipArgs(commandLine, 1);
+        var remaining = CommandLineHelper.SliceVerbatimTail(commandLine, 1);
         if (string.IsNullOrWhiteSpace(remaining))
             return false;
 
-        var args = CommandLineHelper.SplitArgs(remaining);
-        if (args.Length < 3
+        var args = CommandLineHelper.ParseProcessArguments(remaining);
+        if (args.Length < 2
             || !string.Equals(args[0], "--resolve", StringComparison.OrdinalIgnoreCase)
-            || string.IsNullOrWhiteSpace(args[1])
-            || string.IsNullOrWhiteSpace(args[2]))
+            || string.IsNullOrWhiteSpace(args[1]))
         {
             return false;
         }
 
         association = args[1];
-        rawArgument = args[2];
+        rawArgument = CommandLineHelper.SliceVerbatimTail(remaining, 2) ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(rawArgument))
+        {
+            association = string.Empty;
+            rawArgument = string.Empty;
+            return false;
+        }
+
         return true;
     }
 
-    /// <summary>
-    /// Restores the original handler for the association represented by
-    /// <paramref name="associationKey"/> (already opened writable at
-    /// <c>Software\Classes\{keyName}</c>) and removes the <c>RunFenceFallback</c> marker.
-    /// </summary>
-    /// <param name="associationKey">Writable registry key at <c>Software\Classes\{keyName}</c>.</param>
-    /// <param name="keyName">Association key name (e.g., <c>".pdf"</c>, <c>"mailto"</c>).</param>
-    /// <returns>
-    /// The <c>RunFenceFallback</c> value that was stored (may be an empty string meaning
-    /// no previous handler existed), or <see langword="null"/> if no fallback was stored.
-    /// </returns>
-    public static string? RestoreFromFallback(RegistryKey associationKey, string keyName)
+    public static string? ParseAssociationTarget(string? rawArgument)
     {
-        if (associationKey.GetValue(PathConstants.RunFenceFallbackValueName) is not string fallbackValue)
+        var rawTail = CommandLineHelper.SliceVerbatimTail(rawArgument ?? string.Empty, 0);
+        if (string.IsNullOrWhiteSpace(rawTail))
             return null;
 
+        if (Uri.TryCreate(rawTail, UriKind.Absolute, out var uri)
+            && !string.IsNullOrEmpty(uri.Scheme)
+            && rawTail.Contains("://", StringComparison.Ordinal))
+        {
+            return uri.AbsoluteUri;
+        }
+
+        string? normalizedTarget = null;
+        var isFileTarget = false;
+        if (rawTail[0] == '"')
+        {
+            var quotedToken = CommandLineHelper.ParseProcessArguments(rawTail).FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(quotedToken))
+            {
+                isFileTarget = true;
+                if (Path.IsPathRooted(quotedToken))
+                {
+                    try
+                    {
+                        normalizedTarget = Path.GetFullPath(quotedToken);
+                    }
+                    catch
+                    {
+                        normalizedTarget = null;
+                    }
+                }
+                else
+                {
+                    normalizedTarget = quotedToken;
+                }
+            }
+        }
+        else if (Path.IsPathRooted(rawTail))
+        {
+            isFileTarget = true;
+            try
+            {
+                normalizedTarget = Path.GetFullPath(rawTail);
+            }
+            catch
+            {
+                var token = CommandLineHelper.ParseProcessArguments(rawTail).FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(token))
+                {
+                    isFileTarget = true;
+                    if (Path.IsPathRooted(token))
+                    {
+                        try
+                        {
+                            normalizedTarget = Path.GetFullPath(token);
+                        }
+                        catch
+                        {
+                            normalizedTarget = null;
+                        }
+                    }
+                    else
+                    {
+                        normalizedTarget = token;
+                    }
+                }
+            }
+        }
+        else
+        {
+            var token = CommandLineHelper.ParseProcessArguments(rawTail).FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(token))
+            {
+                isFileTarget = true;
+                normalizedTarget = token;
+            }
+        }
+
+        if (isFileTarget)
+            return normalizedTarget;
+
+        return null;
+    }
+
+    public static bool ApplyFallbackRestore(
+        string keyName,
+        string fallbackValue,
+        Action<string?> setDefaultValue,
+        Action<string> setNamedValue,
+        Action<string> deleteValue,
+        Action<string> deleteSubKeyTree,
+        Action deleteExtensionCommandSubkeys)
+    {
         if (keyName.StartsWith('.'))
         {
             if (!string.IsNullOrEmpty(fallbackValue))
-                associationKey.SetValue(null, fallbackValue);
+                setDefaultValue(fallbackValue);
             else
-                associationKey.DeleteValue(string.Empty, throwOnMissingValue: false);
-            // Clean up shell\open\command added by a command-based direct handler (if any)
-            DeleteExtensionCommandSubkeys(associationKey);
+                deleteValue(string.Empty);
+            deleteExtensionCommandSubkeys();
         }
         else
         {
             if (!string.IsNullOrEmpty(fallbackValue))
             {
-                using var commandKey = associationKey.OpenSubKey(@"shell\open\command", writable: true)
-                    ?? associationKey.CreateSubKey(@"shell\open\command");
-                commandKey.SetValue(null, fallbackValue);
+                setNamedValue(fallbackValue);
             }
             else
             {
-                associationKey.DeleteSubKeyTree("shell", throwOnMissingSubKey: false);
-                associationKey.DeleteValue("URL Protocol", throwOnMissingValue: false);
+                deleteSubKeyTree("shell");
+                deleteValue("URL Protocol");
             }
         }
 
-        associationKey.DeleteValue(PathConstants.RunFenceFallbackValueName, throwOnMissingValue: false);
-        return fallbackValue;
-    }
-
-    /// <summary>
-    /// Deletes <c>shell\open\command</c> from an extension key and cleans up any empty parent
-    /// keys (<c>shell\open</c>, <c>shell</c>), preserving siblings that still have content.
-    /// </summary>
-    private static void DeleteExtensionCommandSubkeys(RegistryKey extensionKey)
-    {
-        using (var openKey = extensionKey.OpenSubKey(@"shell\open", writable: true))
-            openKey?.DeleteSubKeyTree("command", throwOnMissingSubKey: false);
-
-        using (var openKeyRead = extensionKey.OpenSubKey(@"shell\open"))
-        {
-            if (openKeyRead is { SubKeyCount: 0, ValueCount: 0 })
-            {
-                using var shellKey = extensionKey.OpenSubKey("shell", writable: true);
-                shellKey?.DeleteSubKey("open", throwOnMissingSubKey: false);
-            }
-        }
-
-        using (var shellKeyRead = extensionKey.OpenSubKey("shell"))
-        {
-            if (shellKeyRead is { SubKeyCount: 0, ValueCount: 0 })
-                extensionKey.DeleteSubKey("shell", throwOnMissingSubKey: false);
-        }
+        return true;
     }
 
     private static bool TryGetSupportedPlaceholderLength(string command, int index, out int length)

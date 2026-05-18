@@ -4,7 +4,9 @@ using Moq;
 using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Persistence.UI;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -26,7 +28,8 @@ public class AppContainerSerializationTests
             Capabilities = ["S-1-15-3-1", "S-1-15-3-2"],
             EnableLoopback = true,
             IsEphemeral = true,
-            DeleteAfterUtc = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc)
+            DeleteAfterUtc = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc),
+            LifecycleState = "CleanupPending"
         };
 
         var json = JsonSerializer.Serialize(entry, Options);
@@ -39,6 +42,7 @@ public class AppContainerSerializationTests
         Assert.Equal(entry.EnableLoopback, result.EnableLoopback);
         Assert.Equal(entry.IsEphemeral, result.IsEphemeral);
         Assert.Equal(entry.DeleteAfterUtc, result.DeleteAfterUtc);
+        Assert.Equal(entry.LifecycleState, result.LifecycleState);
     }
 
     [Fact]
@@ -129,17 +133,46 @@ public class AppContainerSerializationTests
         // set to the current user's SID — the AppContainerName == null guard in LoadAdditionalConfig
         // must skip these entries.
         var mockDb = new Mock<IDatabaseService>();
-        var grantTracker = new Mock<IGrantConfigTracker>().Object;
+        using var session = new SessionContext
+{
+            Database = new AppDatabase(),
+            CredentialStore = new CredentialStore
+            {
+                ArgonSalt = new byte[32],
+                EncryptedCanary = [1]
+            },
+        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        var sessionProvider = new Mock<ISessionProvider>();
+        sessionProvider.Setup(provider => provider.GetSession()).Returns(session);
         var handlerMappings = new Mock<IHandlerMappingService>().Object;
+        var appIdValidator = new AppIdValidator();
+        var configSaveOrchestrator = new ConfigSaveOrchestrator(
+            sessionProvider.Object,
+            () => new InlineUiThreadInvoker(action => action()),
+            mockDb.Object,
+            new Mock<IAppConfigService>().Object,
+            handlerMappings);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        var mainStore = new MainGrantIntentStore(
+            sessionProvider.Object,
+            configSaveOrchestrator,
+            ownershipProjection);
+        var grantIntentStoreProvider = new GrantIntentStoreProvider(
+            mainStore,
+            configSaveOrchestrator,
+            ownershipProjection);
+        var grantIntentRepository = new GrantIntentRepository(grantIntentStoreProvider);
         var appConfigService = new AppConfigService(
             new Mock<ILoggingService>().Object,
-            new AppConfigIndex(grantTracker),
-            grantTracker,
+            new AppConfigIndex(ownershipProjection, appIdValidator),
+            ownershipProjection,
+            () => grantIntentStoreProvider,
             handlerMappings,
             mockDb.Object,
-            new AppConfigSaveHelper(grantTracker, handlerMappings, mockDb.Object),
-            new AppEntryIdGenerator());
-        var database = new AppDatabase();
+            new AppConfigSaveHelper(() => grantIntentStoreProvider, handlerMappings, mockDb.Object),
+            new AppEntryIdGenerator(),
+            appIdValidator);
+        var database = session.Database;
         var containerApp = new AppEntry
         {
             Name = "SandboxedApp",
@@ -149,13 +182,14 @@ public class AppContainerSerializationTests
         };
 
         mockDb
-            .Setup(d => d.LoadAppConfig(It.IsAny<string>(), It.IsAny<byte[]>()))
+            .Setup(d => d.LoadAppConfigFromPath(It.IsAny<string>(), It.IsAny<ISecureSecretSnapshotSource>()))
             .Returns(new AppConfig { Apps = [containerApp] });
 
         // Use a temp file path outside %LOCALAPPDATA%\RunFence\ to pass the path validation guard
         var configPath = Path.Combine(Path.GetTempPath(), $"test_{Guid.NewGuid():N}.ramc");
 
-        appConfigService.LoadAdditionalConfig(configPath, database, new byte[32]);
+        using var pinKey = TestSecretFactory.Create(32);
+        appConfigService.LoadAdditionalConfig(configPath, database, pinKey);
 
         // AccountSid must remain empty — container apps intentionally have empty AccountSid
         Assert.Equal("", containerApp.AccountSid);

@@ -24,7 +24,8 @@ public sealed class JobKeeperServiceDecompositionTests
             new Mock<IJobKeeperProcessDiscovery>().Object,
             new Mock<IJobKeeperProcessVerifier>().Object,
             new JobKeeperRegistry(),
-            terminator.Object);
+            terminator.Object,
+            TimeSpan.FromSeconds(10));
         var pipe = new NamedPipeServerStream($"test-{Guid.NewGuid():N}", PipeDirection.InOut);
         pipe.Dispose();
 
@@ -32,6 +33,28 @@ public sealed class JobKeeperServiceDecompositionTests
 
         Assert.Equal(0, result);
         terminator.Verify(t => t.Kill(1234), Times.Once);
+    }
+
+    [Fact]
+    public void WaitAndRegisterJobKeeper_TimeoutUsesInjectedValue()
+    {
+        var identity = Identity(isLow: false);
+        var terminator = new Mock<IJobKeeperProcessTerminator>();
+        var service = new JobKeeperService(
+            new Mock<ILoggingService>().Object,
+            new Mock<IJobKeeperIdentityStore>().Object,
+            new Mock<IJobKeeperPipeServerFactory>().Object,
+            new Mock<IJobKeeperProcessDiscovery>().Object,
+            new Mock<IJobKeeperProcessVerifier>().Object,
+            new JobKeeperRegistry(),
+            terminator.Object,
+            TimeSpan.FromMilliseconds(20));
+        using var pipe = new NamedPipeServerStream($"test-{Guid.NewGuid():N}", PipeDirection.InOut);
+
+        var result = service.WaitAndRegisterJobKeeper(identity, pipe, 4321, new SecurityIdentifier(Sid));
+
+        Assert.Equal(0, result);
+        terminator.Verify(t => t.Kill(4321), Times.Once);
     }
 
     [Fact]
@@ -56,7 +79,8 @@ public sealed class JobKeeperServiceDecompositionTests
             discovery.Object,
             verifier.Object,
             registry,
-            terminator.Object);
+            terminator.Object,
+            TimeSpan.FromSeconds(10));
 
         var result = service.TryReconnectExistingJobKeeper(Sid, false, new SecurityIdentifier(Sid));
 
@@ -80,7 +104,7 @@ public sealed class JobKeeperServiceDecompositionTests
         using var pipeClient = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut);
         verifier.Setup(v => v.Verify(pipeServer, 1234, It.IsAny<SecurityIdentifier>(), identity))
             .Returns(JobKeeperProcessVerificationResult.Failure("pipe client image mismatch: expected keeper."));
-        var connectTask = Task.Run(() => pipeClient.Connect());
+        var connectTask = Task.Run(() => pipeClient.Connect(1000));
         var service = new JobKeeperService(
             log.Object,
             identityStore.Object,
@@ -88,7 +112,8 @@ public sealed class JobKeeperServiceDecompositionTests
             new Mock<IJobKeeperProcessDiscovery>().Object,
             verifier.Object,
             registry,
-            terminator.Object);
+            terminator.Object,
+            TimeSpan.FromSeconds(10));
 
         var result = service.WaitAndRegisterJobKeeper(identity, pipeServer, 1234, new SecurityIdentifier(Sid));
 
@@ -120,7 +145,8 @@ public sealed class JobKeeperServiceDecompositionTests
             discovery.Object,
             new Mock<IJobKeeperProcessVerifier>().Object,
             new JobKeeperRegistry(),
-            terminator.Object);
+            terminator.Object,
+            TimeSpan.FromSeconds(10));
 
         var result = service.TryReconnectExistingJobKeeper(Sid, false, new SecurityIdentifier(Sid));
 
@@ -132,7 +158,7 @@ public sealed class JobKeeperServiceDecompositionTests
     }
 
     [Fact]
-    public void JobKeeperLaunchIpcClient_PipeFailure_RemovesRegisteredKeeper()
+    public async Task JobKeeperLaunchIpcClient_PipeFailure_RemovesRegisteredKeeper()
     {
         var registry = new JobKeeperRegistry();
         var terminator = new Mock<IJobKeeperProcessTerminator>();
@@ -142,11 +168,149 @@ public sealed class JobKeeperServiceDecompositionTests
 
         var client = new JobKeeperLaunchIpcClient(new Mock<ILoggingService>().Object, registry, terminator.Object);
 
-        var result = client.SendLaunchRequest(Sid, false, new JobKeeperLaunchRequest("app.exe", null, null, false, null));
+        var result = await client.SendLaunchRequestAsync(
+            Sid,
+            false,
+            new JobKeeperLaunchRequest("app.exe", null, null, false, false, null),
+            TimeSpan.FromMilliseconds(100),
+            CancellationToken.None);
 
         Assert.Equal(0, result);
         Assert.False(registry.Has(Sid, false));
         terminator.Verify(t => t.Kill(1234), Times.Once);
+    }
+
+    [Fact]
+    public async Task JobKeeperLaunchIpcClient_Timeout_RemovesRegisteredKeeper()
+    {
+        var registry = new JobKeeperRegistry();
+        var terminator = new Mock<IJobKeeperProcessTerminator>();
+        using var pair = ConnectedPipePair.Create();
+        registry.Register(Sid, false, new JobKeeperState(pair.Server, 1234));
+
+        var client = new JobKeeperLaunchIpcClient(new Mock<ILoggingService>().Object, registry, terminator.Object);
+
+        var result = await client.SendLaunchRequestAsync(
+            Sid,
+            false,
+            new JobKeeperLaunchRequest("app.exe", null, null, false, false, null),
+            TimeSpan.FromMilliseconds(100),
+            CancellationToken.None);
+
+        Assert.Equal(0, result);
+        Assert.False(registry.Has(Sid, false));
+        terminator.Verify(t => t.Kill(1234), Times.Once);
+    }
+
+    [Fact]
+    public async Task JobKeeperLaunchIpcClient_InvalidResponse_RemovesRegisteredKeeper()
+    {
+        var registry = new JobKeeperRegistry();
+        var terminator = new Mock<IJobKeeperProcessTerminator>();
+        using var pair = ConnectedPipePair.Create();
+        registry.Register(Sid, false, new JobKeeperState(pair.Server, 1234));
+
+        var responder = Task.Run(async () =>
+        {
+            _ = JobKeeperProtocol.ReadMessage<JobKeeperLaunchRequest>(pair.Client);
+            var invalidJson = System.Text.Encoding.UTF8.GetBytes("{bad");
+            await pair.Client.WriteAsync(BitConverter.GetBytes(invalidJson.Length));
+            await pair.Client.WriteAsync(invalidJson);
+            await pair.Client.FlushAsync();
+        });
+
+        var client = new JobKeeperLaunchIpcClient(new Mock<ILoggingService>().Object, registry, terminator.Object);
+        var result = await client.SendLaunchRequestAsync(
+            Sid,
+            false,
+            new JobKeeperLaunchRequest("app.exe", null, null, false, false, null),
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        await responder;
+        Assert.Equal(0, result);
+        Assert.False(registry.Has(Sid, false));
+        terminator.Verify(t => t.Kill(1234), Times.Once);
+    }
+
+    [Fact]
+    public async Task JobKeeperLaunchIpcClient_KeeperLaunchError_ThrowsDetailedWin32Message()
+    {
+        var registry = new JobKeeperRegistry();
+        var terminator = new Mock<IJobKeeperProcessTerminator>();
+        using var pair = ConnectedPipePair.Create();
+        registry.Register(Sid, false, new JobKeeperState(pair.Server, 1234));
+
+        var responder = Task.Run(() =>
+        {
+            _ = JobKeeperProtocol.ReadMessage<JobKeeperLaunchRequest>(pair.Client);
+            JobKeeperProtocol.WriteMessage(pair.Client, new JobKeeperLaunchResponse(0, 2));
+        });
+
+        var client = new JobKeeperLaunchIpcClient(new Mock<ILoggingService>().Object, registry, terminator.Object);
+
+        var ex = await Assert.ThrowsAnyAsync<InvalidOperationException>(() => client.SendLaunchRequestAsync(
+            Sid,
+            false,
+            new JobKeeperLaunchRequest(@"C:\Missing\app.exe", null, null, false, false, null),
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None));
+
+        await responder;
+        Assert.Contains(@"C:\Missing\app.exe", ex.Message);
+        Assert.Contains("Win32 error (0x00000002)", ex.Message);
+        Assert.Contains("cannot find the file", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(registry.Has(Sid, false));
+        terminator.Verify(t => t.Kill(It.IsAny<int>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task JobKeeperLaunchIpcClient_DoesNotHoldSyncRootDuringPipeIo()
+    {
+        var registry = new JobKeeperRegistry();
+        var terminator = new Mock<IJobKeeperProcessTerminator>();
+        using var pair = ConnectedPipePair.Create();
+        var state = new JobKeeperState(pair.Server, 1234);
+        registry.Register(Sid, false, state);
+        var requestRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseResponse = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var responder = Task.Run(async () =>
+        {
+            _ = JobKeeperProtocol.ReadMessage<JobKeeperLaunchRequest>(pair.Client);
+            requestRead.TrySetResult();
+            await releaseResponse.Task;
+            JobKeeperProtocol.WriteMessage(pair.Client, new JobKeeperLaunchResponse(4321, 0));
+        });
+
+        var client = new JobKeeperLaunchIpcClient(new Mock<ILoggingService>().Object, registry, terminator.Object);
+        var launchTask = client.SendLaunchRequestAsync(
+            Sid,
+            false,
+            new JobKeeperLaunchRequest("app.exe", null, null, false, false, null),
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        await requestRead.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+        var lockTaken = false;
+        try
+        {
+            Monitor.TryEnter(state.SyncRoot, TimeSpan.FromMilliseconds(100), ref lockTaken);
+            Assert.True(lockTaken);
+        }
+        finally
+        {
+            if (lockTaken)
+                Monitor.Exit(state.SyncRoot);
+        }
+
+        releaseResponse.TrySetResult();
+        var result = await launchTask;
+        await responder;
+
+        Assert.Equal(4321, result);
+        terminator.Verify(t => t.Kill(It.IsAny<int>()), Times.Never);
     }
 
     private static JobKeeperInstanceIdentity Identity(bool isLow) => new()
@@ -157,4 +321,33 @@ public sealed class JobKeeperServiceDecompositionTests
         PipeName = $"pipe-{Guid.NewGuid():N}",
         JobName = $"job-{Guid.NewGuid():N}",
     };
+
+    private sealed class ConnectedPipePair : IDisposable
+    {
+        private ConnectedPipePair(NamedPipeServerStream server, NamedPipeClientStream client)
+        {
+            Server = server;
+            Client = client;
+        }
+
+        public NamedPipeServerStream Server { get; }
+        public NamedPipeClientStream Client { get; }
+
+        public static ConnectedPipePair Create()
+        {
+            var pipeName = $"RunFenceTest_JobKeeper_{Guid.NewGuid():N}";
+            var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+            var client = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            var connectTask = server.WaitForConnectionAsync();
+            client.Connect(1000);
+            connectTask.GetAwaiter().GetResult();
+            return new ConnectedPipePair(server, client);
+        }
+
+        public void Dispose()
+        {
+            Client.Dispose();
+            Server.Dispose();
+        }
+    }
 }

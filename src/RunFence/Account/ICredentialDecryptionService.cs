@@ -9,14 +9,14 @@ public interface ICredentialDecryptionService
     LaunchCredentials? DecryptAndResolve(
         string accountSid,
         CredentialStore credentialStore,
-        byte[] pinDerivedKey,
+        ReadOnlySpan<byte> pinDerivedKey,
         IReadOnlyDictionary<string, string>? sidNames,
         out CredentialLookupStatus status);
 
     CredentialLookupStatus TryDecryptCredential(
         string accountSid,
         CredentialStore credentialStore,
-        byte[] pinDerivedKey,
+        ReadOnlySpan<byte> pinDerivedKey,
         out CredentialEntry? credEntry,
         out ProtectedString? password);
 

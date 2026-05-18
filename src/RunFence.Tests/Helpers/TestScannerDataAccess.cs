@@ -25,8 +25,7 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
     private readonly List<RegistryDllEntry> _networkProviderEntries = [];
     private string _sharedWrapperScriptsDir = "";
     private readonly Dictionary<string, List<string>> _logonScriptPaths = new(StringComparer.OrdinalIgnoreCase);
-    private readonly List<string> _ifeoSubkeyNames = [];
-    private readonly Dictionary<string, string?> _ifeoDebuggerPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<IfeoSubkeyInfo> _ifeoSubkeys = [];
 
     private readonly Dictionary<string, DirectorySecurity> _dirSecurities = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, FileSecurity> _fileSecurities = new(StringComparer.OrdinalIgnoreCase);
@@ -42,8 +41,9 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
     private readonly Dictionary<(string Hive, string Path), List<string>> _registryAutorunPaths =
         new(CaseInsensitiveTupleComparer.Instance);
 
-    private readonly Dictionary<string, string> _shortcutTargets = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ShortcutTargetInfo> _shortcutTargets = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, RegistrySecurity> _serviceRegSecurities = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, RegistrySecurity> _serviceParametersRegSecurities = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<(string Name, string ImagePath, string Expanded, string? Dll)> _services = [];
     private List<(string Sid, string? ProfilePath)>? _allUserProfiles;
     private readonly Dictionary<string, HashSet<string>?> _groupMembers = new(StringComparer.OrdinalIgnoreCase);
@@ -95,14 +95,17 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
     public void AddRegistryAutorunPaths((string Hive, string Path) key, List<string> paths) =>
         _registryAutorunPaths[key] = paths;
 
-    public void AddShortcutTarget(string lnkPath, string targetPath) =>
-        _shortcutTargets[lnkPath] = targetPath;
+    public void AddShortcutTarget(string lnkPath, string targetPath, string? arguments = null, string? workingDirectory = null) =>
+        _shortcutTargets[lnkPath] = new ShortcutTargetInfo(targetPath, arguments, workingDirectory);
 
     public void AddServiceEntry(string name, string imagePath, string expanded, string? dll = null) =>
         _services.Add((name, imagePath, expanded, dll));
 
     public void AddServiceRegistryKeySecurity(string name, RegistrySecurity security) =>
         _serviceRegSecurities[name] = security;
+
+    public void AddServiceParametersRegistryKeySecurity(string name, RegistrySecurity security) =>
+        _serviceParametersRegSecurities[name] = security;
 
     public void SetWinlogonRegistryKeySecurity(RegistrySecurity security) =>
         _winlogonKeySecurity = security;
@@ -125,8 +128,18 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
     public void SetSharedWrapperScriptsDir(string dir) => _sharedWrapperScriptsDir = dir;
 
     public void SetGpScriptsDir(string userSid, string dir) => _gpScriptsDirs[userSid] = dir;
-    public void AddIfeoSubkeyName(string name) => _ifeoSubkeyNames.Add(name);
-    public void SetIfeoDebuggerPath(string exeName, string? path) => _ifeoDebuggerPaths[exeName] = path;
+    public void AddIfeoSubkeyName(string name) =>
+        _ifeoSubkeys.Add(new IfeoSubkeyInfo(
+            name,
+            $@"HKLM\...\Image File Execution Options\{name}",
+            $@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\{name}",
+            null,
+            null,
+            null));
+
+    public void SetIfeoDebuggerPath(string exeName, string? path) =>
+        UpdateIfeoSubkey(exeName, info => info with { DebuggerPath = path });
+
     public void SetAllUserProfiles(List<(string Sid, string? ProfilePath)> profiles) => _allUserProfiles = profiles;
 
     private int? _accountLockoutThreshold;
@@ -205,14 +218,24 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
         return paths;
     }
 
-    public List<string> GetIfeoSubkeyNames() => _ifeoSubkeyNames;
+    public List<IfeoSubkeyInfo> GetIfeoSubkeys() => _ifeoSubkeys.ToList();
 
-    public string? GetIfeoDebuggerPath(string exeName) =>
-        _ifeoDebuggerPaths.GetValueOrDefault(exeName);
+    public void SetIfeoVerifierDlls(string exeName, string? dlls) =>
+        UpdateIfeoSubkey(exeName, info => info with { VerifierDlls = dlls });
 
-    private readonly Dictionary<string, string?> _ifeoVerifierDlls = new(StringComparer.OrdinalIgnoreCase);
-    public void SetIfeoVerifierDlls(string exeName, string? dlls) => _ifeoVerifierDlls[exeName] = dlls;
-    public string? GetIfeoVerifierDlls(string exeName) => _ifeoVerifierDlls.GetValueOrDefault(exeName);
+    public void SetIfeoSubkeySecurity(string exeName, RegistrySecurity security) =>
+        UpdateIfeoSubkey(exeName, info => info with { Security = security });
+
+    public void AddIfeoWow6432Subkey(string exeName, string? debuggerPath = null, string? verifierDlls = null, RegistrySecurity? security = null)
+    {
+        _ifeoSubkeys.Add(new IfeoSubkeyInfo(
+            exeName,
+            $@"HKLM\...\Wow6432Node\Image File Execution Options\{exeName}",
+            $@"HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\{exeName}",
+            security,
+            debuggerPath,
+            verifierDlls));
+    }
 
     public List<AppInitDllEntry> GetAppInitDllEntries() =>
         _appInitDllEntries.Count > 0 ? _appInitDllEntries : [];
@@ -229,10 +252,13 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
     public string GetMachineGpUserScriptsDir() => "";
 
     public List<ServiceInfo> GetAutoStartServices() =>
-        _services.Select(s => new ServiceInfo(s.Name, s.ImagePath, s.Expanded, s.Dll)).ToList();
-
-    public RegistrySecurity? GetServiceRegistryKeySecurity(string serviceName) =>
-        _serviceRegSecurities.GetValueOrDefault(serviceName);
+        _services.Select(s => new ServiceInfo(
+            s.Name,
+            s.ImagePath,
+            s.Expanded,
+            s.Dll,
+            _serviceRegSecurities.GetValueOrDefault(s.Name),
+            _serviceParametersRegSecurities.GetValueOrDefault(s.Name))).ToList();
 
     public RegistrySecurity? GetWinlogonRegistryKeySecurity() => _winlogonKeySecurity;
     public List<string> GetWinlogonExePaths() => _winlogonExePaths;
@@ -292,7 +318,7 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
         return [];
     }
 
-    public string? ResolveShortcutTarget(string lnkPath)
+    public ShortcutTargetInfo? ResolveShortcutTarget(string lnkPath)
     {
         return _shortcutTargets.GetValueOrDefault(lnkPath);
     }
@@ -321,5 +347,20 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
         if (hive == Registry.Users)
             return "HKU";
         return hive.Name;
+    }
+
+    private void UpdateIfeoSubkey(string exeName, Func<IfeoSubkeyInfo, IfeoSubkeyInfo> updater)
+    {
+        for (int i = 0; i < _ifeoSubkeys.Count; i++)
+        {
+            if (!_ifeoSubkeys[i].ExeName.Equals(exeName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            _ifeoSubkeys[i] = updater(_ifeoSubkeys[i]);
+            return;
+        }
+
+        AddIfeoSubkeyName(exeName);
+        UpdateIfeoSubkey(exeName, updater);
     }
 }

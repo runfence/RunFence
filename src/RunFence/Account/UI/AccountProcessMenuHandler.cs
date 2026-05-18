@@ -1,5 +1,4 @@
 using RunFence.Infrastructure;
-using DiagProcess = System.Diagnostics.Process;
 
 namespace RunFence.Account.UI;
 
@@ -9,7 +8,8 @@ namespace RunFence.Account.UI;
 /// </summary>
 public class AccountProcessMenuHandler(
     IShellHelper shellHelper,
-    ProcessCommandLineFormatter commandLineFormatter)
+    ProcessCommandLineFormatter commandLineFormatter,
+    IProcessTerminationService processTerminationService)
 {
     private DataGridView _grid = null!;
     private IAccountsPanelOperationContext _context = null!;
@@ -108,23 +108,19 @@ public class AccountProcessMenuHandler(
 
     private void CloseProcess(ProcessRow pr)
     {
-        try
+        var generation = _context.BeginProcessRefreshGeneration();
+        var owner = _context.OwnerControl.FindForm();
+        var result = processTerminationService.CloseProcess(pr.Process.Pid, pr.Process.StartTimeUtcTicks, pr.OwnerSid);
+        if (result.Status == ProcessActionStatus.StaleProcess)
         {
-            using var process = DiagProcess.GetProcessById(pr.Process.Pid);
-            process.CloseMainWindow();
+            _context.TriggerProcessRefresh(generation, 1000);
+            return;
         }
-        catch (ArgumentException)
-        {
-            /* already exited */
-        }
-        catch (Exception ex)
-        {
-            var owner = _context.OwnerControl.FindForm();
-            MessageBox.Show(owner, $"Failed to close process: {ex.Message}", "Close Process",
+        if (result.Status is ProcessActionStatus.Failed or ProcessActionStatus.AccessDenied)
+            MessageBox.Show(owner, $"Failed to close process: {result.ErrorMessage ?? "Unknown error."}", "Close Process",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
 
-        _context.TriggerProcessRefresh(1000);
+        _context.TriggerProcessRefresh(generation, 1000);
     }
 
     private void OnKillProcessClick(object? sender, EventArgs e)
@@ -143,23 +139,21 @@ public class AccountProcessMenuHandler(
                 MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return;
 
-        try
+        var generation = _context.BeginProcessRefreshGeneration();
+        var result = processTerminationService.KillProcess(pr.Process.Pid, pr.Process.StartTimeUtcTicks, pr.OwnerSid);
+        if (result.Status == ProcessActionStatus.StaleProcess)
         {
-            using var process = DiagProcess.GetProcessById(pr.Process.Pid);
-            process.Kill();
+            _context.TriggerProcessRefresh(generation);
+            return;
         }
-        catch (ArgumentException)
+        if (result.Status is ProcessActionStatus.Failed or ProcessActionStatus.AccessDenied)
         {
-            /* already exited */
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(owner, $"Failed to kill process: {ex.Message}", "Kill Process",
+            MessageBox.Show(owner, $"Failed to kill process: {result.ErrorMessage ?? "Unknown error."}", "Kill Process",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
-        _context.TriggerProcessRefresh();
+        _context.TriggerProcessRefresh(generation);
     }
 
     private void OnProcessPropertiesClick(object? sender, EventArgs e)

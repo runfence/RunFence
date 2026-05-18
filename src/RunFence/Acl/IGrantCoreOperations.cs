@@ -16,7 +16,7 @@ public interface IGrantCoreOperations
     /// <see cref="InvalidOperationException"/>.
     /// </summary>
     GrantAddResult AddGrant(string sid, string path, bool isDeny,
-        SavedRightsState? savedRights = null, string? ownerSid = null);
+        SavedRightsState? savedRights = null, string? ownerSid = null, bool? isFolderOverride = null);
 
     /// <summary>
     /// Removes the allow or deny ACE for <paramref name="sid"/> on <paramref name="path"/>
@@ -32,12 +32,12 @@ public interface IGrantCoreOperations
     /// the NTFS ACE. Updates the owner if <paramref name="ownerSid"/> is provided.
     /// </summary>
     void UpdateGrant(string sid, string path, bool isDeny,
-        SavedRightsState savedRights, string? ownerSid = null);
+        SavedRightsState savedRights, string? ownerSid = null, bool? isFolderOverride = null);
 
     /// <summary>
     /// Re-applies the NTFS ACE for an existing grant entry (does not change the DB).
     /// </summary>
-    void FixGrant(string sid, string path, bool isDeny);
+    void FixGrant(string sid, string path, bool isDeny, bool? isFolderOverride = null);
 
     /// <summary>
     /// Removes all grant (non-traverse) entries for <paramref name="sid"/>, reverting NTFS ACEs

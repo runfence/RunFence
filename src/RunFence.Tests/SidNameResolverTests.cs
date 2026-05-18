@@ -205,8 +205,9 @@ public class SidNameResolverTests
     [Fact]
     public void ResolveDomainAndUsername_CurrentAccount_ReturnsEmptyDomainAndEnvironmentUsername()
     {
+        var currentUserSid = SidResolutionHelper.GetCurrentUserSid();
         var (domain, username) = SidNameResolver.ResolveDomainAndUsername(
-            FakeSid, isCurrentAccount: true, NullResolver(), null);
+            currentUserSid, isCurrentAccount: true, NullResolver(), null);
         Assert.Equal(string.Empty, domain);
         Assert.Equal(Environment.UserName, username);
     }

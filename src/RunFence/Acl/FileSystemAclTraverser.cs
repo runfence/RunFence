@@ -5,7 +5,7 @@ namespace RunFence.Acl;
 
 public readonly record struct AclTraversalEntry(string Path, bool IsDirectory, FileSystemSecurity Security);
 
-public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTraverser
+public class FileSystemAclTraverser(ILoggingService log, IAclAccessor aclAccessor) : IFileSystemAclTraverser
 {
     public IEnumerable<AclTraversalEntry> Traverse(
         IReadOnlyList<string> rootPaths,
@@ -13,12 +13,12 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
         CancellationToken ct)
     {
         long scanned = 0;
-        var stack = new Stack<string>();
+        var stack = new Stack<(string Path, bool IsDirectory)>();
 
         foreach (var root in rootPaths)
         {
-            if (Directory.Exists(root))
-                stack.Push(root);
+            if (aclAccessor.PathExists(root, out bool isDirectory))
+                stack.Push((root, isDirectory));
         }
 
         while (stack.Count > 0)
@@ -27,20 +27,21 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
                 ct.ThrowIfCancellationRequested();
 
             var current = stack.Pop();
+            if (!aclAccessor.PathExists(current.Path, out bool currentIsDirectory))
+                continue;
 
             FileSystemSecurity? dirSecurity = null;
             try
             {
-                var dirInfo = new DirectoryInfo(current);
-                dirSecurity = dirInfo.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+                dirSecurity = aclAccessor.GetSecurity(current.Path);
             }
             catch (UnauthorizedAccessException)
             {
-                log.Warn($"Access denied scanning: {current}");
+                log.Warn($"Access denied scanning: {current.Path}");
             }
             catch (Exception ex)
             {
-                log.Warn($"Error scanning {current}: {ex.Message}");
+                log.Warn($"Error scanning {current.Path}: {ex.Message}");
             }
 
             if (dirSecurity != null)
@@ -48,17 +49,20 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
                 scanned++;
                 if (scanned % 500 == 0)
                     progress.Report(scanned);
-                yield return new AclTraversalEntry(current, true, dirSecurity);
+                yield return new AclTraversalEntry(current.Path, currentIsDirectory, dirSecurity);
             }
+
+            if (!currentIsDirectory)
+                continue;
 
             string[]? files = null;
             try
             {
-                files = Directory.GetFiles(current);
+                files = Directory.GetFiles(current.Path);
             }
             catch (Exception ex)
             {
-                log.Debug($"ACL access failed for '{current}': {ex.Message}");
+                log.Debug($"ACL access failed for '{current.Path}': {ex.Message}");
             }
 
             if (files != null)
@@ -71,8 +75,7 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
                     FileSystemSecurity? fileSecurity = null;
                     try
                     {
-                        var fileInfo = new FileInfo(file);
-                        fileSecurity = fileInfo.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+                        fileSecurity = aclAccessor.GetSecurity(file);
                     }
                     catch (Exception ex)
                     {
@@ -92,11 +95,11 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
             string[]? subdirs = null;
             try
             {
-                subdirs = Directory.GetDirectories(current);
+                subdirs = Directory.GetDirectories(current.Path);
             }
             catch (Exception ex)
             {
-                log.Debug($"ACL access failed for '{current}': {ex.Message}");
+                log.Debug($"ACL access failed for '{current.Path}': {ex.Message}");
             }
 
             if (subdirs != null)
@@ -115,7 +118,7 @@ public class FileSystemAclTraverser(ILoggingService log) : IFileSystemAclTravers
                         continue;
                     }
 
-                    stack.Push(sub);
+                    stack.Push((sub, true));
                 }
             }
         }

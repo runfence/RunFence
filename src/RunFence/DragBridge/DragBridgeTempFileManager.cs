@@ -9,61 +9,59 @@ namespace RunFence.DragBridge;
 public class DragBridgeTempFileManager(
     ILoggingService log,
     IPathGrantService pathGrantService,
-    ISessionSaver sessionSaver,
-    IUiThreadInvoker uiThreadInvoker,
     ITempDirectoryAclHelper aclHelper,
     string tempRoot)
     : IDragBridgeTempFileManager
 {
     private string TempRoot { get; } = tempRoot;
 
-    public string CreateTempFolder(string targetSid, string? containerSid = null)
+    public DragBridgeTempFolderResult CreateTempFolder(string targetSid, string? containerSid = null)
     {
-        Directory.CreateDirectory(TempRoot);
-
-        // Ensure each involved SID can traverse TempRoot and all ancestors to reach their
-        // per-session subfolder. This is needed for accounts not in BUILTIN\Users
-        // (e.g. AppContainer package SIDs) that wouldn't have traverse rights from default
-        // ProgramData ACL inheritance. Full ancestor walk covers paths with broken inheritance.
-        EnsureTraverseAccess(TempRoot, targetSid);
-        if (containerSid != null)
-            EnsureTraverseAccess(TempRoot, containerSid);
-
-        var tempFolder = Path.Combine(TempRoot, Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempFolder);
-
-        var targetIdentity = new SecurityIdentifier(targetSid);
-        if (containerSid != null)
+        string? tempFolder = null;
+        try
         {
-            var containerIdentity = new SecurityIdentifier(containerSid);
-            aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
-                (targetIdentity, FileSystemRights.ReadAndExecute),
-                (containerIdentity, FileSystemRights.ReadAndExecute));
-        }
-        else
-        {
-            aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
-                (targetIdentity, FileSystemRights.ReadAndExecute));
-        }
+            Directory.CreateDirectory(TempRoot);
 
-        return tempFolder;
+            // Ensure each involved SID can traverse TempRoot and all ancestors to reach their
+            // per-session subfolder. This is needed for accounts not in BUILTIN\Users
+            // (e.g. AppContainer package SIDs) that wouldn't have traverse rights from default
+            // ProgramData ACL inheritance. Full ancestor walk covers paths with broken inheritance.
+            EnsureTraverseAccess(TempRoot, targetSid);
+            if (containerSid != null)
+                EnsureTraverseAccess(TempRoot, containerSid);
+
+            tempFolder = Path.Combine(TempRoot, Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempFolder);
+
+            var targetIdentity = new SecurityIdentifier(targetSid);
+            if (containerSid != null)
+            {
+                var containerIdentity = new SecurityIdentifier(containerSid);
+                aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
+                    (targetIdentity, FileSystemRights.ReadAndExecute),
+                    (containerIdentity, FileSystemRights.ReadAndExecute));
+            }
+            else
+            {
+                aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
+                    (targetIdentity, FileSystemRights.ReadAndExecute));
+            }
+
+            return new DragBridgeTempFolderResult(true, tempFolder, null);
+        }
+        catch (Exception ex)
+        {
+            if (!string.IsNullOrEmpty(tempFolder))
+                TryDeleteTempFolder(tempFolder);
+
+            log.Warn($"DragBridgeTempFileManager: failed to create temp folder: {ex.Message}");
+            return new DragBridgeTempFolderResult(false, null, ex.Message);
+        }
     }
 
     private void EnsureTraverseAccess(string dirPath, string sid)
     {
-        try
-        {
-            var (modified, _) = pathGrantService.AddTraverse(sid, dirPath);
-            if (modified)
-            {
-                // Marshal to UI thread — SaveConfig calls ProtectedBuffer.Unprotect which is not thread-safe.
-                uiThreadInvoker.Invoke(() => sessionSaver.SaveConfig());
-            }
-        }
-        catch (Exception ex)
-        {
-            log.Warn($"DragBridgeTempFileManager: traverse grant failed for '{sid}' on '{dirPath}': {ex.Message}");
-        }
+        pathGrantService.AddTraverse(sid, dirPath);
     }
 
     /// <summary>
@@ -71,9 +69,10 @@ public class DragBridgeTempFileManager(
     /// for each successfully copied item (collision-renamed paths are returned as-is).
     /// Directories are copied recursively.
     /// </summary>
-    public List<string> CopyFilesToTemp(string tempFolder, IReadOnlyList<string> filePaths)
+    public DragBridgeTempFileResult CopyFilesToTemp(string tempFolder, IReadOnlyList<string> filePaths)
     {
-        var result = new List<string>(filePaths.Count);
+        var tempPaths = new List<string>(filePaths.Count);
+        var entries = new List<DragBridgeTempFileEntryResult>(filePaths.Count);
         foreach (var src in filePaths)
         {
             try
@@ -83,26 +82,52 @@ public class DragBridgeTempFileManager(
                     var dirName = Path.GetFileName(src.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                     var destDir = ResolveCollisionFreeDestination(tempFolder, dirName, isDirectory: true);
                     CopyDirectoryRecursive(src, destDir);
-                    result.Add(destDir);
+                    tempPaths.Add(destDir);
+                    entries.Add(new DragBridgeTempFileEntryResult(src, destDir,
+                        DragBridgeTempFileCopyStatus.Succeeded, DragBridgeTempFileGrantStatus.NotAttempted,
+                        DragBridgeTempFileRollbackStatus.NotRequired, null));
                 }
                 else if (File.Exists(src))
                 {
                     var dest = ResolveCollisionFreeDestination(tempFolder, Path.GetFileName(src), isDirectory: false);
                     File.Copy(src, dest);
-                    result.Add(dest);
+                    tempPaths.Add(dest);
+                    entries.Add(new DragBridgeTempFileEntryResult(src, dest,
+                        DragBridgeTempFileCopyStatus.Succeeded, DragBridgeTempFileGrantStatus.NotAttempted,
+                        DragBridgeTempFileRollbackStatus.NotRequired, null));
                 }
                 else
                 {
                     log.Warn($"DragBridgeTempFileManager: source path no longer exists, skipping: '{src}'");
+                    entries.Add(new DragBridgeTempFileEntryResult(src, null,
+                        DragBridgeTempFileCopyStatus.SourceMissing, DragBridgeTempFileGrantStatus.NotAttempted,
+                        DragBridgeTempFileRollbackStatus.NotRequired, "Source path missing."));
                 }
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                log.Warn($"DragBridgeTempFileManager: failed to copy '{src}': {ex.Message}");
+                entries.Add(new DragBridgeTempFileEntryResult(src, null,
+                    DragBridgeTempFileCopyStatus.AccessDenied, DragBridgeTempFileGrantStatus.NotAttempted,
+                    DragBridgeTempFileRollbackStatus.NotRequired, ex.Message));
             }
             catch (Exception ex)
             {
                 log.Warn($"DragBridgeTempFileManager: failed to copy '{src}': {ex.Message}");
+                entries.Add(new DragBridgeTempFileEntryResult(src, null,
+                    DragBridgeTempFileCopyStatus.Failed, DragBridgeTempFileGrantStatus.NotAttempted,
+                    DragBridgeTempFileRollbackStatus.NotRequired, ex.Message));
             }
         }
 
-        return result;
+        var succeeded = entries.All(e => e.CopyStatus == DragBridgeTempFileCopyStatus.Succeeded);
+        if (!succeeded)
+        {
+            TryDeleteTempFolder(tempFolder);
+            tempPaths.Clear();
+        }
+
+        return new DragBridgeTempFileResult(succeeded, entries, tempPaths);
     }
 
     private static string ResolveCollisionFreeDestination(string parentFolder, string name, bool isDirectory)
@@ -181,5 +206,17 @@ public class DragBridgeTempFileManager(
         catch
         {
         } // best-effort overall
+    }
+
+    private static void TryDeleteTempFolder(string tempFolder)
+    {
+        try
+        {
+            if (Directory.Exists(tempFolder))
+                Directory.Delete(tempFolder, recursive: true);
+        }
+        catch
+        {
+        }
     }
 }

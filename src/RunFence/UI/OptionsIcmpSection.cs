@@ -43,7 +43,6 @@ public class OptionsIcmpSection(
             try
             {
                 globalIcmpSettingsApplier.ApplyGlobalIcmpSetting(snapshot);
-                uiThreadInvoker.BeginInvoke(_saveSettings);
             }
             catch (Exception ex)
             {
@@ -52,15 +51,14 @@ public class OptionsIcmpSection(
                 {
                     if (_blockIcmpCheckBox.IsDisposed)
                         return;
-                    _blockIcmpCheckBox.CheckedChanged -= OnBlockIcmpChanged;
-                    _blockIcmpCheckBox.Checked = !newValue;
-                    appStateProvider.Database.Settings.BlockIcmpWhenInternetBlocked = !newValue;
-                    _blockIcmpCheckBox.CheckedChanged += OnBlockIcmpChanged;
                     _saveSettings();
-                    MessageBox.Show($"Failed to apply ICMP block setting: {ex.Message}", "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show($"ICMP block setting was saved, but enforcement will retry: {ex.Message}", "RunFence",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 });
+                return;
             }
+
+            uiThreadInvoker.BeginInvoke(_saveSettings);
         });
     }
 }

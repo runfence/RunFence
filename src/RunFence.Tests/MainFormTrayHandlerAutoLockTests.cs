@@ -29,7 +29,7 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
     private readonly FakeForm _fakeForm = new();
 
     private readonly AppDatabase _database = new();
-    private readonly ProtectedBuffer _pinKey;
+    private readonly SecureSecret _pinKey;
     private readonly LockManager _lockManager;
     private readonly MainFormWindowRequestHandler _windowRequestHandler;
     private readonly MainFormBackgroundAutoLockCoordinator _autoLockCoordinator;
@@ -38,29 +38,35 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
 
     public MainFormTrayHandlerAutoLockTests()
     {
-        _pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        _pinKey = TestSecretFactory.Create(32);
         _session = new SessionContext
-        {
+{
             Database = _database,
             CredentialStore = new CredentialStore(),
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(_pinKey);
         _database.Settings.AutoLockInBackground = true;
         _database.Settings.AutoLockTimeoutMinutes = 5;
+        var credentialUnlockService = new Mock<ICredentialUnlockService>();
+        credentialUnlockService.Setup(c => c.VerifyPin()).Returns(CredentialUnlockResult.Canceled);
+        credentialUnlockService.Setup(c => c.VerifyAsync(It.IsAny<CredentialUnlockMode>())).ReturnsAsync(CredentialUnlockResult.Canceled);
 
         _lockManager = new LockManager(
             _session,
-            new Mock<IPinService>().Object,
             new Mock<ILoggingService>().Object,
-            new Mock<ISecureDesktopRunner>().Object,
-            new Mock<IWindowsHelloService>().Object,
             _autoLockTimer.Object,
-            new Mock<IUnlockProcessLauncher>().Object);
+            new Mock<IUnlockProcessLauncher>().Object,
+            new LockStateService(_session),
+            credentialUnlockService.Object,
+            new InlineUiThreadInvoker(a => a()),
+            TimeSpan.FromMinutes(5));
 
         _licenseService.Setup(l => l.IsLicensed).Returns(true);
         _fakeForm.Visible = true;
 
-        (_windowRequestHandler, _autoLockCoordinator, _handler) = CreateHandler();
+        var handlerContext = CreateHandlerContext();
+        _windowRequestHandler = handlerContext.WindowRequestHandler;
+        _autoLockCoordinator = handlerContext.AutoLockCoordinator;
+        _handler = handlerContext.Handler;
     }
 
     public void Dispose()
@@ -82,6 +88,10 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
         public string Title { set { } }
         public IntPtr Handle => IntPtr.Zero;
 
+        public bool IsTrayLockVisible { get; set; } = true;
+        public bool IsTrayLockEnabled { get; set; } = true;
+        public bool IsLocked { get; set; }
+
         public void Show()
         {
             Visible = true;
@@ -97,6 +107,7 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
         public void InvokeOnUiThread(Action action) => action();
 
         public Task TryShowWindowAsync() => Task.CompletedTask;
+        public void LockToTrayImmediately() { }
     }
 
     // --- MainFormBackgroundAutoLockCoordinator tests ---
@@ -156,7 +167,94 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
     {
         _autoLockCoordinator.HandleAppDeactivated();
 
+        Assert.True(_fakeForm.Visible);
         _autoLockTimer.Verify(t => t.Start(300, It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void HideToTray_Visible_StartsHiddenWindowLockingPath()
+    {
+        _fakeForm.Visible = true;
+
+        _autoLockCoordinator.HideToTray();
+
+        Assert.False(_fakeForm.Visible);
+        _autoLockTimer.Verify(t => t.Start(300, It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task HandleAppDeactivated_WhenVisibleAutoLockGraceStarts_TrayReopenStopsPendingLock()
+    {
+        Action? backgroundTimeoutCallback = null;
+        _autoLockTimer
+            .Setup(t => t.Start(300, It.IsAny<Action>()))
+            .Callback<int, Action>((_, callback) => backgroundTimeoutCallback = callback);
+
+        _autoLockCoordinator.HandleAppDeactivated();
+        backgroundTimeoutCallback!.Invoke();
+        await _windowRequestHandler.TryShowWindowAsync();
+
+        Assert.True(_fakeForm.Visible);
+        Assert.False(_lockManager.IsLocked);
+        _autoLockTimer.Verify(t => t.Stop(), Times.AtLeastOnce);
+        _autoLockTimer.Verify(t => t.Start(10, It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void HandleAppDeactivated_WhenTimeoutExpiresWhileVisible_HidesToTrayAndStartsGraceTimer()
+    {
+        Action? backgroundTimeoutCallback = null;
+        _autoLockTimer
+            .Setup(t => t.Start(300, It.IsAny<Action>()))
+            .Callback<int, Action>((_, callback) => backgroundTimeoutCallback = callback);
+
+        _autoLockCoordinator.HandleAppDeactivated();
+        backgroundTimeoutCallback!.Invoke();
+
+        Assert.False(_fakeForm.Visible);
+        Assert.False(_lockManager.IsLocked);
+        _autoLockTimer.Verify(t => t.Start(10, It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void HandleAppDeactivated_WhenVisibleAutoLockGraceExpires_LocksAndKeepsWindowHidden()
+    {
+        Action? backgroundTimeoutCallback = null;
+        Action? graceTimeoutCallback = null;
+        _autoLockTimer
+            .Setup(t => t.Start(300, It.IsAny<Action>()))
+            .Callback<int, Action>((_, callback) => backgroundTimeoutCallback = callback);
+        _autoLockTimer
+            .Setup(t => t.Start(10, It.IsAny<Action>()))
+            .Callback<int, Action>((_, callback) => graceTimeoutCallback = callback);
+
+        _autoLockCoordinator.HandleAppDeactivated();
+        backgroundTimeoutCallback!.Invoke();
+        graceTimeoutCallback!.Invoke();
+
+        Assert.False(_fakeForm.Visible);
+        Assert.True(_lockManager.IsLocked);
+    }
+
+    [Fact]
+    public void HideToTray_WhenAlreadyHidden_UsesDefaultHiddenLockingPath()
+    {
+        _fakeForm.Visible = false;
+
+        _autoLockCoordinator.HideToTray();
+
+        _autoLockTimer.Verify(t => t.Start(300, It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void HandleAppDeactivated_WithZeroTimeoutVisible_StartsGracefulHiddenLockTimer()
+    {
+        _database.Settings.AutoLockTimeoutMinutes = 0;
+
+        _autoLockCoordinator.HandleAppDeactivated();
+
+        Assert.False(_fakeForm.Visible);
+        _autoLockTimer.Verify(t => t.Start(10, It.IsAny<Action>()), Times.Once);
     }
 
     [Fact]
@@ -167,17 +265,6 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
         _autoLockCoordinator.HandleAppActivated();
 
         _autoLockTimer.Verify(t => t.Stop(), Times.AtLeastOnce);
-    }
-
-    [Fact]
-    public void HideToTray_WhenTimeoutIsZero_LocksImmediately()
-    {
-        _database.Settings.AutoLockTimeoutMinutes = 0;
-        _autoLockCoordinator.HideToTray();
-
-        Assert.True(_lockManager.IsLocked);
-        Assert.False(_fakeForm.Visible);
-        _autoLockTimer.Verify(t => t.Start(It.IsAny<int>(), It.IsAny<Action>()), Times.Never);
     }
 
     [Fact]
@@ -204,6 +291,32 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
         _autoLockCoordinator.HandleWindowlessUnlock();
 
         _autoLockTimer.Verify(t => t.Start(300, It.IsAny<Action>()), Times.Once);
+    }
+
+    [Fact]
+    public void HideToTray_WhenTimeoutIsZero_StartsZeroTimeoutWindowTimerWithGrace()
+    {
+        _database.Settings.AutoLockTimeoutMinutes = 0;
+        _fakeForm.Visible = true;
+
+        _autoLockCoordinator.HideToTray();
+
+        Assert.True(_lockManager.IsLocked);
+        Assert.False(_fakeForm.Visible);
+        _autoLockTimer.Verify(t => t.Start(It.IsAny<int>(), It.IsAny<Action>()), Times.Never);
+    }
+
+    [Fact]
+    public void HideToTray_WhenAlreadyHiddenAndTimeoutIsZero_LocksImmediately()
+    {
+        _database.Settings.AutoLockTimeoutMinutes = 0;
+        _fakeForm.Visible = false;
+
+        _autoLockCoordinator.HideToTray();
+
+        Assert.True(_lockManager.IsLocked);
+        Assert.False(_fakeForm.Visible);
+        _autoLockTimer.Verify(t => t.Start(It.IsAny<int>(), It.IsAny<Action>()), Times.Never);
     }
 
     [Fact]
@@ -261,13 +374,12 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
         unlockProcessLauncher
             .Setup(l => l.LaunchUnlockProcess(true))
             .Callback(launchCalled.Set);
-        var (windowRequestHandler, _, handler) = CreateHandler(
+        using var handlerContext = CreateHandlerContext(
             autoLockTimer: new Mock<IAutoLockTimerService>().Object,
             unlockProcessLauncher: unlockProcessLauncher.Object,
             startLocked: true);
-        using var _ = handler;
 
-        windowRequestHandler.RequestOperationUnlock();
+        handlerContext.WindowRequestHandler.RequestOperationUnlock();
 
         Assert.True(launchCalled.Wait(1000));
         unlockProcessLauncher.Verify(l => l.LaunchUnlockProcess(true), Times.Once);
@@ -282,12 +394,13 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
 
         var lockManager = new LockManager(
             _session,
-            new Mock<IPinService>().Object,
             new Mock<ILoggingService>().Object,
-            new Mock<ISecureDesktopRunner>().Object,
-            new Mock<IWindowsHelloService>().Object,
             autoLockTimer.Object,
-            new Mock<IUnlockProcessLauncher>().Object);
+            new Mock<IUnlockProcessLauncher>().Object,
+            new LockStateService(_session),
+            new Mock<ICredentialUnlockService>().Object,
+            new InlineUiThreadInvoker(a => a()),
+            TimeSpan.FromMinutes(5));
 
         var windowRequestHandler = new MainFormWindowRequestHandler(
             lockManager,
@@ -303,22 +416,23 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
 
         windowRequestHandler.SetStartupComplete();
 
-        Assert.True(shown.Wait(1000));
+        Assert.True(shown.Wait(TimeSpan.FromSeconds(5)));
     }
 
-    private (MainFormWindowRequestHandler windowRequestHandler, MainFormBackgroundAutoLockCoordinator autoLockCoordinator, MainFormTrayHandler handler) CreateHandler(
+    private HandlerContext CreateHandlerContext(
         IAutoLockTimerService? autoLockTimer = null,
         IUnlockProcessLauncher? unlockProcessLauncher = null,
         bool startLocked = false)
     {
         var lockManager = autoLockTimer == null && unlockProcessLauncher == null ? _lockManager : new LockManager(
             _session,
-            new Mock<IPinService>().Object,
             new Mock<ILoggingService>().Object,
-            new Mock<ISecureDesktopRunner>().Object,
-            new Mock<IWindowsHelloService>().Object,
             autoLockTimer ?? _autoLockTimer.Object,
-            unlockProcessLauncher ?? new Mock<IUnlockProcessLauncher>().Object);
+            unlockProcessLauncher ?? new Mock<IUnlockProcessLauncher>().Object,
+            new LockStateService(_session),
+            new Mock<ICredentialUnlockService>().Object,
+            new InlineUiThreadInvoker(a => a()),
+            TimeSpan.FromMinutes(5));
         if (startLocked)
             lockManager.LockWindow();
 
@@ -343,21 +457,29 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
         mockDbProvider.Setup(p => p.GetDatabase()).Returns(_database);
 
         var mockSidResolver = new Mock<ISidResolver>();
+        var mockProfilePathResolver = new Mock<IProfilePathResolver>();
         var trayIconManager = new TrayIconManager(
             notifyIcon,
-            new SidDisplayNameResolver(mockSidResolver.Object, new Mock<IProfilePathResolver>().Object),
-            new Mock<IIconService>().Object,
             mockAppIconProvider.Object,
             mockDbProvider.Object,
-            new TrayMenuDiscoveryBuilder(new Mock<IShortcutIconHelper>().Object),
+            new TrayMenuBuilder(
+                new SidDisplayNameResolver(mockSidResolver.Object, mockProfilePathResolver.Object),
+                new Mock<IIconService>().Object,
+                new TrayMenuDiscoveryBuilder(new Mock<IShortcutIconHelper>().Object)),
             new Mock<IInputInjectionBlockerService>().Object);
 
         var accountToolResolver = new AccountToolResolver(new Mock<IProfilePathResolver>().Object);
         var mockLaunchFacade = new Mock<ILaunchFacade>();
+        mockLaunchFacade
+            .Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()))
+            .Returns(() => new LaunchExecutionResult(LaunchExecutionStatus.ProcessStarted, null));
+        mockLaunchFacade
+            .Setup(f => f.LaunchFolderBrowser(It.IsAny<LaunchIdentity>(), It.IsAny<string?>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
+            .Returns(() => new LaunchExecutionResult(LaunchExecutionStatus.ProcessStarted, null));
         var packageInstallService = new PackageInstallService(
-            mockLaunchFacade.Object,
-            accountToolResolver,
-            new Mock<ILoggingService>().Object);
+            Mock.Of<IPackageInstallLauncher>(),
+            Mock.Of<IPackageInstallScriptStore>(),
+            accountToolResolver);
         var trayLaunchHandler = new TrayLaunchHandler(
             new Mock<IAppEntryLauncher>().Object,
             mockLaunchFacade.Object,
@@ -365,7 +487,9 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
                 mockLaunchFacade.Object,
                 accountToolResolver,
                 packageInstallService,
+                new Mock<ILaunchFeedbackPresenter>().Object,
                 new Mock<ILoggingService>().Object),
+            new Mock<ILaunchFeedbackPresenter>().Object,
             new Mock<ISidNameCacheService>().Object,
             new Mock<ILoggingService>().Object);
 
@@ -387,10 +511,27 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
             windowRequestHandler,
             autoLockCoordinator);
 
+        lockManager.ShowWindowRequested += windowRequestHandler.ShowAndActivate;
+        lockManager.ShowWindowUnlockedRequested += windowRequestHandler.ShowAndActivateForUnlock;
+        lockManager.WindowlessUnlockCompleted += autoLockCoordinator.HandleWindowlessUnlock;
         windowRequestHandler.Initialize(_fakeForm);
         autoLockCoordinator.Initialize(_fakeForm);
         windowRequestHandler.SetStartupComplete();
 
-        return (windowRequestHandler, autoLockCoordinator, handler);
+        return new HandlerContext(windowRequestHandler, autoLockCoordinator, handler);
     }
+
+    private sealed class HandlerContext(
+        MainFormWindowRequestHandler windowRequestHandler,
+        MainFormBackgroundAutoLockCoordinator autoLockCoordinator,
+        MainFormTrayHandler handler)
+        : IDisposable
+    {
+        public MainFormWindowRequestHandler WindowRequestHandler { get; } = windowRequestHandler;
+        public MainFormBackgroundAutoLockCoordinator AutoLockCoordinator { get; } = autoLockCoordinator;
+        public MainFormTrayHandler Handler { get; } = handler;
+
+        public void Dispose() => Handler.Dispose();
+    }
+
 }

@@ -9,6 +9,4 @@ public sealed class NoOpBlockedConnectionReader(IBlockedConnectionReader real) :
     // to keep DI validation working; all calls are no-ops in non-elevated debug mode
 
     public List<BlockedConnection> ReadBlockedConnections(TimeSpan lookback) => [];
-    public bool IsAuditPolicyEnabled() => false;
-    public void SetAuditPolicyEnabled(bool enabled) { }
 }

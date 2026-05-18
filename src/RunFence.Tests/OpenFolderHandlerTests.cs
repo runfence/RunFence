@@ -1,4 +1,5 @@
 using Moq;
+using Microsoft.Win32.SafeHandles;
 using RunFence.Core;
 using RunFence.Core.Ipc;
 using RunFence.Infrastructure;
@@ -156,5 +157,54 @@ public class OpenFolderHandlerTests
         _uiThreadInvoker.Verify(a => a.Invoke(It.IsAny<Action>()), Times.AtLeastOnce);
         _shellFolderOpener.Verify(s => s.TryOpen(CanonicalPath, out It.Ref<string?>.IsAny), Times.Once);
         Assert.True(response.Success);
+    }
+
+    [Fact]
+    public async Task HandleOpenFolder_Success_ReleasesValidationLeaseAfterDelayWithoutBlockingCaller()
+    {
+        var tempPath = Path.Combine(Path.GetTempPath(), $"RunFence_OpenFolderLease_{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(tempPath, "lease");
+        using var trackedHandle = File.OpenHandle(tempPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        var validHandle = new DirectoryValidationHandle(trackedHandle)
+        {
+            IsValid = true,
+            CanonicalPath = CanonicalPath
+        };
+        _validator.Setup(v => v.ValidateAndHold(TestPath, CallerSid)).Returns(validHandle);
+        var handler = CreateHandler();
+
+        var started = Environment.TickCount64;
+        var response = handler.HandleOpenFolder(OpenFolderMessage(TestPath), CallerIdentity, CallerSid);
+        var elapsedMs = Environment.TickCount64 - started;
+
+        Assert.True(response.Success);
+        Assert.True(elapsedMs < 500, $"Expected immediate return, got {elapsedMs}ms.");
+        await AssertFileDeleteBlockedAsync(tempPath);
+        await WaitForFileDeleteAsync(tempPath, TimeSpan.FromSeconds(7));
+    }
+
+    private static async Task AssertFileDeleteBlockedAsync(string path)
+    {
+        await Assert.ThrowsAnyAsync<IOException>(() => Task.Run(() => File.Delete(path)));
+    }
+
+    private static async Task WaitForFileDeleteAsync(string path, TimeSpan timeout)
+    {
+        var started = Environment.TickCount64;
+        while (Environment.TickCount64 - started < timeout.TotalMilliseconds)
+        {
+            try
+            {
+                File.Delete(path);
+                return;
+            }
+            catch (IOException)
+            {
+                await Task.Yield();
+                SpinWait.SpinUntil(static () => false, 100);
+            }
+        }
+
+        throw new TimeoutException($"Timed out waiting for delayed lease disposal for '{path}'.");
     }
 }

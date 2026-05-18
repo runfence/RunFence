@@ -10,12 +10,5 @@ namespace RunFence.Startup;
 /// </summary>
 public interface IStartupCredentialLoader
 {
-    CredentialLoadResult? LoadAndVerifyCredentials();
+    CredentialLoadResult? LoadAndVerifyCredentials(string selectedConfigPath);
 }
-
-/// <summary>Result of the credential load and verify step.</summary>
-public record CredentialLoadResult(
-    CredentialStore Store,
-    byte[] PinDerivedKey,
-    byte[]? MismatchKey,
-    bool PinBypassed = false);

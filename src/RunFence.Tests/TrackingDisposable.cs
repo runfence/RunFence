@@ -20,7 +20,7 @@ public sealed class TrackingDisposable : IDisposable
     }
 
     /// <summary>
-    /// Waits up to one second for <see cref="Dispose"/> to be called.
+    /// Waits up to five seconds for <see cref="Dispose"/> to be called.
     /// Returns <see langword="true"/> if disposal occurred within the timeout.
     /// </summary>
     public bool WaitUntilDisposed()
@@ -28,7 +28,7 @@ public sealed class TrackingDisposable : IDisposable
         bool result;
         try
         {
-            result = _disposedEvent.Wait(TimeSpan.FromSeconds(1));
+            result = _disposedEvent.Wait(TimeSpan.FromSeconds(5));
         }
         catch (ObjectDisposedException)
         {

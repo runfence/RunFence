@@ -42,6 +42,8 @@ public class AclManagerActionOrchestratorTests
                 DenyExecute: RightCheckState.Unchecked,
                 DenyWrite: RightCheckState.Unchecked,
                 DenySpecial: RightCheckState.Unchecked,
+                TraverseOnlyAllow: RightCheckState.Unchecked,
+                TraverseOnlyDeny: RightCheckState.Unchecked,
                 IsAccountOwner: RightCheckState.Unchecked,
                 IsAdminOwner: false,
                 DirectAllowAceCount: 0,
@@ -53,11 +55,213 @@ public class AclManagerActionOrchestratorTests
         var error = orchestrator.AddGrantPathDirect(path, isDeny: true);
 
         Assert.Null(error);
-        var modification = Assert.Single(pending.PendingModifications).Value;
-        Assert.Same(existing, modification.Entry);
-        Assert.True(modification.WasIsDeny);
-        Assert.True(modification.NewIsDeny);
-        Assert.Equal(rights, modification.NewRights);
+        var pendingFix = Assert.Single(pending.PendingGrantFixes).Value;
+        Assert.Same(existing, pendingFix);
+        Assert.Equal(1, refresher.GrantsRefreshCount);
+    }
+
+    [Fact]
+    public void AddGrantPathDirect_ExistingBrokenGrantInDifferentSection_QueuesPendingFixAndConfigMove()
+    {
+        var path = Path.GetFullPath(@"C:\ExistingBrokenMoved");
+        var targetConfigPath = Path.GetFullPath(@"C:\Configs\extra.rfn");
+        var rights = SavedRightsState.DefaultForMode(isDeny: true);
+        var database = new AppDatabase();
+        var existing = new GrantedPathEntry
+        {
+            Path = path,
+            IsDeny = true,
+            SavedRights = rights
+        };
+        database.GetOrCreateAccount(TestSid).Grants.Add(existing);
+
+        var pending = new AclManagerPendingChanges();
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService
+            .Setup(s => s.ReadGrantState(path, TestSid, It.IsAny<IReadOnlyList<string>>()))
+            .Returns(new GrantRightsState(
+                AllowExecute: RightCheckState.Unchecked,
+                AllowWrite: RightCheckState.Unchecked,
+                AllowSpecial: RightCheckState.Unchecked,
+                DenyRead: RightCheckState.Unchecked,
+                DenyExecute: RightCheckState.Unchecked,
+                DenyWrite: RightCheckState.Unchecked,
+                DenySpecial: RightCheckState.Unchecked,
+                TraverseOnlyAllow: RightCheckState.Unchecked,
+                TraverseOnlyDeny: RightCheckState.Unchecked,
+                IsAccountOwner: RightCheckState.Unchecked,
+                IsAdminOwner: false,
+                DirectAllowAceCount: 0,
+                DirectDenyAceCount: 0));
+
+        var refresher = new TestGridRefresher();
+        var additionalStore = new TestGrantIntentStore(targetConfigPath);
+        var orchestrator = CreateOrchestrator(
+            database,
+            pathGrantService.Object,
+            pending,
+            refresher,
+            loadedStores: [additionalStore]);
+
+        var error = orchestrator.AddGrantPathDirect(
+            path,
+            isDeny: true,
+            targetConfigPath: targetConfigPath,
+            hasExplicitTargetSection: true);
+
+        Assert.Null(error);
+        var pendingFix = Assert.Single(pending.PendingGrantFixes).Value;
+        Assert.Same(existing, pendingFix);
+        Assert.Equal(targetConfigPath, pending.PendingConfigMoves[(path, true)].TargetConfigPath);
+        Assert.Equal(1, refresher.GrantsRefreshCount);
+    }
+
+    [Fact]
+    public void AddGrantPathDirect_ExistingBrokenGrantWithoutExplicitTarget_DoesNotMoveConfigSection()
+    {
+        var path = Path.GetFullPath(@"C:\ExistingBrokenNoTarget");
+        var rights = SavedRightsState.DefaultForMode(isDeny: true);
+        var database = new AppDatabase();
+        var existing = new GrantedPathEntry
+        {
+            Path = path,
+            IsDeny = true,
+            SavedRights = rights
+        };
+        database.GetOrCreateAccount(TestSid).Grants.Add(existing);
+
+        var pending = new AclManagerPendingChanges();
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService
+            .Setup(s => s.ReadGrantState(path, TestSid, It.IsAny<IReadOnlyList<string>>()))
+            .Returns(new GrantRightsState(
+                AllowExecute: RightCheckState.Unchecked,
+                AllowWrite: RightCheckState.Unchecked,
+                AllowSpecial: RightCheckState.Unchecked,
+                DenyRead: RightCheckState.Unchecked,
+                DenyExecute: RightCheckState.Unchecked,
+                DenyWrite: RightCheckState.Unchecked,
+                DenySpecial: RightCheckState.Unchecked,
+                TraverseOnlyAllow: RightCheckState.Unchecked,
+                TraverseOnlyDeny: RightCheckState.Unchecked,
+                IsAccountOwner: RightCheckState.Unchecked,
+                IsAdminOwner: false,
+                DirectAllowAceCount: 0,
+                DirectDenyAceCount: 0));
+
+        var refresher = new TestGridRefresher();
+        var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
+        additionalStore.AddEntry(TestSid, existing);
+        var orchestrator = CreateOrchestrator(
+            database,
+            pathGrantService.Object,
+            pending,
+            refresher,
+            loadedStores: [additionalStore]);
+
+        var error = orchestrator.AddGrantPathDirect(path, isDeny: true);
+
+        Assert.Null(error);
+        var pendingFix = Assert.Single(pending.PendingGrantFixes).Value;
+        Assert.Same(existing, pendingFix);
+        Assert.Empty(pending.PendingConfigMoves);
+        Assert.Equal(1, refresher.GrantsRefreshCount);
+    }
+
+    [Fact]
+    public void AddGrantPathDirect_ExistingBrokenGrantWithExplicitMainTarget_MovesToMainConfig()
+    {
+        var path = Path.GetFullPath(@"C:\ExistingBrokenMainTarget");
+        var rights = SavedRightsState.DefaultForMode(isDeny: true);
+        var database = new AppDatabase();
+        var existing = new GrantedPathEntry
+        {
+            Path = path,
+            IsDeny = true,
+            SavedRights = rights
+        };
+        database.GetOrCreateAccount(TestSid).Grants.Add(existing);
+
+        var pending = new AclManagerPendingChanges();
+        var pathGrantService = new Mock<IPathGrantService>();
+        pathGrantService
+            .Setup(s => s.ReadGrantState(path, TestSid, It.IsAny<IReadOnlyList<string>>()))
+            .Returns(new GrantRightsState(
+                AllowExecute: RightCheckState.Unchecked,
+                AllowWrite: RightCheckState.Unchecked,
+                AllowSpecial: RightCheckState.Unchecked,
+                DenyRead: RightCheckState.Unchecked,
+                DenyExecute: RightCheckState.Unchecked,
+                DenyWrite: RightCheckState.Unchecked,
+                DenySpecial: RightCheckState.Unchecked,
+                TraverseOnlyAllow: RightCheckState.Unchecked,
+                TraverseOnlyDeny: RightCheckState.Unchecked,
+                IsAccountOwner: RightCheckState.Unchecked,
+                IsAdminOwner: false,
+                DirectAllowAceCount: 0,
+                DirectDenyAceCount: 0));
+
+        var refresher = new TestGridRefresher();
+        var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
+        additionalStore.AddEntry(TestSid, existing);
+        var orchestrator = CreateOrchestrator(
+            database,
+            pathGrantService.Object,
+            pending,
+            refresher,
+            loadedStores: [additionalStore]);
+
+        var error = orchestrator.AddGrantPathDirect(
+            path,
+            isDeny: true,
+            targetConfigPath: null,
+            hasExplicitTargetSection: true);
+
+        Assert.Null(error);
+        var pendingFix = Assert.Single(pending.PendingGrantFixes).Value;
+        Assert.Same(existing, pendingFix);
+        Assert.True(pending.PendingConfigMoves.ContainsKey((path, true)));
+        Assert.Null(pending.PendingConfigMoves[(path, true)].TargetConfigPath);
+        Assert.Equal(1, refresher.GrantsRefreshCount);
+    }
+
+    [Fact]
+    public void AddGrantPathDirect_CanceledPendingRemove_WithExplicitMainTarget_PreservesConfigMoveIntent()
+    {
+        var path = Path.GetFullPath(@"C:\RestoreRemovedToMain");
+        var rights = SavedRightsState.DefaultForMode(isDeny: true);
+        var database = new AppDatabase();
+        var existing = new GrantedPathEntry
+        {
+            Path = path,
+            IsDeny = true,
+            SavedRights = rights
+        };
+        database.GetOrCreateAccount(TestSid).Grants.Add(existing);
+
+        var pending = new AclManagerPendingChanges();
+        pending.PendingRemoves[(path, true)] = existing;
+        var pathGrantService = new Mock<IPathGrantService>();
+        var refresher = new TestGridRefresher();
+        var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
+        additionalStore.AddEntry(TestSid, existing);
+        var orchestrator = CreateOrchestrator(
+            database,
+            pathGrantService.Object,
+            pending,
+            refresher,
+            loadedStores: [additionalStore]);
+
+        var error = orchestrator.AddGrantPathDirect(
+            path,
+            isDeny: true,
+            targetConfigPath: null,
+            hasExplicitTargetSection: true);
+
+        Assert.Null(error);
+        Assert.Empty(pending.PendingRemoves);
+        Assert.True(pending.PendingConfigMoves.ContainsKey((path, true)));
+        Assert.Null(pending.PendingConfigMoves[(path, true)].TargetConfigPath);
         Assert.Equal(1, refresher.GrantsRefreshCount);
     }
 
@@ -86,6 +290,8 @@ public class AclManagerActionOrchestratorTests
                 DenyExecute: RightCheckState.Unchecked,
                 DenyWrite: RightCheckState.Checked,
                 DenySpecial: RightCheckState.Checked,
+                TraverseOnlyAllow: RightCheckState.Unchecked,
+                TraverseOnlyDeny: RightCheckState.Unchecked,
                 IsAccountOwner: RightCheckState.Unchecked,
                 IsAdminOwner: false,
                 DirectAllowAceCount: 0,
@@ -96,7 +302,7 @@ public class AclManagerActionOrchestratorTests
         var error = orchestrator.AddGrantPathDirect(path, isDeny: true);
 
         Assert.Equal("This path is already in the list.", error);
-        Assert.Empty(pending.PendingModifications);
+        Assert.Empty(pending.PendingGrantFixes);
     }
 
     [Fact]
@@ -155,7 +361,8 @@ public class AclManagerActionOrchestratorTests
         AclManagerPendingChanges pending,
         IAclManagerGridRefresher refresher,
         string sid = TestSid,
-        ISpecificContainerAceConflictDetector? containerAceDetector = null)
+        ISpecificContainerAceConflictDetector? containerAceDetector = null,
+        IReadOnlyList<TestGrantIntentStore>? loadedStores = null)
     {
         var databaseProvider = new LambdaDatabaseProvider(() => database);
         var pathInfo = new TestFileSystemPathInfo();
@@ -173,16 +380,21 @@ public class AclManagerActionOrchestratorTests
 
         var traversePathResolver = new GrantTraversePathResolver(pathInfo);
         var traverseAutoManager = new TraverseAutoManager(
-            aclPermission.Object, databaseProvider, traversePathResolver, pathInfo);
+            aclPermission.Object, databaseProvider, traversePathResolver, pathInfo, new TraverseGrantOwnerResolver());
         traverseAutoManager.Initialize(pending, sid, groupSids: []);
 
         var traverseOperations = new AclManagerTraverseOperations(
             databaseProvider, reparsePointHelper.Object, aclPermission.Object, pathInfo);
         traverseOperations.Initialize(sid, pending, new Lazy<IReadOnlyList<string>>(() => []), () => { });
+        var grantIntentStoreProvider = new TestGrantIntentStoreProvider(new TestGrantIntentStore());
+        foreach (var store in loadedStores ?? [])
+            grantIntentStoreProvider.AddLoadedStore(store);
+        var grantIntentRepository = new GrantIntentRepository(grantIntentStoreProvider);
 
         var grantsHelper = new AclManagerGrantsHelper(
             new Mock<IAppConfigService>().Object,
-            new Mock<IGrantConfigTracker>().Object,
+            grantIntentRepository,
+            grantIntentStoreProvider,
             databaseProvider,
             new Mock<ISessionSaver>().Object,
             traverseAutoManager,

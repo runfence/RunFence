@@ -1,4 +1,3 @@
-using RunFence.Acl;
 using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI.Forms;
 using RunFence.Core;
@@ -13,13 +12,11 @@ namespace RunFence.Apps.UI;
 /// <summary>
 /// Provides access to shared state and operations for the applications panel CRUD handler.
 /// </summary>
-public interface IApplicationsPanelContext
+public interface IApplicationsPanelContext : IApplicationMutationContext
 {
-    AppDatabase Database { get; }
     CredentialStore CredentialStore { get; }
     DataGridView Grid { get; }
     void ShowModalDialog(Form dialog);
-    void SaveAndRefresh(string? selectAppId = null, int fallbackIndex = -1, bool targetedSave = false);
     void LaunchApp(AppEntry app, string? launcherArguments);
 }
 
@@ -29,13 +26,12 @@ public interface IApplicationsPanelContext
 /// </summary>
 public class ApplicationsCrudOrchestrator(
     Func<AppEditDialog> dialogFactory,
-    IAclService aclService,
     IIconService iconService,
     IAppConfigService appConfigService,
-    AppEntryEnforcementHelper enforcementHelper,
+    ApplicationsCrudOperationService operationService,
     IShortcutDiscoveryService shortcutDiscovery,
     AppEntryPermissionPrompter permissionPrompter,
-    ILoggingService log,
+    IMessageBoxService messageBoxService,
     ILicenseService licenseService)
 {
     private IApplicationsPanelContext _context = null!;
@@ -67,10 +63,62 @@ public class ApplicationsCrudOrchestrator(
         }
 
         var dlg = dialogFactory();
+        var commandContext = new AppEditDialogCommandContext(
+            ApplyAsync: async () =>
+            {
+                if (!licenseService.CanAddApp(_context.Database.Apps.Count))
+                    throw new InvalidOperationException(
+                        licenseService.GetRestrictionMessage(EvaluationFeature.Apps, _context.Database.Apps.Count)
+                        ?? "Cannot add application.");
+
+                var permissionDecision = permissionPrompter.PromptForGrant(dlg, dlg.Result);
+                if (permissionDecision.Result == AppEntryPermissionPromptResult.Canceled)
+                    throw new OperationCanceledException();
+
+                if (_context.Database.Apps.Any(a => string.Equals(a.Id, dlg.Result.Id, StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException($"Application ID '{dlg.Result.Id}' already exists.");
+
+                var appWasAdded = false;
+                if (_context.Database.Apps.All(a => !ReferenceEquals(a, dlg.Result)))
+                {
+                    _context.Database.Apps.Add(dlg.Result);
+                    appWasAdded = true;
+                }
+
+                var shortcutCache = await CreateShortcutCacheIfNeeded(dlg.Result);
+                var operationResult = operationService.ApplyChanges(
+                    _context,
+                    dlg.Result,
+                    shortcutCache,
+                    selectAppId: dlg.Result.Id,
+                    targetedSave: true);
+                if (!HandleOperationResult(operationResult, "save"))
+                {
+                    if (appWasAdded)
+                        RemoveAppById(dlg.Result.Id);
+                    throw new InvalidOperationException(operationResult.ErrorMessage ?? "Failed to save application.");
+                }
+
+                if (permissionDecision.GrantRequest != null)
+                {
+                    var grantWarning = permissionPrompter.TryApplyGrant(permissionDecision.GrantRequest);
+                    if (!string.IsNullOrWhiteSpace(grantWarning))
+                    {
+                        messageBoxService.Show(
+                            $"Application was saved, but applying the selected permission grant failed:\n\n{grantWarning}",
+                            "Saved With Warning",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                    }
+                }
+                if (dlg.LaunchNow)
+                    _context.LaunchApp(dlg.Result, null);
+            });
         dlg.Initialize(
             null,
             _context.CredentialStore.Credentials,
             _context.Database.Apps,
+            commandContext,
             new AppEditDialogOptions(ConfigPath: initialConfigPath, AccountSid: initialAccountSid,
                 ExePath: initialExePath),
             _context.Database.SidNames,
@@ -78,34 +126,9 @@ public class ApplicationsCrudOrchestrator(
 
         using (dlg)
         {
-            dlg.ApplyRequested += async () =>
-            {
-                if (!licenseService.CanAddApp(_context.Database.Apps.Count))
-                    throw new OperationCanceledException(licenseService.GetRestrictionMessage(EvaluationFeature.Apps, _context.Database.Apps.Count));
-
-                appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
-                try
-                {
-                    _context.Database.Apps.Add(dlg.Result);
-                    var shortcutCache = await CreateShortcutCacheIfNeeded(dlg.Result);
-                    ApplyChanges(dlg.Result, shortcutCache);
-                    _context.SaveAndRefresh(dlg.Result.Id, targetedSave: true);
-                    if (permissionPrompter.PromptAndGrant(dlg, dlg.Result))
-                        _context.SaveAndRefresh(dlg.Result.Id);
-                    if (dlg.LaunchNow)
-                        _context.LaunchApp(dlg.Result, null);
-                    dlg.DialogResult = DialogResult.OK;
-                    dlg.Close();
-                }
-                catch
-                {
-                    _context.Database.Apps.Remove(dlg.Result);
-                    appConfigService.RemoveApp(dlg.Result.Id);
-                    throw;
-                }
-            };
-
             _context.ShowModalDialog(dlg);
+            if (dlg.HasUnsavedInMemoryMutations)
+                _context.RefreshAfterInMemoryMutation(dlg.Result.Id);
         }
     }
 
@@ -129,72 +152,131 @@ public class ApplicationsCrudOrchestrator(
 
     private void OpenEditDialog(AppEntry app, int selectedIndex, AppEditDialogOptions? options = null)
     {
-        var originalConfigPath = appConfigService.GetConfigPath(app.Id);
-
         var dlg = dialogFactory();
+        var commandContext = new AppEditDialogCommandContext(
+            ApplyAsync: async () =>
+            {
+                var index = _context.Database.Apps.FindIndex(a => a.Id == app.Id);
+                if (index < 0)
+                    throw new InvalidOperationException("The application no longer exists.");
+
+                var previousApp = app.Clone();
+                var permissionDecision = permissionPrompter.PromptForGrant(dlg, dlg.Result);
+                if (permissionDecision.Result == AppEntryPermissionPromptResult.Canceled)
+                    throw new OperationCanceledException();
+
+                var shortcutCache = await CreateShortcutCacheIfNeeded(app, dlg.Result);
+                var revertResult = operationService.RevertChanges(
+                    _context,
+                    app,
+                    shortcutCache,
+                    ShortcutWarningPolicy.DemoteToWarning);
+                string? revertWarning = null;
+                if (revertResult.Status == ApplicationsCrudOperationStatus.EnforcementFailed)
+                {
+                    revertWarning = revertResult.ErrorMessage;
+                }
+                else if (revertResult.Status == ApplicationsCrudOperationStatus.SucceededWithEnforcementWarning)
+                {
+                    revertWarning = revertResult.WarningMessage;
+                }
+
+                _context.Database.Apps[index] = dlg.Result;
+                var applyResult = operationService.ApplyChanges(
+                    _context,
+                    dlg.Result,
+                    shortcutCache,
+                    selectAppId: dlg.Result.Id);
+                if (applyResult.Status == ApplicationsCrudOperationStatus.SaveFailed)
+                {
+                    var appsAfterRollback = new List<AppEntry>(_context.Database.Apps);
+                    appsAfterRollback[index] = previousApp;
+                    var restoreResult = operationService.RestoreEnforcementAfterFailedEdit(
+                        previousApp,
+                        appsAfterRollback,
+                        shortcutCache);
+                    // Restore the persisted database entry only after the system state has been rolled back.
+                    // The dialog remains open with the user's current edits intact so they can retry
+                    // without losing the in-memory UI state.
+                    _context.Database.Apps[index] = previousApp;
+                    var combinedMessage = CombineFailureMessages(
+                        revertWarning,
+                        applyResult.ErrorMessage,
+                        restoreResult.WarningMessage);
+                    HandleOperationResult(
+                        new ApplicationsCrudOperationResult(ApplicationsCrudOperationStatus.SaveFailed, ErrorMessage: combinedMessage),
+                        "save");
+                    throw new InvalidOperationException(combinedMessage);
+                }
+
+                var combinedWarnings = new[] { revertWarning, applyResult.WarningMessage }
+                    .Where(w => !string.IsNullOrWhiteSpace(w))
+                    .ToList();
+                var resultToHandle = combinedWarnings.Count == 0
+                    ? applyResult
+                    : new ApplicationsCrudOperationResult(
+                        ApplicationsCrudOperationStatus.SucceededWithEnforcementWarning,
+                        WarningMessage: string.Join("\n\n", combinedWarnings));
+                HandleOperationResult(resultToHandle, "save");
+
+                if (permissionDecision.GrantRequest != null)
+                {
+                    var grantWarning = permissionPrompter.TryApplyGrant(permissionDecision.GrantRequest);
+                    if (!string.IsNullOrWhiteSpace(grantWarning))
+                    {
+                        messageBoxService.Show(
+                            $"Application was saved, but applying the selected permission grant failed:\n\n{grantWarning}",
+                            "Saved With Warning",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                    }
+                }
+
+                if (dlg.LaunchNow)
+                    _context.LaunchApp(dlg.Result, null);
+            },
+            RemoveAsync: async () =>
+            {
+                var shortcutCache = await CreateShortcutCacheIfNeeded(app);
+                var revertResult = operationService.RevertChanges(
+                    _context,
+                    app,
+                    shortcutCache,
+                    ShortcutWarningPolicy.TreatAsFailure);
+                if (revertResult.Status == ApplicationsCrudOperationStatus.EnforcementFailed)
+                {
+                    HandleOperationResult(revertResult, "remove");
+                    return;
+                }
+
+                _context.Database.Apps.Remove(app);
+                appConfigService.RemoveApp(app.Id);
+                iconService.DeleteIcon(app.Id);
+                var saveResult = operationService.SaveAfterMutation(
+                    _context,
+                    app,
+                    fallbackIndex: selectedIndex);
+                if (saveResult.Status == ApplicationsCrudOperationStatus.SaveFailed)
+                    _context.RefreshAfterInMemoryMutation(fallbackIndex: selectedIndex);
+                HandleOperationResult(saveResult, "remove");
+                if (saveResult.Status == ApplicationsCrudOperationStatus.Succeeded)
+                    dlg.DialogResult = DialogResult.OK;
+                dlg.Close();
+            });
         dlg.Initialize(
             app,
             _context.CredentialStore.Credentials,
             _context.Database.Apps,
+            commandContext,
             options,
             _context.Database.SidNames,
             _context.Database);
 
         using (dlg)
         {
-            dlg.ApplyRequested += async () =>
-            {
-                var index = _context.Database.Apps.FindIndex(a => a.Id == app.Id);
-                if (index >= 0)
-                {
-                    var shortcutCache = await CreateShortcutCacheIfNeeded(app, dlg.Result);
-                    RevertChanges(app, shortcutCache);
-                    _context.Database.Apps[index] = dlg.Result;
-                    appConfigService.AssignApp(dlg.Result.Id, dlg.SelectedConfigPath);
-                    try
-                    {
-                        ApplyChanges(dlg.Result, shortcutCache);
-                        _context.SaveAndRefresh(dlg.Result.Id);
-                    }
-                    catch
-                    {
-                        _context.Database.Apps[index] = app;
-                        appConfigService.AssignApp(app.Id, originalConfigPath);
-                        try
-                        {
-                            ApplyChanges(app, shortcutCache);
-                        }
-                        catch (Exception restoreEx)
-                        {
-                            log.Error($"Failed to restore ACL after edit failure for {app.Name}", restoreEx);
-                        }
-
-                        throw;
-                    }
-
-                    if (permissionPrompter.PromptAndGrant(dlg, dlg.Result))
-                        _context.SaveAndRefresh(dlg.Result.Id);
-                }
-
-                if (dlg.LaunchNow)
-                    _context.LaunchApp(dlg.Result, null);
-                dlg.DialogResult = DialogResult.OK;
-                dlg.Close();
-            };
-
-            dlg.RemoveRequested += async () =>
-            {
-                var shortcutCache = await CreateShortcutCacheIfNeeded(app);
-                RevertChanges(app, shortcutCache);
-                _context.Database.Apps.Remove(app);
-                appConfigService.RemoveApp(app.Id);
-                iconService.DeleteIcon(app.Id);
-                _context.SaveAndRefresh(fallbackIndex: selectedIndex);
-                dlg.DialogResult = DialogResult.OK;
-                dlg.Close();
-            };
-
             _context.ShowModalDialog(dlg);
+            if (dlg.HasUnsavedInMemoryMutations)
+                _context.RefreshAfterInMemoryMutation(dlg.Result.Id, selectedIndex);
         }
     }
 
@@ -213,47 +295,85 @@ public class ApplicationsCrudOrchestrator(
         if (MessageBox.Show(removeMessage, "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
         {
             var shortcutCache = await CreateShortcutCacheIfNeeded(app);
-            RevertChanges(app, shortcutCache);
+            var revertResult = operationService.RevertChanges(
+                _context,
+                app,
+                shortcutCache,
+                ShortcutWarningPolicy.TreatAsFailure);
+            if (revertResult.Status == ApplicationsCrudOperationStatus.EnforcementFailed)
+            {
+                HandleOperationResult(revertResult, "remove");
+                return;
+            }
+
             _context.Database.Apps.Remove(app);
             appConfigService.RemoveApp(app.Id);
             iconService.DeleteIcon(app.Id);
-            _context.SaveAndRefresh(fallbackIndex: selectedIndex);
+            var saveResult = operationService.SaveAfterMutation(
+                _context,
+                app,
+                fallbackIndex: selectedIndex);
+            if (saveResult.Status == ApplicationsCrudOperationStatus.SaveFailed)
+                _context.RefreshAfterInMemoryMutation(fallbackIndex: selectedIndex);
+            HandleOperationResult(saveResult, "remove");
         }
     }
 
-    private void ApplyChanges(AppEntry app, ShortcutTraversalCache shortcutCache)
+    private bool HandleOperationResult(ApplicationsCrudOperationResult result, string actionVerb)
     {
-        try
+        switch (result.Status)
         {
-            enforcementHelper.ApplyChanges(app, _context.Database.Apps, shortcutCache);
-            aclService.RecomputeAllAncestorAcls(_context.Database.Apps);
-        }
-        catch (Exception ex)
-        {
-            log.Error($"Failed to apply changes for {app.Name}", ex);
-            MessageBox.Show($"Failed to apply ACL/shortcut changes for {app.Name}:\n{ex.Message}",
-                "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            case ApplicationsCrudOperationStatus.Succeeded:
+                return true;
+            case ApplicationsCrudOperationStatus.SaveFailed:
+                messageBoxService.Show(
+                    $"Application {actionVerb} failed because RunFence could not save the change:\n\n{result.ErrorMessage}",
+                    "Save Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return false;
+            case ApplicationsCrudOperationStatus.SucceededWithEnforcementWarning:
+                messageBoxService.Show(
+                    $"Application was saved, but enforcement failed and needs retry:\n\n{result.WarningMessage}",
+                    "Saved With Warning",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return true;
+            case ApplicationsCrudOperationStatus.EnforcementFailed:
+                messageBoxService.Show(
+                    $"Application {actionVerb} failed during cleanup/enforcement:\n\n{result.ErrorMessage}",
+                    "Enforcement Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return false;
+            default:
+                return false;
         }
     }
 
-    private void RevertChanges(AppEntry app, ShortcutTraversalCache shortcutCache)
+    private static string? CombineFailureMessages(string? firstMessage, string? secondMessage, string? thirdMessage = null)
     {
-        try
+        var messages = new[] { firstMessage, secondMessage, thirdMessage }
+            .Where(w => !string.IsNullOrWhiteSpace(w))
+            .ToList();
+
+        return messages.Count switch
         {
-            enforcementHelper.RevertChanges(app, _context.Database.Apps, shortcutCache);
-            var appsAfterRevert = _context.Database.Apps.Where(a => a.Id != app.Id).ToList();
-            aclService.RecomputeAllAncestorAcls(appsAfterRevert);
-        }
-        catch (Exception ex)
-        {
-            log.Error($"Failed to revert changes for {app.Name}", ex);
-            MessageBox.Show($"Failed to revert ACL/shortcut changes for {app.Name}:\n{ex.Message}",
-                "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
+            0 => null,
+            1 => messages[0],
+            _ => string.Join("\n\n", messages)
+        };
+    }
+
+    private void RemoveAppById(string appId)
+    {
+        var index = _context.Database.Apps.FindIndex(a => string.Equals(a.Id, appId, StringComparison.OrdinalIgnoreCase));
+        if (index >= 0)
+            _context.Database.Apps.RemoveAt(index);
     }
 
     /// <remarks>
-    /// Concurrent calls share a single in-progress scan — if a scan is already running, awaits the
+    /// Concurrent calls share a single in-progress scan - if a scan is already running, awaits the
     /// existing task rather than starting a second scan. The field is cleared after the task completes
     /// so subsequent calls start a fresh scan. Managed SIDs are captured on the UI thread before the
     /// background scan starts to avoid accessing the live database from the thread pool.

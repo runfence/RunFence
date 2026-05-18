@@ -5,18 +5,24 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.RunAs;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
 
-public class RunAsAppShortcutCreatorTests
+public class RunAsAppShortcutCreatorTests : IDisposable
 {
+    private const string LauncherPath = @"C:\RunFence\RunFence.Launcher.exe";
+
     private readonly Mock<IIconService> _iconService = new();
     private readonly Mock<ISidNameCacheService> _sidNameCache = new();
     private readonly Mock<IShortcutService> _shortcutService = new();
     private readonly Mock<IBesideTargetShortcutService> _besideTargetShortcutService = new();
     private readonly Mock<IInteractiveUserSidResolver> _interactiveUserSidResolver = new();
     private readonly Mock<ILoggingService> _log = new();
+    private readonly FakeLauncherPathProvider _launcherPathProvider = new(LauncherPath, exists: true);
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
+    private readonly List<SessionContext> _sessions = [];
 
     [Fact]
     public void CreateBesideTargetShortcut_AppContainer_UsesResolvedInteractiveSid()
@@ -27,10 +33,10 @@ public class RunAsAppShortcutCreatorTests
         _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
         _sidNameCache.Setup(c => c.GetDisplayName(interactiveSid)).Returns("InteractiveUser");
 
-        RunWithLauncherPresent(() => CreateCreator().CreateBesideTargetShortcut(app));
+        CreateCreator().CreateBesideTargetShortcut(app);
 
         _besideTargetShortcutService.Verify(
-            s => s.CreateBesideTargetShortcut(app, It.IsAny<string>(), @"C:\icon.ico", "InteractiveUser"),
+            s => s.CreateBesideTargetShortcut(app, LauncherPath, @"C:\icon.ico", "InteractiveUser"),
             Times.Once);
     }
 
@@ -41,7 +47,7 @@ public class RunAsAppShortcutCreatorTests
         _iconService.Setup(i => i.CreateBadgedIcon(app, null)).Returns(@"C:\icon.ico");
         _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
 
-        RunWithLauncherPresent(() => CreateCreator().CreateBesideTargetShortcut(app));
+        CreateCreator().CreateBesideTargetShortcut(app);
 
         _besideTargetShortcutService.Verify(
             s => s.CreateBesideTargetShortcut(
@@ -59,7 +65,7 @@ public class RunAsAppShortcutCreatorTests
         _iconService.Setup(i => i.CreateBadgedIcon(app, null)).Returns(@"C:\icon.ico");
         _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(string.Empty);
 
-        RunWithLauncherPresent(() => CreateCreator().CreateBesideTargetShortcut(app));
+        CreateCreator().CreateBesideTargetShortcut(app);
 
         _besideTargetShortcutService.Verify(
             s => s.CreateBesideTargetShortcut(
@@ -70,13 +76,31 @@ public class RunAsAppShortcutCreatorTests
             Times.Once);
     }
 
+    [Fact]
+    public void TryUpdateOriginalShortcut_UsesValidatedIconPathFromIconService()
+    {
+        using var tempDir = new TempDirectory("RunFence_RunAsShortcutCreator");
+        var iconPath = Path.Combine(tempDir.Path, "icon.ico");
+        File.WriteAllBytes(iconPath, []);
+
+        _iconService.Setup(i => i.GetIconPath("app1")).Returns(iconPath);
+
+        CreateCreator().TryUpdateOriginalShortcut(@"C:\Shortcuts\App.lnk", "app1");
+
+        _shortcutService.Verify(s =>
+            s.UpdateShortcutToLauncher(@"C:\Shortcuts\App.lnk", "app1", LauncherPath, iconPath),
+            Times.Once);
+    }
+
     private RunAsAppShortcutCreator CreateCreator()
     {
         var session = new SessionContext
-        {
+{
             Database = new AppDatabase(),
-            CredentialStore = new CredentialStore()
-        };
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(_pinKey);
+        _sessions.Add(session);
+
         return new RunAsAppShortcutCreator(
             _iconService.Object,
             _sidNameCache.Object,
@@ -84,23 +108,24 @@ public class RunAsAppShortcutCreatorTests
             _besideTargetShortcutService.Object,
             new LambdaSessionProvider(() => session),
             _interactiveUserSidResolver.Object,
+            _launcherPathProvider,
             _log.Object);
     }
 
-    private static void RunWithLauncherPresent(Action action)
+    public void Dispose()
     {
-        var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
-        var existed = File.Exists(launcherPath);
-        if (!existed)
-            File.WriteAllBytes(launcherPath, []);
-        try
+        foreach (var session in _sessions)
         {
-            action();
+            session.Dispose();
         }
-        finally
-        {
-            if (!existed)
-                File.Delete(launcherPath);
-        }
+
+        _pinKey.Dispose();
+    }
+
+    private sealed class FakeLauncherPathProvider(string launcherPath, bool exists) : IRunFenceLauncherPathProvider
+    {
+        public string GetLauncherPath() => launcherPath;
+
+        public bool Exists() => exists;
     }
 }

@@ -7,6 +7,6 @@ namespace RunFence.Launch.Container;
 /// </summary>
 public interface IAppContainerProfileSetup
 {
-    void EnsureProfileUnderToken(AppContainerEntry entry, IntPtr hToken);
+    AppContainerProfileSetupResult EnsureProfileUnderToken(AppContainerEntry entry, IntPtr hToken);
     void TryEnableVirtualization(IntPtr hToken);
 }

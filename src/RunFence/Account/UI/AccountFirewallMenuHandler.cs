@@ -11,8 +11,8 @@ namespace RunFence.Account.UI;
 public class AccountFirewallMenuHandler(
     ISessionProvider sessionProvider,
     ISessionSaver sessionSaver,
-    FirewallApplyHelper firewallApplyHelper,
-    FirewallDialogFactory firewallDialogFactory)
+    IFirewallApplyHelper firewallApplyHelper,
+    IFirewallDialogFactory firewallDialogFactory)
 {
     private DataGridView _grid = null!;
 
@@ -52,18 +52,15 @@ public class AccountFirewallMenuHandler(
         {
             var existing = db.GetAccount(accountRow.Sid)?.Firewall ?? new FirewallAccountSettings();
             var previousSettings = existing.Clone();
-            existing.AllowInternet = dialog.AllowInternet;
-            existing.AllowLan = dialog.AllowLan;
-            existing.AllowLocalhost = dialog.AllowLocalhost;
-            existing.LocalhostPortExemptions = dialog.AllowedLocalhostPorts.ToList();
-            existing.FilterEphemeralLoopback = dialog.FilterEphemeralLoopback;
-            existing.Allowlist = dialog.Result;
-            FirewallAccountSettings.UpdateOrRemove(db, accountRow.Sid, existing);
-
-            sessionSaver.SaveConfig();
-            SaveAndRefreshRequested?.Invoke();
-
-            var finalSettings = db.GetAccount(accountRow.Sid)?.Firewall ?? new FirewallAccountSettings();
+            var finalSettings = new FirewallAccountSettings
+            {
+                AllowInternet = dialog.AllowInternet,
+                AllowLan = dialog.AllowLan,
+                AllowLocalhost = dialog.AllowLocalhost,
+                LocalhostPortExemptions = dialog.AllowedLocalhostPorts.ToList(),
+                FilterEphemeralLoopback = dialog.FilterEphemeralLoopback,
+                Allowlist = dialog.Result
+            };
             var username = db.SidNames.GetValueOrDefault(accountRow.Sid) ?? accountRow.Username;
             bool rolledBack = firewallApplyHelper.ApplyWithRollback(
                 owner: owner,

@@ -9,7 +9,7 @@ public class AppEntryLauncher(
     ISessionProvider sessionProvider)
     : IAppEntryLauncher
 {
-    public void Launch(AppEntry app, string? launcherArguments, string? launcherWorkingDirectory = null,
+    public LaunchExecutionResult Launch(AppEntry app, string? launcherArguments, string? launcherWorkingDirectory = null,
         Func<string, string, bool>? permissionPrompt = null, string? associationArgsTemplate = null)
     {
         var session = sessionProvider.GetSession();
@@ -18,14 +18,11 @@ public class AppEntryLauncher(
         switch (plan.Kind)
         {
             case AppEntryLaunchKind.Url:
-                launchFacade.LaunchUrl(plan.Url!, plan.Identity);
-                return;
+                return launchFacade.LaunchUrl(plan.Url!, plan.Identity);
             case AppEntryLaunchKind.Folder:
-                launchFacade.LaunchFolderBrowser(plan.Identity, plan.FolderPath, folderPermissionPrompt: permissionPrompt);
-                return;
+                return launchFacade.LaunchFolderBrowser(plan.Identity, plan.FolderPath, folderPermissionPrompt: permissionPrompt);
             case AppEntryLaunchKind.File:
-                launchFacade.LaunchFile(plan.FileTarget!, plan.Identity, permissionPrompt: permissionPrompt);
-                return;
+                return launchFacade.LaunchFile(plan.FileTarget!, plan.Identity, permissionPrompt: permissionPrompt);
             default:
                 throw new InvalidOperationException($"Unsupported launch plan kind '{plan.Kind}'.");
         }

@@ -6,9 +6,9 @@ public interface IRememberPinService
 {
     bool IsEnabled { get; }                                   // startkey.dat exists
     bool IsTpmAvailable();                                    // delegates to ITpmKeyProvider
-    bool TryDecrypt(out byte[] pinDerivedKey);                // TPM+DPAPI -> key (startup)
-    void EnableWithTpm(ProtectedBuffer pinDerivedKey);        // create startkey.dat mode=TPM
-    void EnableDpapiOnly(ProtectedBuffer pinDerivedKey);      // create startkey.dat mode=DPAPI
+    bool TryDecryptSecret(out SecureSecret? pinDerivedKey);   // TPM+DPAPI -> key (startup)
+    void EnableWithTpm(ISecureSecretSnapshotSource pinDerivedKey);
+    void EnableDpapiOnly(ISecureSecretSnapshotSource pinDerivedKey);
     void Disable();                                           // delete startkey.dat + TPM key
-    void UpdateForPinChange(ProtectedBuffer newPinDerivedKey); // re-wrap preserving current mode
+    void UpdateForPinChange(ISecureSecretSnapshotSource newPinDerivedKey); // re-wrap preserving current mode
 }

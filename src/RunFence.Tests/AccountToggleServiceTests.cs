@@ -15,6 +15,7 @@ public class AccountToggleServiceTests
     private const string Username = "testuser";
 
     private readonly Mock<IAccountLoginRestrictionService> _accountRestriction = new();
+    private readonly Mock<IGroupPolicyScriptHelper> _groupPolicyScriptHelper = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<ILicenseService> _licenseService = new();
     private readonly Mock<IAccountFirewallToggle> _firewallToggle = new();
@@ -31,6 +32,7 @@ public class AccountToggleServiceTests
 
         return new(
             _accountRestriction.Object,
+            _groupPolicyScriptHelper.Object,
             _log.Object,
             _licenseService.Object,
             _firewallToggle.Object,
@@ -92,7 +94,7 @@ public class AccountToggleServiceTests
         // Assert
         Assert.True(result.Success);
         _pathGrantService.Verify(g => g.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
-        _pathGrantService.Verify(g => g.RemoveGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>()), Times.Never);
+        _pathGrantService.Verify(g => g.UntrackGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
     }
 
     [Fact]
@@ -106,9 +108,9 @@ public class AccountToggleServiceTests
         // Act
         var result = CreateService().SetLogonBlocked(Sid, Username, blocked: false);
 
-        // Assert: RemoveGrant called with updateFileSystem=false (ACEs already removed by restriction service)
+        // Assert: tracking is removed without touching NTFS (ACEs already removed by restriction service)
         Assert.True(result.Success);
-        _pathGrantService.Verify(g => g.RemoveGrant(Sid, scriptPath, false, false), Times.Once);
+        _pathGrantService.Verify(g => g.UntrackGrant(Sid, scriptPath, false), Times.Once);
     }
 
     [Fact]
@@ -124,8 +126,8 @@ public class AccountToggleServiceTests
         // Act
         CreateService().SetLogonBlocked(Sid, Username, blocked: false);
 
-        // Assert: traverse entry for scriptsDir is removed (updateFileSystem=false since ACEs already reverted)
-        _pathGrantService.Verify(g => g.RemoveTraverse(Sid, scriptsDir, false), Times.Once);
+        // Assert: traverse entry for scriptsDir is untracked (ACEs already reverted)
+        _pathGrantService.Verify(g => g.UntrackTraverse(Sid, scriptsDir), Times.Once);
         // Assert: orphaned ancestor traverse entries are also cleaned up
         _pathGrantService.Verify(g => g.CleanupOrphanedTraverse(Sid, scriptsDir), Times.Once);
     }
@@ -143,7 +145,7 @@ public class AccountToggleServiceTests
         // Assert
         Assert.True(result.Success);
         _pathGrantService.Verify(g => g.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
-        _pathGrantService.Verify(g => g.RemoveGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<bool>()), Times.Never);
+        _pathGrantService.Verify(g => g.UntrackGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
     }
 
     [Fact]
@@ -180,6 +182,7 @@ public class AccountToggleServiceTests
 
         var service = new AccountToggleService(
             _accountRestriction.Object,
+            _groupPolicyScriptHelper.Object,
             _log.Object,
             _licenseService.Object,
             _firewallToggle.Object,
@@ -227,6 +230,97 @@ public class AccountToggleServiceTests
         Assert.Contains("Access is denied", result.ErrorMessage);
     }
 
+    [Fact]
+    public void RestoreLogonState_TracksGroupPolicyGrantStateAndHiddenState()
+    {
+        const string scriptPath = @"C:\Windows\System32\GroupPolicy\scripts\Startup\block.cmd";
+        var scriptsDir = Path.GetDirectoryName(scriptPath)!;
+        var traversePaths = new List<string> { scriptsDir, Path.GetDirectoryName(scriptsDir)! };
+        _groupPolicyScriptHelper.Setup(g => g.SetLoginBlocked(Sid, true))
+            .Returns(new SetLoginBlockedResult(scriptPath, traversePaths));
+
+        CreateService().RestoreLogonState(Sid, Username, groupPolicyBlocked: true, hiddenBlocked: false);
+
+        _pathGrantService.Verify(g => g.UpdateFromPath(scriptPath, Sid), Times.Once);
+        _accountRestriction.Verify(r => r.RestoreAccountHiddenState(Username, false), Times.Once);
+        Assert.Contains(_database.GetAccount(Sid)!.Grants, g => g.IsTraverseOnly &&
+            string.Equals(Path.GetFullPath(g.Path), Path.GetFullPath(scriptsDir), StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void RestoreLogonState_Unblocked_RemovesGrantTracking()
+    {
+        const string scriptPath = @"C:\Windows\System32\GroupPolicy\scripts\Startup\block.cmd";
+        var scriptsDir = Path.GetDirectoryName(scriptPath)!;
+        _groupPolicyScriptHelper.Setup(g => g.SetLoginBlocked(Sid, false))
+            .Returns(new SetLoginBlockedResult(scriptPath, null));
+
+        CreateService().RestoreLogonState(Sid, Username, groupPolicyBlocked: false, hiddenBlocked: false);
+
+        _pathGrantService.Verify(g => g.UntrackGrant(Sid, scriptPath, false), Times.Once);
+        _pathGrantService.Verify(g => g.UntrackTraverse(Sid, scriptsDir), Times.Once);
+        _pathGrantService.Verify(g => g.CleanupOrphanedTraverse(Sid, scriptsDir), Times.Once);
+        _accountRestriction.Verify(r => r.RestoreAccountHiddenState(Username, false), Times.Once);
+    }
+
+    [Fact]
+    public void SetLogonBlocked_WhenGrantTrackingThrows_RollsBackAndReturnsRolledBack()
+    {
+        const string scriptPath = @"C:\Windows\System32\GroupPolicy\scripts\block.cmd";
+        _licenseService.Setup(l => l.CanHideAccount(It.IsAny<int>())).Returns(true);
+        _accountRestriction.Setup(r => r.IsAccountHidden(Username)).Returns(false);
+        _accountRestriction.Setup(r => r.SetLoginBlockedBySid(Sid, Username, true))
+            .Returns(new SetLoginBlockedResult(scriptPath, null));
+        _groupPolicyScriptHelper.Setup(g => g.IsLoginBlocked(Sid)).Returns(false);
+        _pathGrantService.Setup(g => g.UpdateFromPath(scriptPath, Sid))
+            .Throws(new InvalidOperationException("db failed"));
+        _groupPolicyScriptHelper.Setup(g => g.SetLoginBlocked(Sid, false))
+            .Returns(new SetLoginBlockedResult(scriptPath, null));
+
+        var result = CreateService().SetLogonBlocked(Sid, Username, blocked: true);
+
+        Assert.False(result.Success);
+        Assert.Equal(AccountRestrictionStatus.RolledBack, result.FailureStatus);
+        Assert.True(result.RollbackAttempted);
+        _groupPolicyScriptHelper.Verify(g => g.SetLoginBlocked(Sid, false), Times.Once);
+        _accountRestriction.Verify(r => r.RestoreAccountHiddenState(Username, false), Times.Once);
+    }
+
+    [Fact]
+    public void SetLogonBlocked_Unblocked_UntrackWarnings_AreLogged()
+    {
+        const string scriptPath = @"C:\Windows\System32\GroupPolicy\scripts\Startup\block.cmd";
+        var scriptsDir = Path.GetDirectoryName(scriptPath)!;
+        var grantWarning = new GrantApplyWarning(
+            GrantApplyFailureStep.UntrackGrantSave,
+            scriptPath,
+            null,
+            new InvalidOperationException("grant save failed"));
+        var traverseWarning = new GrantApplyWarning(
+            GrantApplyFailureStep.UntrackTraverseSave,
+            scriptsDir,
+            null,
+            new InvalidOperationException("traverse save failed"));
+        _accountRestriction.Setup(r => r.SetLoginBlockedBySid(Sid, Username, false))
+            .Returns(new SetLoginBlockedResult(scriptPath, null));
+        _pathGrantService.Setup(g => g.UntrackGrant(Sid, scriptPath, false))
+            .Returns(new GrantApplyResult(
+                DatabaseModified: true,
+                DurableSaveCompleted: false,
+                Warnings: [grantWarning]));
+        _pathGrantService.Setup(g => g.UntrackTraverse(Sid, scriptsDir))
+            .Returns(new GrantApplyResult(
+                DatabaseModified: true,
+                DurableSaveCompleted: false,
+                Warnings: [traverseWarning]));
+
+        var result = CreateService().SetLogonBlocked(Sid, Username, blocked: false);
+
+        Assert.True(result.Success);
+        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(GrantApplyFailureFormatter.Format(grantWarning)))), Times.Once);
+        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(GrantApplyFailureFormatter.Format(traverseWarning)))), Times.Once);
+    }
+
     // ── SetAllowInternet ─────────────────────────────────────────────────────
 
     [Fact]
@@ -235,13 +329,13 @@ public class AccountToggleServiceTests
         // Arrange: existing firewall settings on account
         var existingFirewall = new FirewallAccountSettings { AllowInternet = true, AllowLan = false };
         _database.GetOrCreateAccount(Sid).Firewall = existingFirewall;
-        _firewallToggle.Setup(f => f.SetAllowInternet(Sid, false, existingFirewall)).Returns((string?)null);
+        _firewallToggle.Setup(f => f.SetAllowInternet(Sid, false, existingFirewall)).Returns(new SetAllowInternetResult(null));
 
         // Act
-        var error = CreateService().SetAllowInternet(Sid, allowInternet: false);
+        var result = CreateService().SetAllowInternet(Sid, allowInternet: false);
 
         // Assert: delegates to IAccountFirewallToggle with the existing settings
-        Assert.Null(error);
+        Assert.Null(result.Message);
         _firewallToggle.Verify(f => f.SetAllowInternet(Sid, false, existingFirewall), Times.Once);
     }
 
@@ -249,13 +343,13 @@ public class AccountToggleServiceTests
     public void SetAllowInternet_NoExistingAccount_PassesNullSettings()
     {
         // Arrange: no account entry — existing is null
-        _firewallToggle.Setup(f => f.SetAllowInternet(Sid, true, null)).Returns((string?)null);
+        _firewallToggle.Setup(f => f.SetAllowInternet(Sid, true, null)).Returns(new SetAllowInternetResult(null));
 
         // Act
-        var error = CreateService().SetAllowInternet(Sid, allowInternet: true);
+        var result = CreateService().SetAllowInternet(Sid, allowInternet: true);
 
         // Assert: null existing settings passed when no account
-        Assert.Null(error);
+        Assert.Null(result.Message);
         _firewallToggle.Verify(f => f.SetAllowInternet(Sid, true, null), Times.Once);
     }
 
@@ -263,12 +357,12 @@ public class AccountToggleServiceTests
     public void SetAllowInternet_FirewallToggleReturnsError_PropagatesError()
     {
         // Arrange: firewall toggle returns an error message
-        _firewallToggle.Setup(f => f.SetAllowInternet(Sid, false, null)).Returns("firewall unavailable");
+        _firewallToggle.Setup(f => f.SetAllowInternet(Sid, false, null)).Returns(new SetAllowInternetResult("firewall unavailable"));
 
         // Act
-        var error = CreateService().SetAllowInternet(Sid, allowInternet: false);
+        var result = CreateService().SetAllowInternet(Sid, allowInternet: false);
 
         // Assert: error propagated from toggle
-        Assert.Equal("firewall unavailable", error);
+        Assert.Equal("firewall unavailable", result.Message);
     }
 }

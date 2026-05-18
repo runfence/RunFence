@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using Moq;
 using RunFence.Acl;
 using Xunit;
 
@@ -20,7 +21,7 @@ public class AccountAclBulkScanServiceTests
 
     private static AccountAclBulkScanService CreateService(
         IEnumerable<(string Path, FileSystemSecurity Security)> entries)
-        => new(new StubTraverser(entries));
+        => new(new StubTraverser(entries), Mock.Of<IAclAccessor>());
 
     /// <summary>
     /// Builds a <see cref="DirectorySecurity"/> with explicit ACEs for the given SID.
@@ -37,14 +38,12 @@ public class AccountAclBulkScanServiceTests
             security.SetOwner(new SecurityIdentifier(ownerSid));
 
         foreach (var (sid, rights, type) in rules)
-        {
             security.AddAccessRule(new FileSystemAccessRule(
                 new SecurityIdentifier(sid),
                 rights,
                 InheritanceFlags.None,
                 PropagationFlags.None,
                 type));
-        }
 
         return security;
     }
@@ -119,6 +118,23 @@ public class AccountAclBulkScanServiceTests
         Assert.True(grant.Write);
     }
 
+    [Fact]
+    public async Task Scan_DenyAceOnOwnedPath_DoesNotMarkGrantAsOwned()
+    {
+        var security = MakeSecurity(
+            [(Sid1, FileSystemRights.WriteData, AccessControlType.Deny)],
+            ownerSid: Sid1);
+        var service = CreateService([(@"C:\Foo", security)]);
+
+        var knownSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 };
+        var result = await service.ScanAllAccountsAsync(
+            @"C:\Foo", knownSids, new Progress<long>(), CancellationToken.None);
+
+        var grant = result[Sid1].Grants.Single();
+        Assert.True(grant.IsDeny);
+        Assert.False(grant.IsOwner);
+    }
+
     // --- Traverse-only ACE classification ---
 
     [Fact]
@@ -158,6 +174,25 @@ public class AccountAclBulkScanServiceTests
             string.Equals(p, @"C:\Foo", StringComparison.OrdinalIgnoreCase));
         // But it IS in Grants
         Assert.Contains(scanResult.Grants, g => !g.IsDeny);
+    }
+
+    [Fact]
+    public async Task Scan_TraversePathWithDenyOnly_StillAppearsInTraversePaths()
+    {
+        var security = MakeSecurity([
+            (Sid1, TraverseOnlyRights, AccessControlType.Allow),
+            (Sid1, FileSystemRights.ReadData, AccessControlType.Deny)
+        ]);
+        var service = CreateService([(@"C:\Foo", security)]);
+
+        var knownSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 };
+        var result = await service.ScanAllAccountsAsync(
+            @"C:\Foo", knownSids, new Progress<long>(), CancellationToken.None);
+
+        var scanResult = result[Sid1];
+        Assert.Contains(scanResult.TraversePaths, p =>
+            string.Equals(p, @"C:\Foo", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(scanResult.Grants, g => g.IsDeny);
     }
 
     // --- Discovered rights mapping ---
@@ -299,10 +334,31 @@ public class AccountAclBulkScanServiceTests
         Assert.DoesNotContain(Sid1, (IDictionary<string, AccountScanResult>)result);
     }
 
+    [Fact]
+    public async Task Scan_AllowAndDenyAcesOnSamePath_ReturnsBothDiscoveredGrantModes()
+    {
+        var security = MakeSecurity([
+            (Sid1, FileSystemRights.ReadAndExecute, AccessControlType.Allow),
+            (Sid1, FileSystemRights.WriteData, AccessControlType.Deny)
+        ]);
+        var service = CreateService([(@"C:\Foo", security)]);
+
+        var result = await service.ScanAllAccountsAsync(
+            @"C:\Foo",
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 },
+            new Progress<long>(),
+            CancellationToken.None);
+
+        var grants = result[Sid1].Grants;
+        Assert.Equal(2, grants.Count);
+        Assert.Contains(grants, grant => !grant.IsDeny && grant.Read && grant.Execute);
+        Assert.Contains(grants, grant => grant.IsDeny && grant.Write);
+    }
+
     // --- Cancellation ---
 
     [Fact]
-    public async Task Scan_PreCancelledToken_ThrowsOrReturnsEmpty()
+    public async Task Scan_PreCancelledToken_ThrowsOperationCanceledException()
     {
         // Arrange: a pre-cancelled token so any cancellation-aware code exits immediately
         var cts = new CancellationTokenSource();
@@ -312,18 +368,11 @@ public class AccountAclBulkScanServiceTests
         var service = CreateService([(@"C:\Foo", security)]);
         var knownSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 };
 
-        // Act: either returns gracefully with empty results or throws OperationCanceledException
-        try
-        {
-            var result = await service.ScanAllAccountsAsync(
-                @"C:\Foo", knownSids, new Progress<long>(), cts.Token);
-            // If it returns (didn't throw), it must produce an empty result due to cancellation
-            Assert.Empty(result);
-        }
-        catch (OperationCanceledException)
-        {
-            // Acceptable: cancellation propagated
-        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ScanAllAccountsAsync(
+            @"C:\Foo",
+            knownSids,
+            new Progress<long>(),
+            cts.Token));
     }
 
     // --- File-vs-directory branching (SpecialMask selection) ---
@@ -337,7 +386,7 @@ public class AccountAclBulkScanServiceTests
         using var tempDir = new TempDirectory();
         var deleteOnlyRights = FileSystemRights.Delete;
         var security = MakeSecurity([(Sid1, deleteOnlyRights, AccessControlType.Allow)]);
-        var service = new AccountAclBulkScanService(new StubTraverser([(tempDir.Path, security)]));
+        var service = new AccountAclBulkScanService(new StubTraverser([(tempDir.Path, security)]), Mock.Of<IAclAccessor>());
 
         var result = await service.ScanAllAccountsAsync(
             tempDir.Path, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 },
@@ -360,7 +409,7 @@ public class AccountAclBulkScanServiceTests
 
         var deleteOnlyRights = FileSystemRights.Delete;
         var security = MakeSecurity([(Sid1, deleteOnlyRights, AccessControlType.Allow)]);
-        var service = new AccountAclBulkScanService(new StubTraverser([(tempFile, security)]));
+        var service = new AccountAclBulkScanService(new StubTraverser([(tempFile, security)]), Mock.Of<IAclAccessor>());
 
         var result = await service.ScanAllAccountsAsync(
             tempFile, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 },
@@ -376,7 +425,7 @@ public class AccountAclBulkScanServiceTests
     // --- Strict cancellation contract ---
 
     [Fact]
-    public async Task Scan_CancelledMidScan_DoesNotIncludeItemsAfterCancellation()
+    public async Task Scan_CancelledMidScan_ThrowsOperationCanceledException()
     {
         // Arrange: traverser yields 2 entries; cancels after the first one is produced.
         var cts = new CancellationTokenSource();
@@ -385,25 +434,37 @@ public class AccountAclBulkScanServiceTests
 
         // CancellingTraverser yields the first entry, then cancels the token and throws.
         var service = new AccountAclBulkScanService(
-            new CancellingTraverser([security1, security2], cts));
+            new CancellingTraverser([security1, security2], cts),
+            Mock.Of<IAclAccessor>());
 
         var knownSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1, Sid2 };
 
-        // Act: either throws OperationCanceledException or returns partial results
-        Dictionary<string, AccountScanResult> result;
-        try
-        {
-            result = await service.ScanAllAccountsAsync(
-                @"C:\Root", knownSids, new Progress<long>(), cts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            // Acceptable: cancellation propagated as exception — no items after cancel
-            return;
-        }
+        await Assert.ThrowsAsync<OperationCanceledException>(() => service.ScanAllAccountsAsync(
+            @"C:\Root",
+            knownSids,
+            new Progress<long>(),
+            cts.Token));
 
-        // If it returned normally, Sid2 must NOT be present (it was scanned after cancellation)
-        Assert.DoesNotContain(Sid2, (IDictionary<string, AccountScanResult>)result);
+    }
+
+    [Fact]
+    public async Task Scan_InaccessibleRoot_ThrowsAndDoesNotReportSuccess()
+    {
+        var root = Path.GetPathRoot(Environment.SystemDirectory)!;
+        var aclAccessor = new Mock<IAclAccessor>();
+        bool isFolder = true;
+        aclAccessor.Setup(a => a.PathExists(root, out isFolder)).Returns(true);
+        aclAccessor.Setup(a => a.GetSecurity(root)).Throws(new UnauthorizedAccessException("denied"));
+
+        var service = new AccountAclBulkScanService(
+            new StubTraverser([]),
+            aclAccessor.Object);
+
+        await Assert.ThrowsAsync<IOException>(() => service.ScanAllAccountsAsync(
+            root,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 },
+            new Progress<long>(),
+            CancellationToken.None));
     }
 
     /// <summary>
@@ -414,7 +475,7 @@ public class AccountAclBulkScanServiceTests
     {
         public IEnumerable<AclTraversalEntry> Traverse(
             IReadOnlyList<string> rootPaths, IProgress<long> progress, CancellationToken ct)
-            => entries.Select(e => new AclTraversalEntry(e.Path, false, e.Security));
+            => entries.Select(e => new AclTraversalEntry(e.Path, Directory.Exists(e.Path), e.Security));
     }
 
     /// <summary>

@@ -23,7 +23,8 @@ public class RunAsDirectLauncher(
     /// When <paramref name="adHocPassword"/> is provided, uses it directly without credential lookup.
     /// </summary>
     public void LaunchWithoutAppEntry(string filePath, string? arguments, CredentialEntry credential,
-        bool isFolder = false, PrivilegeLevel privilegeLevel = PrivilegeLevel.Basic,
+        string? launcherWorkingDirectory,
+        bool isFolder = false, PrivilegeLevel privilegeLevel = PrivilegeLevel.Isolated,
         ProtectedString? adHocPassword = null)
     {
         LaunchCredentials? launchCreds = null;
@@ -34,14 +35,14 @@ public class RunAsDirectLauncher(
             launchCreds = new LaunchCredentials(adHocPassword, domain, username);
         }
 
-        LaunchDirect(filePath, arguments, credential.Sid, isFolder, privilegeLevel, launchCreds);
+        LaunchDirect(filePath, arguments, launcherWorkingDirectory, credential.Sid, isFolder, privilegeLevel, launchCreds);
     }
 
     /// <summary>
     /// Launches a file without a saved app entry, using an AppContainer token.
     /// </summary>
     public void LaunchWithoutAppEntryInContainer(string filePath, string? arguments,
-        AppContainerEntry container, bool isFolder)
+        string? launcherWorkingDirectory, AppContainerEntry container, bool isFolder)
     {
         if (isFolder)
         {
@@ -51,7 +52,9 @@ public class RunAsDirectLauncher(
         }
 
         var permissionPrompt = AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache);
-        var workingDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath));
+        var workingDirectory = string.IsNullOrWhiteSpace(launcherWorkingDirectory)
+            ? Path.GetDirectoryName(Path.GetFullPath(filePath))
+            : launcherWorkingDirectory;
         RunWithLaunchErrorHandling(
             () => facade.LaunchFile(new ProcessLaunchTarget(filePath, arguments, workingDirectory),
                 new AppContainerLaunchIdentity(container),
@@ -59,7 +62,7 @@ public class RunAsDirectLauncher(
             filePath);
     }
 
-    private void LaunchDirect(string filePath, string? arguments, string sid, bool isFolder,
+    private void LaunchDirect(string filePath, string? arguments, string? launcherWorkingDirectory, string sid, bool isFolder,
         PrivilegeLevel privilegeLevel, LaunchCredentials? credentials)
     {
         var permissionPrompt = AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache);
@@ -77,7 +80,9 @@ public class RunAsDirectLauncher(
         }
         else
         {
-            var workingDir = Path.GetDirectoryName(filePath);
+            var workingDir = string.IsNullOrWhiteSpace(launcherWorkingDirectory)
+                ? Path.GetDirectoryName(filePath)
+                : launcherWorkingDirectory;
             RunWithLaunchErrorHandling(
                 () => facade.LaunchFile(new ProcessLaunchTarget(filePath, arguments, workingDir), identity,
                     permissionPrompt: permissionPrompt),
@@ -85,6 +90,6 @@ public class RunAsDirectLauncher(
         }
     }
 
-    private void RunWithLaunchErrorHandling(Action launchAction, string filePath)
+    private void RunWithLaunchErrorHandling(Func<LaunchExecutionResult> launchAction, string filePath)
         => launchErrorHandler.RunWithErrorHandling(launchAction, filePath);
 }

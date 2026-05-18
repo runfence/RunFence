@@ -1,8 +1,8 @@
-using RunFence.Launching.Windows;
-
 namespace RunFence.Launching.Resolution;
 
-public sealed class ExecutableKindService(IExecutableFileSystem fileSystem) : IExecutableKindService
+public sealed class ExecutableKindService(
+    IExecutableFileSystem fileSystem,
+    IWindowsAppsAliasPathResolver windowsAppsAliasPathResolver) : IExecutableKindService
 {
     private const ushort AppContainerFlag = 0x1000;
 
@@ -20,7 +20,7 @@ public sealed class ExecutableKindService(IExecutableFileSystem fileSystem) : IE
         try
         {
             if (fileSystem.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
-                return IsAppExecutionAlias(path);
+                return windowsAppsAliasPathResolver.IsWindowsAppsAliasPath(path);
         }
         catch
         {
@@ -30,39 +30,8 @@ public sealed class ExecutableKindService(IExecutableFileSystem fileSystem) : IE
         return HasAppContainerFlag(path);
     }
 
-    public bool SuggestsAboveBasicPrivilegeLevel(string path) =>
+    public bool SuggestsBasicPrivilegeLevel(string path) =>
         IsKnownBrowserExe(path) || IsUwpExeFile(path);
-
-    private bool IsAppExecutionAlias(string path)
-    {
-        using var handle = LaunchingNative.CreateFile(
-            path,
-            0,
-            LaunchingNative.FileShareRead | LaunchingNative.FileShareWrite,
-            IntPtr.Zero,
-            LaunchingNative.OpenExisting,
-            LaunchingNative.FileFlagOpenReparsePoint | LaunchingNative.FileFlagBackupSemantics,
-            IntPtr.Zero);
-
-        if (handle.IsInvalid)
-            return false;
-
-        var buffer = new byte[LaunchingNative.MaximumReparseDataBufferSize];
-        if (!LaunchingNative.DeviceIoControl(
-                handle,
-                LaunchingNative.FsctlGetReparsePoint,
-                IntPtr.Zero,
-                0,
-                buffer,
-                (uint)buffer.Length,
-                out _,
-                IntPtr.Zero))
-        {
-            return false;
-        }
-
-        return BitConverter.ToUInt32(buffer, 0) == LaunchingNative.IoReparseTagAppExecLink;
-    }
 
     private bool HasAppContainerFlag(string path)
     {

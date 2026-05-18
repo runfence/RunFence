@@ -1,6 +1,7 @@
 using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI.Forms;
 using RunFence.Core;
+using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
@@ -20,7 +21,7 @@ public class AppEditBrowseHelper
     private readonly ISessionProvider _sessionProvider;
     private readonly IExecutableKindService _executableKindService;
 
-    internal AppEditBrowseHelper(
+    public AppEditBrowseHelper(
         IShortcutDiscoveryService shortcutDiscoveryService,
         IShortcutIconHelper iconHelper,
         ShortcutTargetResolver shortcutTargetResolver,
@@ -108,10 +109,16 @@ public class AppEditBrowseHelper
     /// Runs app discovery and applies the selected result to the receiver.
     /// Does nothing if discovery returns no results or the user cancels.
     /// </summary>
-    public async Task DiscoverAndApplyAsync(IAppEditBrowseResultReceiver receiver)
+    public async Task DiscoverAndApplyAsync(IAppEditBrowseResultReceiver receiver, Func<bool>? canContinue = null)
     {
         var apps = await Task.Run(DiscoverApps);
+        if (canContinue != null && !canContinue())
+            return;
+
         var result = await ShowDiscoveryDialogAsync(apps);
+        if (canContinue != null && !canContinue())
+            return;
+
         if (result != null)
         {
             receiver.SetFilePath(result.Value.path);
@@ -132,23 +139,23 @@ public class AppEditBrowseHelper
 
     /// <summary>
     /// If <paramref name="exePath"/> is a known browser or UWP executable and the receiver's
-    /// current privilege level allows a suggestion, prompts the user to set it to 'Above Basic'.
-    /// Does nothing when the privilege level is already AboveBasic or higher, or for non-exe paths.
+    /// current privilege level allows a suggestion, prompts the user to set it to 'Basic'.
+    /// Does nothing when the privilege level is already Basic or higher, or for non-exe paths.
     /// </summary>
-    public void PromptAboveBasicIfNeeded(string exePath, IAppEditBrowseResultReceiver receiver)
+    public void PromptBasicIfNeeded(string exePath, IAppEditBrowseResultReceiver receiver)
     {
-        if (!receiver.CanSuggestAboveBasicPrivilegeLevel())
+        if (!receiver.CanSuggestBasicPrivilegeLevel())
             return;
 
         string? message = null;
         if (_executableKindService.IsKnownBrowserExe(exePath))
-            message = "This is a browser application. Set privilege level to 'Above Basic' for better compatibility?";
+            message = "This is a browser application. Set privilege level to 'Basic' for better compatibility?";
         else if (_executableKindService.IsUwpExeFile(exePath))
-            message = "This is a UWP application. Set privilege level to 'Above Basic' for better compatibility? (UWP apps do not support job restrictions.)";
+            message = "This is a UWP application. Set privilege level to 'Basic' for better compatibility? (UWP apps do not support job restrictions.)";
 
         if (message != null
             && MessageBox.Show(message, "RunFence", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-            receiver.SetPrivilegeLevel(PrivilegeLevel.AboveBasic);
+            receiver.SetPrivilegeLevel(PrivilegeLevel.Basic);
     }
 
     private string? BrowseFile()

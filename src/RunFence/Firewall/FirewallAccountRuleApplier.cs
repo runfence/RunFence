@@ -46,7 +46,11 @@ public class FirewallAccountRuleApplier(
                 wfpApplier.RollBackWfpRules(sid, rollbackSettings);
             }
 
-            throw new FirewallApplyException(FirewallApplyPhase.AccountRules, sid, ex);
+            return new FirewallAccountRuleApplyResult(
+                false,
+                [],
+                IsWfpFailure(ex) ? FirewallEnforcementLayer.WfpFilters : FirewallEnforcementLayer.AccountRules,
+                ex.Message);
         }
     }
 
@@ -59,4 +63,8 @@ public class FirewallAccountRuleApplier(
 
     public bool RefreshLocalAddressRules(string sid, string username, FirewallAccountSettings settings)
         => comApplier.RefreshLocalAddressRules(sid, username, settings);
+
+    private static bool IsWfpFailure(Exception ex)
+        => ex is Wfp.WfpFilterHelperException
+           || ex.InnerException is Wfp.WfpFilterHelperException;
 }

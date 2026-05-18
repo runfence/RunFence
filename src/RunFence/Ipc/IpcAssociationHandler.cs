@@ -19,6 +19,7 @@ public class IpcAssociationHandler(
     IIpcUiInvoker ipcUiInvoker,
     IAppEntryLauncher entryLauncher,
     IAssociationLaunchResolver associationLaunchResolver,
+    AssociationAccessDeniedNotifier accessDeniedNotifier,
     ISidNameCacheService sidNameCache,
     ILoggingService log,
     IIdleMonitorService idleMonitor)
@@ -41,8 +42,7 @@ public class IpcAssociationHandler(
             {
                 var resolution = associationLaunchResolver.Resolve(
                     appState.Database,
-                    message.Association,
-                    message.Arguments,
+                    AssociationLaunchResolver.BuildRequest(message.Association, message.Arguments),
                     context.CallerIdentity,
                     context.CallerSid,
                     context.IdentityFromImpersonation);
@@ -60,6 +60,7 @@ public class IpcAssociationHandler(
                         AssociationLaunchResolutionStatus.AppNotFound => new IpcResponse
                         {
                             Success = false,
+                            ErrorCode = IpcErrorCode.AppNotFound,
                             ErrorMessage = $"Registered app for '{message.Association}' not found (config may be unloaded)."
                         },
                         AssociationLaunchResolutionStatus.AccessDenied => new IpcResponse
@@ -76,6 +77,8 @@ public class IpcAssociationHandler(
                         },
                         _ => new IpcResponse { Success = false, ErrorMessage = "Launch failed." }
                     };
+                    if (resolution.Status == AssociationLaunchResolutionStatus.AccessDenied)
+                        accessDeniedNotifier.Notify();
                     return;
                 }
 
@@ -83,13 +86,16 @@ public class IpcAssociationHandler(
                 // per-association templates. Null coalesces to "" so DetermineArguments replaces DefaultArguments.
                 var associationTemplate = resolution.Entry?.ArgumentsTemplate ?? string.Empty;
 
-                entryLauncher.Launch(
+                using var launch = entryLauncher.Launch(
                     resolution.App,
                     message.Arguments,
                     message.WorkingDirectory,
                     AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache),
                     associationTemplate);
-                result = new IpcResponse { Success = true };
+                var warning = LaunchExecutionWarningFormatter.Format(resolution.App.Name, launch);
+                if (warning != null)
+                    log.Warn(warning);
+                result = new IpcResponse { Success = true, WarningMessage = warning };
 
                 idleMonitor.ResetIdleTimer();
             }

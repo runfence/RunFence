@@ -16,7 +16,7 @@ public class AppSettingsTests
     }
 
     [Fact]
-    public void Deserialize_LegacyEnableLoggingOnly_UsesDefaultLogVerbosity()
+    public void Deserialize_UnknownEnableLoggingProperty_UsesDefaultLogVerbosity()
     {
         var settings = JsonSerializer.Deserialize<AppSettings>(
             """{"enableLogging":false}""",
@@ -34,6 +34,16 @@ public class AppSettingsTests
 
         Assert.Contains("logVerbosity", json);
         Assert.DoesNotContain("enableLogging", json);
+    }
+
+    [Fact]
+    public void Deserialize_LogVerbosityProperty_UsesConfiguredValue()
+    {
+        var settings = JsonSerializer.Deserialize<AppSettings>(
+            """{"logVerbosity":"Error"}""",
+            JsonDefaults.Options)!;
+
+        Assert.Equal(LogVerbosity.Error, settings.LogVerbosity);
     }
 
 }

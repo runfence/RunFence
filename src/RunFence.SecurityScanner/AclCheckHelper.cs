@@ -111,6 +111,38 @@ public class AclCheckHelper(IEnvironmentDataAccess environment, IFileSystemDataA
         }
     }
 
+    public void CheckSecurityDescriptorAcl(string securityDescriptorSddl, string displayPath,
+        HashSet<string> excludedSids, int writeMask, StartupSecurityCategory category,
+        List<StartupSecurityFinding> findings, HashSet<(string, string)> seen,
+        string? navigationTarget = null)
+    {
+        if (string.IsNullOrWhiteSpace(securityDescriptorSddl))
+            return;
+
+        var descriptor = new RawSecurityDescriptor(securityDescriptorSddl);
+        CheckSecurityDescriptorOwner(descriptor, displayPath, excludedSids, category, findings, seen, navigationTarget);
+        var effective = ComputeFilteredAccessMasks(descriptor, excludedSids, writeMask);
+        foreach (var (sidStr, rights) in effective)
+        {
+            var writeRights = rights & writeMask;
+            if (writeRights == 0)
+                continue;
+
+            var principal = CachedResolveDisplayName(sidStr);
+            var key = (displayPath, sidStr);
+            if (!seen.Add(key))
+                continue;
+
+            findings.Add(new StartupSecurityFinding(
+                category,
+                displayPath,
+                sidStr,
+                principal,
+                FormatAccessMask(writeRights),
+                navigationTarget));
+        }
+    }
+
     public Dictionary<string, FileSystemRights> ComputeFilteredFileRights(
         FileSystemSecurity security, HashSet<string> excludedSids,
         FileSystemRights writeMask = 0)
@@ -125,6 +157,45 @@ public class AclCheckHelper(IEnvironmentDataAccess environment, IFileSystemDataA
         RegistryRights writeMask = 0)
     {
         var effective = AclComputeHelper.ComputeEffectiveRegistryRights(security, excludedSids);
+        FilterRedundantGroupSids(effective, excludedSids, sid => (effective[sid] & writeMask) != 0);
+        return effective;
+    }
+
+    private Dictionary<string, int> ComputeFilteredAccessMasks(
+        RawSecurityDescriptor descriptor, HashSet<string> excludedSids,
+        int writeMask = 0)
+    {
+        var allowed = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var denied = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (descriptor.DiscretionaryAcl != null)
+        {
+            foreach (GenericAce ace in descriptor.DiscretionaryAcl)
+            {
+                if (ace is not QualifiedAce { SecurityIdentifier: SecurityIdentifier sid } qualifiedAce)
+                    continue;
+                if (AclComputeHelper.IsTrustedSystemSid(sid) || excludedSids.Contains(sid.Value))
+                    continue;
+
+                switch (qualifiedAce.AceQualifier)
+                {
+                    case AceQualifier.AccessAllowed:
+                        allowed[sid.Value] = allowed.GetValueOrDefault(sid.Value) | qualifiedAce.AccessMask;
+                        break;
+                    case AceQualifier.AccessDenied:
+                        denied[sid.Value] = denied.GetValueOrDefault(sid.Value) | qualifiedAce.AccessMask;
+                        break;
+                }
+            }
+        }
+
+        var effective = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (sid, rights) in allowed)
+        {
+            var net = rights & ~denied.GetValueOrDefault(sid);
+            if (net != 0)
+                effective[sid] = net;
+        }
+
         FilterRedundantGroupSids(effective, excludedSids, sid => (effective[sid] & writeMask) != 0);
         return effective;
     }
@@ -285,5 +356,49 @@ public class AclCheckHelper(IEnvironmentDataAccess environment, IFileSystemDataA
         {
             /* best effort */
         }
+    }
+
+    private void CheckSecurityDescriptorOwner(RawSecurityDescriptor descriptor, string displayPath,
+        HashSet<string> excludedSids, StartupSecurityCategory category,
+        List<StartupSecurityFinding> findings, HashSet<(string, string)> seen, string? navigationTarget)
+    {
+        try
+        {
+            if (descriptor.Owner is not SecurityIdentifier owner)
+                return;
+            if (AclComputeHelper.IsTrustedSystemSid(owner))
+                return;
+            if (excludedSids.Contains(owner.Value))
+                return;
+            if (!seen.Add((displayPath, owner.Value + ":owner")))
+                return;
+            var principal = CachedResolveDisplayName(owner.Value);
+            findings.Add(new StartupSecurityFinding(category, displayPath, owner.Value, principal,
+                "Owner", navigationTarget));
+        }
+        catch
+        {
+            /* best effort */
+        }
+    }
+
+    private static string FormatAccessMask(int accessMask)
+    {
+        var parts = new List<string>();
+        if ((accessMask & 0x2) != 0)
+            parts.Add("Create");
+        if ((accessMask & 0x4) != 0)
+            parts.Add("Update");
+        if ((accessMask & 0x10000) != 0)
+            parts.Add("Delete");
+        if ((accessMask & 0x40000) != 0)
+            parts.Add("WriteDac");
+        if ((accessMask & 0x80000) != 0)
+            parts.Add("WriteOwner");
+        if ((accessMask & unchecked((int)0x40000000)) != 0)
+            parts.Add("GenericWrite");
+        if ((accessMask & unchecked((int)0x10000000)) != 0)
+            parts.Add("GenericAll");
+        return parts.Count > 0 ? string.Join(", ", parts) : $"0x{accessMask:X}";
     }
 }

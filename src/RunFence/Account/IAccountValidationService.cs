@@ -5,6 +5,6 @@ public interface IAccountValidationService
     void ValidateNotCurrentAccount(string sid, string action);
     void ValidateNotLastAdmin(string sid, string action);
     void ValidateNotInteractiveUser(string sid, string action);
-    void ValidateNoRunningProcesses(string sid, string action);
+    IReadOnlyList<ProcessInfo> GetRunningProcesses(string targetSid);
     List<string> GetProcessesRunningAsSid(string targetSid);
 }

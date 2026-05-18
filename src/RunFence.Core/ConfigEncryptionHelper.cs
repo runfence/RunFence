@@ -18,14 +18,14 @@ public static class ConfigEncryptionHelper
     private const int SaltSize = 32;
     private const int MinEncryptedSize = 66; // HeaderSize(6) + SaltSize(32) + nonce(12B) + tag(16B)
 
-    public static byte[] EncryptConfig(byte[] plaintext, byte[] masterKey, ConfigFileType fileType, byte[] argonSalt)
+    public static byte[] EncryptConfig(ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> masterKey, ConfigFileType fileType, ReadOnlySpan<byte> argonSalt)
     {
         // Build static prefix + salt (38 bytes) — this array is also the AAD
         var aad = new byte[HeaderSize + SaltSize];
         Buffer.BlockCopy(Magic, 0, aad, 0, Magic.Length);
         aad[4] = FormatVersion;
         aad[5] = (byte)fileType;
-        Buffer.BlockCopy(argonSalt, 0, aad, HeaderSize, SaltSize);
+        argonSalt.CopyTo(aad.AsSpan(HeaderSize, SaltSize));
 
         byte[]? derivedKey = null;
         try
@@ -45,7 +45,7 @@ public static class ConfigEncryptionHelper
         }
     }
 
-    public static byte[] DecryptConfig(byte[] encrypted, byte[] masterKey, ConfigFileType fileType)
+    public static byte[] DecryptConfig(ReadOnlySpan<byte> encrypted, ReadOnlySpan<byte> masterKey, ConfigFileType fileType)
     {
         if (encrypted.Length < MinEncryptedSize)
             throw new CryptographicException("Config file is too short.");

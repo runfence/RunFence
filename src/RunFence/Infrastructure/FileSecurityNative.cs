@@ -17,8 +17,12 @@ public static class FileSecurityNative
     public static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
     public const uint FILE_SHARE_READ = 0x00000001;
     public const uint FILE_SHARE_WRITE = 0x00000002;
+    public const uint FILE_SHARE_DELETE = 0x00000004;
+    public const uint CREATE_NEW = 1;
     public const uint OPEN_EXISTING = 3;
     public const uint GENERIC_READ = 0x80000000;
+    public const uint GENERIC_WRITE = 0x40000000;
+    public const uint DELETE = 0x00010000;
 
     public const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     public const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
@@ -47,6 +51,8 @@ public static class FileSecurityNative
         OWNER_SECURITY_INFORMATION = 0x00000001,
         DACL_SECURITY_INFORMATION = 0x00000004,
         LABEL_SECURITY_INFORMATION = 0x00000010,
+        UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000,
+        PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000,
     }
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -72,6 +78,12 @@ public static class FileSecurityNative
         [MarshalAs(UnmanagedType.Bool)] out bool lpbDaclPresent,
         out IntPtr pDacl,
         [MarshalAs(UnmanagedType.Bool)] out bool lpbDaclDefaulted);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    public static extern bool GetSecurityDescriptorOwner(
+        IntPtr pSecurityDescriptor,
+        out IntPtr pOwner,
+        [MarshalAs(UnmanagedType.Bool)] out bool lpbOwnerDefaulted);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     public static extern int SetSecurityInfo(
@@ -142,6 +154,65 @@ public static class FileSecurityNative
 
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern bool GetFileInformationByHandle(IntPtr hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+
+    public enum FILE_INFO_BY_HANDLE_CLASS
+    {
+        FileBasicInfo = 0,
+        FileDispositionInfo = 4,
+        FileDispositionInfoEx = 21,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FILE_BASIC_INFO
+    {
+        public long CreationTime;
+        public long LastAccessTime;
+        public long LastWriteTime;
+        public long ChangeTime;
+        public uint FileAttributes;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FILE_DISPOSITION_INFO
+    {
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool DeleteFile;
+    }
+
+    [Flags]
+    public enum FILE_DISPOSITION_FLAGS : uint
+    {
+        DELETE = 0x00000001,
+        POSIX_SEMANTICS = 0x00000002,
+        IGNORE_READONLY_ATTRIBUTE = 0x00000010,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FILE_DISPOSITION_INFO_EX
+    {
+        public FILE_DISPOSITION_FLAGS Flags;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetFileInformationByHandle(
+        IntPtr hFile,
+        FILE_INFO_BY_HANDLE_CLASS FileInformationClass,
+        ref FILE_DISPOSITION_INFO lpFileInformation,
+        uint dwBufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetFileInformationByHandle(
+        IntPtr hFile,
+        FILE_INFO_BY_HANDLE_CLASS FileInformationClass,
+        ref FILE_DISPOSITION_INFO_EX lpFileInformation,
+        uint dwBufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool SetFileInformationByHandle(
+        IntPtr hFile,
+        FILE_INFO_BY_HANDLE_CLASS FileInformationClass,
+        ref FILE_BASIC_INFO lpFileInformation,
+        uint dwBufferSize);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern uint GetFinalPathNameByHandle(IntPtr hFile, StringBuilder lpszFilePath,

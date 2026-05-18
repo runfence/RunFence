@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text.Json;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -11,42 +12,75 @@ namespace RunFence.Startup;
 public class StartupCredentialLoader(
     IStartupUI ui,
     IDatabaseService databaseService,
+    ILoadedGoodBackupStore loadedGoodBackupStore,
     IConfigPaths configPaths,
     IRememberPinService rememberPinService,
     IPinService pinService,
-    ICredentialEncryptionService encryptionService,
+    ICredentialEncryptionSpanService encryptionService,
     ILoggingService log) : IStartupCredentialLoader
 {
     /// <summary>
     /// Loads the credential store and verifies the PIN. Handles first run, DPAPI loss, and
     /// JSON corruption cases. Returns null if the user cancelled or an unrecoverable error occurred.
     /// </summary>
-    public CredentialLoadResult? LoadAndVerifyCredentials()
+    public CredentialLoadResult? LoadAndVerifyCredentials(string selectedConfigPath)
+        => LoadAndVerifyCredentials(
+            selectedConfigPath,
+            credentialBackupLoadAttempted: false,
+            credentialStorePath: configPaths.CredentialsFilePath,
+            usingBackupSource: false);
+
+    private CredentialLoadResult? LoadAndVerifyCredentials(
+        string selectedConfigPath,
+        bool credentialBackupLoadAttempted,
+        string credentialStorePath,
+        bool usingBackupSource)
     {
         log.Info("StartupCredentialLoader: loading credentials.");
-        var configSalt = databaseService.TryGetConfigSalt();
+        var configSalt = databaseService.TryGetConfigSaltFromPath(selectedConfigPath);
 
         try
         {
-            var credentialStore = databaseService.LoadCredentialStore();
+            var credentialStore = usingBackupSource
+                ? databaseService.LoadCredentialStoreFromPath(credentialStorePath)
+                : databaseService.LoadCredentialStore();
 
+            var configSaltMatchesCredentialStore = configSalt != null &&
+                                                   configSalt.SequenceEqual(credentialStore.ArgonSalt);
+            var requiresInteractivePinForMismatch = configSalt != null && !configSaltMatchesCredentialStore;
             var mismatchConfigSalt = configSalt != null &&
-                                     !configSalt.SequenceEqual(credentialStore.ArgonSalt)
+                                     !configSaltMatchesCredentialStore
                 ? configSalt
                 : null;
 
             if (rememberPinService.IsEnabled)
             {
-                if (rememberPinService.TryDecrypt(out var rememberedPinKey))
+                if (rememberPinService.TryDecryptSecret(out var rememberedPinKey))
                 {
-                    if (pinService.VerifyDerivedKey(rememberedPinKey, credentialStore))
+                    Debug.Assert(rememberedPinKey != null);
+                    bool rememberPinCanaryVerified = false;
+                    if (rememberedPinKey!.TransformSnapshot(key => pinService.VerifyDerivedKey(key, credentialStore)))
                     {
-                        return new CredentialLoadResult(credentialStore, rememberedPinKey, MismatchKey: null,
-                            PinBypassed: true);
+                        rememberPinCanaryVerified = true;
+                        if (!requiresInteractivePinForMismatch)
+                        {
+                            return AcceptCredentialStore(
+                                credentialStore,
+                                rememberedPinKey,
+                                null,
+                                usingBackupSource,
+                                configSalt,
+                                pinBypassed: true);
+                        }
+
+                        log.Info("Remember PIN bypass skipped because config salt mismatched");
                     }
 
-                    log.Warn("Remember PIN key failed canary verification - falling back to PIN");
-                    CryptographicOperations.ZeroMemory(rememberedPinKey);
+                    if (rememberPinCanaryVerified)
+                        log.Info("Remember PIN key verified but startup requires explicit PIN verification");
+                    else
+                        log.Warn("Remember PIN key failed canary verification - falling back to PIN");
+                    rememberedPinKey.Dispose();
                 }
                 else
                 {
@@ -54,8 +88,8 @@ public class StartupCredentialLoader(
                 }
             }
 
-            var pinResult = ui.PromptVerifyPin(credentialStore, mismatchConfigSalt);
-            if (pinResult.Key.Length == 0)
+            using var pinResult = ui.PromptVerifyPin(credentialStore, mismatchConfigSalt) ?? PinVerifyOutcome.Canceled();
+            if (pinResult.IsCanceled)
                 return null;
 
             if (pinResult.NewStore != null)
@@ -64,88 +98,205 @@ public class StartupCredentialLoader(
                 credentialStore = pinResult.NewStore;
             }
 
-            var pinDerivedKey = pinResult.Key;
-            var mismatchKey = pinResult.MismatchKey;
+            SecureSecret? pinDerivedKey = null;
+            SecureSecret? mismatchKey = null;
             bool success = false;
 
             try
             {
-                if (!VerifyDpapiAccess(credentialStore, pinDerivedKey))
-                {
-                    CryptographicOperations.ZeroMemory(pinDerivedKey);
-                    if (mismatchKey != null)
-                    {
-                        CryptographicOperations.ZeroMemory(mismatchKey);
-                        mismatchKey = null;
-                    }
-
-                    try
-                    {
-                        File.Delete(configPaths.CredentialsFilePath);
-                    }
-                    catch
-                    {
-                    }
-
-                    var recovery = ui.PromptRecoveryPin(configSalt);
-                    if (recovery == null)
-                        return null;
-                    credentialStore = recovery.Value.Store;
-                    pinDerivedKey = recovery.Value.Key;
-                    mismatchKey = recovery.Value.MismatchKey;
-                }
+                pinDerivedKey = pinResult.TakeKey();
+                mismatchKey = pinResult.TakeMismatchKey();
+                var acceptedResult = AcceptCredentialStore(
+                    credentialStore,
+                    pinDerivedKey,
+                    mismatchKey,
+                    usingBackupSource,
+                    configSalt,
+                    pinBypassed: false);
+                if (acceptedResult == null)
+                    return null;
 
                 success = true;
-                log.Info("StartupCredentialLoader: credentials loaded and verified.");
-                return new CredentialLoadResult(credentialStore, pinDerivedKey, mismatchKey);
+                pinDerivedKey = null;
+                mismatchKey = null;
+                return acceptedResult;
             }
             finally
             {
                 if (!success)
                 {
-                    CryptographicOperations.ZeroMemory(pinDerivedKey);
-                    if (mismatchKey != null)
-                        CryptographicOperations.ZeroMemory(mismatchKey);
+                    pinDerivedKey?.Dispose();
+                    mismatchKey?.Dispose();
                 }
             }
         }
         catch (FileNotFoundException)
         {
+            if (TryContinueWithCredentialBackup(
+                    selectedConfigPath,
+                    credentialBackupLoadAttempted,
+                    out var backupResult))
+            {
+                return backupResult;
+            }
+
             var result = ui.PromptNewPin();
             if (result == null)
                 return null;
             log.Info("StartupCredentialLoader: credentials created (first run).");
-            return new CredentialLoadResult(result.Value.store, result.Value.key, null);
+            using (result)
+            {
+                return new CredentialLoadResult(result.Store, result.TakePinDerivedKey(), null);
+            }
         }
         catch (JsonException ex)
         {
             log.Error("Credential store corrupt", ex);
-            ui.ShowError("Credential store file is corrupt. Backup at credentials.bak may help.");
+            if (TryContinueWithCredentialBackup(
+                    selectedConfigPath,
+                    credentialBackupLoadAttempted,
+                    out var backupResult))
+            {
+                return backupResult;
+            }
+
+            ui.ShowError("Credential store file is corrupt.");
             return null;
         }
         catch (IOException ex)
         {
             log.Error("Credential store inaccessible", ex);
+            if (TryContinueWithCredentialBackup(
+                    selectedConfigPath,
+                    credentialBackupLoadAttempted,
+                    out var backupResult))
+            {
+                return backupResult;
+            }
+
+            ui.ShowError($"Credential store inaccessible: {ex.Message}");
+            return null;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            log.Error("Credential store inaccessible", ex);
+            if (TryContinueWithCredentialBackup(
+                    selectedConfigPath,
+                    credentialBackupLoadAttempted,
+                    out var backupResult))
+            {
+                return backupResult;
+            }
+
             ui.ShowError($"Credential store inaccessible: {ex.Message}");
             return null;
         }
     }
 
-    private bool VerifyDpapiAccess(CredentialStore store, byte[] pinDerivedKey)
+    private bool TryContinueWithCredentialBackup(
+        string selectedConfigPath,
+        bool credentialBackupLoadAttempted,
+        out CredentialLoadResult? backupResult)
     {
-        var cred = store.Credentials.FirstOrDefault(c => c is { IsCurrentAccount: false, EncryptedPassword.Length: > 0 });
-        if (cred == null)
-            return true;
+        backupResult = null;
+        if (credentialBackupLoadAttempted ||
+            !loadedGoodBackupStore.Exists(configPaths.CredentialsFilePath) ||
+            !ui.ConfirmRestoreCredentialStoreBackup())
+        {
+            return false;
+        }
 
+        var backupPath = loadedGoodBackupStore.GetBackupPath(configPaths.CredentialsFilePath);
+        backupResult = LoadAndVerifyCredentials(
+            selectedConfigPath,
+            credentialBackupLoadAttempted: true,
+            credentialStorePath: backupPath,
+            usingBackupSource: true);
+        return true;
+    }
+
+    private CredentialLoadResult? AcceptCredentialStore(
+        CredentialStore credentialStore,
+        SecureSecret pinDerivedKey,
+        SecureSecret? mismatchKey,
+        bool usingBackupSource,
+        byte[]? configSalt,
+        bool pinBypassed)
+    {
+        var success = false;
         try
         {
-            using var password = encryptionService.Decrypt(cred.EncryptedPassword, pinDerivedKey);
-            return true;
+            if (!VerifyDpapiAccess(credentialStore, pinDerivedKey))
+            {
+                pinDerivedKey.Dispose();
+                pinDerivedKey = null!;
+                mismatchKey?.Dispose();
+                mismatchKey = null;
+
+                try
+                {
+                    File.Delete(configPaths.CredentialsFilePath);
+                }
+                catch
+                {
+                }
+
+                using var recovery = ui.PromptRecoveryPin(configSalt);
+                if (recovery == null)
+                    return null;
+
+                credentialStore = recovery.Store;
+                pinDerivedKey = recovery.TakeKey();
+                mismatchKey = recovery.TakeMismatchKey();
+                pinBypassed = false;
+            }
+
+            if (usingBackupSource)
+                databaseService.SaveCredentialStore(credentialStore);
+
+            success = true;
+            log.Info("StartupCredentialLoader: credentials loaded and verified.");
+            return new CredentialLoadResult(credentialStore, pinDerivedKey, mismatchKey, pinBypassed);
         }
-        catch (CryptographicException ex)
+        finally
         {
-            log.Error("DPAPI key loss detected - credential decryption failed after successful PIN verification", ex);
-            return false;
+            if (!success)
+            {
+                pinDerivedKey?.Dispose();
+                mismatchKey?.Dispose();
+            }
+        }
+    }
+
+    private bool VerifyDpapiAccess(CredentialStore store, ISecureSecretSnapshotSource pinDerivedKey)
+    {
+        var encryptedCredentials = store.Credentials
+            .Where(c => c is { IsCurrentAccount: false, EncryptedPassword.Length: > 0 })
+            .ToList();
+        if (encryptedCredentials.Count == 0)
+            return true;
+
+        bool allAccessible = true;
+        try
+        {
+            foreach (var cred in encryptedCredentials)
+            {
+                try
+                {
+                    using var password = pinDerivedKey.TransformSnapshot(key => encryptionService.Decrypt(cred.EncryptedPassword, key));
+                }
+                catch (CryptographicException ex)
+                {
+                    allAccessible = false;
+                    log.Error($"DPAPI key loss detected for credential SID {cred.Sid}", ex);
+                }
+            }
+
+            return allAccessible;
+        }
+        finally
+        {
+            log.Info($"DPAPI credential classification complete: checked={encryptedCredentials.Count}, allAccessible={allAccessible}");
         }
     }
 }

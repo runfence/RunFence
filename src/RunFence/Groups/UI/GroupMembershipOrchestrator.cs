@@ -7,7 +7,7 @@ namespace RunFence.Groups.UI;
 /// Handles add/remove member operations for a selected group via dialogs.
 /// </summary>
 public class GroupMembershipOrchestrator(
-    ILocalGroupMembershipService groupMembership,
+    ILocalGroupMutationService groupMembership,
     IMemberPickerDialog memberPicker,
     IGroupMembershipPrompt prompt,
     ILoggingService log)

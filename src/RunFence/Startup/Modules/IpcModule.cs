@@ -55,6 +55,10 @@ public class IpcModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<AssociationAccessDeniedNotifier>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<IpcAssociationHandler>()
             .AsSelf()
             .SingleInstance();

@@ -21,8 +21,9 @@ public class WizardAccountSetupHelperFactory(
     ISidNameCacheService sidNameCache,
     ISettingsTransferService settingsTransferService,
     FirewallApplyHelper firewallApplyHelper,
-    PackageInstallService packageInstallService,
-    IDatabaseProvider databaseProvider)
+    IPackageInstallService packageInstallService,
+    IDatabaseProvider databaseProvider,
+    IWizardSessionSaver sessionSaver)
 {
     /// <summary>
     /// Creates an <see cref="AccountNameStep"/> with account-existence validation using the
@@ -47,5 +48,5 @@ public class WizardAccountSetupHelperFactory(
 
     public WizardAccountSetupHelper Create(SessionContext session) =>
         new(credentialManager, localUserProvider, sidNameCache,
-            settingsTransferService, firewallApplyHelper, packageInstallService, session);
+            settingsTransferService, firewallApplyHelper, packageInstallService, sessionSaver, session);
 }

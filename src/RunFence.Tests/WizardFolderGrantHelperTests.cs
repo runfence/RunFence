@@ -25,21 +25,17 @@ public class WizardFolderGrantHelperTests
     {
         // Arrange: null/empty strings are skipped by string.IsNullOrEmpty check
         var paths = new[] { "" };
+        var rights = SavedRightsState.DefaultForMode(isDeny: false);
 
         var helper = CreateHelper();
 
         // Act
-        await helper.GrantFolderAccessAsync(paths, Sid, SavedRightsState.DefaultForMode(isDeny: false), _progress.Object);
+        await helper.GrantFolderAccessAsync(paths, Sid, rights, _progress.Object);
 
-        // Assert: EnsureAccess and PinFolders never called; no status reported
-        _pathGrantService.Verify(
-            s => s.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<SavedRightsState>(),
-                It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()),
-            Times.Never);
-        _quickAccessPinService.Verify(
-            p => p.PinFolders(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()),
-            Times.Never);
-        _progress.Verify(p => p.ReportStatus(It.IsAny<string>()), Times.Never);
+        // Assert: no grant or pin interaction and no status progress
+        _pathGrantService.VerifyNoOtherCalls();
+        _quickAccessPinService.VerifyNoOtherCalls();
+        _progress.VerifyNoOtherCalls();
     }
 
     // --- Error reporting ---
@@ -47,39 +43,35 @@ public class WizardFolderGrantHelperTests
     [Fact]
     public async Task GrantFolderAccessAsync_ReportsErrorForFailedPath_ContinuesToNextPath()
     {
-        // Arrange: two paths — first throws, second succeeds on a real temp directory.
-        // Use It.Is to distinguish the two paths without relying on Path.GetFullPath normalization.
+        // Arrange: two paths; first throws, second succeeds on a real temp directory.
         using var dir = new TempDirectory("RunFenceTest");
         var tempDir = dir.Path;
         const string failingPath = @"C:\NonExistentPath\WillThrow";
+        var rights = SavedRightsState.DefaultForMode(isDeny: false);
         _pathGrantService
-            .Setup(s => s.EnsureAccess(
-                Sid, It.Is<string>(p => p.Equals(failingPath, StringComparison.OrdinalIgnoreCase)),
-                It.IsAny<SavedRightsState>(),
-                It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
-            .Throws(new UnauthorizedAccessException("Access denied"));
+            .Setup(s => s.EnsureAccess(Sid, failingPath, rights, null, false))
+            .Throws(new GrantOperationException(
+                GrantApplyFailureStep.GrantAclApply,
+                failingPath,
+                null,
+                new UnauthorizedAccessException("Access denied")));
         _pathGrantService
-            .Setup(s => s.EnsureAccess(
-                Sid, It.Is<string>(p => !p.Equals(failingPath, StringComparison.OrdinalIgnoreCase)),
-                It.IsAny<SavedRightsState>(),
-                It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
-            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
+            .Setup(s => s.EnsureAccess(Sid, tempDir, rights, null, false))
+            .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
         var helper = CreateHelper();
 
         // Act
-        await helper.GrantFolderAccessAsync([failingPath, tempDir], Sid, SavedRightsState.DefaultForMode(isDeny: false), _progress.Object);
+        await helper.GrantFolderAccessAsync([failingPath, tempDir], Sid, rights, _progress.Object);
 
-        // Assert: error reported for failing path
+        // Assert: error reported for failing path and status for the succeeding path
+        var expectedStatus = $"Granting access to {Path.GetFileName(tempDir)}...";
         _progress.Verify(
             p => p.ReportError(It.Is<string>(s =>
                 s.Contains("C:\\NonExistentPath\\WillThrow") &&
                 s.Contains("Access denied"))),
             Times.Once);
-        // Status reported for the succeeding path
-        _progress.Verify(
-            p => p.ReportStatus(It.Is<string>(s => s.Contains(Path.GetFileName(tempDir)))),
-            Times.Once);
+        _progress.Verify(p => p.ReportStatus(expectedStatus), Times.Once);
     }
 
     // --- Pinning accessible folders ---
@@ -88,31 +80,31 @@ public class WizardFolderGrantHelperTests
     public async Task GrantFolderAccessAsync_PinsExistingDirectory_WhenGrantAdded()
     {
         // Arrange: a real temp directory that exists on disk; grant returns GrantAdded=true.
-        // Use It.IsAny for the path to avoid relying on Path.GetFullPath normalization details.
         using var dir = new TempDirectory("RunFenceTest");
         var tempDir = dir.Path;
+        var rights = SavedRightsState.DefaultForMode(isDeny: false);
         _pathGrantService
-            .Setup(s => s.EnsureAccess(
-                Sid, It.IsAny<string>(), It.IsAny<SavedRightsState>(),
-                It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
-            .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
+            .Setup(s => s.EnsureAccess(Sid, tempDir, rights, null, false))
+            .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
         List<string>? pinnedPaths = null;
         _quickAccessPinService
-            .Setup(p => p.PinFolders(Sid, It.IsAny<IReadOnlyList<string>>()))
+            .Setup(p => p.PinFolders(
+                Sid,
+                It.Is<IReadOnlyList<string>>(paths => paths.Count == 1 && paths[0] == tempDir)))
             .Callback<string, IReadOnlyList<string>>((_, paths) => pinnedPaths = [..paths]);
 
         var helper = CreateHelper();
 
         // Act
-        await helper.GrantFolderAccessAsync([tempDir], Sid, SavedRightsState.DefaultForMode(isDeny: false), _progress.Object);
+        await helper.GrantFolderAccessAsync([tempDir], Sid, rights, _progress.Object);
 
-        // Assert: PinFolders called once with the normalized (full) path of the directory
-        _quickAccessPinService.Verify(p => p.PinFolders(Sid, It.IsAny<IReadOnlyList<string>>()), Times.Once);
+        // Assert: PinFolders called once with normalized existing directory
+        _quickAccessPinService.Verify(p => p.PinFolders(Sid, It.Is<IReadOnlyList<string>>(paths => paths.Count == 1 && paths[0] == tempDir)), Times.Once);
         Assert.NotNull(pinnedPaths);
         Assert.Single(pinnedPaths);
         Assert.True(Directory.Exists(pinnedPaths[0]));
-        Assert.Equal(Path.GetFullPath(pinnedPaths[0]), pinnedPaths[0]); // path is normalized
+        Assert.Equal(Path.GetFullPath(pinnedPaths[0]), pinnedPaths[0]);
     }
 
     [Fact]
@@ -121,21 +113,18 @@ public class WizardFolderGrantHelperTests
         // Arrange: grant returns GrantAdded=false (access already granted)
         using var dir = new TempDirectory("RunFenceTest");
         var tempDir = dir.Path;
+        var rights = SavedRightsState.DefaultForMode(isDeny: false);
         _pathGrantService
-            .Setup(s => s.EnsureAccess(
-                Sid, It.IsAny<string>(), It.IsAny<SavedRightsState>(),
-                It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
-            .Returns(new GrantOperationResult(GrantAdded: false, TraverseAdded: false, DatabaseModified: false));
+            .Setup(s => s.EnsureAccess(Sid, tempDir, rights, null, false))
+            .Returns(default(GrantApplyResult));
 
         var helper = CreateHelper();
 
         // Act
-        await helper.GrantFolderAccessAsync([tempDir], Sid, SavedRightsState.DefaultForMode(isDeny: false), _progress.Object);
+        await helper.GrantFolderAccessAsync([tempDir], Sid, rights, _progress.Object);
 
         // Assert: PinFolders never called
-        _quickAccessPinService.Verify(
-            p => p.PinFolders(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()),
-            Times.Never);
+        _quickAccessPinService.VerifyNoOtherCalls();
     }
 
     [Fact]
@@ -143,23 +132,20 @@ public class WizardFolderGrantHelperTests
     {
         // Arrange: EnsureAccess returns GrantAdded=true but path is a file (not a directory)
         var tempFile = Path.GetTempFileName();
+        var rights = SavedRightsState.DefaultForMode(isDeny: false);
         try
         {
             _pathGrantService
-                .Setup(s => s.EnsureAccess(
-                    Sid, It.IsAny<string>(), It.IsAny<SavedRightsState>(),
-                    It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
-                .Returns(new GrantOperationResult(GrantAdded: true, TraverseAdded: false, DatabaseModified: true));
+                .Setup(s => s.EnsureAccess(Sid, tempFile, rights, null, false))
+                .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
             var helper = CreateHelper();
 
             // Act
-            await helper.GrantFolderAccessAsync([tempFile], Sid, SavedRightsState.DefaultForMode(isDeny: false), _progress.Object);
+            await helper.GrantFolderAccessAsync([tempFile], Sid, rights, _progress.Object);
 
             // Assert: PinFolders not called because path is a file, not a directory
-            _quickAccessPinService.Verify(
-                p => p.PinFolders(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()),
-                Times.Never);
+            _quickAccessPinService.VerifyNoOtherCalls();
         }
         finally
         {

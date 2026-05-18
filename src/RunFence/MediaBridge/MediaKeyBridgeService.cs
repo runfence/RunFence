@@ -175,6 +175,8 @@ public class MediaKeyBridgeService : IMediaKeyBridgeService, IRequiresInitializa
 
     private bool TryBridgePlayPause()
     {
+        // Keep eligibility intentionally scoped to the resolved foreground process/window at this point:
+        // this method does not broaden bridge ownership to global media-session tracking.
         if (_interactiveUserPlaying)
         {
             _log.Info("MediaKeyBridge: interactive user is playing → pass through");
@@ -277,6 +279,7 @@ public class MediaKeyBridgeService : IMediaKeyBridgeService, IRequiresInitializa
         // that don't expose a classic Win32 window class. Chromium address bars and search fields
         // expose ControlType.Edit via UIAutomation even when GetClassName returns "Chrome_RenderWidgetHostHWND".
         // Cache the result by HWND to avoid repeated slow queries inside the hook callback.
+        // Cache is intentionally stale-tolerant so media bridging stays fast during rapid focus churn.
         if (info.hwndFocus == _cachedUiaHwnd)
             return _cachedUiaIsText;
 
@@ -324,7 +327,8 @@ public class MediaKeyBridgeService : IMediaKeyBridgeService, IRequiresInitializa
             var cp = new CreateParams { Parent = new IntPtr(-3) }; // HWND_MESSAGE
             CreateHandle(cp);
 
-            // Allow the shell (medium-IL) to post the shell hook message to this high-IL window.
+            // Keep shell-hook APPCOMMAND compatibility as intended:
+            // this filter opening is not intended as an input-authentication boundary.
             WindowNative.ChangeWindowMessageFilterEx(Handle, WmShellHook, WindowNative.MSGFLT_ALLOW, IntPtr.Zero);
 
             if (!WindowNative.RegisterShellHookWindow(Handle))
@@ -348,6 +352,8 @@ public class MediaKeyBridgeService : IMediaKeyBridgeService, IRequiresInitializa
             {
                 // lParam carries the WM_APPCOMMAND lParam format: HIWORD & 0x0FFF = APPCOMMAND value.
                 int appCmd = (int)((m.LParam.ToInt64() >> 16) & 0x0FFF);
+                // HSHELL_APPCOMMAND handling intentionally supports legacy shell-hook
+                // compatibility and is not treated as an additional auth boundary.
                 onAppCommand(appCmd);
                 m.Result = IntPtr.Zero;
                 return;

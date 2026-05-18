@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.IO.Pipes;
 using RunFence.Core;
 
 namespace RunFence.Infrastructure;
@@ -7,44 +9,88 @@ public sealed class JobKeeperLaunchIpcClient(
     IJobKeeperRegistry registry,
     IJobKeeperProcessTerminator processTerminator) : IJobKeeperLaunchIpcClient
 {
-    public int SendLaunchRequest(string sid, bool isLow, JobKeeperLaunchRequest request)
+    public async Task<int> SendLaunchRequestAsync(
+        string sid,
+        bool isLow,
+        JobKeeperLaunchRequest request,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         if (!registry.TryGet(sid, isLow, out var state))
             return 0;
 
+        NamedPipeServerStream pipe;
+        int pid;
+        SemaphoreSlim ipcGate;
         lock (state.SyncRoot)
         {
-            try
-            {
-                JobKeeperProtocol.WriteMessage(state.Pipe, request);
-                var response = JobKeeperProtocol.ReadMessage<JobKeeperLaunchResponse>(state.Pipe);
-                if (response == null)
-                {
-                    log.Warn($"JobKeeper: null response from keeper for {sid}");
-                    RemoveAndKill(sid, isLow, state);
-                    return 0;
-                }
+            pipe = state.Pipe;
+            pid = state.Pid;
+            ipcGate = state.IpcGate;
+        }
 
-                if (response.Error != 0)
-                {
-                    log.Warn($"JobKeeper: keeper reported Win32 error {response.Error} launching for {sid}");
-                    return 0;
-                }
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(timeout);
 
-                return response.Pid;
-            }
-            catch (Exception ex)
+        var gateHeld = false;
+        try
+        {
+            await ipcGate.WaitAsync(timeoutCts.Token).ConfigureAwait(false);
+            gateHeld = true;
+
+            await JobKeeperProtocol.WriteMessageAsync(pipe, request, timeoutCts.Token).ConfigureAwait(false);
+            var response = await JobKeeperProtocol.ReadMessageAsync<JobKeeperLaunchResponse>(pipe, timeoutCts.Token).ConfigureAwait(false);
+            if (response == null)
             {
-                log.Error($"JobKeeper: pipe error sending request for {sid}: {ex.Message}");
-                RemoveAndKill(sid, isLow, state);
+                log.Warn($"JobKeeper: null response from keeper for {sid}");
+                RemoveAndKill(sid, isLow, state, pid);
                 return 0;
+            }
+
+            if (response.Error != 0)
+            {
+                var win32Message = new Win32Exception(response.Error).Message;
+                var message = $"JobKeeper: keeper failed to launch '{request.ExePath}' for {sid}: Win32 error (0x{response.Error:X8}): {win32Message}";
+                log.Warn(message);
+                throw new JobKeeperChildLaunchException(message, response.Error);
+            }
+
+            return response.Pid;
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            log.Warn($"JobKeeper: launch IPC timed out for {sid}");
+            RemoveAndKill(sid, isLow, state, pid);
+            return 0;
+        }
+        catch (Exception ex) when (ex is not JobKeeperChildLaunchException)
+        {
+            log.Error($"JobKeeper: pipe error sending request for {sid}: {ex.Message}");
+            RemoveAndKill(sid, isLow, state, pid);
+            return 0;
+        }
+        finally
+        {
+            if (gateHeld)
+            {
+                try
+                {
+                    ipcGate.Release();
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                catch (SemaphoreFullException)
+                {
+                }
             }
         }
     }
 
-    private void RemoveAndKill(string sid, bool isLow, JobKeeperState state)
+    private void RemoveAndKill(string sid, bool isLow, JobKeeperState state, int pid)
     {
         registry.RemoveAndDispose(sid, isLow, state);
-        processTerminator.Kill(state.Pid);
+        processTerminator.Kill(pid);
     }
+
 }

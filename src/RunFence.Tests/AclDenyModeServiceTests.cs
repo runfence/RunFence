@@ -38,7 +38,7 @@ public class AclDenyModeServiceTests : IDisposable
         var containerLookup = new ContainerLookupHelper(dbProvider);
         var iuResolver = new Mock<IInteractiveUserResolver>();
         iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
-        var acl = new AclAccessor();
+        var acl = AclAccessorFactory.Create();
         var log = new Mock<ILoggingService>();
 
         _service = new AclDenyModeService(log.Object, _localUserProvider.Object, containerLookup,
@@ -107,3 +107,4 @@ public class AclDenyModeServiceTests : IDisposable
             (rule.FileSystemRights & rights) == rights);
     }
 }
+

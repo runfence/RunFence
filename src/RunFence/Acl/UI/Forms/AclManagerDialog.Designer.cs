@@ -2,6 +2,7 @@
 
 using System.ComponentModel;
 using RunFence.UI.Controls;
+using RunFence.UI.Forms;
 
 namespace RunFence.Acl.UI.Forms;
 
@@ -50,6 +51,9 @@ partial class AclManagerDialog
     private ToolStripMenuItem _ctxTraverseCopyPath;
     private ToolStripSeparator _ctxTraversePropertiesSep;
     private ToolStripMenuItem _ctxTraverseProperties;
+    private Panel _topRowHost;
+    private Panel _contextHelpHost;
+    private ContextHelpButton _contextHelpButton;
     private Icon _formIcon;
 
     private AclManagerDialog() { InitializeComponent(); }
@@ -113,10 +117,14 @@ partial class AclManagerDialog
         _ctxTraverseCopyPath = new ToolStripMenuItem();
         _ctxTraversePropertiesSep = new ToolStripSeparator();
         _ctxTraverseProperties = new ToolStripMenuItem();
+        _topRowHost = new Panel();
+        _contextHelpHost = new Panel();
+        _contextHelpButton = new ContextHelpButton();
 
         ((ISupportInitialize)_grantsGrid).BeginInit();
         ((ISupportInitialize)_traverseGrid).BeginInit();
-        _toolStrip.SuspendLayout();
+        _topRowHost.SuspendLayout();
+        _contextHelpHost.SuspendLayout();
         _contextMenuGrants.SuspendLayout();
         _contextMenuTraverse.SuspendLayout();
         _grantsTab.SuspendLayout();
@@ -169,9 +177,32 @@ partial class AclManagerDialog
         _traverseGrid.MouseMove += OnTraverseGridMouseMove;
         _traverseGrid.MouseUp += OnTraverseGridMouseUp;
 
+        // topRowHost
+        _topRowHost.BackColor = SystemColors.Control;
+        _topRowHost.Dock = DockStyle.Top;
+        _topRowHost.Height = 33;
+        _topRowHost.Padding = new Padding(0, 2, 0, 2);
+        _topRowHost.TabStop = false;
+
+        // contextHelpHost
+        _contextHelpHost.BackColor = SystemColors.Control;
+        _contextHelpHost.Dock = DockStyle.Right;
+        _contextHelpHost.Padding = Padding.Empty;
+        _contextHelpHost.Size = new Size(29, 29);
+        _contextHelpHost.TabStop = false;
+
+        // contextHelpButton
+        _contextHelpButton.AccessibleName = "Context help";
+        _contextHelpButton.Dock = DockStyle.Right;
+        _contextHelpButton.Name = "_contextHelpButton";
+        _contextHelpButton.Size = new Size(29, 29);
+        _contextHelpButton.TabStop = false;
+
         // toolStrip
-        _toolStrip.Dock = DockStyle.Top;
+        _toolStrip.AutoSize = false;
+        _toolStrip.Dock = DockStyle.Fill;
         _toolStrip.GripStyle = ToolStripGripStyle.Hidden;
+        _toolStrip.Height = 29;
         _toolStrip.Items.AddRange(new ToolStripItem[] { _addFileButton, _addFolderButton, _scanButton, _removeButton, _fixAclsButton, _exportButton, _importButton, _progressBar, _scanStatusLabel });
 
         // addFileButton
@@ -284,6 +315,10 @@ partial class AclManagerDialog
         _closeButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
         _closeButton.Size = new Size(75, 28);
 
+        _contextHelpHost.Controls.Add(_contextHelpButton);
+        _topRowHost.Controls.Add(_toolStrip);
+        _topRowHost.Controls.Add(_contextHelpHost);
+
         // Form
         CancelButton = _closeButton;
         AutoScaleDimensions = new SizeF(7F, 15F);
@@ -294,12 +329,12 @@ partial class AclManagerDialog
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
-        Controls.AddRange(new Control[] { _toolStrip, _tabControl, _applyButton, _closeButton });
+        Controls.AddRange(new Control[] { _topRowHost, _tabControl, _applyButton, _closeButton });
         Name = "AclManagerDialog";
         ((ISupportInitialize)_grantsGrid).EndInit();
         ((ISupportInitialize)_traverseGrid).EndInit();
-        _toolStrip.ResumeLayout(false);
-        _toolStrip.PerformLayout();
+        _topRowHost.ResumeLayout(false);
+        _contextHelpHost.ResumeLayout(false);
         _contextMenuGrants.ResumeLayout(false);
         _contextMenuTraverse.ResumeLayout(false);
         _grantsTab.ResumeLayout(false);

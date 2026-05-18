@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using RunFence.Account;
+using RunFence.Acl;
 using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Ipc;
@@ -20,9 +21,8 @@ public class IpcLaunchHandler(
     IAppEntryLauncher entryLauncher,
     IIpcCallerAuthorizer authorizer,
     ISidNameCacheService sidNameCache,
-    ILoggingService log,
     IIdleMonitorService idleMonitor,
-    ITrayBalloonService trayBalloon,
+    ILaunchFeedbackPresenter launchFeedbackPresenter,
     IRunAsFlowHandler? runAsFlowHandler = null)
 {
     public IpcResponse HandleLaunch(IpcMessage message, IpcCallerContext context)
@@ -69,19 +69,41 @@ public class IpcLaunchHandler(
             {
                 try
                 {
-                    entryLauncher.Launch(capturedApp, message.Arguments, message.WorkingDirectory,
+                    using var launch = entryLauncher.Launch(capturedApp, message.Arguments, message.WorkingDirectory,
                         AclPermissionDialogHelper.CreateLaunchPermissionPrompt(sidNameCache));
+                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext(capturedApp.Name, LaunchFeedbackSource.SilentIpc)
+                    {
+                        SummaryName = capturedApp.Name
+                    });
                     idleMonitor.ResetIdleTimer();
                 }
                 catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
                 {
-                    log.Error("IPC launch failed: stored credentials are incorrect", ex);
-                    trayBalloon.ShowWarning($"Launch failed: {capturedApp.Name}");
+                    launchFeedbackPresenter.ShowLaunchFailure(
+                        "Stored credentials are incorrect. Please update the password in RunFence.",
+                        ex,
+                        new LaunchFeedbackContext(capturedApp.Name, LaunchFeedbackSource.SilentIpc)
+                        {
+                            SummaryName = capturedApp.Name,
+                            FailureCaption = "Launch Failed"
+                        });
+                }
+                catch (GrantOperationException ex)
+                {
+                    launchFeedbackPresenter.ShowGrantFailure(ex, new LaunchFeedbackContext(capturedApp.Name, LaunchFeedbackSource.SilentIpc)
+                    {
+                        SummaryName = capturedApp.Name
+                    });
                 }
                 catch (Exception ex)
                 {
-                    log.Error("IPC launch failed", ex);
-                    trayBalloon.ShowWarning($"Launch failed: {capturedApp.Name}");
+                    launchFeedbackPresenter.ShowLaunchFailure(
+                        $"Launch failed: {ex.Message}",
+                        ex,
+                        new LaunchFeedbackContext(capturedApp.Name, LaunchFeedbackSource.SilentIpc)
+                        {
+                            SummaryName = capturedApp.Name
+                        });
                 }
             });
         }, out var disposeResponse))

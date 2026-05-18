@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -31,19 +30,43 @@ public interface IAclAccessor
     /// Returns true when <paramref name="modify"/> returns true (changes were made).
     /// </summary>
     bool ModifyAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify);
+
+    /// <summary>
+    /// Reads, modifies, and writes the owner and DACL for <paramref name="path"/>.
+    /// Tries the standard <c>GetAccessControl</c>/<c>SetAccessControl</c> path first;
+    /// on <see cref="UnauthorizedAccessException"/>, falls back to
+    /// <c>FILE_FLAG_BACKUP_SEMANTICS</c> via backup/restore privilege.
+    /// Returns true when <paramref name="modify"/> returns true (changes were made).
+    /// </summary>
+    bool ModifyOwnerAndAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify);
+
+    /// <summary>
+    /// Replaces the owner and DACL on <paramref name="path"/> with the supplied
+    /// <paramref name="security"/> descriptor.
+    /// Tries the standard <c>SetAccessControl</c> path first; on
+    /// <see cref="UnauthorizedAccessException"/>, falls back to
+    /// <c>FILE_FLAG_BACKUP_SEMANTICS</c> via backup/restore privilege.
+    /// </summary>
+    void SetOwnerAndAclWithFallback(string path, bool isFolder, FileSystemSecurity security);
 }
 
 /// <summary>
-/// Low-level native security I/O for NTFS paths: reads security descriptors via backup privilege
-/// fallback and applies/removes explicit ACEs.
-/// SeBackupPrivilege, SeRestorePrivilege, and SeTakeOwnershipPrivilege are enabled once at
-/// startup (Program.cs) for the lifetime of the elevated admin process — no per-call enable needed.
+/// Low-level ACL access for NTFS paths. Backup-privilege descriptor I/O is delegated to
+/// <see cref="BackupPrivilegeSecurityDescriptorAccessor"/>.
 /// </summary>
 public class AclAccessor : IAclAccessor
 {
+    private readonly BackupPrivilegeSecurityDescriptorAccessor backupPrivilegeSecurityDescriptorAccessor;
+
+    public AclAccessor(BackupPrivilegeSecurityDescriptorAccessor backupPrivilegeSecurityDescriptorAccessor)
+    {
+        this.backupPrivilegeSecurityDescriptorAccessor = backupPrivilegeSecurityDescriptorAccessor;
+    }
+
     public FileSystemSecurity GetSecurity(string path)
     {
-        if (Directory.Exists(path))
+        bool isDir = ResolvePathIsDirectory(path);
+        if (isDir)
         {
             try
             {
@@ -51,7 +74,7 @@ public class AclAccessor : IAclAccessor
             }
             catch (UnauthorizedAccessException)
             {
-                return GetSecurityViaBackupPrivilege(path, isDir: true);
+                return backupPrivilegeSecurityDescriptorAccessor.ReadOwnerAndDacl(path, isDirectory: true);
             }
         }
 
@@ -61,52 +84,7 @@ public class AclAccessor : IAclAccessor
         }
         catch (UnauthorizedAccessException)
         {
-            return GetSecurityViaBackupPrivilege(path, isDir: false);
-        }
-    }
-
-    /// <summary>
-    /// Reads, modifies, and writes the DACL bypassing DACL restrictions via SeBackupPrivilege + SeRestorePrivilege.
-    /// Called only when the standard GetAccessControl/SetAccessControl path fails with UnauthorizedAccessException.
-    /// </summary>
-    private void ModifyDaclViaBackupPrivilege(string path, bool isDir, Action<FileSystemSecurity> modifier)
-    {
-        IntPtr handle = FileSecurityNative.CreateFile(path,
-            FileSecurityNative.READ_CONTROL | FileSecurityNative.WRITE_DAC,
-            FileSecurityNative.FILE_SHARE_READ | FileSecurityNative.FILE_SHARE_WRITE,
-            IntPtr.Zero, FileSecurityNative.OPEN_EXISTING,
-            FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
-        if (handle == FileSecurityNative.INVALID_HANDLE_VALUE)
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-        try
-        {
-            var security = ReadSecurityFromHandle(handle,
-                FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION, isDir);
-            modifier(security);
-
-            byte[] modifiedBytes = security.GetSecurityDescriptorBinaryForm();
-            var pinned = GCHandle.Alloc(modifiedBytes, GCHandleType.Pinned);
-            try
-            {
-                if (!FileSecurityNative.GetSecurityDescriptorDacl(pinned.AddrOfPinnedObject(),
-                        out bool daclPresent, out IntPtr pDacl, out _))
-                    throw new Win32Exception(Marshal.GetLastWin32Error());
-                int err = FileSecurityNative.SetSecurityInfo(handle,
-                    FileSecurityNative.SE_OBJECT_TYPE.SE_FILE_OBJECT,
-                    FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION,
-                    IntPtr.Zero, IntPtr.Zero,
-                    daclPresent ? pDacl : IntPtr.Zero, IntPtr.Zero);
-                if (err != 0)
-                    throw new Win32Exception(err);
-            }
-            finally
-            {
-                pinned.Free();
-            }
-        }
-        finally
-        {
-            ProcessNative.CloseHandle(handle);
+            return backupPrivilegeSecurityDescriptorAccessor.ReadOwnerAndDacl(path, isDirectory: false);
         }
     }
 
@@ -119,7 +97,7 @@ public class AclAccessor : IAclAccessor
         Func<FileSystemAccessRule, bool>? shouldSkip = null)
     {
         var identity = new SecurityIdentifier(sid);
-        bool isDir = Directory.Exists(path);
+        bool isDir = ResolvePathIsDirectory(path);
         try
         {
             if (isDir)
@@ -128,10 +106,15 @@ public class AclAccessor : IAclAccessor
                 var security = dirInfo.GetAccessControl();
                 RemoveExplicitAce(security, identity, type, shouldSkip);
                 if (rights != 0)
+                {
                     security.AddAccessRule(new FileSystemAccessRule(
-                        identity, rights,
+                        identity,
+                        rights,
                         InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                        PropagationFlags.None, type));
+                        PropagationFlags.None,
+                        type));
+                }
+
                 dirInfo.SetAccessControl(security);
             }
             else
@@ -140,20 +123,29 @@ public class AclAccessor : IAclAccessor
                 var security = fileInfo.GetAccessControl();
                 RemoveExplicitAce(security, identity, type, shouldSkip);
                 if (rights != 0)
+                {
                     security.AddAccessRule(new FileSystemAccessRule(identity, rights, type));
+                }
+
                 fileInfo.SetAccessControl(security);
             }
         }
         catch (UnauthorizedAccessException)
         {
-            ModifyDaclViaBackupPrivilege(path, isDir, security =>
+            backupPrivilegeSecurityDescriptorAccessor.ModifyDacl(path, isDir, security =>
             {
                 RemoveExplicitAce(security, identity, type, shouldSkip);
                 if (rights != 0)
+                {
                     security.AddAccessRule(new FileSystemAccessRule(
-                        identity, rights,
-                        isDir ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit : InheritanceFlags.None,
-                        PropagationFlags.None, type));
+                        identity,
+                        rights,
+                        isDir
+                            ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
+                            : InheritanceFlags.None,
+                        PropagationFlags.None,
+                        type));
+                }
             });
         }
     }
@@ -162,7 +154,7 @@ public class AclAccessor : IAclAccessor
         Func<FileSystemAccessRule, bool>? shouldSkip = null)
     {
         var identity = new SecurityIdentifier(sid);
-        bool isDir = Directory.Exists(path);
+        bool isDir = ResolvePathIsDirectory(path);
         try
         {
             if (isDir)
@@ -170,19 +162,26 @@ public class AclAccessor : IAclAccessor
                 var dirInfo = new DirectoryInfo(path);
                 var security = dirInfo.GetAccessControl();
                 if (RemoveExplicitAce(security, identity, type, shouldSkip))
+                {
                     dirInfo.SetAccessControl(security);
+                }
             }
             else if (File.Exists(path))
             {
                 var fileInfo = new FileInfo(path);
                 var security = fileInfo.GetAccessControl();
                 if (RemoveExplicitAce(security, identity, type, shouldSkip))
+                {
                     fileInfo.SetAccessControl(security);
+                }
             }
         }
         catch (UnauthorizedAccessException)
         {
-            ModifyDaclViaBackupPrivilege(path, isDir, security => RemoveExplicitAce(security, identity, type, shouldSkip));
+            backupPrivilegeSecurityDescriptorAccessor.ModifyDacl(
+                path,
+                isDir,
+                security => RemoveExplicitAce(security, identity, type, shouldSkip));
         }
     }
 
@@ -195,7 +194,10 @@ public class AclAccessor : IAclAccessor
                 var dirInfo = new DirectoryInfo(path);
                 var security = dirInfo.GetAccessControl();
                 if (!modify(security))
+                {
                     return false;
+                }
+
                 dirInfo.SetAccessControl(security);
             }
             else
@@ -203,7 +205,10 @@ public class AclAccessor : IAclAccessor
                 var fileInfo = new FileInfo(path);
                 var security = fileInfo.GetAccessControl();
                 if (!modify(security))
+                {
                     return false;
+                }
+
                 fileInfo.SetAccessControl(security);
             }
 
@@ -212,8 +217,69 @@ public class AclAccessor : IAclAccessor
         catch (UnauthorizedAccessException)
         {
             bool changed = false;
-            ModifyDaclViaBackupPrivilege(path, isFolder, security => changed = modify(security));
+            backupPrivilegeSecurityDescriptorAccessor.ModifyDacl(path, isFolder, security => changed = modify(security));
             return changed;
+        }
+    }
+
+    public bool ModifyOwnerAndAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify)
+    {
+        try
+        {
+            if (isFolder)
+            {
+                var dirInfo = new DirectoryInfo(path);
+                var security = dirInfo.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+                if (!modify(security))
+                {
+                    return false;
+                }
+
+                dirInfo.SetAccessControl((DirectorySecurity)security);
+            }
+            else
+            {
+                var fileInfo = new FileInfo(path);
+                var security = fileInfo.GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
+                if (!modify(security))
+                {
+                    return false;
+                }
+
+                fileInfo.SetAccessControl((FileSecurity)security);
+            }
+
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            bool changed = false;
+            backupPrivilegeSecurityDescriptorAccessor.ModifyOwnerAndDacl(
+                path,
+                isFolder,
+                security => changed = modify(security));
+            return changed;
+        }
+    }
+
+    public void SetOwnerAndAclWithFallback(string path, bool isFolder, FileSystemSecurity security)
+    {
+        try
+        {
+            if (isFolder)
+            {
+                var dirInfo = new DirectoryInfo(path);
+                dirInfo.SetAccessControl((DirectorySecurity)security);
+            }
+            else
+            {
+                var fileInfo = new FileInfo(path);
+                fileInfo.SetAccessControl((FileSecurity)security);
+            }
+        }
+        catch (UnauthorizedAccessException)
+        {
+            backupPrivilegeSecurityDescriptorAccessor.WriteOwnerAndDacl(path, isFolder, security);
         }
     }
 
@@ -227,24 +293,25 @@ public class AclAccessor : IAclAccessor
         }
 
         int error = Marshal.GetLastWin32Error();
-        if (error is 2 or 3) // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND
+        if (error is 2 or 3)
         {
             isFolder = false;
             return false;
         }
 
-        // Access denied (or another unexpected error) — retry via backup privilege.
         IntPtr handle = FileSecurityNative.CreateFile(path,
-            FileSecurityNative.READ_CONTROL,
+            0,
             FileSecurityNative.FILE_SHARE_READ | FileSecurityNative.FILE_SHARE_WRITE,
-            IntPtr.Zero, FileSecurityNative.OPEN_EXISTING,
-            FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
+            IntPtr.Zero,
+            FileSecurityNative.OPEN_EXISTING,
+            FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS,
+            IntPtr.Zero);
 
         if (handle == FileSecurityNative.INVALID_HANDLE_VALUE)
         {
             error = Marshal.GetLastWin32Error();
             isFolder = false;
-            return error is not (2 or 3); // non-not-found error → treat as possibly existent
+            return error is not (2 or 3);
         }
 
         try
@@ -256,51 +323,6 @@ public class AclAccessor : IAclAccessor
         finally
         {
             ProcessNative.CloseHandle(handle);
-        }
-    }
-
-    private FileSystemSecurity GetSecurityViaBackupPrivilege(string path, bool isDir)
-    {
-        IntPtr handle = FileSecurityNative.CreateFile(path,
-            FileSecurityNative.READ_CONTROL,
-            FileSecurityNative.FILE_SHARE_READ | FileSecurityNative.FILE_SHARE_WRITE,
-            IntPtr.Zero, FileSecurityNative.OPEN_EXISTING,
-            FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
-        if (handle == FileSecurityNative.INVALID_HANDLE_VALUE)
-            throw new Win32Exception(Marshal.GetLastWin32Error());
-        try
-        {
-            return ReadSecurityFromHandle(handle,
-                FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION |
-                FileSecurityNative.SECURITY_INFORMATION.OWNER_SECURITY_INFORMATION,
-                isDir);
-        }
-        finally
-        {
-            ProcessNative.CloseHandle(handle);
-        }
-    }
-
-    private FileSystemSecurity ReadSecurityFromHandle(
-        IntPtr handle, FileSecurityNative.SECURITY_INFORMATION info, bool isDir)
-    {
-        int error = FileSecurityNative.GetSecurityInfo(handle,
-            FileSecurityNative.SE_OBJECT_TYPE.SE_FILE_OBJECT, info,
-            out _, out _, out _, out _, out IntPtr pSecDesc);
-        if (error != 0)
-            throw new Win32Exception(error);
-        try
-        {
-            int length = (int)FileSecurityNative.GetSecurityDescriptorLength(pSecDesc);
-            var bytes = new byte[length];
-            Marshal.Copy(pSecDesc, bytes, 0, length);
-            FileSystemSecurity security = isDir ? new DirectorySecurity() : new FileSecurity();
-            security.SetSecurityDescriptorBinaryForm(bytes);
-            return security;
-        }
-        finally
-        {
-            ProcessNative.LocalFree(pSecDesc);
         }
     }
 
@@ -319,7 +341,9 @@ public class AclAccessor : IAclAccessor
                 ruleSid.Equals(identity))
             {
                 if (shouldSkip != null && shouldSkip(rule))
+                {
                     continue;
+                }
 
                 security.RemoveAccessRuleSpecific(rule);
                 removed = true;
@@ -328,4 +352,7 @@ public class AclAccessor : IAclAccessor
 
         return removed;
     }
+
+    private bool ResolvePathIsDirectory(string path)
+        => PathExists(path, out bool isFolder) && isFolder;
 }

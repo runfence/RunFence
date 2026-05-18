@@ -7,7 +7,7 @@ namespace RunFence.Account.UI;
 /// Handles simple account panel actions: rename account, copy SID, copy profile path,
 /// open profile folder, and copy random password.
 /// </summary>
-public class AccountPanelActions(IWindowsAccountService windowsAccountService, ILocalUserProvider localUserProvider, ILoggingService log, ISidNameCacheService sidNameCache, IShellHelper shellHelper, ISystemDialogLauncher systemDialogLauncher)
+public class AccountPanelActions(IWindowsAccountService windowsAccountService, IWindowsAccountQueryService windowsAccountQueryService, ILocalUserProvider localUserProvider, ILoggingService log, ISidNameCacheService sidNameCache, IShellHelper shellHelper, ISystemDialogLauncher systemDialogLauncher)
 {
     private DataGridView _grid = null!;
     private IAccountsPanelOperationContext _context = null!;
@@ -25,7 +25,7 @@ public class AccountPanelActions(IWindowsAccountService windowsAccountService, I
 
     public void CopyProfilePath(string sid)
     {
-        var path = windowsAccountService.GetProfilePath(sid);
+        var path = windowsAccountQueryService.GetProfilePath(sid).ProfilePath;
         if (!string.IsNullOrEmpty(path))
             Clipboard.SetText(path);
         else
@@ -34,7 +34,7 @@ public class AccountPanelActions(IWindowsAccountService windowsAccountService, I
 
     public void OpenProfileFolder(string sid)
     {
-        var path = windowsAccountService.GetProfilePath(sid);
+        var path = windowsAccountQueryService.GetProfilePath(sid).ProfilePath;
         if (string.IsNullOrEmpty(path) || !Directory.Exists(path))
         {
             MessageBox.Show("No profile folder found for this account.", "Profile Folder", MessageBoxButtons.OK, MessageBoxIcon.Information);

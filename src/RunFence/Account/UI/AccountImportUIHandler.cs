@@ -1,10 +1,13 @@
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 using RunFence.PrefTrans.UI.Forms;
 using RunFence.UI.Forms;
 
 namespace RunFence.Account.UI;
 
-public class AccountImportUIHandler(IAccountImportHandler importHandler)
+public class AccountImportUIHandler(
+    IAccountImportHandler importHandler,
+    IOpenFileDialogAdapterFactory openFileDialogFactory)
 {
     private DataGridView _grid = null!;
     private ToolStripButton _importButton = null!;
@@ -66,10 +69,11 @@ public class AccountImportUIHandler(IAccountImportHandler importHandler)
                 .ToList();
 
             string selectedFile;
-            using (var dlg = new OpenFileDialog())
+            using (var dlgAdapter = openFileDialogFactory.Create())
             {
+                var dlg = dlgAdapter.Dialog;
                 DesktopSettingsImportDialog.Setup(dlg, context.Database.LastPrefsFilePath);
-                if (dlg.ShowDialog(owner.FindForm()) != DialogResult.OK)
+                if (dlgAdapter.ShowDialog(owner.FindForm()) != DialogResult.OK)
                     return;
                 selectedFile = dlg.FileName;
             }
@@ -86,7 +90,7 @@ public class AccountImportUIHandler(IAccountImportHandler importHandler)
                 logForm.EnableOkButton,
                 text => { if (!owner.IsDisposed) context.UpdateStatus(text); });
 
-            var settingsPath = await importHandler.RunImportAsync(importAccounts, context.CredentialStore, context.PinDerivedKey, sink, context.Database);
+            var settingsPath = await importHandler.RunImportAsync(importAccounts, context.CredentialStore, sink);
 
             if (settingsPath != null && !owner.IsDisposed)
                 context.SaveLastPrefsPath(settingsPath);

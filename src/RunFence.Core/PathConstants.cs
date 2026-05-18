@@ -72,6 +72,8 @@ public static class PathConstants
     public const string FolderBrowserExeName = "RunFence.FolderBrowser.exe";
     public const string DragBridgeExeName = "RunFence.DragBridge.exe";
     public const string JobKeeperExeName = "RunFence.JobKeeper.exe";
+    public const string PinHelperExeName = "RunFence.PinHelper.exe";
+    public const string ProfileKeeperExeName = "RunFence.ProfileKeeper.exe";
     public const string ShellServerExeName = "RunFence.ShellServer.exe";
     public const string PrefTransExeName = "preftrans.exe";
     public const string SecurityScannerExeName = "RunFence.SecurityScanner.exe";

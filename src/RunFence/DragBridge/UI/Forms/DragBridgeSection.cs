@@ -1,5 +1,6 @@
 using RunFence.Core.Models;
 using InfraWindowNative = RunFence.Infrastructure.WindowNative;
+using RunFence.UI.Forms;
 
 namespace RunFence.DragBridge.UI.Forms;
 
@@ -71,6 +72,11 @@ public partial class DragBridgeSection : UserControl
         settings.EnableDragBridge = _enableCheckBox.Checked;
         if (_hotkeyBox.Tag is int key)
             settings.DragBridgeCopyHotkey = key;
+    }
+
+    public void RegisterContextHelp(ContextHelpForm host)
+    {
+        host.SetContextHelp(_groupBox, ContextHelpTextCatalog.Options_DragBridge);
     }
 
     private string FormatHotkeyText(int keysValue)

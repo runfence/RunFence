@@ -7,11 +7,12 @@ using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.PrefTrans;
 using RunFence.RunAs;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
 
-public class RunAsAccountSettingsApplierTests
+public class RunAsAccountSettingsApplierTests : IDisposable
 {
     private const string TestSid = "S-1-5-21-100-200-300-1001";
 
@@ -21,21 +22,54 @@ public class RunAsAccountSettingsApplierTests
     private readonly Mock<ISettingsTransferService> _settingsTransferService = new();
     private readonly Mock<IAccountFirewallSettingsApplier> _firewallSettingsApplier = new();
     private readonly AppDatabase _database = new();
+    private readonly CredentialStore _credentialStore = new() { ArgonSalt = [1, 2, 3] };
+    private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
+    private readonly List<SessionContext> _sessions = [];
 
     public RunAsAccountSettingsApplierTests()
     {
         _appState.Setup(a => a.Database).Returns(_database);
     }
 
-    private RunAsAccountSettingsApplier CreateApplier()
-        => new(_appState.Object, new SessionContext(), _databaseService.Object, _log.Object,
+    public void Dispose()
+    {
+        foreach (var session in _sessions)
+            session.Dispose();
+
+        _pinKey.Dispose();
+    }
+
+    private SessionContext CreateSession()
+    {
+        var session = new SessionContext
+        {
+            Database = _database,
+            CredentialStore = _credentialStore,
+        }.WithOwnedPinDerivedKey(_pinKey);
+        _sessions.Add(session);
+        return session;
+    }
+
+    private RunAsAccountSettingsApplier CreateApplier(
+        Mock<IDatabaseService>? databaseService = null,
+        SessionContext? session = null)
+    {
+        var currentSession = session ?? CreateSession();
+
+        return new RunAsAccountSettingsApplier(
+            _appState.Object,
+            currentSession,
+            (databaseService ?? _databaseService).Object,
+            _log.Object,
             _settingsTransferService.Object,
-            new FirewallApplyHelper(_firewallSettingsApplier.Object, new DynamicPortRangeChecker(_log.Object, new Mock<IUserConfirmationService>().Object), _log.Object));
+            new FirewallApplyHelper(_firewallSettingsApplier.Object, new DynamicPortRangeChecker(_log.Object, new Mock<IUserConfirmationService>().Object, new StandardNetshCommandRunner()), _log.Object),
+            new ImmediateAccountCreationProgressRunner());
+    }
 
     // ── ApplyLaunchDefaults ─────────────────────────────────────────────────
 
     [Theory]
-    [InlineData(PrivilegeLevel.Basic)]
+    [InlineData(PrivilegeLevel.Isolated)]
     [InlineData(PrivilegeLevel.HighestAllowed)]
     [InlineData(PrivilegeLevel.LowIntegrity)]
     public void ApplyLaunchDefaults_SetsPrivilegeLevelOnAccount(PrivilegeLevel privilegeLevel)
@@ -114,5 +148,34 @@ public class RunAsAccountSettingsApplierTests
 
         Assert.True(_database.GetAccount(TestSid)!.TrayDiscovery);
         Assert.Equal(PrivilegeLevel.LowIntegrity, _database.GetAccount(TestSid)!.PrivilegeLevel);
+    }
+    [Fact]
+    public async Task RunPostCreationTasksAsync_SaveConfig_ReceivesSessionKeySource()
+    {
+        var session = CreateSession();
+        session.ReplacePinDerivedKey(TestSecretFactory.Create(32, 9));
+        var expectedKeySource = session.PinDerivedKey;
+        var databaseService = new Mock<IDatabaseService>();
+        ISecureSecretSnapshotSource? capturedKeySource = null;
+
+        databaseService.Setup(s => s.SaveConfig(
+                _database,
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()))
+            .Callback<AppDatabase, ISecureSecretSnapshotSource, byte[]>((_, keySource, _) => capturedKeySource = keySource);
+
+        await CreateApplier(databaseService, session).RunPostCreationTasksAsync(
+            TestSid,
+            "newuser",
+            settingsImportPath: null,
+            firewallSettingsChanged: false,
+            errors: []);
+
+        Assert.NotNull(capturedKeySource);
+        Assert.Same(expectedKeySource, capturedKeySource);
+        databaseService.Verify(s => s.SaveConfig(
+            _database,
+            It.IsAny<ISecureSecretSnapshotSource>(),
+            It.IsAny<byte[]>()), Times.Once);
     }
 }

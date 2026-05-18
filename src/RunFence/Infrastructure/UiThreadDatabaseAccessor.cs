@@ -8,19 +8,19 @@ namespace RunFence.Infrastructure;
 /// Consumers inject this single dependency instead of the separate
 /// <see cref="IDatabaseProvider"/> + <see cref="IUiThreadInvoker"/> pair.
 /// </summary>
-public class UiThreadDatabaseAccessor(IDatabaseProvider databaseProvider, IUiThreadInvoker uiThreadInvoker)
+public class UiThreadDatabaseAccessor(IDatabaseProvider databaseProvider, Func<IUiThreadInvoker> uiThreadInvokerFactory)
 {
     public T Read<T>(Func<AppDatabase, T> reader)
-        => uiThreadInvoker.Invoke(() => reader(databaseProvider.GetDatabase()));
+        => uiThreadInvokerFactory().Invoke(() => reader(databaseProvider.GetDatabase()));
 
     public void Read(Action<AppDatabase> reader)
-        => uiThreadInvoker.Invoke(() => reader(databaseProvider.GetDatabase()));
+        => uiThreadInvokerFactory().Invoke(() => reader(databaseProvider.GetDatabase()));
 
     public T Write<T>(Func<AppDatabase, T> writer)
-        => uiThreadInvoker.Invoke(() => writer(databaseProvider.GetDatabase()));
+        => uiThreadInvokerFactory().Invoke(() => writer(databaseProvider.GetDatabase()));
 
     public void Write(Action<AppDatabase> writer)
-        => uiThreadInvoker.Invoke(() => writer(databaseProvider.GetDatabase()));
+        => uiThreadInvokerFactory().Invoke(() => writer(databaseProvider.GetDatabase()));
 
     public AppDatabase CreateSnapshot()
         => Read(db => db.CreateSnapshot());

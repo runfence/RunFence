@@ -15,31 +15,39 @@ public class FoundationModule : Module
     protected override void Load(ContainerBuilder builder)
     {
         builder.RegisterType<LoggingService>().As<ILoggingService>().SingleInstance();
+        builder.RegisterType<MachineIdentityReader>().As<IMachineIdentityReader>().SingleInstance();
         builder.RegisterType<MachineIdProvider>().As<IMachineIdProvider>().SingleInstance();
         builder.RegisterType<NTTranslateApi>().SingleInstance();
         builder.RegisterType<GroupMembershipApi>().SingleInstance();
-        builder.RegisterType<CredentialEncryptionService>().As<ICredentialEncryptionService>().SingleInstance();
+        builder.RegisterType<NativeDpapiProtector>().As<IDpapiProtector>().SingleInstance();
+        builder.RegisterType<CredentialEncryptionService>()
+            .As<ICredentialEncryptionSpanService>()
+            .SingleInstance();
         builder.RegisterType<PinService>().As<IPinService>().SingleInstance();
+        builder.RegisterType<ConfigMismatchPinVerifier>().SingleInstance();
         builder.RegisterType<ProductionConfigPaths>().As<IConfigPaths>().SingleInstance();
-        builder.RegisterType<AppConfigIndex>().As<IAppFilter>().AsSelf().SingleInstance();
-        builder.RegisterType<AppConfigSaveHelper>().AsSelf().SingleInstance();
-        builder.RegisterType<AppConfigService>().As<IAppConfigService>().SingleInstance();
-        builder.Register(c => new DatabaseService(
-                c.Resolve<ILoggingService>(),
-                c.Resolve<IConfigPaths>(),
-                c.ResolveOptional<IAppFilter>(),
-                allowPlaintextConfig: false))
-            .As<IDatabaseService>().As<IConfigRepository>().As<ICredentialRepository>().SingleInstance();
-        builder.RegisterType<GrantConfigTracker>().As<IGrantConfigTracker>().AsSelf().SingleInstance();
-        builder.RegisterType<HandlerMappingService>().As<IHandlerMappingService>().AsSelf().SingleInstance();
+        builder.RegisterType<PersistenceFileSecurityMirror>().As<IPersistenceFileSecurityMirror>().SingleInstance();
+        builder.RegisterType<PersistenceAtomicFileWriter>().As<IPersistenceAtomicFileWriter>().SingleInstance();
+        builder.RegisterType<LoadedGoodBackupStore>().As<ILoadedGoodBackupStore>().SingleInstance();
+        builder.RegisterType<ManagedPersistenceFileCleaner>().As<IManagedPersistenceFileCleaner>().SingleInstance();
+        builder.RegisterType<AppIdValidator>().AsSelf().SingleInstance();
+        builder.RegisterType<DatabaseService>()
+            .WithParameter(
+                (parameterInfo, _) => parameterInfo.Name == "appFilter",
+                (_, context) => context.ResolveOptional<IAppFilter>())
+            .WithParameter("allowPlaintextConfig", false)
+            .As<IDatabaseService>().As<IConfigRepository>().As<ICredentialRepository>().InstancePerLifetimeScope();
         builder.RegisterType<SidResolver>().As<ISidResolver>().SingleInstance();
         builder.RegisterType<ProfilePathResolver>().As<IProfilePathResolver>().SingleInstance();
         builder.RegisterType<InteractiveUserSidResolver>().As<IInteractiveUserSidResolver>().SingleInstance();
         builder.RegisterType<FileSystemExecutableFileSystem>().As<IExecutableFileSystem>().SingleInstance();
         builder.RegisterType<RegistryProfilePathReader>().As<IProfilePathReader>().SingleInstance();
+        builder.RegisterType<WindowsAppsAliasPathResolver>().As<IWindowsAppsAliasPathResolver>().SingleInstance();
+        builder.RegisterType<WindowsAppsPackageIdentityResolver>().As<IWindowsAppsPackageIdentityResolver>().SingleInstance();
         builder.RegisterType<ExecutablePathResolver>().As<IExecutablePathResolver>().SingleInstance();
         builder.RegisterType<ExecutableKindService>().As<IExecutableKindService>().SingleInstance();
         builder.RegisterType<AppInitializationHelper>().As<IAppInitializationHelper>().SingleInstance();
+        builder.RegisterType<SecureDesktopNative>().As<ISecureDesktopNative>().SingleInstance();
         builder.RegisterType<SecureDesktopHelper>().As<ISecureDesktopRunner>().SingleInstance();
         builder.RegisterType<ModalCoordinator>().As<IModalCoordinator>().SingleInstance();
         builder.RegisterType<PinResetFlowRunner>().As<IPinResetFlowRunner>().SingleInstance();

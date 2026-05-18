@@ -14,10 +14,11 @@ namespace RunFence.Apps.UI;
 /// </summary>
 public class AppEditDialogPopulator(
     IAppConfigService appConfigService,
-    ISidResolver sidResolver,
-    IProfilePathResolver profilePathResolver,
+    CredentialDisplayItemFactory displayItemFactory,
     CredentialFilterHelper credentialFilterHelper)
 {
+    private readonly CredentialDisplayItemFactory _displayItemFactory = displayItemFactory;
+
     /// <summary>
     /// Builds account combo-box items from credentials (filtered to resolvable accounts)
     /// and AppContainer items separated by a visual divider.
@@ -26,29 +27,45 @@ public class AppEditDialogPopulator(
         List<CredentialEntry> credentials,
         IReadOnlyDictionary<string, string>? sidNames,
         AppEntry? existing,
-        AppDatabase? database)
+        AppDatabase? database,
+        string? preferredAccountSid = null)
     {
         var ephemeralSids = database?.Accounts.Where(a => a.DeleteAfterUtc.HasValue).Select(a => a.Sid)
                                 .ToHashSet(StringComparer.OrdinalIgnoreCase)
                             ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var representedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var items = new List<object>();
+
+        void AddTransientOrExistingSid(string sid, bool isEphemeral = false)
+        {
+            if (string.IsNullOrEmpty(sid) || representedSids.Contains(sid))
+                return;
+
+            items.Add(_displayItemFactory.Create(credentials, sid, sidNames, isEphemeral: isEphemeral));
+            representedSids.Add(sid);
+        }
+
         foreach (var cred in credentialFilterHelper.FilterResolvableCredentials(credentials, sidNames, existing))
         {
             var isEphemeral = !string.IsNullOrEmpty(cred.Sid) && ephemeralSids.Contains(cred.Sid);
-            items.Add(new CredentialDisplayItem(cred, sidResolver, profilePathResolver, sidNames, isEphemeral: isEphemeral));
+            items.Add(_displayItemFactory.Create(cred, sidNames, isEphemeral: isEphemeral));
             if (!string.IsNullOrEmpty(cred.Sid))
                 representedSids.Add(cred.Sid);
         }
+
+        // Ensure SYSTEM appears as an explicit account option even if no stored credential exists.
+        if (!representedSids.Contains(Core.SidConstants.SystemSid))
+            AddTransientOrExistingSid(Core.SidConstants.SystemSid);
 
         // Add interactive user if not already represented by a stored credential
         var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
         if (interactiveSid != null && !representedSids.Contains(interactiveSid))
         {
-            var transient = new CredentialEntry { Id = Guid.NewGuid(), Sid = interactiveSid };
-            items.Add(new CredentialDisplayItem(transient, sidResolver, profilePathResolver, sidNames,
-                isEphemeral: ephemeralSids.Contains(interactiveSid)));
+            AddTransientOrExistingSid(interactiveSid, isEphemeral: ephemeralSids.Contains(interactiveSid));
         }
+
+        if (preferredAccountSid != null)
+            AddTransientOrExistingSid(preferredAccountSid);
 
         if (database?.AppContainers.Count > 0)
         {

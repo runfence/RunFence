@@ -16,15 +16,34 @@ public class InfraModule : Module
         builder.RegisterInstance(new LambdaUiThreadInvoker(a => a(), a => a()))
             .As<IUiThreadInvoker>()
             .SingleInstance();
+        builder.Register(ctx =>
+            {
+                var sessionProvider = ctx.Resolve<SessionProvider>();
+                return new Func<IUiThreadInvoker>(() => sessionProvider.GetSessionScope().Resolve<IUiThreadInvoker>());
+            })
+            .SingleInstance();
+        builder.Register(ctx =>
+            {
+                var sessionProvider = ctx.Resolve<SessionProvider>();
+                return new Func<IConfigRepository>(() => sessionProvider.GetSessionScope().Resolve<IConfigRepository>());
+            })
+            .SingleInstance();
+        builder.RegisterType<NoOpTrayWarningSink>()
+            .As<ITrayWarningSink>()
+            .SingleInstance();
 
         builder.RegisterType<UiThreadDatabaseAccessor>().AsSelf().SingleInstance();
         builder.RegisterType<ModalTracker>().As<IModalTracker>().SingleInstance();
         builder.RegisterType<StartupUnlockGrant>().As<IStartupUnlockGrant>().SingleInstance();
         builder.RegisterType<AppIconProvider>().As<IAppIconProvider>().SingleInstance();
         builder.RegisterType<SystemTimeProvider>().As<ITimeProvider>().SingleInstance();
+        builder.RegisterType<SystemClock>().As<IClock>().SingleInstance();
+        builder.RegisterType<CryptographicRandomSource>().As<IRandomSource>().SingleInstance();
         builder.RegisterType<WinFormsTimerScheduler>().As<ITimerScheduler>().InstancePerDependency();
         builder.RegisterType<SystemStopwatchProvider>().As<IStopwatchProvider>().SingleInstance();
+        builder.RegisterType<ProcessExecutionService>().As<IProcessExecutionService>().SingleInstance();
         builder.RegisterType<KeyboardStateReader>().As<IKeyboardStateReader>().SingleInstance();
+        builder.RegisterType<WindowInputApi>().As<IWindowInputApi>().SingleInstance();
         builder.RegisterType<ForegroundWindowResolver>().As<IForegroundWindowResolver>().SingleInstance();
         builder.RegisterType<ProcessIdentityReader>()
             .As<IProcessIdentityReader>()
@@ -36,7 +55,7 @@ public class InfraModule : Module
         builder.RegisterType<ClipboardFormatReader>().As<IClipboardFormatReader>().SingleInstance();
         builder.RegisterType<ClipboardPayloadBuilder>().As<IClipboardPayloadBuilder>().SingleInstance();
         builder.RegisterType<RemoteProcessInjector>().As<IRemoteProcessInjector>().SingleInstance();
-        builder.RegisterType<SyntheticInputSender>().As<ISyntheticInputSender>().SingleInstance();
+        builder.RegisterType<SyntheticInputSender>().As<ISyntheticInputSender>().InstancePerLifetimeScope();
         builder.RegisterType<ClipboardPasteWorkScheduler>().As<IClipboardPasteWorkScheduler>().SingleInstance();
         builder.RegisterType<LowLevelHookApi>().As<ILowLevelHookApi>().SingleInstance();
         builder.RegisterType<ClipboardPasteKeyDecision>().AsSelf().SingleInstance();
@@ -47,27 +66,24 @@ public class InfraModule : Module
         builder.RegisterType<ProcessJobManager>().As<IProcessJobManager>().SingleInstance();
         builder.RegisterType<JobKeeperRegistry>().As<IJobKeeperRegistry>().SingleInstance();
         builder.RegisterType<KernelObjectMandatoryLabelService>().As<IKernelObjectMandatoryLabelService>().SingleInstance();
+        builder.RegisterType<BackupIntentFileSystem>().As<IBackupIntentFileSystem>().SingleInstance();
         builder.RegisterType<JobKeeperPipeServerFactory>().As<IJobKeeperPipeServerFactory>().SingleInstance();
         builder.RegisterType<JobKeeperProcessTerminator>().As<IJobKeeperProcessTerminator>().SingleInstance();
-        builder.Register(c => new JobKeeperProcessDiscovery(
-                jobKeeperExePath: Path.Combine(AppContext.BaseDirectory, PathConstants.JobKeeperExeName)))
+        builder.RegisterType<JobKeeperProcessDiscovery>()
+            .WithParameter(
+                "jobKeeperExePath",
+                Path.Combine(AppContext.BaseDirectory, PathConstants.JobKeeperExeName))
             .As<IJobKeeperProcessDiscovery>()
             .SingleInstance();
-        builder.Register(c => new JobKeeperProcessVerifier(
-                c.Resolve<IJobKeeperJobVerifier>(),
-                c.Resolve<IProcessJobManager>(),
-                jobKeeperExePath: Path.Combine(AppContext.BaseDirectory, PathConstants.JobKeeperExeName)))
+        builder.RegisterType<JobKeeperProcessVerifier>()
+            .WithParameter(
+                "jobKeeperExePath",
+                Path.Combine(AppContext.BaseDirectory, PathConstants.JobKeeperExeName))
             .As<IJobKeeperProcessVerifier>()
             .SingleInstance();
         builder.RegisterType<JobKeeperLaunchIpcClient>().As<IJobKeeperLaunchIpcClient>().SingleInstance();
-        builder.Register(c => new JobKeeperService(
-                c.Resolve<ILoggingService>(),
-                c.Resolve<IJobKeeperIdentityStore>(),
-                c.Resolve<IJobKeeperPipeServerFactory>(),
-                c.Resolve<IJobKeeperProcessDiscovery>(),
-                c.Resolve<IJobKeeperProcessVerifier>(),
-                c.Resolve<IJobKeeperRegistry>(),
-                c.Resolve<IJobKeeperProcessTerminator>()))
+        builder.RegisterType<JobKeeperService>()
+            .WithParameter("waitForConnectionTimeout", TimeSpan.FromSeconds(10))
             .As<IJobKeeperService>()
             .SingleInstance();
         builder.RegisterType<ProcessListService>().As<IProcessListService>().SingleInstance();
@@ -75,10 +91,11 @@ public class InfraModule : Module
         builder.RegisterType<IdleMonitorService>().As<IIdleMonitorService>().SingleInstance();
         builder.RegisterType<PreviousWindowTracker>().As<IPreviousWindowTracker>().SingleInstance();
         builder.RegisterType<InteractiveUserDesktopProvider>().As<IInteractiveUserDesktopProvider>().SingleInstance();
-        builder.RegisterType<ShellHelper>().As<IShellHelper>().SingleInstance();
+        builder.RegisterType<FolderBrowserDialogAdapterFactory>().As<IFolderBrowserDialogAdapterFactory>().SingleInstance();
+        builder.RegisterType<OpenFileDialogAdapterFactory>().As<IOpenFileDialogAdapterFactory>().SingleInstance();
         builder.RegisterType<ClipboardPasteInterceptService>()
             .As<IRequiresInitialization>()
             .OrderBy(5)
-            .SingleInstance();
+            .InstancePerLifetimeScope();
     }
 }

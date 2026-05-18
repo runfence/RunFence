@@ -3,7 +3,7 @@ using RunFence.Core.Models;
 
 namespace RunFence.Startup.UI.Forms;
 
-public partial class StartupSecurityDialog : Form
+public partial class StartupSecurityDialog : RunFence.UI.Forms.ContextHelpForm
 {
     private readonly List<StartupSecurityFinding> _findings;
     private readonly FindingLocationHelper _findingLocationHelper;

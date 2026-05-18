@@ -10,7 +10,7 @@ namespace RunFence.Firewall.UI.Forms;
 /// Dialog for editing the firewall allowlist for one account. Lets the user add IP/CIDR
 /// or domain entries that bypass the internet block rule for this account.
 /// </summary>
-public partial class FirewallAllowlistDialog : Form
+public partial class FirewallAllowlistDialog : RunFence.UI.Forms.ContextHelpForm, IFirewallAllowlistDialog
 {
     private readonly IFirewallNetworkInfo _firewallNetworkInfo;
     private readonly FirewallAllowlistTabHandler _allowlistHandler;
@@ -18,11 +18,13 @@ public partial class FirewallAllowlistDialog : Form
     private readonly FirewallAllowlistGridHelper _allowlistGridHelper;
     private readonly FirewallPortsGridHelper _portsGridHelper;
     private readonly BlockedConnectionsFlowHelper _blockedConnectionsFlow;
+    private readonly FirewallDialogApplyPresenter _applyPresenter;
     private FirewallAllowlistImportExportHelper _importExportHelper = null!;
     private bool _initialAllowInternet;
     private bool _initialAllowLan;
     private bool _initialAllowLocalhost;
     private bool _initialFilterEphemeral;
+    private bool _isApplying;
     private readonly GridSortHelper _sortHelper = new();
 
     /// <summary>
@@ -62,6 +64,7 @@ public partial class FirewallAllowlistDialog : Form
         FirewallDomainResolver domainResolver,
         BlockedConnectionsFlowHelper blockedConnectionsFlow,
         FirewallAllowlistImportExportService importExportService,
+        FirewallDialogApplyPresenter applyPresenter,
         string? displayName = null,
         bool allowInternet = true,
         bool allowLan = true,
@@ -73,12 +76,14 @@ public partial class FirewallAllowlistDialog : Form
         _allowlistHandler = new FirewallAllowlistTabHandler(validator, domainResolver, current);
         _portsHandler = new FirewallPortsTabHandler(portValidator, allowedLocalhostPorts);
         _blockedConnectionsFlow = blockedConnectionsFlow;
+        _applyPresenter = applyPresenter;
         _initialAllowInternet = allowInternet;
         _initialAllowLan = allowLan;
         _initialAllowLocalhost = allowLocalhost;
         _initialFilterEphemeral = filterEphemeralLoopback;
 
         InitializeComponent();
+        InitializeRuntimeImages();
         Icon = AppIcons.GetAppIcon();
         Text = displayName != null ? $"Internet Allowlist \u2014 {displayName}" : "Internet Allowlist";
 
@@ -121,6 +126,35 @@ public partial class FirewallAllowlistDialog : Form
         _portsGridHelper.PopulatePortsGrid();
         UpdateDnsLabel();
         UpdateApplyButton();
+        RegisterContextHelp();
+    }
+
+    private void RegisterContextHelp()
+    {
+        SetContextHelp(_filterEphemeralCheckBox, ContextHelpTextCatalog.Firewall_ScopeLoopbackFilter);
+        SetContextHelp(_allowlistTab, ContextHelpTextCatalog.Firewall_InternetAllowlist);
+        SetContextHelp(_allowlistPanel, ContextHelpTextCatalog.Firewall_InternetAllowlist);
+        SetContextHelp(_grid, ContextHelpTextCatalog.Firewall_InternetAllowlist);
+        SetContextHelp(_warningLabel, ContextHelpTextCatalog.Firewall_InternetAllowlist);
+        SetContextHelp(_dnsLabel, ContextHelpTextCatalog.Firewall_InternetAllowlist);
+        SetContextHelp(_portsTab, ContextHelpTextCatalog.Firewall_LocalhostAllowlist);
+        SetContextHelp(_portsPanel, ContextHelpTextCatalog.Firewall_LocalhostAllowlist);
+        SetContextHelp(_portsGrid, ContextHelpTextCatalog.Firewall_LocalhostAllowlist);
+        SetContextHelp(_portsWarningLabel, ContextHelpTextCatalog.Firewall_LocalhostAllowlist);
+    }
+
+    private void InitializeRuntimeImages()
+    {
+        _addButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 30);
+        _removeButton.Image = UiIconFactory.CreateToolbarIcon("\u2212", Color.FromArgb(0xCC, 0x33, 0x33), 30);
+        _exportButton.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x22, 0x8B, 0x22), 30);
+        _importButton.Image = UiIconFactory.CreateToolbarIcon("\u2193", Color.FromArgb(0x33, 0x66, 0xCC), 30);
+        _resolveButton.Image = UiIconFactory.CreateToolbarIcon("\u21BB", Color.FromArgb(0x33, 0x66, 0x99), 30);
+        _viewBlockedButton.Image = UiIconFactory.CreateToolbarIcon("\U0001F6AB", Color.FromArgb(0xCC, 0x44, 0x00), 30);
+        _ctxRemoveItem.Image = UiIconFactory.CreateToolbarIcon("\u2212", Color.FromArgb(0xCC, 0x33, 0x33), 16);
+        _ctxExportItem.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x22, 0x8B, 0x22), 16);
+        _portsCtxRemove.Image = UiIconFactory.CreateToolbarIcon("\u2212", Color.FromArgb(0xCC, 0x33, 0x33), 16);
+        _portsCtxExport.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x22, 0x8B, 0x22), 16);
     }
 
     private void OnFirewallSettingsChanged(object? sender, EventArgs e)
@@ -350,10 +384,13 @@ public partial class FirewallAllowlistDialog : Form
         _allowlistHandler.HasUnappliedChanges() ||
         _portsHandler.HasUnappliedChanges();
 
-    private void UpdateApplyButton() => _applyButton.Enabled = HasUnappliedChanges();
+    private void UpdateApplyButton() => _applyButton.Enabled = !_isApplying && HasUnappliedChanges();
 
     private void OnApplyClick(object? sender, EventArgs e)
     {
+        if (_isApplying)
+            return;
+
         _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
         _portsGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
         Result = _allowlistHandler.GetEntries().ToList();
@@ -363,24 +400,47 @@ public partial class FirewallAllowlistDialog : Form
         AllowedLocalhostPorts = _portsHandler.GetPortEntries().ToList();
         FilterEphemeralLoopback = _filterEphemeralCheckBox.Checked;
 
-        var args = new FirewallApplyEventArgs();
-        Applied?.Invoke(this, args);
-        if (!args.RolledBack)
+        _isApplying = true;
+        SetApplyState(enabled: false);
+        try
         {
-            _initialAllowInternet = _allowInternetCheckBox.Checked;
-            _initialAllowLan = _allowLanCheckBox.Checked;
-            _initialAllowLocalhost = _allowLocalhostCheckBox.Checked;
-            _initialFilterEphemeral = _filterEphemeralCheckBox.Checked;
-            _allowlistHandler.CommitApply();
-            _portsHandler.CommitApply();
+            var args = new FirewallApplyEventArgs();
+            Applied?.Invoke(this, args);
+            var presentation = _applyPresenter.Present(args.RolledBack, changedSettingsCount: 1);
+            if (!presentation.RetainPendingInput)
+            {
+                _initialAllowInternet = _allowInternetCheckBox.Checked;
+                _initialAllowLan = _allowLanCheckBox.Checked;
+                _initialAllowLocalhost = _allowLocalhostCheckBox.Checked;
+                _initialFilterEphemeral = _filterEphemeralCheckBox.Checked;
+                _allowlistHandler.CommitApply();
+                _portsHandler.CommitApply();
+            }
         }
-        UpdateApplyButton();
+        finally
+        {
+            _isApplying = false;
+            SetApplyState(enabled: true);
+            UpdateApplyButton();
+        }
     }
 
-    private void OnCloseClick(object? sender, EventArgs e) => Close();
+    private void OnCloseClick(object? sender, EventArgs e)
+    {
+        if (_isApplying)
+            return;
+
+        Close();
+    }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        if (_isApplying)
+        {
+            e.Cancel = true;
+            return;
+        }
+
         if (HasUnappliedChanges())
         {
             var result = MessageBox.Show(
@@ -399,6 +459,9 @@ public partial class FirewallAllowlistDialog : Form
     {
         if (keyData == Keys.Escape)
         {
+            if (_isApplying)
+                return true;
+
             OnCloseClick(this, EventArgs.Empty);
             return true;
         }
@@ -410,5 +473,17 @@ public partial class FirewallAllowlistDialog : Form
     {
         using var dlg = new InputPromptDialog(title, prompt);
         return dlg.ShowDialog(this) == DialogResult.OK ? dlg.Value?.Trim() : null;
+    }
+
+    private void SetApplyState(bool enabled)
+    {
+        _applyButton.Enabled = enabled && HasUnappliedChanges();
+        _closeButton.Enabled = enabled;
+        _tabControl.Enabled = enabled;
+        _toolStrip.Enabled = enabled;
+        _allowInternetCheckBox.Enabled = enabled;
+        _allowLanCheckBox.Enabled = enabled;
+        _allowLocalhostCheckBox.Enabled = enabled;
+        _filterEphemeralCheckBox.Enabled = enabled && !_allowLocalhostCheckBox.Checked;
     }
 }

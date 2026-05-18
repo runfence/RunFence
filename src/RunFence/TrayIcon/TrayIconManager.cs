@@ -1,4 +1,4 @@
-using System.Drawing.Drawing2D;
+using System.ComponentModel;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -9,29 +9,29 @@ namespace RunFence.TrayIcon;
 
 public class TrayIconManager(
     NotifyIcon notifyIcon,
-    SidDisplayNameResolver displayNameResolver,
-    IIconService iconService,
     IAppIconProvider appIconProvider,
     IDatabaseProvider databaseProvider,
-    TrayMenuDiscoveryBuilder trayMenuDiscoveryBuilder,
+    TrayMenuBuilder trayMenuBuilder,
     IInputInjectionBlockerService injectionBlocker)
     : IDisposable, IInputInjectionTraySink
 {
     private ITrayOwner _trayOwner = null!;
+    private ITrayMenuActionHandler _actionHandler = null!;
     private CredentialStore? _credentialStore;
     private List<StartMenuEntry>? _discoveredEntries;
+    private ToolStripMenuItem? _showMenuItem;
+    private ToolStripMenuItem? _lockMenuItem;
     private readonly Dictionary<string, Image?> _discoveredIconCache = new(StringComparer.OrdinalIgnoreCase);
     private Bitmap? _appIconBitmap;
+    private bool _initialized;
 
-    public event Action<AppEntry>? AppLaunchRequested;
-    public event Action<string, bool>? FolderBrowserLaunchRequested;
-    public event Action<string, bool>? TerminalLaunchRequested;
-    public event Action<string, string>? DiscoveredAppLaunchRequested;
     public event Action? InputInjectionToggleRequested;
 
-    public void Initialize(ITrayOwner trayOwner)
+    public void Initialize(ITrayOwner trayOwner, ITrayMenuActionHandler actionHandler)
     {
         _trayOwner = trayOwner;
+        _actionHandler = actionHandler;
+        _initialized = true;
 
         notifyIcon.Icon = appIconProvider.GetAppIcon();
         notifyIcon.Visible = true;
@@ -56,7 +56,8 @@ public class TrayIconManager(
     public void UpdateDatabase(CredentialStore credentialStore)
     {
         _credentialStore = credentialStore;
-        RebuildContextMenu();
+        if (_initialized)
+            RebuildContextMenu();
     }
 
     public void UpdateDiscoveredApps(List<StartMenuEntry>? entries)
@@ -66,195 +67,55 @@ public class TrayIconManager(
         _discoveredIconCache.Clear();
 
         _discoveredEntries = entries;
-        RebuildContextMenu();
+        if (_initialized)
+            RebuildContextMenu();
     }
 
     private void RebuildContextMenu()
     {
         var database = databaseProvider.GetDatabase();
 
-        // Dispose the old menu (including all item bitmaps) before building the new one
-        // to avoid accumulating GDI resources across rapid tray menu rebuilds.
         var oldMenu = notifyIcon.ContextMenuStrip;
         if (oldMenu != null)
         {
             notifyIcon.ContextMenuStrip = null;
-            // Detach the cached app icon bitmap from the Show item before disposal to prevent
-            // DisposeMenuItemImages from disposing the field-owned _appIconBitmap.
+            // Detach the manager-retained app icon bitmap before menu cleanup so it survives rebuilds.
             if (oldMenu.Items.Count > 0 && oldMenu.Items[0].Image == _appIconBitmap)
                 oldMenu.Items[0].Image = null;
-            DisposeMenuItemImages(oldMenu.Items);
+            trayMenuBuilder.DisposeMenuItemImages(oldMenu.Items);
             oldMenu.Dispose();
         }
 
-        var menu = new ContextMenuStrip { ShowItemToolTips = true };
+        var buildResult = trayMenuBuilder.BuildContextMenu(new TrayMenuBuildRequest(
+            _credentialStore,
+            _discoveredEntries,
+            _discoveredIconCache,
+            database,
+            _appIconBitmap ??= appIconProvider.GetAppIcon().ToBitmap(),
+            _actionHandler));
+        var menu = buildResult.Menu;
+        menu.Opening += OnContextMenuOpening;
 
-        var showItem = new ToolStripMenuItem("Show", _appIconBitmap ??= appIconProvider.GetAppIcon().ToBitmap());
-        showItem.Click += async (_, _) => await _trayOwner.TryShowWindowAsync();
-        menu.Items.Add(showItem);
+        _showMenuItem = buildResult.ShowItem;
+        _lockMenuItem = buildResult.LockItem;
+        trayMenuBuilder.ApplyOwnerState(_trayOwner, _showMenuItem, _lockMenuItem);
 
-        var blockInjectionItem = new ToolStripMenuItem("Block Input Injection") { Checked = injectionBlocker.IsEnabled };
+        var blockInjectionItem = new ToolStripMenuItem("Block Input Injection")
+        {
+            Checked = injectionBlocker.IsEnabled
+        };
         blockInjectionItem.Click += (_, _) => InputInjectionToggleRequested?.Invoke();
-        menu.Items.Add(blockInjectionItem);
-        
-        if (database.Apps.Count > 0)
-        {
-            menu.Items.Add(new ToolStripSeparator());
-
-            var nameGroups = database.Apps
-                .GroupBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
-
-            // By design: configured apps are always launchable from the tray regardless of lock state.
-            // This is intentional — lock protects the GUI, not app launching.
-            // The tray launch path invokes the orchestrator directly (no lock check), and the IPC
-            // handler used by the launcher also authorizes launches independently of the lock.
-            foreach (var app in database.Apps.OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase))
-            {
-                var label = app.Name;
-                if (nameGroups.TryGetValue(app.Name, out int count) && count > 1)
-                {
-                    var accountLabel = app.AppContainerName
-                                       ?? displayNameResolver.GetDisplayName(app.AccountSid, null, database.SidNames);
-                    label = $"{app.Name} ({accountLabel})";
-                }
-
-                var item = new ToolStripMenuItem(label);
-
-                // Add original exe/folder icon to tray menu
-                var icon = iconService.GetOriginalAppIcon(app);
-                if (icon != null)
-                    item.Image = icon;
-
-                var capturedApp = app;
-                item.Click += (_, _) => AppLaunchRequested?.Invoke(capturedApp);
-                menu.Items.Add(item);
-            }
-        }
-
-        if (_discoveredEntries?.Count > 0)
-        {
-            menu.Items.Add(new ToolStripSeparator());
-            // By design: discovered entries are always launchable from the tray regardless of lock state.
-            // The user explicitly opted in per account — lock protects the GUI, not launching.
-            var discoveredItems = trayMenuDiscoveryBuilder.BuildMenuItems(
-                _discoveredEntries,
-                database.SidNames,
-                _discoveredIconCache,
-                (exePath, sid) => DiscoveredAppLaunchRequested?.Invoke(exePath, sid),
-                displayNameResolver);
-            foreach (var item in discoveredItems)
-                menu.Items.Add(item);
-        }
-
-        BuildAccountMenuItems(menu, database, database.Accounts.Where(a => a.TrayFolderBrowser).Select(a => a.Sid).ToList(), CreateFolderIcon,
-            (sid, shift) => FolderBrowserLaunchRequested?.Invoke(sid, shift));
-        BuildAccountMenuItems(menu, database, database.Accounts.Where(a => a.TrayTerminal).Select(a => a.Sid).ToList(), CreateTerminalIcon,
-            (sid, shift) => TerminalLaunchRequested?.Invoke(sid, shift));
-
-        menu.Items.Add(new ToolStripSeparator());
-
-        var exitItem = new ToolStripMenuItem("Exit", CreateExitIcon());
-        exitItem.Click += (_, _) => Application.Exit();
-        menu.Items.Add(exitItem);
+        menu.Items.Insert(2, blockInjectionItem);
 
         notifyIcon.ContextMenuStrip = menu;
     }
 
-    private void BuildAccountMenuItems(ContextMenuStrip menu, AppDatabase database, List<string> traySids,
-        Func<Image> iconFactory, Action<string, bool> onLaunch)
+    private void OnContextMenuOpening(object? sender, CancelEventArgs e)
     {
-        if (traySids.Count == 0)
+        if (_showMenuItem == null || _lockMenuItem == null)
             return;
 
-        var credentialSids = _credentialStore?.Credentials
-                                 .Select(c => c.Sid)
-                                 .ToHashSet(StringComparer.OrdinalIgnoreCase)
-                             ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
-        if (interactiveSid != null)
-            credentialSids.Add(interactiveSid);
-
-        var sidsToShow = traySids
-            .Where(sid => credentialSids.Contains(sid))
-            .OrderBy(sid => displayNameResolver.ResolveUsername(sid, database.SidNames)
-                            ?? displayNameResolver.GetDisplayName(sid, null, database.SidNames),
-                StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (sidsToShow.Count == 0)
-            return;
-
-        menu.Items.Add(new ToolStripSeparator());
-        foreach (var sid in sidsToShow)
-        {
-            var label = displayNameResolver.ResolveUsername(sid, database.SidNames)
-                        ?? displayNameResolver.GetDisplayName(sid, null, database.SidNames);
-            var item = new ToolStripMenuItem(label, iconFactory());
-            item.ToolTipText = "Hold Shift to launch with full privileges";
-            // By design: tray-pinned items are always launchable regardless of lock state.
-            // Lock protects the GUI, not launching — same policy as configured app entries.
-            var capturedSid = sid;
-            item.Click += (_, _) => onLaunch(capturedSid,
-                (Control.ModifierKeys & Keys.Shift) != 0);
-            menu.Items.Add(item);
-        }
-    }
-
-    private static void DisposeMenuItemImages(ToolStripItemCollection items)
-    {
-        foreach (ToolStripItem item in items)
-        {
-            if (item.Image != null)
-            {
-                item.Image.Dispose();
-                item.Image = null;
-            }
-
-            if (item is ToolStripMenuItem { DropDownItems.Count: > 0 } menuItem)
-                DisposeMenuItemImages(menuItem.DropDownItems);
-        }
-    }
-
-    private static Image CreateFolderIcon()
-    {
-        var bmp = new Bitmap(16, 16);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var brush = new SolidBrush(Color.FromArgb(0xCC, 0x88, 0x22));
-        g.FillRectangle(brush, 1, 5, 5, 2); // folder tab
-        g.FillRectangle(brush, 1, 6, 14, 8); // folder body
-        return bmp;
-    }
-
-    private static Image CreateTerminalIcon()
-    {
-        var bmp = new Bitmap(16, 16);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var bgBrush = new SolidBrush(Color.FromArgb(0x1E, 0x1E, 0x1E));
-        g.FillRectangle(bgBrush, 1, 2, 14, 12);
-        using var promptPen = new Pen(Color.FromArgb(0x33, 0xDD, 0x66), 1.5f);
-        promptPen.StartCap = LineCap.Round;
-        promptPen.EndCap = LineCap.Round;
-        g.DrawLine(promptPen, 3, 7, 6, 9);
-        g.DrawLine(promptPen, 6, 9, 3, 11);
-        using var cursorBrush = new SolidBrush(Color.FromArgb(0xCC, 0xCC, 0xCC));
-        g.FillRectangle(cursorBrush, 8, 10, 4, 2);
-        return bmp;
-    }
-
-    private static Image CreateExitIcon()
-    {
-        var bmp = new Bitmap(16, 16);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        using var pen = new Pen(Color.FromArgb(0xCC, 0x33, 0x33), 2f);
-        pen.StartCap = LineCap.Round;
-        pen.EndCap = LineCap.Round;
-        g.DrawLine(pen, 4, 4, 12, 12);
-        g.DrawLine(pen, 12, 4, 4, 12);
-        return bmp;
+        trayMenuBuilder.ApplyOwnerState(_trayOwner, _showMenuItem, _lockMenuItem);
     }
 
     private async void OnTrayClick(object? sender, MouseEventArgs e)
@@ -270,17 +131,17 @@ public class TrayIconManager(
 
     public void Dispose()
     {
-        notifyIcon.Visible = false;
+        notifyIcon.MouseClick -= OnTrayClick;
+        notifyIcon.BalloonTipClicked -= OnBalloonTipClicked;
+
         var menu = notifyIcon.ContextMenuStrip;
         if (menu != null)
         {
             notifyIcon.ContextMenuStrip = null;
-            // Detach the cached app icon bitmap from the Show item before disposal so
-            // DisposeMenuItemImages does not dispose the field-owned _appIconBitmap,
-            // which is then disposed explicitly below.
+            // Detach the manager-retained app icon bitmap before menu cleanup so it is disposed only once below.
             if (menu.Items.Count > 0 && menu.Items[0].Image == _appIconBitmap)
                 menu.Items[0].Image = null;
-            DisposeMenuItemImages(menu.Items);
+            trayMenuBuilder.DisposeMenuItemImages(menu.Items);
             menu.Dispose();
         }
 

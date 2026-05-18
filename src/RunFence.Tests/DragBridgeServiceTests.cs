@@ -8,6 +8,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.DragBridge;
 using RunFence.Infrastructure;
+using RunFence.Launch;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -20,7 +21,7 @@ public class DragBridgeServiceTests : IDisposable
     private readonly Mock<INotificationService> _notifications;
     private readonly Mock<ILoggingService> _log;
     private readonly DragBridgeService _service;
-    private readonly ProtectedBuffer _pinKey;
+    private readonly SecureSecret _pinKey;
 
     private static readonly string CurrentSid = SidResolutionHelper.GetCurrentUserSid();
     private static readonly SecurityIdentifier CurrentSecId = new(CurrentSid);
@@ -59,9 +60,10 @@ public class DragBridgeServiceTests : IDisposable
             new DragBridgeChoiceCache());
         var resolveOrchestrator = new DragBridgeResolveOrchestrator(
             pasteHandler,
-            sessionSaver.Object,
             new Mock<IQuickAccessPinService>().Object,
-            uiThreadInvoker.Object);
+            uiThreadInvoker.Object,
+            _notifications.Object,
+            permissionGrant.Object);
 
         _service = new DragBridgeService(
             _hotkeyService.Object,
@@ -74,13 +76,12 @@ public class DragBridgeServiceTests : IDisposable
             resolveOrchestrator);
         _service.Initialize();
 
-        _pinKey = new ProtectedBuffer(new byte[32], protect: false);
+        _pinKey = TestSecretFactory.Create(32);
         _service.SetData(new SessionContext
-        {
+{
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-            PinDerivedKey = _pinKey
-        });
+        }.WithOwnedPinDerivedKey(_pinKey));
     }
 
     public void Dispose()
@@ -169,9 +170,9 @@ public class DragBridgeServiceTests : IDisposable
 
     [Theory]
     [InlineData(NativeTokenHelper.MandatoryLevelHigh, false, PrivilegeLevel.HighestAllowed)]
-    [InlineData(NativeTokenHelper.MandatoryLevelMedium, false, PrivilegeLevel.AboveBasic)]
-    [InlineData(NativeTokenHelper.MandatoryLevelLow, false, PrivilegeLevel.HighestAllowed)]
-    [InlineData(NativeTokenHelper.MandatoryLevelMedium, true, PrivilegeLevel.Basic)]
+    [InlineData(NativeTokenHelper.MandatoryLevelMedium, false, PrivilegeLevel.Basic)]
+    [InlineData(NativeTokenHelper.MandatoryLevelLow, false, PrivilegeLevel.LowIntegrity)]
+    [InlineData(NativeTokenHelper.MandatoryLevelMedium, true, PrivilegeLevel.Isolated)]
     [InlineData(NativeTokenHelper.MandatoryLevelLow, true, PrivilegeLevel.LowIntegrity)]
     public async Task CopyHotkey_CurrentUser_CallsLaunchDirectWithExpectedPrivilegeLevel(
         int integrityLevel, bool isInRestrictedJob, PrivilegeLevel expectedMode)
@@ -208,14 +209,13 @@ public class DragBridgeServiceTests : IDisposable
         var managedSecId = new SecurityIdentifier(managedSid);
 
         var sessionWithCredential = new SessionContext
-        {
+{
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore
             {
                 Credentials = [new CredentialEntry { Sid = managedSid, EncryptedPassword = [1] }]
             },
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(_pinKey);
         _service.SetData(sessionWithCredential);
         _service.ApplySettings(new AppSettings { EnableDragBridge = true });
 
@@ -224,7 +224,7 @@ public class DragBridgeServiceTests : IDisposable
 
         var launchCalledTcs = new TaskCompletionSource();
         _launcher.Setup(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>(),
-                PrivilegeLevel.AboveBasic))
+                PrivilegeLevel.Basic))
             .Callback(() => launchCalledTcs.TrySetResult())
             .Throws(new InvalidOperationException("test: no real process available"));
 
@@ -233,7 +233,7 @@ public class DragBridgeServiceTests : IDisposable
         await launchCalledTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         _launcher.Verify(l => l.LaunchManaged(It.IsAny<string>(), managedSid, It.IsAny<IReadOnlyList<string>>(),
-            PrivilegeLevel.AboveBasic), Times.Once);
+            PrivilegeLevel.Basic), Times.Once);
         _launcher.Verify(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
             It.IsAny<PrivilegeLevel>()), Times.Never);
         _launcher.Verify(l => l.LaunchDeElevated(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
@@ -249,14 +249,13 @@ public class DragBridgeServiceTests : IDisposable
         var managedSecId = new SecurityIdentifier(managedSid);
 
         var session = new SessionContext
-        {
+{
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore
             {
                 Credentials = [new CredentialEntry { Sid = managedSid, EncryptedPassword = [1] }]
             },
-            PinDerivedKey = _pinKey
-        };
+        }.WithOwnedPinDerivedKey(_pinKey);
         _service.SetData(session);
         _service.ApplySettings(new AppSettings { EnableDragBridge = true });
 
@@ -282,6 +281,48 @@ public class DragBridgeServiceTests : IDisposable
             It.Is<string>(s => s.Contains("Failed to launch"))), Times.Once);
         _log.Verify(l => l.Error(It.Is<string>(s => s.Contains("managed launch failed")),
             It.IsAny<Exception>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task CopyHotkey_AppContainerOwner_CallsLaunchAppContainer()
+    {
+        const string containerSidValue = "S-1-15-2-42";
+        var containerSid = new SecurityIdentifier(containerSidValue);
+        var database = new AppDatabase();
+        database.AppContainers.Add(new AppContainerEntry
+        {
+            Name = "sandbox",
+            DisplayName = "Sandbox",
+            Sid = containerSidValue
+        });
+        _service.SetData(new SessionContext
+{
+            Database = database,
+            CredentialStore = new CredentialStore(),
+        }.WithOwnedPinDerivedKey(_pinKey));
+        _service.ApplySettings(new AppSettings { EnableDragBridge = true });
+
+        _windowOwnerDetector.Setup(d => d.GetDragSourceOrForegroundOwnerInfo())
+            .Returns(new WindowOwnerInfo(CurrentSecId, NativeTokenHelper.MandatoryLevelMedium, false, containerSid));
+
+        var launchCalledTcs = new TaskCompletionSource();
+        _launcher.Setup(l => l.LaunchAppContainer(
+                It.IsAny<string>(),
+                It.Is<AppContainerEntry>(entry => entry.Sid == containerSidValue),
+                It.IsAny<IReadOnlyList<string>>()))
+            .Callback(() => launchCalledTcs.TrySetResult())
+            .Returns(new ProcessInfo(new ProcessLaunchNative.PROCESS_INFORMATION()));
+
+        _hotkeyService.Raise(h => h.HotkeyPressed += null, DragBridgeService.CopyHotkeyId);
+        await launchCalledTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        _launcher.Verify(l => l.LaunchAppContainer(
+            It.IsAny<string>(),
+            It.Is<AppContainerEntry>(entry => entry.Sid == containerSidValue),
+            It.IsAny<IReadOnlyList<string>>()), Times.Once);
+        _launcher.Verify(l => l.LaunchDirect(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<PrivilegeLevel>()), Times.Never);
+        _launcher.Verify(l => l.LaunchManaged(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<PrivilegeLevel>()), Times.Never);
+        _launcher.Verify(l => l.LaunchDeElevated(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<PrivilegeLevel?>()), Times.Never);
     }
 
     // --- Dispose unregisters ---

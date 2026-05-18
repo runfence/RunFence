@@ -5,6 +5,7 @@ using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Ipc;
 using RunFence.RunAs;
+using RunFence.UI;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -71,9 +72,8 @@ public class IpcLaunchHandlerTests
             null!,    // IAppEntryLauncher - not reached on RunAs path
             authorizer,
             null!,    // ISidNameCacheService - not reached on RunAs path
-            log,
             idleMonitor.Object,
-            null!,    // ITrayBalloonService - not reached on RunAs path
+            null!,    // ILaunchFeedbackPresenter - not reached on RunAs path
             runAsFlowHandler);
 
         // A path-based AppId triggers the RunAs flow (contains path separator)

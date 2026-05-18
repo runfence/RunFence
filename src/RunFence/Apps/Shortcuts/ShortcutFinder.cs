@@ -20,6 +20,7 @@ public class ShortcutFinder
     /// </summary>
     public List<string> FindShortcutsForExe(string exePath, ShortcutTraversalCache cache)
     {
+        // Managed shortcut matching here is path-based discovery only; it is not used as ownership proof.
         var normalized = Path.GetFullPath(exePath);
         return cache.FindWhere((target, _) =>
         {
@@ -41,7 +42,8 @@ public class ShortcutFinder
     /// </summary>
     public List<string> FindShortcutsForFolder(string folderPath, ShortcutTraversalCache cache)
     {
-        var normalizedFolder = Path.GetFullPath(folderPath).TrimEnd(Path.DirectorySeparatorChar);
+        // Folder-target matching is limited to managed shortcut discovery heuristics, not ownership verification.
+        var normalizedFolder = Path.GetFullPath(folderPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         return cache.FindWhere((target, args) =>
             ShortcutClassificationHelper.IsFolderShortcutTarget(target, args, normalizedFolder));
     }
@@ -51,11 +53,12 @@ public class ShortcutFinder
     /// </summary>
     public List<string> FindShortcutsForLauncher(string appId, ShortcutTraversalCache cache)
     {
+        // Suffix/target matching is intentional for RunFence-managed launcher shortcuts only;
+        // it is not intended as a general ownership proof for arbitrary shortcut files.
         return cache.FindWhere((target, args) =>
             target != null &&
             target.EndsWith(PathConstants.LauncherExeName, StringComparison.OrdinalIgnoreCase) &&
-            args != null &&
-            (args == appId || args.StartsWith(appId + " ")));
+            string.Equals(ShortcutClassificationHelper.TryGetManagedShortcutAppId(args), appId, StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -88,8 +91,9 @@ public class ShortcutFinder
             if (target.EndsWith(PathConstants.LauncherExeName, StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrEmpty(args))
             {
-                var spaceIndex = args.IndexOf(' ');
-                var appId = spaceIndex < 0 ? args : args[..spaceIndex];
+                var appId = ShortcutClassificationHelper.TryGetManagedShortcutAppId(args);
+                if (string.IsNullOrEmpty(appId))
+                    continue;
 
                 if (!byLauncherAppId.TryGetValue(appId, out var idList))
                 {

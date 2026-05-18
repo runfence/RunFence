@@ -30,6 +30,7 @@ internal class UntrustedAppTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
     IAppContainerService appContainerService,
+    IWizardSessionSaver sessionSaver,
     SessionContext session,
     WizardLicenseChecker licenseChecker,
     IShortcutDiscoveryService discoveryService,
@@ -197,11 +198,9 @@ internal class UntrustedAppTemplate(
         // License checks
         if (!licenseChecker.CheckCanCreateContainer(session, progress))
             return;
-        if (!licenseChecker.CheckCanAddApp(session, progress))
-            return;
 
-        // Generate a unique container name from the app name
-        var containerName = GenerateContainerName(_data.AppName);
+        // Generate a deterministic unique container name from current config state
+        var containerName = GenerateContainerName(_data.AppName, session.Database.AppContainers);
 
         var containerEntry = new AppContainerEntry
         {
@@ -212,11 +211,19 @@ internal class UntrustedAppTemplate(
             DeleteAfterUtc = _data.IsEphemeral ? DateTime.UtcNow.AddHours(24) : null
         };
 
+        session.Database.AppContainers.Add(containerEntry);
+        sessionSaver.SaveConfig();
+
         // Create AppContainer profile
         progress.ReportStatus("Creating AppContainer profile...");
         try
         {
-            await Task.Run(() => appContainerService.CreateProfile(containerEntry));
+            var profileResult = await Task.Run(() => appContainerService.CreateProfile(containerEntry));
+            if (profileResult.Status != AppContainerProfileSetupStatus.Succeeded)
+            {
+                progress.ReportError(profileResult.ErrorMessage ?? $"Container profile setup failed for '{containerEntry.Name}'.");
+                return;
+            }
         }
         catch (Exception ex)
         {
@@ -224,8 +231,14 @@ internal class UntrustedAppTemplate(
             return;
         }
 
-        session.Database.AppContainers.Add(containerEntry);
-        try { containerEntry.Sid = appContainerService.GetSid(containerEntry.Name); } catch { }
+        try
+        {
+            containerEntry.Sid = appContainerService.GetSid(containerEntry.Name);
+            sessionSaver.SaveConfig();
+        }
+        catch
+        {
+        }
 
         var appName = _data.AppName;
         var appPath = _data.AppPath;
@@ -250,9 +263,10 @@ internal class UntrustedAppTemplate(
         await executor.ExecuteAsync(flowParams, progress);
     }
 
-    private static string GenerateContainerName(string appName)
+    private static string GenerateContainerName(string appName, IReadOnlyList<AppContainerEntry> existingContainers)
     {
-        // Sanitize: keep only alphanumeric and hyphens, limit length
+        // Sanitize: keep only alphanumeric and hyphens, limit length.
+        // Deterministic: no clock/random input; collision suffix uses stable ascending integer.
         var clean = new string(appName
                 .Where(c => char.IsLetterOrDigit(c) || c == '-')
                 .Take(32)
@@ -260,7 +274,20 @@ internal class UntrustedAppTemplate(
             .Trim('-');
         if (string.IsNullOrEmpty(clean))
             clean = "app";
-        return $"rf-{clean.ToLowerInvariant()}-{DateTime.Now:yyMMddHHmm}";
+
+        var baseName = $"rf-{clean.ToLowerInvariant()}";
+        var existing = new HashSet<string>(
+            existingContainers.Select(c => c.Name),
+            StringComparer.OrdinalIgnoreCase);
+
+        if (!existing.Contains(baseName))
+            return baseName;
+
+        var suffix = 2;
+        while (existing.Contains($"{baseName}-{suffix}"))
+            suffix++;
+
+        return $"{baseName}-{suffix}";
     }
 
     private sealed class CommitData
@@ -278,7 +305,7 @@ internal class UntrustedAppTemplate(
         public void Reset()
         {
             UseContainer = false;
-            PrivilegeLevel = PrivilegeLevel.Basic;
+            PrivilegeLevel = PrivilegeLevel.Isolated;
             IsEphemeral = false;
             AllowInternet = false;
             AllowLan = false;

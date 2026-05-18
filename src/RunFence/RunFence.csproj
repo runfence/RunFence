@@ -33,6 +33,7 @@
         <ProjectReference Include="..\RunFence.Launcher\RunFence.Launcher.csproj"/>
         <ProjectReference Include="..\RunFence.DragBridge\RunFence.DragBridge.csproj"/>
         <ProjectReference Include="..\RunFence.JobKeeper\RunFence.JobKeeper.csproj"/>
+        <ProjectReference Include="..\RunFence.ProfileKeeper\RunFence.ProfileKeeper.csproj"/>
         <ProjectReference Include="..\RunFence.PinHelper\RunFence.PinHelper.csproj"/>
         <ProjectReference Include="..\preftrans\preftrans.csproj"/>
         <ProjectReference Include="..\RunFence.SecurityScanner\RunFence.SecurityScanner.csproj"/>
@@ -71,5 +72,41 @@
     <ItemGroup>
         <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
     </ItemGroup>
+
+    <Target Name="KillOutputProcesses"
+            BeforeTargets="PrepareForBuild"
+            Condition="'$(DesignTimeBuild)' != 'true' And '$(BuildingProject)' == 'true'">
+        <PropertyGroup>
+            <_PowerShellExe>$([System.IO.Path]::GetFullPath('$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe'))</_PowerShellExe>
+            <_KillScriptPath>$([System.IO.Path]::GetFullPath('$(IntermediateOutputPath)kill-output.ps1'))</_KillScriptPath>
+            <_KillScript>param([switch]$ElevatedKill)
+$targetDir = [System.IO.Path]::GetFullPath('$(TargetDir)')
+if ('$(Configuration)' -eq 'Release' -and -not $ElevatedKill) {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isElevated) {
+        try {
+            $process = Start-Process -FilePath '$(_PowerShellExe)' -ArgumentList @('-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-ElevatedKill') -WorkingDirectory '$(MSBuildProjectDirectory)' -Verb RunAs -WindowStyle Hidden -Wait -PassThru -ErrorAction Stop
+            exit $process.ExitCode
+        } catch [System.InvalidOperationException] {
+            exit 0
+        }
+    }
+}
+Get-Process | ForEach-Object {
+    try {
+        $processPath = $_.MainModule.FileName
+        if ($processPath -and [System.IO.Path]::GetFullPath($processPath).StartsWith($targetDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}</_KillScript>
+        </PropertyGroup>
+        <MakeDir Directories="$(IntermediateOutputPath)" />
+        <WriteLinesToFile File="$(_KillScriptPath)" Lines="$(_KillScript)" Overwrite="true" />
+        <Exec Command="&quot;$(_PowerShellExe)&quot; -NonInteractive -ExecutionPolicy Bypass -File &quot;$(_KillScriptPath)&quot;"
+              IgnoreExitCode="true" />
+    </Target>
 
 </Project>

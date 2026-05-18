@@ -13,7 +13,6 @@
       Scope="perMachine": MSI requires elevation automatically, installs to ProgramFiles64Folder.
       Architecture is x64 via -arch x64 on the wix build command (not a Package attribute in WiX v4).
       ProductVersion is passed from the build script via: wix build -d ProductVersion=1.0.0
-      UPDATE: set ARPHELPLINK and ARPURLINFOABOUT to the actual GitHub URL before publishing.
     -->
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of RunFence is already installed." />
@@ -47,8 +46,8 @@
     <!-- Application icon for Add/Remove Programs -->
     <Icon Id="RunFenceIcon" SourceFile="..\src\RunFence\app.ico" />
     <Property Id="ARPPRODUCTICON" Value="RunFenceIcon" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/your-repo-url-here/issues" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/your-repo-url-here" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/runfence/RunFence/issues" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/runfence/RunFence" />
 
     <!-- Features -->
     <Feature Id="MainFeature" Title="RunFence" Level="1">
@@ -76,7 +75,7 @@
       <RemoveFolder Id="RemoveRunFenceMenuFolder"
                     Directory="RunFenceMenuFolder"
                     On="uninstall" />
-      <RegistryValue Root="HKCU" Key="Software\RunFence\Install"
+      <RegistryValue Root="HKLM" Key="Software\RunFence\Install"
                      Type="integer" Value="1" KeyPath="yes" />
     </Component>
 
@@ -91,7 +90,7 @@
                 Target="[INSTALLFOLDER]RunFence.exe"
                 WorkingDirectory="INSTALLFOLDER"
                 Icon="RunFenceIcon" />
-      <RegistryValue Root="HKCU" Key="Software\RunFence\DesktopShortcut"
+      <RegistryValue Root="HKLM" Key="Software\RunFence\Install" Name="DesktopShortcut"
                      Type="integer" Value="1" KeyPath="yes" />
     </Component>
 

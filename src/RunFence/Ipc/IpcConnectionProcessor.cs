@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using RunFence.Core;
 using RunFence.Core.Ipc;
+using RunFence.Infrastructure;
 
 namespace RunFence.Ipc;
 
@@ -12,9 +13,10 @@ namespace RunFence.Ipc;
 /// pings, extracts caller identity, applies per-caller rate limiting, deserializes, suppresses
 /// ExecutionContext flow, dispatches to the handler, and writes the response.
 /// </summary>
-public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor identityExtractor)
+public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor identityExtractor, IClock clock)
 {
     private readonly ConcurrentDictionary<string, DateTime> _lastRequestByCaller = new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _rateLimitSync = new();
     private static readonly byte[] RateLimitedBytes = [IpcCommands.RateLimitedSignal];
 
     public async Task ProcessConnectionAsync(
@@ -40,18 +42,28 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
 
         // Per-caller rate limit: reject requests arriving faster than 100ms from the same identity.
         // Keyed by verified SID (from impersonation) or caller identity/unknown as fallback.
-        var now = DateTime.UtcNow;
+        var now = clock.UtcNow;
         var rateLimitKey = context.RateLimitKey;
 
-        // Evict stale entries (older than 10 seconds) to prevent unbounded dictionary growth
-        foreach (var staleKey in _lastRequestByCaller
-            .Where(kvp => (now - kvp.Value).TotalSeconds > 10)
-            .Select(kvp => kvp.Key)
-            .ToList())
-            _lastRequestByCaller.TryRemove(staleKey, out _);
+        bool isRateLimited;
+        lock (_rateLimitSync)
+        {
+            foreach (var staleKey in _lastRequestByCaller
+                         .Where(kvp => (now - kvp.Value).TotalSeconds > 10)
+                         .Select(kvp => kvp.Key)
+                         .ToList())
+            {
+                _lastRequestByCaller.TryRemove(staleKey, out _);
+            }
 
-        if (_lastRequestByCaller.TryGetValue(rateLimitKey, out var last)
-            && (now - last).TotalMilliseconds < 100)
+            isRateLimited = _lastRequestByCaller.TryGetValue(rateLimitKey, out var last)
+                            && (now - last).TotalMilliseconds < 100;
+
+            if (!isRateLimited)
+                _lastRequestByCaller[rateLimitKey] = now;
+        }
+
+        if (isRateLimited)
         {
             log.Warn($"IPC rate limit exceeded for caller '{rateLimitKey}'; dropping connection.");
             try
@@ -65,8 +77,6 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
             }
             return;
         }
-
-        _lastRequestByCaller[rateLimitKey] = now;
 
         var json = Encoding.UTF8.GetString(messageBuffer, 0, bytesRead);
         log.Info($"IPC received: {json.Length} bytes from {context.CallerIdentity ?? "unknown"}");

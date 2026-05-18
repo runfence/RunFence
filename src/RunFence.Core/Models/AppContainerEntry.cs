@@ -16,6 +16,9 @@ public class AppContainerEntry
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DateTime? DeleteAfterUtc { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LifecycleState { get; set; }
+
     /// <summary>
     /// CLSIDs granted COM launch+access permissions (HKCR\AppID\{clsid}).
     /// Null when no COM grants configured; empty list treated the same as null on load.
@@ -28,4 +31,17 @@ public class AppContainerEntry
     /// interactive user changes. Empty string means not yet resolved.
     /// </summary>
     public string Sid { get; set; } = string.Empty;
+
+    public AppContainerEntry Clone() => new()
+    {
+        Name = Name,
+        DisplayName = DisplayName,
+        Capabilities = Capabilities?.ToList(),
+        EnableLoopback = EnableLoopback,
+        IsEphemeral = IsEphemeral,
+        DeleteAfterUtc = DeleteAfterUtc,
+        LifecycleState = LifecycleState,
+        ComAccessClsids = ComAccessClsids?.ToList(),
+        Sid = Sid,
+    };
 }

@@ -1,8 +1,10 @@
 using Moq;
+using System.IO;
 using RunFence.Core;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.Persistence.UI;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -129,12 +131,61 @@ public class ConfigAvailabilityMonitorTests
     }
 
     [Fact]
-    public void Tick_RaisesAutoUnloadOnUiThread_WhenFilesMissing()
+    public void Tick_SkipsAutoUnload_WhenMissingFileReappearsBeforeUiCallback()
     {
-        var missingPath = @"C:\does-not-exist-runfence-test.rfn";
+        var missingPath = Path.Combine(Path.GetTempPath(), $"runfence-missing-{Guid.NewGuid():N}.rfn");
         _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([missingPath]);
 
-        // Use ManualResetEventSlim to avoid Thread.Sleep polling: signal when BeginInvoke fires.
+        try
+        {
+            // Use ManualResetEventSlim to avoid Thread.Sleep polling: signal when BeginInvoke fires.
+            var callbackSignal = new ManualResetEventSlim(false);
+            Action? capturedAction = null;
+            _uiThreadInvoker.Setup(u => u.BeginInvoke(It.IsAny<Action>()))
+                .Callback<Action>(a =>
+                {
+                    capturedAction = a;
+                    callbackSignal.Set();
+                });
+
+            List<string>? unloadedPaths = null;
+
+            var manualTimerFactory = new ManualUiTimerFactory();
+            using var monitor = new ConfigAvailabilityMonitor(
+                _appConfigService.Object,
+                _log.Object,
+                _appStateProvider.Object,
+                _uiThreadInvoker.Object,
+                _enforcementGuard,
+                manualTimerFactory);
+            monitor.AutoUnloadRequired += (_, paths) => unloadedPaths = paths;
+
+            monitor.ScheduleAvailabilityCheck();
+            var timer = Assert.Single(manualTimerFactory.Timers);
+            timer.Fire();
+
+            // Wait for Task.Run to post the UI thread callback (no polling - event-driven)
+            Assert.True(callbackSignal.Wait(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
+
+            File.WriteAllText(missingPath, "restored");
+            capturedAction!();
+
+            Assert.Null(unloadedPaths);
+            _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Auto-unloading"))), Times.Never);
+        }
+        finally
+        {
+            if (File.Exists(missingPath))
+                File.Delete(missingPath);
+        }
+    }
+
+    [Fact]
+    public void Tick_RaisesAutoUnloadOnUiThread_WhenFilesMissing()
+    {
+        var missingPath = Path.Combine(Path.GetTempPath(), $"runfence-missing-{Guid.NewGuid():N}.rfn");
+        _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([missingPath]);
+
         var callbackSignal = new ManualResetEventSlim(false);
         Action? capturedAction = null;
         _uiThreadInvoker.Setup(u => u.BeginInvoke(It.IsAny<Action>()))
@@ -146,26 +197,31 @@ public class ConfigAvailabilityMonitorTests
 
         List<string>? unloadedPaths = null;
 
-        using var monitor = BuildMonitor();
+        var manualTimerFactory = new ManualUiTimerFactory();
+        using var monitor = new ConfigAvailabilityMonitor(
+            _appConfigService.Object,
+            _log.Object,
+            _appStateProvider.Object,
+            _uiThreadInvoker.Object,
+            _enforcementGuard,
+            manualTimerFactory);
         monitor.AutoUnloadRequired += (_, paths) => unloadedPaths = paths;
 
         monitor.ScheduleAvailabilityCheck();
-        _timer.Raise(t => t.Tick += null, _timer.Object, EventArgs.Empty);
+        var timer = Assert.Single(manualTimerFactory.Timers);
+        timer.Fire();
 
-        // Wait for Task.Run to post the UI thread callback (no polling — event-driven)
         Assert.True(callbackSignal.Wait(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
-
         capturedAction!();
 
-        Assert.NotNull(unloadedPaths);
-        Assert.Contains(missingPath, unloadedPaths!);
+        Assert.Equal([missingPath], unloadedPaths);
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Auto-unloading"))), Times.Once);
     }
 
     [Fact]
     public void Tick_ReschedulesTimer_AfterAutoUnload()
     {
-        var missingPath = @"C:\does-not-exist-runfence-test2.rfn";
+        var missingPath = Path.Combine(Path.GetTempPath(), $"runfence-missing-{Guid.NewGuid():N}.rfn");
         _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([missingPath]);
 
         var callbackSignal = new ManualResetEventSlim(false);
@@ -186,7 +242,7 @@ public class ConfigAvailabilityMonitorTests
         Assert.True(callbackSignal.Wait(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
         capturedAction!();
 
-        // After unload, ScheduleAvailabilityCheck is called → timer restarted (Stop then Start again)
+        // After unload, ScheduleAvailabilityCheck is called -> timer restarted (Stop then Start again)
         _timer.Verify(t => t.Start(), Times.AtLeast(2));
     }
 }
