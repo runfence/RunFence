@@ -1,14 +1,18 @@
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.Infrastructure;
 
-public class IconService(ILoggingService log, string iconDir, AppIdValidator appIdValidator) : IIconService
+public class IconService(
+    ILoggingService log,
+    AppIdValidator appIdValidator,
+    IProgramDataDirectoryProvisioningService programDataDirectoryProvisioningService,
+    IProgramDataKnownPathResolver programDataKnownPathResolver) : IIconService
 {
-    private readonly string _iconDir = iconDir;
-
+    private readonly string _iconDir = programDataKnownPathResolver.GetDirectoryPath(ProgramDataPolicies.Icons);
     // Badge colors for different accounts
     private static readonly Color[] BadgeColors =
     [
@@ -153,8 +157,8 @@ public class IconService(ILoggingService log, string iconDir, AppIdValidator app
 
     private void EnsureIconDirectory()
     {
-        if (!Directory.Exists(_iconDir))
-            Directory.CreateDirectory(_iconDir);
+        programDataDirectoryProvisioningService.EnsureKnownDirectoryTreeInheritsFromRoot(
+            ProgramDataPolicies.Icons);
     }
 
     private void SaveBadgedIcon(Icon sourceIcon, string outputPath, string accountSid)
@@ -169,7 +173,9 @@ public class IconService(ILoggingService log, string iconDir, AppIdValidator app
         });
         using var ms = new MemoryStream();
         icon.Save(ms);
-        File.WriteAllBytes(outputPath, ms.ToArray());
+        var iconBytes = ms.ToArray();
+
+        File.WriteAllBytes(outputPath, iconBytes);
     }
 
     private static Icon? ExtractFolderIcon()

@@ -11,31 +11,6 @@ namespace RunFence.Tests;
 public class AppContainerEditDialogTests
 {
     [Fact]
-    public void SessionScope_CanResolveAppContainerEditDialog()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var foundationContainer = ContainerRegistrationBuilder.BuildFoundationContainer();
-            using var pinKey = TestSecretFactory.Create(32);
-            var session = new SessionContext
-{
-                Database = new AppDatabase(),
-                CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(pinKey);
-
-            using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
-                foundationContainer,
-                session,
-                new StartupOptions(false, false));
-
-            using var dialog = sessionScope.Resolve<AppContainerEditDialog>();
-            dialog.Initialize(existing: null);
-
-            Assert.NotNull(dialog);
-        });
-    }
-
-    [Fact]
     public void OkButton_PendingAsyncCreate_DoesNotCloseUntilServiceCompletes()
     {
         StaTestHelper.RunOnSta(() =>
@@ -87,23 +62,6 @@ public class AppContainerEditDialogTests
         });
     }
 
-    [Fact]
-    public void DeleteButton_SetsDeleteRequestedAndClosesAsCancel()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var existing = new AppContainerEntry { Name = "rfn_existing", DisplayName = "Existing" };
-            var service = new FakeAppContainerEditService();
-            var notifier = new FakeNotifier();
-            using var dialog = CreateEditDialog(service, notifier, existing);
-
-            ClickButton(dialog, "Delete Container");
-
-            Assert.True(dialog.DeleteRequested);
-            Assert.Equal(DialogResult.Cancel, dialog.DialogResult);
-        });
-    }
-
     private static AppContainerEditDialog CreateCreateDialog(
         FakeAppContainerEditService service,
         FakeNotifier notifier,
@@ -113,17 +71,6 @@ public class AppContainerEditDialogTests
         dialog.Initialize(existing: null);
         StaTestHelper.CreateControlTree(dialog);
         SetDisplayName(dialog, displayName);
-        return dialog;
-    }
-
-    private static AppContainerEditDialog CreateEditDialog(
-        FakeAppContainerEditService service,
-        FakeNotifier notifier,
-        AppContainerEntry existing)
-    {
-        var dialog = CreateDialog(service, notifier);
-        dialog.Initialize(existing);
-        StaTestHelper.CreateControlTree(dialog);
         return dialog;
     }
 

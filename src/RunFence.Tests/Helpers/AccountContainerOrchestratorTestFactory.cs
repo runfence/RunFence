@@ -19,8 +19,8 @@ public static class AccountContainerOrchestratorTestFactory
     public static AccountContainerOrchestrator Create()
     {
         var persistenceHelper = new SessionPersistenceHelper(
-            new Mock<ICredentialRepository>().Object,
-            new Mock<IConfigRepository>().Object,
+            new Mock<IConfigReencryptionPersistence>().Object,
+            new Mock<IMainConfigPersistence>().Object,
             new Mock<ISidNameCacheService>().Object,
             () => new InlineUiThreadInvoker(action => action()),
             new Mock<ILoggingService>().Object);
@@ -30,7 +30,7 @@ public static class AccountContainerOrchestratorTestFactory
             new Mock<ILoggingService>().Object,
             new Mock<IDatabaseService>().Object,
             new Mock<ISessionProvider>().Object);
-        var enforcementHelper = new AppEntryEnforcementHelper(
+        var enforcementCoordinator = AppEntryEnforcementTestFactory.CreateCoordinator(
             new Mock<RunFence.Acl.IAclService>().Object,
             new Mock<IShortcutService>().Object,
             new Mock<IBesideTargetShortcutService>().Object,
@@ -38,9 +38,10 @@ public static class AccountContainerOrchestratorTestFactory
             new Mock<ISidNameCacheService>().Object,
             new Mock<IInteractiveUserDesktopProvider>().Object,
             new Mock<IInteractiveUserSidResolver>().Object,
-            new Mock<ILoggingService>().Object);
+            launcherPathProvider: new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
+            log: new Mock<ILoggingService>().Object);
         var cleanupHelper = new ContainerDeletionCleanupHelper(
-            enforcementHelper,
+            enforcementCoordinator,
             new Mock<RunFence.Acl.IAclService>().Object,
             new Mock<IIconService>().Object,
             new Mock<IShortcutDiscoveryService>().Object,

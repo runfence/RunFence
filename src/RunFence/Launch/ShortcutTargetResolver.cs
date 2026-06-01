@@ -8,7 +8,7 @@ namespace RunFence.Launch;
 /// Resolves .lnk shortcut files to their target path, arguments, and shortcut context.
 /// Used by <see cref="LaunchTargetResolver"/> to handle shortcuts uniformly across all launch paths.
 /// </summary>
-public class ShortcutTargetResolver(IShortcutComHelper shortcutHelper)
+public class ShortcutTargetResolver(IShortcutGateway shortcutGateway)
 {
     public record struct ResolvedShortcut(string ResolvedPath, string? ShortcutArgs, string? ShortcutWorkingDirectory, ShortcutContext Context);
 
@@ -18,7 +18,7 @@ public class ShortcutTargetResolver(IShortcutComHelper shortcutHelper)
     /// </summary>
     public ResolvedShortcut? TryResolveShortcut(string lnkPath, IReadOnlyList<AppEntry> apps)
     {
-        var info = shortcutHelper.GetShortcutDefinition(lnkPath);
+        var info = shortcutGateway.Read(lnkPath);
         if (string.IsNullOrEmpty(info.TargetPath))
             return null;
 
@@ -43,7 +43,7 @@ public class ShortcutTargetResolver(IShortcutComHelper shortcutHelper)
             return new ResolvedShortcut(app.ExePath, null, null, new ShortcutContext(lnkPath, true, app));
         }
 
-        return new ResolvedShortcut(
+            return new ResolvedShortcut(
             info.TargetPath,
             string.IsNullOrEmpty(info.Arguments) ? null : info.Arguments,
             string.IsNullOrEmpty(info.WorkingDirectory) ? null : info.WorkingDirectory,

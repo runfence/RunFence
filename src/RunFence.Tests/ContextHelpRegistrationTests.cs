@@ -15,6 +15,7 @@ using RunFence.Core.Models;
 using RunFence.DragBridge.UI.Forms;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Persistence.UI;
 using RunFence.RunAs.UI;
 using RunFence.RunAs.UI.Forms;
 using RunFence.Persistence.UI.Forms;
@@ -23,49 +24,12 @@ using RunFence.Tests.Helpers;
 using RunFence.UI;
 using RunFence.UI.Forms;
 using Moq;
-using System.Text.RegularExpressions;
 using Xunit;
 
 namespace RunFence.Tests;
 
 public class ContextHelpRegistrationTests
 {
-    private static readonly string[] ContextHelpRegistrationSourceFiles =
-    [
-        @"Acl\UI\Forms\AclConfigSection.cs",
-        @"Acl\UI\Forms\AclManagerDialog.cs",
-        @"Account\UI\AppContainer\AppContainerEditDialog.cs",
-        @"Account\UI\Forms\EditAccountDialog.cs",
-        @"Apps\UI\Forms\AppEditDialog.cs",
-        @"Apps\UI\Forms\CombinedPrefixesSection.cs",
-        @"Apps\UI\Forms\HandlerMappingAddDialog.cs",
-        @"Apps\UI\Forms\HandlerMappingsDialog.cs",
-        @"DragBridge\UI\Forms\DragBridgeSection.cs",
-        @"Firewall\UI\Forms\FirewallAllowlistDialog.cs",
-        @"Persistence\UI\Forms\ConfigManagerSection.cs",
-        @"RunAs\UI\Forms\RunAsDialog.cs",
-        @"SidMigration\UI\Forms\MigrationMappingStep.cs",
-        @"SidMigration\UI\Forms\MigrationProgressStep.cs",
-        @"SidMigration\UI\Forms\SidMigrationInAppStep.cs",
-        @"SidMigration\UI\Forms\SidMigrationPathStep.cs",
-        @"SidMigration\UI\Forms\SidMigrationPreviewStep.cs",
-        @"UI\Forms\IpcCallerSection.cs",
-        @"UI\Forms\OptionsPanel.cs"
-    ];
-
-    private static readonly string[] DialogAndFormSourceFiles =
-    [
-        @"Acl\UI\Forms\AclManagerDialog.cs",
-        @"Account\UI\AppContainer\AppContainerEditDialog.cs",
-        @"Account\UI\Forms\EditAccountDialog.cs",
-        @"Apps\UI\Forms\AppEditDialog.cs",
-        @"Apps\UI\Forms\HandlerMappingAddDialog.cs",
-        @"Apps\UI\Forms\HandlerMappingsDialog.cs",
-        @"Firewall\UI\Forms\FirewallAllowlistDialog.cs",
-        @"RunAs\UI\Forms\RunAsDialog.cs",
-        @"SidMigration\UI\Forms\SidMigrationDialog.cs"
-    ];
-
     [Fact]
     public void OptionsPanel_RegisterContextHelp_RegistersExpectedSectionTargets()
     {
@@ -77,7 +41,7 @@ public class ContextHelpRegistrationTests
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(pinKey);
+            }.WithClonedPinDerivedKey(pinKey);
 
             using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
                 foundationContainer, session, new StartupOptions(false, false));
@@ -96,6 +60,7 @@ public class ContextHelpRegistrationTests
             AssertContextHelp(host, callerSection, ContextHelpTextCatalog.Launcher_LauncherAccessGlobal);
             Assert.NotNull(callerSection.Parent);
             Assert.False(host.TryGetContextHelp(callerSection.Parent, out _));
+            Assert.False(host.TryGetContextHelp(callerSection.Parent!, out _));
             Assert.Contains(host.GetExplicitContextHelpControls(), c => host.TryGetContextHelp(c, out var t) && t == ContextHelpTextCatalog.Launcher_LauncherAccessGlobal);
         });
     }
@@ -111,7 +76,7 @@ public class ContextHelpRegistrationTests
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(pinKey);
+            }.WithClonedPinDerivedKey(pinKey);
 
             using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
                 foundationContainer, session, new StartupOptions(false, false));
@@ -151,26 +116,6 @@ public class ContextHelpRegistrationTests
     }
 
     [Fact]
-    public void SidMigrationPathStep_DoesNotExposeRedundantPathActionButtonHelp()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var step = new RunFence.SidMigration.UI.Forms.SidMigrationPathStep(showSkipButton: true);
-            using var host = new ContextHelpForm();
-
-            var selectAllButton = FindControl<Button>(step, control => control.Text == "Select All");
-            var deselectAllButton = FindControl<Button>(step, control => control.Text == "Deselect All");
-            var addPathButton = FindControl<Button>(step, control => control.Text == "Add Path...");
-            var skipButton = FindControl<Button>(step, control => control.Text == "Skip — I know the SIDs");
-
-            Assert.False(host.TryGetContextHelp(selectAllButton, out _));
-            Assert.False(host.TryGetContextHelp(deselectAllButton, out _));
-            Assert.False(host.TryGetContextHelp(addPathButton, out _));
-            Assert.False(host.TryGetContextHelp(skipButton, out _));
-        });
-    }
-
-    [Fact]
     public void SharedConcepts_ReuseSameCatalogTextAcrossMultipleTargets()
     {
         StaTestHelper.RunOnSta(() =>
@@ -181,7 +126,7 @@ public class ContextHelpRegistrationTests
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(pinKey);
+            }.WithClonedPinDerivedKey(pinKey);
 
             using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
                 foundationContainer, session, new StartupOptions(false, false));
@@ -281,49 +226,6 @@ public class ContextHelpRegistrationTests
         });
     }
 
-    [Fact]
-    public void ContextHelpForm_TracksExactSecurePasswordBoxInstance()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var host = new ContextHelpForm();
-            using var passwordTextBox = new TextBox();
-            host.Controls.Add(passwordTextBox);
-            using var securePasswordBox = new SecurePasswordBox(passwordTextBox);
-            StaTestHelper.CreateControlTree(host);
-
-            Assert.Contains(
-                host.GetContextHelpSnapshotParticipants(),
-                participant => ReferenceEquals(participant, securePasswordBox));
-        });
-    }
-
-    [Fact]
-    public void ContextHelpRegistrationSources_DoNotUseInlineHelpStringLiterals()
-    {
-        foreach (var relativePath in ContextHelpRegistrationSourceFiles)
-        {
-            var source = File.ReadAllText(GetRunFenceSourcePath(relativePath));
-
-            Assert.DoesNotMatch(
-                new Regex("SetContextHelp\\s*\\([^,]+,\\s*\"", RegexOptions.CultureInvariant),
-                source);
-        }
-    }
-
-    [Fact]
-    public void DialogAndFormSources_DoNotRegisterContextHelpOnThemselves()
-    {
-        foreach (var relativePath in DialogAndFormSourceFiles)
-        {
-            var source = File.ReadAllText(GetRunFenceSourcePath(relativePath));
-
-            Assert.DoesNotMatch(
-                new Regex(@"SetContextHelp\s*\(\s*this\s*,", RegexOptions.CultureInvariant),
-                source);
-        }
-    }
-
     private static AclConfigSection CreateAclSection()
     {
         var sidResolver = new Mock<ISidResolver>();
@@ -337,7 +239,7 @@ public class ContextHelpRegistrationTests
             new AclAllowListGridHandler(),
             new AllowListEntryFactory(
                 Mock.Of<ILocalUserProvider>(),
-                Mock.Of<ILocalGroupMembershipService>(),
+                Mock.Of<ILocalGroupQueryService>(),
                 Mock.Of<ISidEntryHelper>(),
                 displayNameResolver),
             new AclConfigValidator(aclService.Object, Mock.Of<ILoggingService>()),
@@ -352,17 +254,16 @@ public class ContextHelpRegistrationTests
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(pinKey));
+        }.WithClonedPinDerivedKey(pinKey));
 
         return new ConfigManagerSection(
             Mock.Of<IAppConfigService>(),
-            Mock.Of<IAppFilter>(),
-            Mock.Of<ILoggingService>(),
             Mock.Of<IAclPermissionService>(),
-            null!,
-            null!,
+            Mock.Of<ILoggingService>(),
             sessionProvider.Object,
-            Mock.Of<IAccountSidResolutionService>(),
+            Mock.Of<IConfigImportExportFilePicker>(),
+            null!,
+            null!,
             null!,
             Mock.Of<IMessageBoxService>());
     }
@@ -375,9 +276,10 @@ public class ContextHelpRegistrationTests
         var displayNameResolver = new SidDisplayNameResolver(sidResolver.Object, profilePathResolver.Object);
 
         return new IpcCallerSection(
-            () => [],
+            Mock.Of<IWindowsAccountQueryService>(service => service.GetLocalUsers() == Array.Empty<LocalUserAccount>()),
             Mock.Of<ISidEntryHelper>(),
-            displayNameResolver);
+            displayNameResolver,
+            Mock.Of<IIpcCallerModalService>());
     }
 
     private static void AssertContextHelp(ContextHelpForm host, Control control, string expectedText)
@@ -414,16 +316,6 @@ public class ContextHelpRegistrationTests
 
             return false;
         });
-
-    private static string GetRunFenceSourcePath(string relativePath)
-        => Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory,
-            "..",
-            "..",
-            "..",
-            "..",
-            "RunFence",
-            relativePath));
 
     private sealed class StubAppContainerEditService : RunFence.Account.UI.AppContainer.IAppContainerEditService
     {

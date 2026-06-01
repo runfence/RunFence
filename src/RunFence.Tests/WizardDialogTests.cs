@@ -95,6 +95,31 @@ public class WizardDialogTests
         });
     }
 
+    [Fact]
+    public void Dispose_DisposesStepsNotHostedInContentPanel()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var dialog = new WizardDialog(
+                [new TestTemplate("Available", isAvailable: true, new ManualResetEventSlim(true))],
+                new WizardExecutionHandler(),
+                new WizardNavigationHandler());
+            var context = (IWizardExecutionContext)dialog;
+            var hostedStep = new TrackingStep("Hosted");
+            var detachedStep = new TrackingStep("Detached");
+            context.Steps.Add(hostedStep);
+            context.Steps.Add(detachedStep);
+
+            StaTestHelper.CreateControlTree(dialog);
+            context.ShowStep(1);
+
+            dialog.Dispose();
+
+            Assert.True(hostedStep.WasDisposed);
+            Assert.True(detachedStep.WasDisposed);
+        });
+    }
+
     private static T FindDescendant<T>(Control root) where T : Control
     {
         foreach (Control child in root.Controls)
@@ -156,15 +181,13 @@ public class WizardDialogTests
         public bool IsAvailable => isAvailable;
         public string Description => displayName;
         public string IconEmoji => "\u2605";
-        public Action<IWin32Window>? PostWizardAction => null;
+        public Func<IWin32Window, Task>? PostWizardAction => null;
 
         public IReadOnlyList<WizardStepPage> CreateSteps() => [];
 
         public Task ExecuteAsync(IWizardProgressReporter progress) => Task.CompletedTask;
 
-        public void Cleanup()
-        {
-        }
+        public void Cleanup() { }
 
         public Task WarmCacheAsync() => Task.Run(() => warmupGate.Wait());
     }
@@ -178,7 +201,7 @@ public class WizardDialogTests
         public string DisplayName => "Cancelable";
         public string Description => "Cancelable execution";
         public string IconEmoji => "\u2605";
-        public Action<IWin32Window>? PostWizardAction => null;
+        public Func<IWin32Window, Task>? PostWizardAction => null;
 
         public IReadOnlyList<WizardStepPage> CreateSteps() => [];
 
@@ -197,9 +220,7 @@ public class WizardDialogTests
             }
         }
 
-        public void Cleanup()
-        {
-        }
+        public void Cleanup() { }
     }
 
     private sealed class PassiveStep : WizardStepPage
@@ -208,6 +229,24 @@ public class WizardDialogTests
         public override string? Validate() => null;
         public override void Collect()
         {
+        }
+    }
+
+    private sealed class TrackingStep(string title) : WizardStepPage
+    {
+        public bool WasDisposed { get; private set; }
+
+        public override string StepTitle => title;
+        public override string? Validate() => null;
+
+        public override void Collect()
+        {
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            WasDisposed = true;
+            base.Dispose(disposing);
         }
     }
 }

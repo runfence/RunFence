@@ -77,6 +77,10 @@ public class IpcLaunchHandler(
                     });
                     idleMonitor.ResetIdleTimer();
                 }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
                 catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
                 {
                     launchFeedbackPresenter.ShowLaunchFailure(

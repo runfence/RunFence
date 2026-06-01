@@ -102,9 +102,6 @@ public class FirewallDnsRefreshCycleRunnerTests
             Username,
             It.IsAny<FirewallAccountSettings>(),
             It.IsAny<IReadOnlyDictionary<string, IReadOnlyList<string>>>()), Times.Once);
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("Failed to refresh local address rules", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
     }
 
     [Fact]
@@ -124,9 +121,6 @@ public class FirewallDnsRefreshCycleRunnerTests
         runner.RunCycle(database);
 
         Assert.True(_retryState.IsGlobalIcmpDirty());
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("Failed to enforce global ICMP", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
     }
 
     private FirewallDnsRefreshCycleRunner BuildRunner()

@@ -7,13 +7,18 @@ public class AppEntryLauncher(
     ILaunchFacade launchFacade,
     IAppEntryLaunchPlanBuilder planBuilder,
     ISessionProvider sessionProvider)
-    : IAppEntryLauncher
+    : IAppEntryLaunchExecutor
 {
     public LaunchExecutionResult Launch(AppEntry app, string? launcherArguments, string? launcherWorkingDirectory = null,
         Func<string, string, bool>? permissionPrompt = null, string? associationArgsTemplate = null)
     {
         var session = sessionProvider.GetSession();
-        var plan = planBuilder.Build(app, session, launcherArguments, launcherWorkingDirectory, associationArgsTemplate);
+        var plan = planBuilder.Build(
+            app,
+            session,
+            launcherArguments,
+            launcherWorkingDirectory,
+            associationArgsTemplate);
 
         switch (plan.Kind)
         {

@@ -29,6 +29,28 @@ public class WizardExecutionHandlerTests
     }
 
     [Fact]
+    public async Task ExecuteTemplateAsync_WithAsyncPostWizardAction_QueuesAwaitablePostAction()
+    {
+        var postActionInvoked = false;
+        var template = new TestTemplate(
+            _ => Task.CompletedTask,
+            async _ =>
+            {
+                await Task.Yield();
+                postActionInvoked = true;
+            });
+        var context = new TestWizardExecutionContext { SelectedTemplate = template };
+        var handler = new WizardExecutionHandler();
+        handler.Initialize(context);
+
+        await handler.ExecuteTemplateAsync();
+
+        var postAction = Assert.Single(context.PostWizardActions);
+        await postAction(null!);
+        Assert.True(postActionInvoked);
+    }
+
+    [Fact]
     public async Task CommitStepAsync_ReportedException_ReturnsFalseWithoutWrappingError()
     {
         var context = new TestWizardExecutionContext();
@@ -144,18 +166,18 @@ public class WizardExecutionHandlerTests
         Assert.Contains(labels, text => text.Contains("was cancelled", StringComparison.Ordinal));
     }
 
-    private sealed class TestTemplate(Func<IWizardProgressReporter, Task> execute) : IWizardTemplate
+    private sealed class TestTemplate(
+        Func<IWizardProgressReporter, Task> execute,
+        Func<IWin32Window, Task>? postWizardAction = null) : IWizardTemplate
     {
         public string DisplayName => "Test Template";
         public string Description => string.Empty;
         public string IconEmoji => string.Empty;
-        public Action<IWin32Window>? PostWizardAction => null;
+        public Func<IWin32Window, Task>? PostWizardAction => postWizardAction;
 
         public IReadOnlyList<WizardStepPage> CreateSteps() => [];
         public Task ExecuteAsync(IWizardProgressReporter progress) => execute(progress);
-        public void Cleanup()
-        {
-        }
+        public void Cleanup() { }
     }
 
     private sealed class TestWizardExecutionContext : IWizardExecutionContext
@@ -165,7 +187,7 @@ public class WizardExecutionHandlerTests
         public IWizardTemplate? SelectedTemplate { get; set; }
         public IReadOnlyList<IWizardTemplate> Templates { get; } = [];
         public bool IsExecuting { get; set; }
-        public List<Action<IWin32Window>> PostWizardActions { get; } = [];
+        public List<Func<IWin32Window, Task>> PostWizardActions { get; } = [];
         public int TemplateCompletedCount { get; set; }
         public string? LastStatusText { get; private set; }
         public string? LastShownError { get; private set; }
@@ -186,64 +208,42 @@ public class WizardExecutionHandlerTests
             LastShownError = null;
         }
 
-        public void SetProgressVisible(bool visible)
-        {
-        }
+        public void SetProgressVisible(bool visible) { }
 
-        public void SetNavigationEnabled(bool enabled)
-        {
-        }
+        public void SetNavigationEnabled(bool enabled) { }
 
-        public void SetNextEnabled(bool enabled)
-        {
-        }
+        public void SetNextEnabled(bool enabled) { }
 
         public void SetCancelEnabled(bool enabled)
         {
             CancelEnabled = enabled;
         }
 
-        public void SetCancelText(string text)
-        {
-        }
+        public void SetCancelText(string text) { }
 
         public void SetStatusText(string text)
         {
             LastStatusText = text;
         }
 
-        public void SetCompletionButtonsState(bool showNavigation, string cancelText)
-        {
-        }
+        public void SetCompletionButtonsState(bool showNavigation, string cancelText) { }
 
-        public void SetBackEnabled(bool enabled)
-        {
-        }
+        public void SetBackEnabled(bool enabled) { }
 
-        public void SetTitleText(string text)
-        {
-        }
+        public void SetTitleText(string text) { }
 
-        public void SetNextText(string text)
-        {
-        }
+        public void SetNextText(string text) { }
 
-        public void InvalidateStepIndicator()
-        {
-        }
+        public void InvalidateStepIndicator() { }
 
         public void BeginInvokeOnUI(Action action)
         {
             action();
         }
 
-        public void UnsubscribeAndDispose(IEnumerable<WizardStepPage> steps)
-        {
-        }
+        public void UnsubscribeAndDispose(IEnumerable<WizardStepPage> steps) { }
 
-        public void SubscribeStep(WizardStepPage step)
-        {
-        }
+        public void SubscribeStep(WizardStepPage step) { }
     }
 
     private sealed class TestStep(Func<IWizardProgressReporter, Task> commitAction) : WizardStepPage

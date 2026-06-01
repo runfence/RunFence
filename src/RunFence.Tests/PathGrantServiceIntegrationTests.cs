@@ -35,7 +35,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
     private readonly AppDatabase _database = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
     private readonly Mock<ILoggingService> _log = new();
-    private readonly IPathGrantService _service;
+    private readonly GrantServiceTestBundle _service;
     private readonly TestGrantIntentStore _mainGrantStore = new();
     private readonly AclIntegrationCleanupScope _cleanup = new();
 
@@ -53,11 +53,11 @@ public class PathGrantServiceIntegrationTests : IDisposable
         _aclPermission.Setup(a => a.ResolveAccountGroupSids(TestSid)).Returns([]);
 
         var acl = AclAccessorFactory.Create();
-        var pathInfo = new FileSystemPathInfo();
-        var grantAceService = new GrantAceService(acl, pathInfo);
-        var fileOwnerService = new FileOwnerService(_log.Object, pathInfo);
+        var pathInfo = new FileSystemPathInfo(acl);
+        var grantAceService = new GrantAceService(acl, acl, pathInfo);
+        var fileOwnerService = new FileOwnerService(_log.Object, pathInfo, acl);
         var mandatoryLabelService = new MandatoryLabelService(_log.Object, pathInfo);
-        var traverseAcl = new TraverseAcl();
+        var traverseAcl = new TraverseAcl(acl);
         var ancestorGranter = new AncestorTraverseGranter(_log.Object, _aclPermission.Object, traverseAcl, pathInfo);
         var iuResolver = new Mock<IInteractiveUserResolver>();
         iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
@@ -74,6 +74,12 @@ public class PathGrantServiceIntegrationTests : IDisposable
         var traverseGrantStateService = new TraverseGrantStateService(dbAccessor, pathInfo, traverseIntentStoreCoordinator);
         var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
             mandatoryLabelService, dbAccessor);
+        var denyModeService = new Mock<IAclDenyModeService>();
+        denyModeService.Setup(service => service.GetDeniedRightsPerSid(
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<AppEntry>>(),
+                It.IsAny<bool>()))
+            .Returns(new Dictionary<string, DeniedRights>(StringComparer.OrdinalIgnoreCase));
         var syncService = new PathGrantSyncService(
             dbAccessor,
             grantAceService,
@@ -81,27 +87,123 @@ public class PathGrantServiceIntegrationTests : IDisposable
             () => repository,
             _log.Object,
             pathInfo,
-            traverseGrantOwnerResolver);
+            traverseGrantOwnerResolver,
+            new LambdaDatabaseProvider(() => _database),
+            new AppEntryManagedAclScanFilter(
+                new AppEntryAllowAclRuleProvider(new AppEntryAclTargetResolver()),
+                denyModeService.Object));
         var fsOps = new GrantFileSystemOperations(grantCore, grantAceService,
             fileOwnerService, mandatoryLabelService, dbAccessor);
-        var accessEnsurer = new GrantAccessEnsurer(_aclPermission.Object, dbAccessor,
-            acl, pathInfo, traverseCore, fsOps, iuResolver.Object, traverseGrantOwnerResolver, () => repository, () => _mainGrantStore, new GrantIntentStoreSaveService());
         var grantIntentStoreSaveService = new GrantIntentStoreSaveService();
-        var traverseRestoreWorkflow = new TraverseRestoreWorkflow(
+        var grantIntentStoreMutationService = new GrantIntentStoreMutationService(
+            traverseGrantStateService,
+            () => storeProvider,
+            () => repository,
+            () => _mainGrantStore);
+        var grantRuntimeMutationService = new GrantRuntimeMutationService(
             traverseCore,
             dbAccessor,
             containerIuSync,
+            lowIlSync,
+            mandatoryLabelService,
+            fsOps,
+            grantAceService,
             pathInfo,
-            traverseAcl,
+            traverseGrantStateService);
+        var grantMutationOrderResolver = new GrantMutationOrderResolver();
+        var grantRuntimeSnapshotService = new GrantRuntimeSnapshotService(dbAccessor, traverseGrantOwnerResolver);
+        var grantIntentMutationStateRestorer = new GrantIntentMutationStateRestorer(grantIntentStoreSaveService);
+        var accessEnsurer = new GrantAccessEnsurer(
+            _aclPermission.Object,
+            dbAccessor,
+            acl,
+            pathInfo,
+            traverseCore,
+            fsOps,
+            iuResolver.Object,
             traverseGrantOwnerResolver,
+            () => repository,
+            () => _mainGrantStore,
+            grantIntentStoreSaveService,
+            grantIntentMutationStateRestorer,
+            grantRuntimeSnapshotService);
+        var grantAclRollbackService = new GrantAclRollbackService(
+            traverseCore,
+            fsOps,
+            acl,
+            grantRuntimeMutationService,
+            grantRuntimeSnapshotService,
+            traverseGrantStateService);
+        var additiveGrantCompensationService = new AdditiveGrantCompensationService(
+            acl,
+            pathInfo,
+            () => storeProvider,
+            grantIntentStoreMutationService,
+            grantRuntimeSnapshotService,
+            grantIntentStoreSaveService,
+            grantAclRollbackService);
+        var persistedGrantMutationWorkflow = new PersistedGrantMutationWorkflow(
+            traverseCore,
+            mandatoryLabelService,
+            fsOps,
+            grantAceService,
+            pathInfo,
             traverseIntentStoreCoordinator,
             traverseGrantStateService,
             () => storeProvider,
+            grantMutationOrderResolver,
+            grantIntentMutationStateRestorer,
+            grantAclRollbackService,
+            additiveGrantCompensationService,
+            grantIntentStoreMutationService,
+            grantRuntimeMutationService,
+            grantRuntimeSnapshotService,
             grantIntentStoreSaveService);
-        _service = new PathGrantService(grantCore, traverseCore, dbAccessor,
-            containerIuSync, lowIlSync, syncService, mandatoryLabelService, fsOps, accessEnsurer, grantAceService, pathInfo,
-            acl, traverseGrantOwnerResolver, traverseIntentStoreCoordinator, traverseGrantStateService, () => storeProvider, () => repository, () => _mainGrantStore,
-            grantIntentStoreSaveService, traverseRestoreWorkflow);
+        var traverseRestoreWorkflow = new TraverseRestoreWorkflow(
+            traverseCore,
+            containerIuSync,
+            traverseIntentStoreCoordinator,
+            traverseGrantStateService,
+            grantMutationOrderResolver,
+            new TraverseRestoreStateRestorer(
+                grantRuntimeSnapshotService,
+                traverseGrantStateService,
+                grantIntentStoreSaveService),
+            new TraverseRestoreAclRollbackService(
+                pathInfo,
+                traverseAcl,
+                traverseCore,
+                traverseIntentStoreCoordinator),
+            () => storeProvider,
+            grantIntentStoreSaveService);
+        var traverseIntentStoreMutationService = new TraverseIntentStoreMutationService(
+            traverseCore,
+            containerIuSync,
+            traverseIntentStoreCoordinator,
+            traverseGrantStateService,
+            grantIntentStoreSaveService);
+        var persistedTraverseMutationWorkflow = new PersistedTraverseMutationWorkflow(
+            traverseCore, containerIuSync, traverseIntentStoreCoordinator, traverseGrantStateService,
+            grantRuntimeSnapshotService, () => _mainGrantStore,
+            traverseIntentStoreMutationService, grantIntentStoreSaveService);
+        var grantMutatorService = new GrantMutatorService(accessEnsurer, fsOps, persistedGrantMutationWorkflow);
+        var traverseService = new TraverseService(traverseCore, traverseRestoreWorkflow, persistedTraverseMutationWorkflow);
+        var grantIntentSnapshotService = new GrantIntentSnapshotService(
+            grantRuntimeSnapshotService,
+            traverseIntentStoreCoordinator,
+            () => repository);
+        var grantAccountCleanupService = new GrantAccountCleanupService(
+            persistedGrantMutationWorkflow,
+            persistedTraverseMutationWorkflow,
+            grantIntentStoreSaveService);
+        _service = new GrantServiceTestBundle(
+            grantMutatorService,
+            traverseService,
+            grantAceService,
+            grantIntentSnapshotService,
+            syncService,
+            grantAccountCleanupService,
+            fsOps);
     }
 
     public void Dispose()
@@ -569,7 +671,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
             AccessControlType.Allow));
         new DirectoryInfo(subDir).SetAccessControl(security);
 
-        var traverseAcl = new TraverseAcl();
+        var traverseAcl = new TraverseAcl(AclAccessorFactory.Create());
 
         // Act
         traverseAcl.AddAllowAce(subDir, sid);
@@ -756,7 +858,7 @@ public class PathGrantServiceIntegrationTests : IDisposable
             IsTraverseOnly = true,
             AllAppliedPaths = [subDir]
         });
-        new TraverseAcl().RemoveTraverseOnlyAce(subDir, new SecurityIdentifier(TestSid));
+        new TraverseAcl(AclAccessorFactory.Create()).RemoveTraverseOnlyAce(subDir, new SecurityIdentifier(TestSid));
         Assert.False(HasTraverseAce(subDir));
         effectiveCheckCount = 0;
 
@@ -922,6 +1024,12 @@ public class PathGrantServiceIntegrationTests : IDisposable
         // the non-conflicting deny rights).
         var file = Path.Combine(_tempDir.Path, "partial_deny_conflict.txt");
         File.WriteAllText(file, "test");
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                TestSid,
+                It.IsAny<IReadOnlyList<string>>(),
+                TraverseRightsHelper.TraverseRights))
+            .Returns(true);
 
         // Add a deny entry with both Read and Execute denied
         _service.AddGrant(TestSid, file, isDeny: true,

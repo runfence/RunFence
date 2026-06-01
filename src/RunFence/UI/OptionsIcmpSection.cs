@@ -29,14 +29,11 @@ public class OptionsIcmpSection(
     }
 
     /// <summary>
-    /// Handles the ICMP checkbox change: updates the setting and applies it on a background thread.
-    /// On success, saves settings on the UI thread. On failure, reverts the checkbox and shows an error.
-    /// Matches the <see cref="EventHandler"/> signature for wiring to <c>CheckedChanged</c>.
+    /// Applies the requested ICMP-block setting value without depending on WinForms event state.
     /// </summary>
-    public void OnBlockIcmpChanged(object? sender, EventArgs e)
+    public void SetBlockIcmp(bool value)
     {
-        var newValue = _blockIcmpCheckBox.Checked;
-        appStateProvider.Database.Settings.BlockIcmpWhenInternetBlocked = newValue;
+        appStateProvider.Database.Settings.BlockIcmpWhenInternetBlocked = value;
         var snapshot = appStateProvider.Database.CreateSnapshot();
         Task.Run(() =>
         {

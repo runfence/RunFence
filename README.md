@@ -359,7 +359,7 @@ AppContainer is a stronger sandbox but most apps will not run correctly in there
 
 **What about Microsoft Store (UWP/MSIX) apps?**
 
-Store and UWP apps are tied to the interactive user session and generally cannot be launched under a different Windows account. RunFence's AppContainer sandboxing is a separate mechanism for ordinary Win32 apps and is unrelated to the Store packaging model.
+It depends. MSIX full-trust apps (e.g. Codex Desktop) will work even if installed from MS Store. But real UWP apps (e.g. CalculatorApp, Store itself, Settings and Xbox app) are tied to the interactive user session and cannot be launched under a different Windows account. RunFence's AppContainer sandboxing is a separate mechanism for ordinary Win32 apps and is unrelated to the Store packaging model.
 
 **My AppContainer app can't access a folder even though the account has permission. Why?**
 

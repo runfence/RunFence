@@ -1,8 +1,9 @@
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.SecurityScanner;
 
-public class DiskRootScanner(IFileSystemDataAccess dataAccess, AclCheckHelper aclCheck)
+public class DiskRootScanner(IDriveRootNativeReader driveRoots, IFileSystemDataAccess fileSystem, AclCheckHelper aclCheck, ILoggingService log)
 {
     public void ScanDiskRoots(ScanContext ctx)
     {
@@ -12,11 +13,11 @@ public class DiskRootScanner(IFileSystemDataAccess dataAccess, AclCheckHelper ac
             ? new HashSet<string>(ctx.AdminSids, StringComparer.OrdinalIgnoreCase) { ctx.InteractiveUserSid }
             : ctx.AdminSids;
 
-        foreach (var root in dataAccess.GetDriveRoots())
+        foreach (var root in driveRoots.GetDriveRoots())
         {
             try
             {
-                var security = dataAccess.GetDirectorySecurity(root);
+                var security = fileSystem.GetDirectorySecurity(root);
                 aclCheck.CheckContainerAcl(security, root, excludedSids,
                     StartupSecurityCategory.DiskRootAcl,
                     SecurityScanner.DiskRootCheckRightsMask,
@@ -25,7 +26,7 @@ public class DiskRootScanner(IFileSystemDataAccess dataAccess, AclCheckHelper ac
             }
             catch (Exception ex)
             {
-                dataAccess.LogError($"Failed to check disk root ACL '{root}': {ex.Message}");
+                log.Error($"Failed to check disk root ACL '{root}'.", ex);
             }
         }
     }

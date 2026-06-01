@@ -10,7 +10,11 @@ namespace RunFence.Acl;
 /// Handles allow-mode ACL operations: applying, reverting, and cleaning up allow-mode ACEs.
 /// Extracted from AclService to keep it focused on dispatch.
 /// </summary>
-public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUserProvider, IAclAccessor aclAccessor)
+public class AclAllowModeService(
+    ILoggingService log,
+    ILocalUserProvider localUserProvider,
+    IPathSecurityDescriptorAccessor aclAccessor,
+    AppEntryAllowAclRuleProvider allowAclRuleProvider)
     : IAclAllowModeService
 {
     public bool ApplyAllowAcl(AppEntry app, string targetPath)
@@ -23,82 +27,17 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
         var entries = app.AllowedAclEntries;
         if (entries == null || entries.Count == 0)
             return false;
-
-        var systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-        var adminsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-
-        var desiredRules = new List<FileSystemAccessRule>();
-
-        var inhFlags = AclHelper.InheritanceFlagsFor(isDirectory);
-        const PropagationFlags propFlags = PropagationFlags.None;
-
-        desiredRules.Add(new FileSystemAccessRule(
-            systemSid, FileSystemRights.FullControl,
-            inhFlags, propFlags, AccessControlType.Allow));
-
-        desiredRules.Add(new FileSystemAccessRule(
-            adminsSid,
-            FileSystemRights.ChangePermissions | FileSystemRights.ReadPermissions |
-            FileSystemRights.ReadAttributes | FileSystemRights.ReadExtendedAttributes,
-            inhFlags, propFlags, AccessControlType.Allow));
-        var currentMockSid = AdminOperationMockAccessHelper.GetCurrentProcessSidWhenUsingMocks();
-        if (currentMockSid != null)
-        {
-            desiredRules.Add(new FileSystemAccessRule(
-                currentMockSid,
-                FileSystemRights.ChangePermissions | FileSystemRights.ReadPermissions |
-                FileSystemRights.ReadAttributes | FileSystemRights.ReadExtendedAttributes,
-                inhFlags, propFlags, AccessControlType.Allow));
-        }
-
-        foreach (var entry in entries)
-        {
-            try
-            {
-                var sid = new SecurityIdentifier(entry.Sid);
-                var rights = FileSystemRights.Read | FileSystemRights.Synchronize;
-                if (entry.AllowWrite)
-                {
-                    rights |= FileSystemRights.WriteData | FileSystemRights.AppendData |
-                              FileSystemRights.WriteExtendedAttributes | FileSystemRights.WriteAttributes |
-                              FileSystemRights.Delete | FileSystemRights.DeleteSubdirectoriesAndFiles;
-                }
-
-                if (entry.AllowExecute)
-                {
-                    rights |= FileSystemRights.ExecuteFile;
-                }
-
-                desiredRules.Add(new FileSystemAccessRule(
-                    sid, rights, inhFlags, propFlags, AccessControlType.Allow));
-            }
-            catch (Exception ex)
-            {
-                log.Error($"Failed to create allow rule for SID {entry.Sid}", ex);
-            }
-        }
-
-        var managedSids = new HashSet<SecurityIdentifier> { systemSid, adminsSid };
-        if (currentMockSid != null)
-            managedSids.Add(currentMockSid);
-        foreach (var entry in entries)
-        {
-            try
-            {
-                managedSids.Add(new SecurityIdentifier(entry.Sid));
-            }
-            catch (ArgumentException)
-            {
-            }
-        }
+        var ruleSet = allowAclRuleProvider.BuildAllowModeRuleSet(app, isDirectory);
+        foreach (var invalidEntry in ruleSet.InvalidEntries)
+            log.Error($"Failed to create allow rule for SID {invalidEntry.Sid}", invalidEntry.Exception);
 
         Func<FileSystemAccessRule, bool> isManagedAce = rule =>
             rule is { AccessControlType: AccessControlType.Allow, IdentityReference: SecurityIdentifier sid } &&
-            managedSids.Contains(sid);
+            ruleSet.ManagedSids.Contains(sid);
 
         var localUserSids = AclHelper.BuildLocalUserSidSet(localUserProvider.GetLocalUserAccounts());
         bool changed = false;
-        aclAccessor.ModifyAclWithFallback(targetPath, isDirectory, security =>
+        aclAccessor.ModifyAclWithFallback(targetPath, security =>
         {
             var denyCleaned = AclHelper.RemoveManagedDenyAces(security, localUserSids);
             var inheritanceBroken = security.AreAccessRulesProtected;
@@ -106,7 +45,7 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
             if (!inheritanceBroken)
                 security.SetAccessRuleProtection(true, false);
 
-            changed = AclHelper.ApplyAclDiff(security, desiredRules, isManagedAce) || !inheritanceBroken || denyCleaned;
+            changed = AclHelper.ApplyAclDiff(security, ruleSet.Rules, isManagedAce) || !inheritanceBroken || denyCleaned;
             return changed;
         });
 
@@ -120,9 +59,9 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
         if (!isDirectory && !isFile)
             return;
 
-        aclAccessor.ModifyAclWithFallback(targetPath, isDirectory, security =>
+        aclAccessor.ModifyAclWithFallback(targetPath, security =>
         {
-            RemoveAllowManagedAces(security, app);
+            RemoveAllowManagedAces(security, allowAclRuleProvider.BuildAllowModeRuleSet(app, isDirectory).ManagedSids);
             security.SetAccessRuleProtection(false, false);
             return true;
         });
@@ -136,7 +75,7 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
 
         try
         {
-            var changed = aclAccessor.ModifyAclWithFallback(targetPath, isFolder, security =>
+            var changed = aclAccessor.ModifyAclWithFallback(targetPath, security =>
             {
                 if (!security.AreAccessRulesProtected)
                     return false;
@@ -154,30 +93,10 @@ public class AclAllowModeService(ILoggingService log, ILocalUserProvider localUs
         }
     }
 
-    private static void RemoveAllowManagedAces(FileSystemSecurity security, AppEntry app)
+    private static void RemoveAllowManagedAces(
+        FileSystemSecurity security,
+        IReadOnlySet<SecurityIdentifier> managedSids)
     {
-        var managedSids = new HashSet<SecurityIdentifier>
-        {
-            new(WellKnownSidType.LocalSystemSid, null),
-            new(WellKnownSidType.BuiltinAdministratorsSid, null)
-        };
-        var currentMockSid = AdminOperationMockAccessHelper.GetCurrentProcessSidWhenUsingMocks();
-        if (currentMockSid != null)
-            managedSids.Add(currentMockSid);
-        if (app.AllowedAclEntries != null)
-        {
-            foreach (var entry in app.AllowedAclEntries)
-            {
-                try
-                {
-                    managedSids.Add(new SecurityIdentifier(entry.Sid));
-                }
-                catch (ArgumentException)
-                {
-                }
-            }
-        }
-
         var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
         foreach (FileSystemAccessRule rule in rules)
         {

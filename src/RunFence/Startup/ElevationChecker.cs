@@ -1,6 +1,7 @@
 using System.Security.Principal;
 using RunFence.Core;
 using RunFence.Startup.UI;
+#pragma warning disable CS0162 // Unreachable code detected
 
 namespace RunFence.Startup;
 

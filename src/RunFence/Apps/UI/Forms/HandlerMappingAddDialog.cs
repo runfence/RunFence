@@ -156,7 +156,10 @@ public partial class HandlerMappingAddDialog : RunFence.UI.Forms.ContextHelpForm
 
         _appPresenter.PopulateAppsForEdit(apps, currentApp);
         _templateTextBox.Text = currentTemplate ?? string.Empty;
-        _appPresenter.LoadPrefixes(currentAppPrefixes, currentAssocPrefixes, currentReplacePrefixes);
+        _appPresenter.LoadPrefixes(new CombinedPrefixesState(
+            currentAppPrefixes,
+            currentAssocPrefixes,
+            currentReplacePrefixes));
 
         _layoutController.ApplyEditLayout(directMode: false);
     }
@@ -259,15 +262,16 @@ public partial class HandlerMappingAddDialog : RunFence.UI.Forms.ContextHelpForm
 
     private string? TryCaptureAcceptedValues()
     {
+        var prefixesState = _appPresenter.CapturePrefixesState();
         var capture = _dialogHelper.CaptureAcceptedValues(_submissionState.CreateCaptureRequest(
             rawKey: _keyCombo.Text,
             isDirectModeSelected: _radioDirect.Checked,
             selectedApp: _appPresenter.SelectedApp,
             directHandlerValue: _submissionState.IsEditMode ? _handlerTextBox.Text : _directPresenter.HandlerValue,
             argumentsTemplate: _appPresenter.NormalizedTemplate,
-            appPrefixes: _appPresenter.AppPrefixes,
-            associationPrefixes: _appPresenter.AssociationPrefixes,
-            replacePrefixes: _appPresenter.IsReplace));
+            appPrefixes: prefixesState.AppPrefixes,
+            associationPrefixes: prefixesState.AssociationPrefixes,
+            replacePrefixes: prefixesState.ReplacePrefixes));
         _submissionState.ApplyCapture(capture);
         return capture.ValidationError;
     }
@@ -281,12 +285,12 @@ public partial class HandlerMappingAddDialog : RunFence.UI.Forms.ContextHelpForm
         _keyCombo.Focus();
     }
 
-    private async void OnOkClick(object? sender, EventArgs e)
+    private void OnOkClick(object? sender, EventArgs e)
     {
-        await HandleOkAsync();
+        HandleOk();
     }
 
-    private async Task HandleOkAsync()
+    private void HandleOk()
     {
         if (IsDisposed || Disposing)
             return;
@@ -303,7 +307,7 @@ public partial class HandlerMappingAddDialog : RunFence.UI.Forms.ContextHelpForm
         try
         {
             Enabled = false;
-            var result = await SubmitAsync();
+            var result = Submit();
             if (IsDisposed || Disposing)
                 return;
 
@@ -316,15 +320,15 @@ public partial class HandlerMappingAddDialog : RunFence.UI.Forms.ContextHelpForm
         }
     }
 
-    private Task<HandlerMappingDialogSubmitResult> SubmitAsync()
+    private HandlerMappingDialogSubmitResult Submit()
     {
         var persistence = _submissionState.Persistence;
         if (!_submissionState.IsEditMode)
-            return _submissionCoordinator.SubmitAddAsync(_submissionState.CreateAddRequest(), persistence);
+            return _submissionCoordinator.SubmitAdd(_submissionState.CreateAddRequest(), persistence);
 
         return _submissionState.IsDirectEditMode
-            ? _submissionCoordinator.SubmitEditDirectAsync(_submissionState.CreateEditDirectRequest(), persistence)
-            : _submissionCoordinator.SubmitEditAppAsync(_submissionState.CreateEditAppRequest(), persistence);
+            ? _submissionCoordinator.SubmitEditDirect(_submissionState.CreateEditDirectRequest(), persistence)
+            : _submissionCoordinator.SubmitEditApp(_submissionState.CreateEditAppRequest(), persistence);
     }
 
     private void ApplySubmitResult(HandlerMappingDialogSubmitResult result)

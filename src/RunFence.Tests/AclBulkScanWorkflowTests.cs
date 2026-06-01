@@ -5,7 +5,6 @@ using RunFence.Acl.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -22,13 +21,9 @@ public class AclBulkScanWorkflowTests
         {
             [sid] = new([new DiscoveredGrant(@"C:\data", false, false, false, true, false, false)], [])
         };
-        var filteredResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [sid] = scanResults[sid]
-        };
         var selectedResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
         {
-            [sid] = filteredResults[sid]
+            [sid] = scanResults[sid]
         };
         var summary = new AclBulkScanImportSummary(1, 0, [@"C:\conflict"]);
 
@@ -51,11 +46,6 @@ public class AclBulkScanWorkflowTests
             .ReturnsAsync(scanResults);
 
         var processor = new Mock<IAclBulkScanResultProcessor>();
-        processor.Setup(service => service.FilterManagedPaths(
-                scanResults,
-                It.IsAny<IReadOnlyList<AppEntry>>(),
-                It.IsAny<IAclService>()))
-            .Returns(filteredResults);
         processor.Setup(service => service.ApplyScanResults(selectedResults, It.IsAny<Action>()))
             .Callback<Dictionary<string, AccountScanResult>, Action>((_, save) => save())
             .Returns(summary);
@@ -65,20 +55,18 @@ public class AclBulkScanWorkflowTests
         resultDialog.SetupGet(dialog => dialog.SelectedResults).Returns(selectedResults);
 
         var resultDialogFactory = new Mock<IAclBulkScanResultDialogFactory>();
-        resultDialogFactory.Setup(factory => factory.Create(filteredResults, It.IsAny<ISidNameCacheService>()))
+        resultDialogFactory.Setup(factory => factory.Create(scanResults, It.IsAny<ISidNameCacheService>()))
             .Returns(resultDialog.Object);
 
         var warningPresenter = new Mock<IAclBulkScanWarningPresenter>();
         var workflow = new AclBulkScanWorkflow(
             bulkScan.Object,
-            Mock.Of<IAclService>(),
             Mock.Of<ILoggingService>(),
             Mock.Of<ISidNameCacheService>(),
             processor.Object,
             warningPresenter.Object,
             resultDialogFactory.Object,
-            folderDialogFactory.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            folderDialogFactory.Object);
 
         var enabledStates = new List<bool>();
         var statuses = new List<string>();
@@ -105,7 +93,6 @@ public class AclBulkScanWorkflowTests
             It.Is<IReadOnlySet<string>>(sids => sids.Count == 1 && sids.Contains(sid)),
             It.IsAny<IProgress<long>>(),
             It.IsAny<CancellationToken>()), Times.Once);
-        processor.Verify(service => service.FilterManagedPaths(scanResults, It.IsAny<IReadOnlyList<AppEntry>>(), It.IsAny<IAclService>()), Times.Once);
         processor.Verify(service => service.ApplyScanResults(selectedResults, It.IsAny<Action>()), Times.Once);
         warningPresenter.Verify(service => service.ShowSkippedConflictWarning(summary, "Scan ACLs"), Times.Once);
         Assert.Equal([false, true], enabledStates);
@@ -134,14 +121,12 @@ public class AclBulkScanWorkflowTests
 
         var workflow = new AclBulkScanWorkflow(
             bulkScan.Object,
-            Mock.Of<IAclService>(),
             Mock.Of<ILoggingService>(),
             Mock.Of<ISidNameCacheService>(),
             processor.Object,
             warningPresenter.Object,
             Mock.Of<IAclBulkScanResultDialogFactory>(),
-            folderDialogFactory.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            folderDialogFactory.Object);
 
         var context = new TestWorkflowContext
         {
@@ -183,14 +168,12 @@ public class AclBulkScanWorkflowTests
         var log = new Mock<ILoggingService>();
         var workflow = new AclBulkScanWorkflow(
             bulkScan.Object,
-            Mock.Of<IAclService>(),
             log.Object,
             Mock.Of<ISidNameCacheService>(),
             Mock.Of<IAclBulkScanResultProcessor>(),
             Mock.Of<IAclBulkScanWarningPresenter>(),
             Mock.Of<IAclBulkScanResultDialogFactory>(),
-            folderDialogFactory.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            folderDialogFactory.Object);
 
         var context = new TestWorkflowContext
         {
@@ -200,7 +183,6 @@ public class AclBulkScanWorkflowTests
 
         await workflow.RunAsync(context);
 
-        log.Verify(service => service.Error("ACL bulk scan failed", exception), Times.Once);
         Assert.Equal(1, context.ScanFailuresShown);
         Assert.Same(exception, context.LastFailure);
         Assert.Equal(0, context.ResultsShown);
@@ -209,14 +191,11 @@ public class AclBulkScanWorkflowTests
     }
 
     [Fact]
-    public async Task RunAsync_WhenFilteredResultsAreEmpty_ShowsContextNoResults()
+    public async Task RunAsync_WhenScanResultsAreEmpty_ShowsContextNoResults()
     {
         var rootPath = @"C:\scan-root";
         var sid = "S-1-5-21-1-2-3-1001";
-        var scanResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [sid] = new([new DiscoveredGrant(@"C:\data", false, false, false, true, false, false)], [])
-        };
+        var scanResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase);
 
         var folderDialog = new Mock<IFolderBrowserDialogAdapter>();
         folderDialog.SetupGet(dialog => dialog.Dialog).Returns(new FolderBrowserDialog
@@ -236,23 +215,14 @@ public class AclBulkScanWorkflowTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(scanResults);
 
-        var processor = new Mock<IAclBulkScanResultProcessor>();
-        processor.Setup(service => service.FilterManagedPaths(
-                scanResults,
-                It.IsAny<IReadOnlyList<AppEntry>>(),
-                It.IsAny<IAclService>()))
-            .Returns([]);
-
         var workflow = new AclBulkScanWorkflow(
             bulkScan.Object,
-            Mock.Of<IAclService>(),
             Mock.Of<ILoggingService>(),
             Mock.Of<ISidNameCacheService>(),
-            processor.Object,
+            new Mock<IAclBulkScanResultProcessor>(MockBehavior.Strict).Object,
             Mock.Of<IAclBulkScanWarningPresenter>(),
             Mock.Of<IAclBulkScanResultDialogFactory>(),
-            folderDialogFactory.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            folderDialogFactory.Object);
 
         var context = new TestWorkflowContext
         {

@@ -51,7 +51,7 @@ public class AccountProcessTimerManagerTests
 
             var expander = new AccountGridProcessExpander(processList.Object, new ProcessRowGridUpdater(new ProcessCommandLineFormatter()));
             expander.Initialize(grid);
-            expander.Toggle(TestSid);
+            StaTestHelper.RunAsyncWithMessagePump(() => expander.ToggleAsync(TestSid));
 
             var timerFactory = new ManualUiTimerFactory();
             using var manager = new AccountProcessTimerManager(Mock.Of<ILoggingService>(), timerFactory);
@@ -142,7 +142,7 @@ public class AccountProcessTimerManagerTests
 
             var expander = new AccountGridProcessExpander(processList.Object, new ProcessRowGridUpdater(new ProcessCommandLineFormatter()));
             expander.Initialize(grid);
-            expander.Toggle(TestSid);
+            StaTestHelper.RunAsyncWithMessagePump(() => expander.ToggleAsync(TestSid));
 
             var timerFactory = new ManualUiTimerFactory();
             using var manager = new AccountProcessTimerManager(Mock.Of<ILoggingService>(), timerFactory);
@@ -278,11 +278,13 @@ public class AccountProcessTimerManagerTests
         return new AccountMenuStateConfigurator(
             Mock.Of<IWindowsAccountQueryService>(),
             sessionProvider.Object,
-            new AccountToolResolver(Mock.Of<IProfilePathResolver>()),
+            Mock.Of<IWindowsTerminalAccountStateService>(),
             new PackageInstallService(
                 Mock.Of<IPackageInstallLauncher>(),
                 Mock.Of<IPackageInstallScriptStore>(),
-                new AccountToolResolver(Mock.Of<IProfilePathResolver>())));
+                new AccountToolResolver(Mock.Of<IProfilePathResolver>()),
+                Mock.Of<IWindowsTerminalAccountStateService>(),
+                Mock.Of<IWindowsTerminalDeploymentService>()));
     }
 
     private static Mock<ISessionProvider> CreateSessionProvider()

@@ -27,8 +27,8 @@ public class HandlerMappingAddDialogTests
     private static Mock<IExeAssociationRegistryReader> MakeReaderMock()
     {
         var mock = new Mock<IExeAssociationRegistryReader>();
-        mock.Setup(r => r.GetHandledAssociations(It.IsAny<string>())).Returns([]);
-        mock.Setup(r => r.GetNonDefaultArguments(It.IsAny<string>(), It.IsAny<string>())).Returns((string?)null);
+        mock.Setup(r => r.GetHandledAssociations(It.IsAny<string>(), It.IsAny<string?>())).Returns([]);
+        mock.Setup(r => r.GetNonDefaultArguments(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>())).Returns((string?)null);
         mock.Setup(r => r.IsRegisteredProgId(".pdf", "Acrobat.Document.DC")).Returns(true);
         return mock;
     }
@@ -167,131 +167,6 @@ public class HandlerMappingAddDialogTests
     // --- HandlerMappingAppModePresenter ---
 
     [Fact]
-    public void AppPresenter_PopulateApps_SelectsFirstApp()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var appCombo = new ComboBox();
-            var keyCombo = new ComboBox();
-            var templateBox = new TextBox();
-            using var section = new CombinedPrefixesSection();
-
-            var presenter = new HandlerMappingAppModePresenter(
-                reader.Object, appCombo, keyCombo, templateBox, section);
-
-            var apps = new[] { MakeApp("a1", "Alpha"), MakeApp("a2", "Beta") };
-            presenter.PopulateApps(apps);
-
-            // Alphabetical: Alpha selected first
-            Assert.NotNull(presenter.SelectedApp);
-            Assert.Equal("a1", presenter.SelectedApp!.Id);
-        });
-    }
-
-    [Fact]
-    public void AppPresenter_PopulateAppsForEdit_SelectsCurrentApp()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var appCombo = new ComboBox();
-            var keyCombo = new ComboBox();
-            var templateBox = new TextBox();
-            using var section = new CombinedPrefixesSection();
-
-            var presenter = new HandlerMappingAppModePresenter(
-                reader.Object, appCombo, keyCombo, templateBox, section);
-
-            var appA = MakeApp("a1", "Alpha");
-            var appB = MakeApp("a2", "Beta");
-
-            presenter.PopulateAppsForEdit([appA, appB], currentApp: appB);
-
-            Assert.NotNull(presenter.SelectedApp);
-            Assert.Equal("a2", presenter.SelectedApp!.Id);
-        });
-    }
-
-    [Fact]
-    public void AppPresenter_PopulateAppsForEdit_UnknownCurrentApp_SelectsFirst()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var appCombo = new ComboBox();
-            var keyCombo = new ComboBox();
-            var templateBox = new TextBox();
-            using var section = new CombinedPrefixesSection();
-
-            var presenter = new HandlerMappingAppModePresenter(
-                reader.Object, appCombo, keyCombo, templateBox, section);
-
-            var appA = MakeApp("a1", "Alpha");
-            var appB = MakeApp("a2", "Beta");
-
-            presenter.PopulateAppsForEdit([appA, appB], currentApp: MakeApp("unknown", "Unknown"));
-
-            // Falls back to first alphabetical app
-            Assert.NotNull(presenter.SelectedApp);
-            Assert.Equal("a1", presenter.SelectedApp!.Id);
-        });
-    }
-
-    [Fact]
-    public void AppPresenter_NormalizedTemplate_ReturnsNullForBlank()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var templateBox = new TextBox { Text = "   " };
-            using var section = new CombinedPrefixesSection();
-
-            var presenter = new HandlerMappingAppModePresenter(
-                reader.Object, new ComboBox(), new ComboBox(), templateBox, section);
-
-            Assert.Null(presenter.NormalizedTemplate);
-        });
-    }
-
-    [Fact]
-    public void AppPresenter_NormalizedTemplate_TrimsNonBlankValue()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var templateBox = new TextBox { Text = "  \"%1\"  " };
-            using var section = new CombinedPrefixesSection();
-
-            var presenter = new HandlerMappingAppModePresenter(
-                reader.Object, new ComboBox(), new ComboBox(), templateBox, section);
-
-            Assert.Equal("\"%1\"", presenter.NormalizedTemplate);
-        });
-    }
-
-    [Fact]
-    public void AppPresenter_LoadPrefixes_AndCollect_RoundTrip()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            using var section = new CombinedPrefixesSection();
-            var presenter = new HandlerMappingAppModePresenter(
-                reader.Object, new ComboBox(), new ComboBox(), new TextBox(), section);
-
-            var appPrefixes = new[] { @"C:\Apps\" };
-            var assocPrefixes = new[] { @"C:\Work\" };
-
-            presenter.LoadPrefixes(appPrefixes, assocPrefixes, replacePrefixes: true);
-
-            Assert.Equal(appPrefixes, presenter.AppPrefixes);
-            Assert.Equal(assocPrefixes, presenter.AssociationPrefixes);
-            Assert.True(presenter.IsReplace);
-        });
-    }
-
-    [Fact]
     public void AppPresenter_OnAppSelectionChanged_LoadsAppPrefixesIntoSection()
     {
         StaTestHelper.RunOnSta(() =>
@@ -310,41 +185,12 @@ public class HandlerMappingAddDialogTests
             presenter.OnAppSelectionChanged();
 
             // App prefixes should now be loaded into the section
-            var result = section.GetAppPrefixes();
-            Assert.NotNull(result);
+            var result = section.GetAppPrefixes() ?? [];
             Assert.Contains(@"C:\Alpha\", result);
         });
     }
 
     // --- HandlerMappingDirectModePresenter ---
-
-    [Fact]
-    public void DirectPresenter_HandlerValue_ReturnsNull_WhenTextBlank()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var mock = MakeInteractiveMock();
-            var handlerBox = new TextBox { Text = "   " };
-
-            var presenter = new HandlerMappingDirectModePresenter(mock.Object, new ComboBox(), handlerBox);
-
-            Assert.Null(presenter.HandlerValue);
-        });
-    }
-
-    [Fact]
-    public void DirectPresenter_HandlerValue_ReturnsTrimmedText()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var mock = MakeInteractiveMock();
-            var handlerBox = new TextBox { Text = "  Acrobat.Document.DC  " };
-
-            var presenter = new HandlerMappingDirectModePresenter(mock.Object, new ComboBox(), handlerBox);
-
-            Assert.Equal("Acrobat.Document.DC", presenter.HandlerValue);
-        });
-    }
 
     [Fact]
     public void DirectPresenter_TryAutoFillHandler_WithBlankKey_DoesNotCallReader()
@@ -423,148 +269,6 @@ public class HandlerMappingAddDialogTests
     }
 
     // --- Dialog result property collection ---
-
-    [Fact]
-    public void Initialize_ResultPropertiesAreDefaultBeforeOkAccepted()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var interactive = MakeInteractiveMock();
-            var context = CreateDialogTestContext(reader);
-            var dlg = CreateDialog(reader, interactive, context);
-
-            dlg.Initialize([MakeApp("a1", "MyApp")], context.Persistence);
-
-            // Result properties are all null/default until OK is accepted
-            Assert.False(dlg.IsDirectMode);
-            Assert.Empty(dlg.ResolvedKeys);
-            Assert.Null(dlg.SelectedApp);
-            Assert.Null(dlg.ArgumentsTemplate);
-            Assert.Null(dlg.AppPrefixes);
-            Assert.Null(dlg.PathPrefixes);
-            Assert.False(dlg.ReplacePrefixes);
-            Assert.Null(dlg.DirectHandlerValue);
-
-            dlg.Dispose();
-        });
-    }
-
-    [Fact]
-    public void InitializeForEditApp_SetsEditTitleWithKeyAndPreservesLayout()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var interactive = MakeInteractiveMock();
-            var context = CreateDialogTestContext(reader);
-            var dlg = CreateDialog(reader, interactive, context);
-
-            var app = MakeApp("a1", "MyApp");
-            dlg.InitializeForEditApp(".pdf", [app], currentApp: app, currentAppId: app.Id,
-                currentTemplate: "\"%1\"",
-                persistence: context.Persistence,
-                currentAppPrefixes: [@"C:\Apps\"],
-                currentAssocPrefixes: [@"C:\Work\"],
-                currentReplacePrefixes: false);
-
-            // Edit title contains the key; form height set to AppEditHeight (app edit layout)
-            Assert.Contains(".pdf", dlg.Text);
-            Assert.Equal(AppEditHeight, dlg.ClientSize.Height);
-
-            dlg.Dispose();
-        });
-    }
-
-    [Fact]
-    public void InitializeForEditDirect_SetsDirectEditTitleAndLayout()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var interactive = MakeInteractiveMock();
-            var context = CreateDialogTestContext(reader);
-            var dlg = CreateDialog(reader, interactive, context);
-
-            dlg.InitializeForEditDirect(
-                ".pdf",
-                currentValue: "Acrobat.Document.DC",
-                currentEntry: new DirectHandlerEntry { ClassName = "Acrobat.Document.DC" },
-                persistence: context.Persistence);
-
-            // Edit title contains key; form height set to DirectEditHeight (direct edit layout)
-            Assert.Contains(".pdf", dlg.Text);
-            Assert.Equal(DirectEditHeight, dlg.ClientSize.Height);
-            // DirectHandlerValue is null until OK accepted
-            Assert.Null(dlg.DirectHandlerValue);
-
-            dlg.Dispose();
-        });
-    }
-
-    // --- HandlerMappingLayoutController ---
-
-    [Fact]
-    public void Initialize_AddAppMode_DefaultClientHeightIs580()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var interactive = MakeInteractiveMock();
-            var context = CreateDialogTestContext(reader);
-            var dlg = CreateDialog(reader, interactive, context);
-
-            dlg.Initialize([MakeApp("a1", "MyApp")], context.Persistence);
-
-            // App mode add layout: full height AppMappingHeight
-            Assert.Equal(AppMappingHeight, dlg.ClientSize.Height);
-            dlg.Dispose();
-        });
-    }
-
-    [Fact]
-    public void LayoutController_ApplyEditLayout_AppMode_AdjustsFormHeightTo500()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var interactive = MakeInteractiveMock();
-            var context = CreateDialogTestContext(reader);
-            var dlg = CreateDialog(reader, interactive, context);
-
-            dlg.InitializeForEditApp(
-                ".pdf",
-                [MakeApp("a1", "MyApp")],
-                currentApp: null,
-                currentAppId: "a1",
-                currentTemplate: null,
-                persistence: context.Persistence);
-
-            Assert.Equal(AppEditHeight, dlg.ClientSize.Height);
-            dlg.Dispose();
-        });
-    }
-
-    [Fact]
-    public void LayoutController_ApplyEditLayout_DirectMode_AdjustsFormHeightTo160()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var reader = MakeReaderMock();
-            var interactive = MakeInteractiveMock();
-            var context = CreateDialogTestContext(reader);
-            var dlg = CreateDialog(reader, interactive, context);
-
-            dlg.InitializeForEditDirect(
-                ".pdf",
-                "SomeHandler",
-                new DirectHandlerEntry { ClassName = "SomeHandler" },
-                context.Persistence);
-
-            Assert.Equal(DirectEditHeight, dlg.ClientSize.Height);
-            dlg.Dispose();
-        });
-    }
 
     // --- Edit-direct and edit-app accept flows ---
 

@@ -1,69 +1,27 @@
-using System.Diagnostics;
-using System.Text;
-using RunFence.Launching.Windows;
-
 namespace RunFence.Launching.Processes;
 
-public sealed class ProcessSnapshotReader : IProcessSnapshotReader
+public sealed class ProcessSnapshotReader(
+    IProcessSnapshotEnumerator processEnumerator,
+    IProcessOwnerInfoReader processOwnerReader,
+    IProcessExecutablePathReader processPathReader) : IProcessSnapshotReader
 {
     public IReadOnlyList<ProcessSnapshotInfo> GetProcesses()
     {
         var result = new List<ProcessSnapshotInfo>();
-        var processes = Process.GetProcesses();
-        try
+        foreach (var process in processEnumerator.GetProcesses())
         {
-            foreach (var process in processes)
-            {
-                if (process.Id <= 4)
-                    continue;
+            if (process.ProcessId <= 4)
+                continue;
 
-                try
-                {
-                    using var processHandle = ProcessInspectionNative.OpenProcess(
-                        ProcessInspectionNative.ProcessQueryLimitedInformation,
-                        false,
-                        (uint)process.Id);
-                    if (processHandle.IsInvalid)
-                        continue;
+            var owner = processOwnerReader.GetProcessOwner(process.ProcessId, string.Empty);
+            if (owner.OwnerSid == null)
+                continue;
 
-                    var sid = ProcessInspectionNative.GetTokenUserSid(processHandle.DangerousGetHandle());
-                    if (sid == null)
-                        continue;
-
-                    string? imagePath = null;
-                    var buffer = new StringBuilder(1024);
-                    uint size = (uint)buffer.Capacity;
-                    if (ProcessInspectionNative.QueryFullProcessImageName(
-                            processHandle.DangerousGetHandle(),
-                            0,
-                            buffer,
-                            ref size))
-                    {
-                        imagePath = buffer.ToString();
-                    }
-
-                    long? creationTimeUtcTicks = null;
-                    if (ProcessInspectionNative.GetProcessTimes(
-                            processHandle.DangerousGetHandle(),
-                            out var creationTime,
-                            out _,
-                            out _,
-                            out _))
-                    {
-                        creationTimeUtcTicks = DateTime.FromFileTimeUtc(creationTime.ToLong()).Ticks;
-                    }
-
-                    result.Add(new ProcessSnapshotInfo(process.Id, sid, imagePath, creationTimeUtcTicks));
-                }
-                catch
-                {
-                }
-            }
-        }
-        finally
-        {
-            foreach (var process in processes)
-                process.Dispose();
+            result.Add(new ProcessSnapshotInfo(
+                process.ProcessId,
+                owner.OwnerSid,
+                processPathReader.GetExecutablePath(process.ProcessId),
+                process.CreationTimeUtcTicks));
         }
 
         return result;

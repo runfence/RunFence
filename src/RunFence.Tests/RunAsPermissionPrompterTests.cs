@@ -48,8 +48,8 @@ public class RunAsPermissionPrompterTests
     [Fact]
     public void TryApplyGrant_AclAppliedForRegularAccount_PinsFolder()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        grantMutatorService
             .Setup(s => s.EnsureAccess(
                 "S-1-5-21-1-2-3-1001",
                 @"C:\Apps",
@@ -57,7 +57,7 @@ public class RunAsPermissionPrompterTests
                 null))
             .Returns(new GrantApplyResult(GrantApplied: true, TraverseApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
         var quickAccessPinService = new Mock<IQuickAccessPinService>();
-        var prompter = CreatePrompter(pathGrantService: pathGrantService.Object, quickAccessPinService: quickAccessPinService.Object);
+        var prompter = CreatePrompter(grantMutatorService: grantMutatorService.Object, quickAccessPinService: quickAccessPinService.Object);
 
         var warning = prompter.TryApplyGrant(new AppEntryPermissionGrantRequest(
             "S-1-5-21-1-2-3-1001",
@@ -72,8 +72,8 @@ public class RunAsPermissionPrompterTests
     [Fact]
     public void TryApplyGrant_SaveFailure_ReturnsWarning()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        grantMutatorService
             .Setup(s => s.EnsureAccess(
                 "S-1-5-21-1-2-3-1001",
                 @"C:\Apps",
@@ -84,7 +84,7 @@ public class RunAsPermissionPrompterTests
                 @"C:\Apps",
                 null,
                 new InvalidOperationException("save failed")));
-        var prompter = CreatePrompter(pathGrantService: pathGrantService.Object);
+        var prompter = CreatePrompter(grantMutatorService: grantMutatorService.Object);
 
         var warning = prompter.TryApplyGrant(new AppEntryPermissionGrantRequest(
             "S-1-5-21-1-2-3-1001",
@@ -97,13 +97,13 @@ public class RunAsPermissionPrompterTests
 
     private static AppEntryPermissionPrompter CreatePrompter(
         IAclPermissionService? aclPermissionService = null,
-        IPathGrantService? pathGrantService = null,
+        IGrantMutatorService? grantMutatorService = null,
         AppDatabase? database = null,
         IQuickAccessPinService? quickAccessPinService = null)
         => new(
             Mock.Of<ILoggingService>(),
             aclPermissionService ?? Mock.Of<IAclPermissionService>(),
-            pathGrantService ?? Mock.Of<IPathGrantService>(),
+            grantMutatorService ?? Mock.Of<IGrantMutatorService>(),
             new LambdaDatabaseProvider(() => database ?? new AppDatabase()),
             quickAccessPinService ?? Mock.Of<IQuickAccessPinService>());
 }

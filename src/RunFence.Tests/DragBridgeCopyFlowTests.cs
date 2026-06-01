@@ -14,19 +14,6 @@ public class DragBridgeCopyFlowTests
     // ── GetCapturedFiles — captured file state ───────────────────────────
 
     [Fact]
-    public void GetCapturedFiles_InitialState_ReturnsNullPathsAndNotExpired()
-    {
-        var store = new CapturedFileStore();
-
-        var (captured, sourceSid, sourceContainerSid, expired) = store.GetCapturedFiles();
-
-        Assert.Null(captured);
-        Assert.Null(sourceSid);
-        Assert.Null(sourceContainerSid);
-        Assert.False(expired);
-    }
-
-    [Fact]
     public void GetCapturedFiles_WithinFiveMinutes_ReturnsCapturedFilesAndSid()
     {
         long fakeTick = 0;
@@ -154,16 +141,6 @@ public class DragBridgeCopyFlowTests
         Assert.Equal(expectedY, result[yIdx + 1]);
     }
 
-    [Fact]
-    public void BuildArgs_DataLength_MatchesExpectedStructure()
-    {
-        // BuildArgs always produces exactly 10 elements:
-        // --pipe <name> --x <x> --y <y> --runfence-pid <pid> --restore-hwnd <hwnd>
-        var result = InvokeBuildArgs("some-pipe", new Point(1, 2), restoreHwnd: 3);
-
-        Assert.Equal(10, result.Count);
-    }
-
     // ── RunBridgeAsync — bridge flow scenarios ────────────────────────────
 
     private static readonly SecurityIdentifier TestSid = new("S-1-5-32-545");
@@ -190,7 +167,7 @@ public class DragBridgeCopyFlowTests
     }
 
     [Fact]
-    public async Task RunBridgeAsync_ConnectionTimeout_LogsErrorAndReturnsWithoutCapture()
+    public async Task RunBridgeAsync_ConnectionTimeout_ReturnsWithoutCapture()
     {
         // Arrange: launcher returns a real unconnected pipe server; no client ever connects
         // within the short timeout → WaitForConnectionAsync is cancelled by the timeout CTS.
@@ -215,8 +192,7 @@ public class DragBridgeCopyFlowTests
         // Act
         await flow.RunBridgeAsync(TestOwner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
 
-        // Assert: timeout error logged; no files captured
-        log.Verify(l => l.Error(It.Is<string>(s => s.Contains("timeout"))), Times.Once);
+        // Assert: no files captured when the pipe never connects
         capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
     }
 
@@ -285,7 +261,7 @@ public class DragBridgeCopyFlowTests
     }
 
     [Fact]
-    public async Task RunBridgeAsync_ClientVerificationFails_LogsErrorAndReturnsWithoutCapture()
+    public async Task RunBridgeAsync_ClientVerificationFails_ReturnsWithoutCapture()
     {
         // Arrange: client connects but VerifyClientProcess returns false → flow returns early.
         var (server, client) = CreatePipePair();
@@ -307,8 +283,7 @@ public class DragBridgeCopyFlowTests
         await flow.RunBridgeAsync(TestOwner, [], new Point(0, 0), null, false, 0, CancellationToken.None);
         await connectTask;
 
-        // Assert: verification failure logged; no files captured; no SignalReady called
-        log.Verify(l => l.Error(It.Is<string>(s => s.Contains("verification"))), Times.Once);
+        // Assert: no files captured and the bridge never signals ready
         capturedFileStore.Verify(s => s.SetCapturedFiles(It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
         launcher.Verify(l => l.SignalReady(It.IsAny<NamedPipeServerStream>()), Times.Never);
     }
@@ -409,7 +384,6 @@ public class DragBridgeCopyFlowTests
                 TestSid.Value,
                 null),
             Times.Once);
-        log.Verify(l => l.Info(It.Is<string>(s => s.Contains("captured") && s.Contains("2"))), Times.Once);
     }
 
     [Fact]

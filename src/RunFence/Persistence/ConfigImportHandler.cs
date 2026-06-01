@@ -75,6 +75,7 @@ public class ConfigImportHandler(
         try
         {
             applyService.ApplyState(database, importedDb, repairPlan, preservation, sidResolutions);
+            database.TrackingJobSids = importedDb.TrackingJobSids?.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
         catch
         {
@@ -82,7 +83,6 @@ public class ConfigImportHandler(
             appConfigService.RestoreRuntimeStateSnapshot(appConfigSnapshot);
             throw;
         }
-        warnings.AddRange(applyService.ApplyOrphanedGrantRemovals(repairPlan));
 
         string? saveError = null;
         try
@@ -132,7 +132,7 @@ public class ConfigImportHandler(
     /// </summary>
     public AdditionalConfigImportBackup CaptureAdditionalConfigBackup(string configPath)
     {
-        var normalizedConfigPath = Path.GetFullPath(configPath);
+        var normalizedConfigPath = AppConfigPathHelper.NormalizePath(configPath);
         var fileExisted = File.Exists(normalizedConfigPath);
         var fileBytes = fileExisted ? File.ReadAllBytes(normalizedConfigPath) : null;
         return new AdditionalConfigImportBackup(normalizedConfigPath, fileExisted, fileBytes);

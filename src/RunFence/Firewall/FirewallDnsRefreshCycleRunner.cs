@@ -190,6 +190,5 @@ public class FirewallDnsRefreshCycleRunner(
     }
 
     private record LocalAddressRefreshItem(string Sid, string Username, FirewallAccountSettings Settings);
-    private record AllowlistRefreshItem(string Sid, string Username, FirewallAccountSettings Settings, IReadOnlyList<FirewallAllowlistEntry> DomainEntries);
     private record RefreshCycleResult(bool AccountRefreshSucceeded, bool DirtyStateConsumed);
 }

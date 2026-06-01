@@ -15,7 +15,7 @@ public partial class RunAsPasswordDialog : RunFence.UI.Forms.ContextHelpForm
     public ProtectedString? Password { get; private set; }
     public bool RememberPassword => _rememberCheckBox.Checked;
 
-    public RunAsPasswordDialog(string accountDisplayName, IAccountPasswordService accountService,
+    public RunAsPasswordDialog(string accountDisplayName, bool allowRememberPassword, IAccountPasswordService accountService,
         string sid, string usernameFallback)
     {
         _accountService = accountService;
@@ -26,6 +26,10 @@ public partial class RunAsPasswordDialog : RunFence.UI.Forms.ContextHelpForm
         _accountLabel.Text = $"Enter password for: {accountDisplayName}";
         _passwordSecure = new SecurePasswordBox(_passwordTextBox);
         _passwordSecure.AddEyeToggle();
+        _rememberCheckBox.Visible = allowRememberPassword;
+        _rememberCheckBox.Enabled = allowRememberPassword;
+        if (!allowRememberPassword)
+            _rememberCheckBox.Checked = false;
     }
 
     private void OnOkClick(object? sender, EventArgs e)

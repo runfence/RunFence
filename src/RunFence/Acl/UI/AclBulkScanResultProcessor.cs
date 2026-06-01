@@ -6,33 +6,6 @@ namespace RunFence.Acl.UI;
 public sealed class AclBulkScanResultProcessor(
     IDatabaseProvider databaseProvider) : IAclBulkScanResultProcessor
 {
-    public Dictionary<string, AccountScanResult> FilterManagedPaths(
-        Dictionary<string, AccountScanResult> results,
-        IReadOnlyList<AppEntry> apps,
-        IAclService aclService)
-    {
-        var managedPaths = apps
-            .Where(a => a is { RestrictAcl: true, IsUrlScheme: false })
-            .Select(a => AclHelper.NormalizePath(aclService.ResolveAclTargetPath(a)))
-            .ToList();
-
-        if (managedPaths.Count == 0)
-            return results;
-
-        bool IsManaged(string path) => managedPaths.Any(m => AclHelper.PathIsAtOrBelow(path, m));
-
-        var filtered = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (sid, result) in results)
-        {
-            var grants = result.Grants.Where(g => !IsManaged(g.Path)).ToList();
-            var traverses = result.TraversePaths.Where(p => !IsManaged(p)).ToList();
-            if (grants.Count > 0 || traverses.Count > 0)
-                filtered[sid] = new AccountScanResult(grants, traverses);
-        }
-
-        return filtered;
-    }
-
     public AclBulkScanImportSummary ApplyScanResults(
         Dictionary<string, AccountScanResult> selected,
         Action saveDatabase)
@@ -75,7 +48,7 @@ public sealed class AclBulkScanResultProcessor(
                              .OrderBy(pair => pair.Key ? 1 : 0)
                              .Select(pair => pair.Value))
                 {
-                    var conflict = GrantCoreOperations.FindNonTraverseGrantConflict(
+                    var conflict = GrantEntryLookup.FindNonTraverseGrantConflict(
                         grants,
                         scannedGrant.Path,
                         scannedGrant.IsDeny);

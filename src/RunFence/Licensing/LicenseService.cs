@@ -1,4 +1,3 @@
-using Microsoft.Win32;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -30,13 +29,13 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
     private readonly ILicenseValidator _validator;
     private readonly IFeatureRestrictionService _featureRestrictionService;
     private readonly ILicenseMessageFormatter _messageFormatter;
+    private readonly ILicenseNagService _licenseNagService;
+    private readonly LicenseNagEligibilityService _licenseNagEligibilityService;
     private readonly ISessionProvider _sessionProvider;
-    private readonly ISessionSaver _sessionSaver;
-    private readonly IEvaluationCredentialCounter _credentialCounter;
-    private readonly string _registryKeyPath;
     private readonly ILoggingService? _log;
     private readonly Lock _lock = new();
     private LicenseInfo _cachedInfo = LicenseInfo.Unlicensed;
+    private bool _initialized;
 
     public event Action? LicenseStatusChanged;
 
@@ -46,28 +45,9 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         ILicenseValidator validator,
         IFeatureRestrictionService featureRestrictionService,
         ILicenseMessageFormatter messageFormatter,
+        ILicenseNagService licenseNagService,
+        LicenseNagEligibilityService licenseNagEligibilityService,
         ISessionProvider sessionProvider,
-        ISessionSaver sessionSaver,
-        IEvaluationCredentialCounter credentialCounter,
-        ILoggingService? log = null)
-        : this(machineIdProvider, store, validator, featureRestrictionService, messageFormatter, PathConstants.LicenseRegistryKey,
-            sessionProvider, sessionSaver, credentialCounter, log)
-    {
-    }
-
-    /// <summary>
-    /// Test constructor with injectable paths for isolation.
-    /// </summary>
-    public LicenseService(
-        IMachineIdProvider machineIdProvider,
-        ILicenseStore store,
-        ILicenseValidator validator,
-        IFeatureRestrictionService featureRestrictionService,
-        ILicenseMessageFormatter messageFormatter,
-        string registryKeyPath,
-        ISessionProvider sessionProvider,
-        ISessionSaver sessionSaver,
-        IEvaluationCredentialCounter credentialCounter,
         ILoggingService? log = null)
     {
         _machineIdProvider = machineIdProvider;
@@ -75,14 +55,11 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         _validator = validator;
         _featureRestrictionService = featureRestrictionService;
         _messageFormatter = messageFormatter;
+        _licenseNagService = licenseNagService;
+        _licenseNagEligibilityService = licenseNagEligibilityService;
         _sessionProvider = sessionProvider;
-        _sessionSaver = sessionSaver;
-        _credentialCounter = credentialCounter;
-        _registryKeyPath = registryKeyPath;
         _log = log;
     }
-
-    private bool _initialized;
 
     public void Initialize()
     {
@@ -91,7 +68,7 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         _initialized = true;
         _log?.Info("LicenseService: initializing.");
         LoadFromFile();
-        ApplyNagEligibilityLatch();
+        _licenseNagEligibilityService.ApplyNagEligibilityLatch();
         _log?.Info($"LicenseService: initialized ({(IsLicensed ? "licensed" : "evaluation mode")}).");
     }
 
@@ -137,6 +114,7 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
                 _log?.Error($"LicenseService: failed to persist license ({saveResult.Status}): {saveResult.ErrorText}");
                 return LicenseActivationResult.PersistenceFailed;
             }
+
             _cachedInfo = validation.ParsedLicenseInfo;
         }
 
@@ -148,7 +126,7 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
     {
         lock (_lock)
         {
-            DeleteLicenseFile();
+            _store.Remove();
             _cachedInfo = LicenseInfo.Unlicensed;
         }
 
@@ -157,79 +135,53 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
 
     public bool ShouldShowNag(DateTime now)
     {
-        bool justExpired = false;
+        var raiseStatusChanged = false;
         lock (_lock)
         {
             if (_cachedInfo.IsValid)
             {
                 if (_cachedInfo.ExpiryDate.HasValue && now.Date > _cachedInfo.ExpiryDate.Value.Date)
                 {
-                    // Expiry transition is applied by nag/status flow here;
-                    // Can* checks and restriction messages stay pure limit evaluation.
-                    // License expired: transition to evaluation mode and clean up the file
                     _cachedInfo = LicenseInfo.Unlicensed;
-                    DeleteLicenseFile();
-                    justExpired = true;
+                    _store.Remove();
+                    raiseStatusChanged = true;
                 }
                 else
+                {
                     return false;
+                }
             }
         }
 
-        // Fire outside the lock to avoid deadlock
-        if (justExpired)
+        if (raiseStatusChanged)
             LicenseStatusChanged?.Invoke();
 
         var session = _sessionProvider.GetSession();
-        if (!session.Database.Settings.NagEligible)
+        if (!_licenseNagEligibilityService.IsSessionEligibleForNag(session.Database))
             return false;
 
-        var lastShown = ReadLastNagDate();
-        if (lastShown == null)
-            return true;
-
-        // Forward time protection: future datetime â†’ treat as invalid â†’ show nag
-        if (lastShown.Value > now)
-            return true;
-
-        return now - lastShown.Value >= TimeSpan.FromHours(24);
+        return _licenseNagService.ShouldShowNagByCadence(now);
     }
 
-    public void RecordNagShown(DateTime now)
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.CreateSubKey(_registryKeyPath);
-            key.SetValue(PathConstants.LastNagShownValueName, now.ToString("o"));
-        }
-        catch
-        {
-        }
-    }
+    public void RecordNagShown(DateTime now) => _licenseNagService.RecordNagShown(now);
 
     public bool CanAddApp(int currentCount) =>
-        // Pure quota check; no expiry transition or side effects here.
         _featureRestrictionService.GetRestriction(EvaluationFeature.Apps, currentCount, IsLicensed).Allowed;
 
     public bool CanCreateContainer(int currentCount) =>
-        // Pure quota check; no expiry transition or side effects here.
         _featureRestrictionService.GetRestriction(EvaluationFeature.Containers, currentCount, IsLicensed).Allowed;
 
     public bool CanHideAccount(int currentHiddenCount) =>
-        // Pure quota check; no expiry transition or side effects here.
         _featureRestrictionService.GetRestriction(EvaluationFeature.HiddenAccounts, currentHiddenCount, IsLicensed).Allowed;
 
     public bool CanAddCredential(int currentCredentialCount) =>
-        // Pure quota check; no expiry transition or side effects here.
         _featureRestrictionService.GetRestriction(EvaluationFeature.Credentials, currentCredentialCount, IsLicensed).Allowed;
 
     public bool CanAddFirewallAllowlistEntry(int currentCount) =>
-        // Pure quota check; no expiry transition or side effects here.
         _featureRestrictionService.GetRestriction(EvaluationFeature.FirewallAllowlist, currentCount, IsLicensed).Allowed;
 
     public string? GetRestrictionMessage(EvaluationFeature feature, int currentCount)
     {
-        // Restriction messages are derived from current quotas only; they do not mutate expiry state.
         var restriction = _featureRestrictionService.GetRestriction(feature, currentCount, IsLicensed);
         return restriction.Allowed ? null : _messageFormatter.FormatRestrictionMessage(restriction);
     }
@@ -257,48 +209,5 @@ internal class LicenseService : ILicenseService, IRequiresInitialization
         {
             _log?.Warn($"License load error: {ex.Message}");
         }
-    }
-
-    private void DeleteLicenseFile()
-    {
-        _store.Remove();
-    }
-
-    private void ApplyNagEligibilityLatch()
-    {
-        var session = _sessionProvider.GetSession();
-        if (session.Database.Settings.NagEligible)
-            return;
-        if (session.Database.Apps.Count == 0)
-            return;
-
-        var credentialCount = _credentialCounter.CountCredentialsExcludingCurrent(session.CredentialStore.Credentials);
-        if (credentialCount == 0)
-            return;
-
-        session.Database.Settings.NagEligible = true;
-        try
-        {
-            _sessionSaver.SaveConfig();
-        }
-        catch (Exception ex)
-        {
-            _log?.Warn($"LicenseService: failed to persist NagEligible=true: {ex.Message}");
-        }
-    }
-
-    private DateTime? ReadLastNagDate()
-    {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(_registryKeyPath);
-            if (key?.GetValue(PathConstants.LastNagShownValueName) is string value && DateTime.TryParse(value, out var date))
-                return date;
-        }
-        catch
-        {
-        }
-
-        return null;
     }
 }

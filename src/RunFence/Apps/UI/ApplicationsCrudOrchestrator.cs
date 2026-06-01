@@ -64,38 +64,46 @@ public class ApplicationsCrudOrchestrator(
 
         var dlg = dialogFactory();
         var commandContext = new AppEditDialogCommandContext(
-            ApplyAsync: async () =>
+            ApplyAsync: async applyContext =>
             {
                 if (!licenseService.CanAddApp(_context.Database.Apps.Count))
                     throw new InvalidOperationException(
                         licenseService.GetRestrictionMessage(EvaluationFeature.Apps, _context.Database.Apps.Count)
                         ?? "Cannot add application.");
 
-                var permissionDecision = permissionPrompter.PromptForGrant(dlg, dlg.Result);
+                var result = applyContext.Result;
+                var permissionDecision = permissionPrompter.PromptForGrant(dlg, result);
                 if (permissionDecision.Result == AppEntryPermissionPromptResult.Canceled)
                     throw new OperationCanceledException();
 
-                if (_context.Database.Apps.Any(a => string.Equals(a.Id, dlg.Result.Id, StringComparison.OrdinalIgnoreCase)))
-                    throw new InvalidOperationException($"Application ID '{dlg.Result.Id}' already exists.");
+                if (_context.Database.Apps.Any(a => string.Equals(a.Id, result.Id, StringComparison.OrdinalIgnoreCase)))
+                    throw new InvalidOperationException($"Application ID '{result.Id}' already exists.");
 
                 var appWasAdded = false;
-                if (_context.Database.Apps.All(a => !ReferenceEquals(a, dlg.Result)))
+                if (_context.Database.Apps.All(a => !ReferenceEquals(a, result)))
                 {
-                    _context.Database.Apps.Add(dlg.Result);
+                    _context.Database.Apps.Add(result);
                     appWasAdded = true;
                 }
 
-                var shortcutCache = await CreateShortcutCacheIfNeeded(dlg.Result);
+                var shortcutCache = await CreateShortcutCacheIfNeeded(result);
                 var operationResult = operationService.ApplyChanges(
                     _context,
-                    dlg.Result,
+                    result,
                     shortcutCache,
-                    selectAppId: dlg.Result.Id,
-                    targetedSave: true);
+                    new AppEntryChangeSet(
+                        RequiresAclReapply: true,
+                        RequiresBesideTargetRefresh: true,
+                        RequiresHandlerSync: false,
+                        RequiresManagedShortcutRefresh: true,
+                        RequiresIconRefresh: true,
+                        ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly),
+                    selectAppId: result.Id,
+                    fallbackIndex: -1);
                 if (!HandleOperationResult(operationResult, "save"))
                 {
                     if (appWasAdded)
-                        RemoveAppById(dlg.Result.Id);
+                        RemoveAppById(result.Id);
                     throw new InvalidOperationException(operationResult.ErrorMessage ?? "Failed to save application.");
                 }
 
@@ -112,7 +120,7 @@ public class ApplicationsCrudOrchestrator(
                     }
                 }
                 if (dlg.LaunchNow)
-                    _context.LaunchApp(dlg.Result, null);
+                    _context.LaunchApp(result, null);
             });
         dlg.Initialize(
             null,
@@ -154,22 +162,26 @@ public class ApplicationsCrudOrchestrator(
     {
         var dlg = dialogFactory();
         var commandContext = new AppEditDialogCommandContext(
-            ApplyAsync: async () =>
+            ApplyAsync: async applyContext =>
             {
-                var index = _context.Database.Apps.FindIndex(a => a.Id == app.Id);
+                var previousApp = applyContext.PreviousApp
+                    ?? throw new InvalidOperationException("The application no longer exists.");
+                var result = applyContext.Result;
+                var changeSet = applyContext.ChangeSet;
+                var index = _context.Database.Apps.FindIndex(a => a.Id == previousApp.Id);
                 if (index < 0)
                     throw new InvalidOperationException("The application no longer exists.");
 
-                var previousApp = app.Clone();
-                var permissionDecision = permissionPrompter.PromptForGrant(dlg, dlg.Result);
+                var permissionDecision = permissionPrompter.PromptForGrant(dlg, result);
                 if (permissionDecision.Result == AppEntryPermissionPromptResult.Canceled)
                     throw new OperationCanceledException();
 
-                var shortcutCache = await CreateShortcutCacheIfNeeded(app, dlg.Result);
+                var shortcutCache = await CreateShortcutCacheIfNeeded(previousApp, result);
                 var revertResult = operationService.RevertChanges(
                     _context,
-                    app,
+                    previousApp,
                     shortcutCache,
+                    changeSet,
                     ShortcutWarningPolicy.DemoteToWarning);
                 string? revertWarning = null;
                 if (revertResult.Status == ApplicationsCrudOperationStatus.EnforcementFailed)
@@ -181,12 +193,13 @@ public class ApplicationsCrudOrchestrator(
                     revertWarning = revertResult.WarningMessage;
                 }
 
-                _context.Database.Apps[index] = dlg.Result;
+                _context.Database.Apps[index] = result;
                 var applyResult = operationService.ApplyChanges(
                     _context,
-                    dlg.Result,
+                    result,
                     shortcutCache,
-                    selectAppId: dlg.Result.Id);
+                    changeSet,
+                    selectAppId: result.Id);
                 if (applyResult.Status == ApplicationsCrudOperationStatus.SaveFailed)
                 {
                     var appsAfterRollback = new List<AppEntry>(_context.Database.Apps);
@@ -194,7 +207,8 @@ public class ApplicationsCrudOrchestrator(
                     var restoreResult = operationService.RestoreEnforcementAfterFailedEdit(
                         previousApp,
                         appsAfterRollback,
-                        shortcutCache);
+                        shortcutCache,
+                        changeSet);
                     // Restore the persisted database entry only after the system state has been rolled back.
                     // The dialog remains open with the user's current edits intact so they can retry
                     // without losing the in-memory UI state.
@@ -233,7 +247,7 @@ public class ApplicationsCrudOrchestrator(
                 }
 
                 if (dlg.LaunchNow)
-                    _context.LaunchApp(dlg.Result, null);
+                    _context.LaunchApp(result, null);
             },
             RemoveAsync: async () =>
             {
@@ -242,6 +256,7 @@ public class ApplicationsCrudOrchestrator(
                     _context,
                     app,
                     shortcutCache,
+                    CreateFullEnforcementChangeSet(),
                     ShortcutWarningPolicy.TreatAsFailure);
                 if (revertResult.Status == ApplicationsCrudOperationStatus.EnforcementFailed)
                 {
@@ -255,6 +270,7 @@ public class ApplicationsCrudOrchestrator(
                 var saveResult = operationService.SaveAfterMutation(
                     _context,
                     app,
+                    AppEditConfigSaveScope.CurrentAppConfigOnly,
                     fallbackIndex: selectedIndex);
                 if (saveResult.Status == ApplicationsCrudOperationStatus.SaveFailed)
                     _context.RefreshAfterInMemoryMutation(fallbackIndex: selectedIndex);
@@ -299,6 +315,7 @@ public class ApplicationsCrudOrchestrator(
                 _context,
                 app,
                 shortcutCache,
+                CreateFullEnforcementChangeSet(),
                 ShortcutWarningPolicy.TreatAsFailure);
             if (revertResult.Status == ApplicationsCrudOperationStatus.EnforcementFailed)
             {
@@ -312,6 +329,7 @@ public class ApplicationsCrudOrchestrator(
             var saveResult = operationService.SaveAfterMutation(
                 _context,
                 app,
+                AppEditConfigSaveScope.CurrentAppConfigOnly,
                 fallbackIndex: selectedIndex);
             if (saveResult.Status == ApplicationsCrudOperationStatus.SaveFailed)
                 _context.RefreshAfterInMemoryMutation(fallbackIndex: selectedIndex);
@@ -398,4 +416,13 @@ public class ApplicationsCrudOrchestrator(
             _scanTask = null;
         }
     }
+
+    private static AppEntryChangeSet CreateFullEnforcementChangeSet()
+        => new(
+            RequiresAclReapply: true,
+            RequiresBesideTargetRefresh: true,
+            RequiresHandlerSync: false,
+            RequiresManagedShortcutRefresh: true,
+            RequiresIconRefresh: true,
+            ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly);
 }

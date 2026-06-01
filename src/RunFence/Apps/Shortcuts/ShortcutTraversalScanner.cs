@@ -3,7 +3,7 @@ using RunFence.Core;
 
 namespace RunFence.Apps.Shortcuts;
 
-internal sealed class ShortcutTraversalScanner(IShortcutComHelper shortcutHelper) : IShortcutTraversalScanner
+internal sealed class ShortcutTraversalScanner(IShortcutGateway shortcutGateway) : IShortcutTraversalScanner
 {
     public IEnumerable<ShortcutTraversalEntry> ScanShortcuts(HashSet<string>? managedSids)
     {
@@ -26,10 +26,10 @@ internal sealed class ShortcutTraversalScanner(IShortcutComHelper shortcutHelper
 
             foreach (var lnk in files)
             {
-                ShortcutDefinition info;
+                ShortcutData info;
                 try
                 {
-                    info = shortcutHelper.GetShortcutDefinition(lnk);
+                    info = shortcutGateway.Read(lnk);
                 }
                 catch
                 {

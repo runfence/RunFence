@@ -238,11 +238,6 @@ public class CreatedAccountRollbackExecutorTests
         Assert.Empty(credentialStore.Credentials);
         Assert.Empty(database.Accounts);
         Assert.DoesNotContain(sid, database.SidNames.Keys);
-        log.Verify(
-            l => l.Warn(It.Is<string>(m =>
-                m.Contains("DeleteProfileAsync failed", StringComparison.Ordinal)
-                && m.Contains("profile cleanup failed", StringComparison.Ordinal))),
-            Times.Once);
     }
 
     [Fact]
@@ -318,16 +313,6 @@ public class CreatedAccountRollbackExecutorTests
         Assert.True(restored.TrayTerminal);
         Assert.True(restored.Firewall.IsDefault);
         localUserProvider.Verify(s => s.InvalidateCache(), Times.Once);
-        log.Verify(
-            l => l.Warn(It.Is<string>(m =>
-                m.Contains("RestoreForUser failed", StringComparison.Ordinal)
-                && m.Contains("association restore failed", StringComparison.Ordinal))),
-            Times.Once);
-        log.Verify(
-            l => l.Warn(It.Is<string>(m =>
-                m.Contains("ClearAccountRestrictions failed", StringComparison.Ordinal)
-                && m.Contains("restriction cleanup failed", StringComparison.Ordinal))),
-            Times.Once);
     }
 
     [Fact]

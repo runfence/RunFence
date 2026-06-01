@@ -42,7 +42,7 @@ public class GrantFileSystemOperations(
         {
             dbAccessor.Write(db =>
             {
-                var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                var entry = GrantEntryLookup.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
                 if (entry != null)
                     entry.PreviousSaclLabel = preparedEntry.PreviousSaclLabel;
             });
@@ -67,7 +67,7 @@ public class GrantFileSystemOperations(
         {
             dbAccessor.Read(db =>
             {
-                var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                var entry = GrantEntryLookup.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
                 hadWrite = entry?.SavedRights?.Write == true;
                 previousSaclLabel = entry?.PreviousSaclLabel;
             });
@@ -107,7 +107,7 @@ public class GrantFileSystemOperations(
         {
             dbAccessor.Write(db =>
             {
-                var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
+                var entry = GrantEntryLookup.FindGrantEntryInDb(db, sid, normalized, isDeny: false);
                 if (entry != null)
                     entry.PreviousSaclLabel = preparedEntry.PreviousSaclLabel;
             });
@@ -192,7 +192,7 @@ public class GrantFileSystemOperations(
         string? oldPreviousSaclLabel = null;
         dbAccessor.Read(db =>
         {
-            var entry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalizedPath, isDeny: false);
+            var entry = GrantEntryLookup.FindGrantEntryInDb(db, sid, normalizedPath, isDeny: false);
             hadWrite = entry?.SavedRights?.Write == true || entry?.PreviousSaclLabel != null;
             oldPreviousSaclLabel = entry?.PreviousSaclLabel;
         });

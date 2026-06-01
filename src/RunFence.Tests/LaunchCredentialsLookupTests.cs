@@ -31,7 +31,7 @@ public class LaunchCredentialsLookupTests : IDisposable
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_protectedPinKey));
+        }.WithClonedPinDerivedKey(_protectedPinKey));
 
         var credentialDecryption = new CredentialDecryptionService(
             new ByteArrayCredentialEncryptionSpanAdapter(_encryptionService.Object),
@@ -192,7 +192,7 @@ public class LaunchCredentialsLookupTests : IDisposable
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_protectedPinKey);
+        }.WithClonedPinDerivedKey(_protectedPinKey);
         var sessionThreadId = 0;
         sessionProvider.Setup(s => s.GetSession())
             .Callback(() => sessionThreadId = Environment.CurrentManagedThreadId)
@@ -258,7 +258,7 @@ public class LaunchCredentialsLookupTests : IDisposable
 {
                 Database = _database,
                 CredentialStore = _credentialStore,
-            }.WithOwnedPinDerivedKey(_protectedPinKey)),
+            }.WithClonedPinDerivedKey(_protectedPinKey)),
             new CredentialDecryptionService(
                 new ByteArrayCredentialEncryptionSpanAdapter(_encryptionService.Object),
                 _sidResolver.Object,
@@ -299,7 +299,7 @@ public class LaunchCredentialsLookupTests : IDisposable
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_protectedPinKey);
+        }.WithClonedPinDerivedKey(_protectedPinKey);
 
         _encryptionService.Setup(e => e.Decrypt(
                 encryptedBytes,

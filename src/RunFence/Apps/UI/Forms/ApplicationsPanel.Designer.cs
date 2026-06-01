@@ -22,6 +22,7 @@ partial class ApplicationsPanel
     private ToolStripMenuItem _ctxEdit;
     private ToolStripMenuItem _ctxRemove;
     private ToolStripMenuItem _ctxLaunch;
+    private ToolStripMenuItem _ctxRunAs;
     private ToolStripMenuItem _ctxCopyLauncherPath;
     private ToolStripMenuItem _ctxSaveShortcut;
     private ToolStripMenuItem _ctxCopyPath;
@@ -78,6 +79,7 @@ partial class ApplicationsPanel
         _ctxEdit = new ToolStripMenuItem();
         _ctxRemove = new ToolStripMenuItem();
         _ctxLaunch = new ToolStripMenuItem();
+        _ctxRunAs = new ToolStripMenuItem();
         _ctxCopyLauncherPath = new ToolStripMenuItem();
         _ctxSaveShortcut = new ToolStripMenuItem();
         _ctxCopyPath = new ToolStripMenuItem();
@@ -208,6 +210,9 @@ partial class ApplicationsPanel
         _ctxLaunch.Text = "Launch";
         _ctxLaunch.Click += OnLaunchClick;
 
+        _ctxRunAs.Text = "RunAs...";
+        _ctxRunAs.Click += OnContextMenuRunAsClick;
+
         _ctxOpenFolder.Text = "Open Folder";
         _ctxOpenFolder.Click += OnOpenFolderClick;
 
@@ -233,7 +238,7 @@ partial class ApplicationsPanel
         _contextMenu.Items.AddRange(new ToolStripItem[]
         {
             _ctxEdit, _ctxGoToAccount, _ctxSep1, _ctxRemove,
-            _ctxSep2, _ctxLaunch, _ctxOpenFolder,
+            _ctxSep2, _ctxLaunch, _ctxRunAs, _ctxOpenFolder,
             _ctxOpenInFolderBrowser,
             _ctxSep3, _ctxCopyLauncherPath, _ctxSaveShortcut, _ctxCopyPath, _ctxOpenDir,
             _ctxSep4, _ctxSetDefaultBrowser

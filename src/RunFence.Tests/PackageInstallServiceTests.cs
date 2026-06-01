@@ -26,14 +26,14 @@ public class PackageInstallServiceTests
         var package = new InstallablePackage("TestPkg", "Write-Host 'test'");
         var identity = new AccountLaunchIdentity(TestSid);
 
-        var firstInstallTask = Task.Run(() => service.InstallPackages([package], identity));
+        var firstInstallTask = Task.Run(() => service.InstallPackagesAsync([package], identity, CancellationToken.None));
         await launchStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         var waitTask = service.WaitForInstallCompletionAsync(TestSid, TimeSpan.FromSeconds(10));
         Assert.False(waitTask.IsCompleted);
 
         var duplicateInstall = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            Task.Run(() => service.InstallPackages([package], identity)));
+            Task.Run(() => service.InstallPackagesAsync([package], identity, CancellationToken.None)));
         Assert.Contains("already running", duplicateInstall.Message, StringComparison.Ordinal);
 
         process.SetExited(0);
@@ -58,11 +58,12 @@ public class PackageInstallServiceTests
         var package = new InstallablePackage("TestPkg", "Write-Host 'test'");
         var identity = new AccountLaunchIdentity(TestSid);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => service.InstallPackages([package], identity));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.InstallPackagesAsync([package], identity, CancellationToken.None));
         Assert.Equal("launch failed", ex.Message);
         Assert.Equal(new[] { scriptStore.CreatedPaths[0] }, scriptStore.DeletedPaths);
 
-        service.InstallPackages([package], identity);
+        await service.InstallPackagesAsync([package], identity, CancellationToken.None);
         await service.WaitForInstallCompletionAsync(TestSid, TimeSpan.FromSeconds(10));
 
         Assert.Equal(2, scriptStore.CreatedPaths.Count);
@@ -80,7 +81,7 @@ public class PackageInstallServiceTests
         var package = new InstallablePackage("TestPkg", "Write-Host 'test'");
         var identity = new AccountLaunchIdentity(TestSid);
 
-        service.InstallPackages([package], identity);
+        await service.InstallPackagesAsync([package], identity, CancellationToken.None);
 
         var waitTask = service.WaitForInstallCompletionAsync(TestSid, TimeSpan.FromSeconds(10));
         process.SetExited(23);
@@ -88,19 +89,6 @@ public class PackageInstallServiceTests
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => waitTask);
         Assert.Contains("exit code 23", ex.Message, StringComparison.Ordinal);
         Assert.Equal(scriptStore.CreatedPaths, scriptStore.DeletedPaths);
-    }
-
-    [Fact]
-    public void InstallPackages_ReturnsMaintenanceWarningsFromLauncher()
-    {
-        var scriptStore = new FakePackageInstallScriptStore();
-        var launcher = new SequencePackageInstallLauncher(
-            _ => new PackageInstallLaunchResult(new FakeInstallProcess(hasExited: true, exitCode: 0), ["warning-a", "warning-b"]));
-        var service = CreateService(launcher, scriptStore);
-
-        var warnings = service.InstallPackages([new InstallablePackage("TestPkg", "Write-Host 'test'")], new AccountLaunchIdentity(TestSid));
-
-        Assert.Equal(["warning-a", "warning-b"], warnings);
     }
 
     [Fact]
@@ -114,7 +102,7 @@ public class PackageInstallServiceTests
         var package = new InstallablePackage("Winget", "winget install Microsoft.Winget");
         var identity = new AccountLaunchIdentity(TestSid);
 
-        var warnings = service.InstallPackages([package], identity);
+        var warnings = await service.InstallPackagesAsync([package], identity, CancellationToken.None);
         await service.WaitForInstallCompletionAsync(TestSid, TimeSpan.FromSeconds(10));
 
         Assert.Empty(warnings);
@@ -143,7 +131,7 @@ public class PackageInstallServiceTests
         var unrelated = new InstallablePackage("other", "winget install Example.Other");
         var identity = new AccountLaunchIdentity(TestSid);
 
-        service.InstallPackages([requested], identity);
+        await service.InstallPackagesAsync([requested], identity, CancellationToken.None);
         await service.WaitForInstallCompletionAsync(TestSid, TimeSpan.FromSeconds(10));
 
         var command = Assert.Single(scriptStore.CreatedScripts).Command;
@@ -165,24 +153,116 @@ public class PackageInstallServiceTests
     }
 
     [Fact]
-    public void CleanupStaleScripts_DelegatesToScriptStore()
+    public async Task InstallPackages_WindowsTerminalRequest_EnsuresSharedDeploymentBeforeLaunching()
     {
         var scriptStore = new FakePackageInstallScriptStore();
-        var service = CreateService(new SequencePackageInstallLauncher(), scriptStore);
+        var process = new FakeInstallProcess(hasExited: true, exitCode: 0);
+        var launcher = new SequencePackageInstallLauncher(
+            _ => new PackageInstallLaunchResult(process, []));
+        var deploymentService = new Mock<IWindowsTerminalDeploymentService>();
+        deploymentService
+            .Setup(x => x.EnsureSharedDeploymentReadyAsync(It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var service = new PackageInstallService(
+            launcher,
+            scriptStore,
+            new AccountToolResolver(Mock.Of<IProfilePathResolver>()),
+            Mock.Of<IWindowsTerminalAccountStateService>(),
+            deploymentService.Object);
 
-        service.CleanupStaleScripts();
+        await service.InstallPackagesAsync([KnownPackages.WindowsTerminal], new AccountLaunchIdentity(TestSid), CancellationToken.None);
 
-        Assert.Equal(1, scriptStore.CleanupCalls);
+        deploymentService.Verify(x => x.EnsureSharedDeploymentReadyAsync(CancellationToken.None), Times.Once);
+    }
+
+    [Fact]
+    public async Task InstallPackages_WindowsTerminalDeploymentInProgress_RejectsSameSidRetryBeforeScriptCreation()
+    {
+        var deploymentStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDeployment = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var scriptStore = new FakePackageInstallScriptStore();
+        var process = new FakeInstallProcess(hasExited: true, exitCode: 0);
+        var launcher = new SequencePackageInstallLauncher(
+            _ => new PackageInstallLaunchResult(process, []));
+        var deploymentCalls = 0;
+        var deploymentService = new Mock<IWindowsTerminalDeploymentService>();
+        deploymentService
+            .Setup(x => x.EnsureSharedDeploymentReadyAsync(It.IsAny<CancellationToken>()))
+            .Callback(() =>
+            {
+                if (System.Threading.Interlocked.Increment(ref deploymentCalls) != 1)
+                    throw new InvalidOperationException("Second deployment should not start.");
+
+                deploymentStarted.TrySetResult();
+                releaseDeployment.Task.GetAwaiter().GetResult();
+            })
+            .Returns(Task.CompletedTask);
+        var service = CreateService(launcher, scriptStore, deploymentService.Object);
+        var identity = new AccountLaunchIdentity(TestSid);
+
+        var firstInstallTask = Task.Run(() => service.InstallPackagesAsync([KnownPackages.WindowsTerminal], identity, CancellationToken.None));
+        await deploymentStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var duplicateInstall = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Task.Run(() => service.InstallPackagesAsync([KnownPackages.WindowsTerminal], identity, CancellationToken.None)));
+
+        Assert.Contains("already running", duplicateInstall.Message, StringComparison.Ordinal);
+        Assert.Empty(scriptStore.CreatedPaths);
+
+        releaseDeployment.TrySetResult();
+        await firstInstallTask.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.WaitForInstallCompletionAsync(TestSid, TimeSpan.FromSeconds(10));
+
+        Assert.Single(scriptStore.CreatedPaths);
+        Assert.Equal(scriptStore.CreatedPaths, scriptStore.DeletedPaths);
+    }
+
+    [Fact]
+    public async Task InstallPackages_WindowsTerminalDeploymentThrows_RemovesReservationForRetry()
+    {
+        var scriptStore = new FakePackageInstallScriptStore();
+        var process = new FakeInstallProcess(hasExited: true, exitCode: 0);
+        var launcher = new SequencePackageInstallLauncher(
+            _ => new PackageInstallLaunchResult(process, []));
+        var deploymentCalls = 0;
+        var deploymentService = new Mock<IWindowsTerminalDeploymentService>();
+        deploymentService
+            .Setup(x => x.EnsureSharedDeploymentReadyAsync(It.IsAny<CancellationToken>()))
+            .Callback(() =>
+            {
+                deploymentCalls++;
+                if (deploymentCalls == 1)
+                    throw new InvalidOperationException("deployment failed");
+            })
+            .Returns(Task.CompletedTask);
+        var service = CreateService(launcher, scriptStore, deploymentService.Object);
+        var identity = new AccountLaunchIdentity(TestSid);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.InstallPackagesAsync([KnownPackages.WindowsTerminal], identity, CancellationToken.None));
+
+        Assert.Equal("deployment failed", exception.Message);
+        Assert.Empty(scriptStore.CreatedPaths);
+
+        await service.InstallPackagesAsync([KnownPackages.WindowsTerminal], identity, CancellationToken.None);
+        await service.WaitForInstallCompletionAsync(TestSid, TimeSpan.FromSeconds(10));
+
+        Assert.Equal(2, deploymentCalls);
+        Assert.Single(scriptStore.CreatedPaths);
+        Assert.Equal(scriptStore.CreatedPaths, scriptStore.DeletedPaths);
     }
 
     private static PackageInstallService CreateService(
         IPackageInstallLauncher launcher,
-        IPackageInstallScriptStore scriptStore)
+        IPackageInstallScriptStore scriptStore,
+        IWindowsTerminalDeploymentService? windowsTerminalDeploymentService = null)
     {
         return new PackageInstallService(
             launcher,
             scriptStore,
-            new AccountToolResolver(Mock.Of<IProfilePathResolver>()));
+            new AccountToolResolver(Mock.Of<IProfilePathResolver>()),
+            Mock.Of<IWindowsTerminalAccountStateService>(),
+            windowsTerminalDeploymentService ?? Mock.Of<IWindowsTerminalDeploymentService>());
     }
 
     private sealed class FakePackageInstallScriptStore : IPackageInstallScriptStore

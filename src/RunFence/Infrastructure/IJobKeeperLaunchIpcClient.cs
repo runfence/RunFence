@@ -4,5 +4,5 @@ namespace RunFence.Infrastructure;
 
 public interface IJobKeeperLaunchIpcClient
 {
-    Task<int> SendLaunchRequestAsync(string sid, bool isLow, JobKeeperLaunchRequest request, TimeSpan timeout, CancellationToken cancellationToken);
+    Task<JobKeeperLaunchedProcess?> SendLaunchRequestAsync(string sid, bool isLow, JobKeeperLaunchRequest request, TimeSpan timeout, CancellationToken cancellationToken);
 }

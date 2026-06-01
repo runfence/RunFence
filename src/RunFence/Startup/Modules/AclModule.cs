@@ -28,15 +28,58 @@ public class AclModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<LocalGroupMembershipService>()
-            .As<ILocalGroupMembershipService>()
-            .AsSelf()
-            .SingleInstance();
-
         builder.RegisterType<ContainerLookupHelper>().AsSelf().SingleInstance();
+        builder.RegisterType<AclAccessorNative>().As<IAclAccessorNative>().SingleInstance();
         builder.RegisterType<BackupPrivilegeSecurityNative>().As<IBackupPrivilegeSecurityNative>().SingleInstance();
         builder.RegisterType<BackupPrivilegeSecurityDescriptorAccessor>().AsSelf().SingleInstance();
-        builder.RegisterType<AclAccessor>().As<IAclAccessor>().SingleInstance();
+        builder.RegisterType<AclAccessor>()
+            .As<IPathSecurityDescriptorAccessor>()
+            .As<IExplicitAceAccessor>()
+            .SingleInstance();
+        builder.RegisterType<HandleSecurityDescriptorAccessor>()
+            .As<IHandleSecurityDescriptorAccessor>()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataPathGuard>()
+            .As<IProgramDataPathGuard>()
+            .As<IProgramDataPathPolicyService>()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataOwnerPolicyService>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataOwnerRepairService>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataAclProfilePolicy>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataDirectoryAclBuilder>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataPathPolicyCatalog>()
+            .As<IProgramDataKnownPathResolver>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataSecurityVerifier>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataSecurityApplier>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataExplicitAclApplier>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataObjectProvisioner>()
+            .As<IProgramDataObjectProvisioner>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataDirectoryProvisioner>()
+            .As<IProgramDataDirectoryProvisioningService>()
+            .AsSelf()
+            .SingleInstance();
+        builder.RegisterType<ProgramDataManagedObjectRepairer>()
+            .As<IProgramDataManagedObjectRepairService>()
+            .AsSelf()
+            .SingleInstance();
         builder.RegisterType<FileSystemPathInfo>().As<IFileSystemPathInfo>().SingleInstance();
         builder.RegisterType<AclPathIconProvider>().As<IAclPathIconProvider>().SingleInstance();
         builder.RegisterType<TraverseAcl>().As<ITraverseAcl>().SingleInstance();
@@ -45,10 +88,18 @@ public class AclModule : Module
         builder.RegisterType<FileSystemAclTraverser>().As<IFileSystemAclTraverser>().SingleInstance();
         builder.RegisterType<LocalSamSidResolver>().As<ILocalSamSidResolver>().SingleInstance();
         builder.RegisterType<CachingLocalUserProvider>().AsSelf().As<ILocalUserProvider>().SingleInstance();
+        builder.RegisterType<AppEntryAclTargetResolver>()
+            .As<IAppEntryAclTargetResolver>()
+            .SingleInstance();
+        builder.RegisterType<AppEntryAllowAclRuleProvider>().AsSelf().SingleInstance();
+        builder.RegisterType<AppEntryManagedAclScanFilter>().AsSelf().SingleInstance();
         builder.RegisterType<AclDenyModeService>().As<IAclDenyModeService>().AsSelf().SingleInstance();
         builder.RegisterType<AclAllowModeService>().As<IAclAllowModeService>().AsSelf().SingleInstance();
         builder.RegisterType<AclService>().As<IAclService>().SingleInstance();
         builder.RegisterType<DeterministicAclAccessEvaluator>().As<IAclAccessEvaluator>().SingleInstance();
+        builder.RegisterType<AclGroupSidResolver>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantableAncestorPolicy>().AsSelf().SingleInstance();
+        builder.RegisterType<AdminRestrictionAclWriter>().AsSelf().SingleInstance();
         builder.RegisterType<AclPermissionService>().As<IAclPermissionService>().SingleInstance();
         builder.RegisterType<DefaultInteractiveUserResolver>().As<IInteractiveUserResolver>().SingleInstance();
         builder.RegisterType<AncestorTraverseGranter>().AsSelf().SingleInstance();
@@ -61,12 +112,16 @@ public class AclModule : Module
             .As<IGrantAceService>()
             .As<IGrantInspectionService>()
             .SingleInstance();
-        builder.RegisterType<FileOwnerService>().As<IFileOwnerService>().SingleInstance();
+        builder.RegisterType<FileOwnerService>()
+            .As<IFileOwnerService>()
+            .SingleInstance();
         builder.RegisterType<SpecificContainerAceConflictDetector>()
             .As<ISpecificContainerAceConflictDetector>()
             .SingleInstance();
         builder.RegisterType<MandatoryLabelService>().As<IMandatoryLabelService>().SingleInstance();
-        builder.RegisterType<GrantCoreOperations>().As<IGrantCoreOperations>().SingleInstance();
+        builder.RegisterType<GrantCoreOperations>()
+            .As<IGrantCoreOperations>()
+            .SingleInstance();
         builder.RegisterType<TraverseGrantOwnerResolver>()
             .As<ITraverseGrantOwnerResolver>()
             .SingleInstance();
@@ -82,6 +137,18 @@ public class AclModule : Module
         builder.RegisterType<LowIntegrityGrantSync>().AsSelf().SingleInstance();
         builder.RegisterType<GrantFileSystemOperations>().AsSelf().SingleInstance();
         builder.RegisterType<GrantAccessEnsurer>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantMutationOrderResolver>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantRuntimeSnapshotService>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantIntentMutationStateRestorer>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantAclRollbackService>().AsSelf().SingleInstance();
+        builder.RegisterType<AdditiveGrantCompensationService>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantIntentStoreMutationService>().AsSelf().SingleInstance();
+        builder.RegisterType<GrantRuntimeMutationService>().AsSelf().SingleInstance();
+        builder.RegisterType<TraverseIntentStoreMutationService>().AsSelf().SingleInstance();
+        builder.RegisterType<TraverseRestoreStateRestorer>().AsSelf().SingleInstance();
+        builder.RegisterType<TraverseRestoreAclRollbackService>().AsSelf().SingleInstance();
+        builder.RegisterType<PersistedGrantMutationWorkflow>().AsSelf().SingleInstance();
+        builder.RegisterType<PersistedTraverseMutationWorkflow>().AsSelf().SingleInstance();
         builder.RegisterType<TraverseRestoreWorkflow>().AsSelf().SingleInstance();
         builder.Register(ctx =>
             {
@@ -111,10 +178,17 @@ public class AclModule : Module
             .AsSelf()
             .As<IGrantSyncService>()
             .SingleInstance();
-        builder.RegisterType<PathGrantService>()
-            .As<IPathGrantService>()
+        builder.RegisterType<GrantMutatorService>()
             .As<IGrantMutatorService>()
+            .SingleInstance();
+        builder.RegisterType<TraverseService>()
             .As<ITraverseService>()
+            .SingleInstance();
+        builder.RegisterType<GrantIntentSnapshotService>()
+            .As<IGrantIntentSnapshotService>()
+            .SingleInstance();
+        builder.RegisterType<GrantAccountCleanupService>()
+            .As<IGrantAccountCleanupService>()
             .SingleInstance();
         builder.RegisterType<AclManagerScanService>()
             .As<IAclManagerScanService>()
@@ -125,8 +199,10 @@ public class AclModule : Module
         // set, with shared instances within the same dialog's owned lifetime scope.
         builder.RegisterType<TraverseEntryResolver>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<TraverseAutoManager>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclManagerScanCancellationController>().AsSelf().InstancePerDependency();
         builder.RegisterType<AclManagerGrantRowRenderer>().AsSelf().InstancePerDependency();
         builder.RegisterType<AclManagerPendingStateHelper>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclManagerSectionHeaderFactory>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerGrantsHelper>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerTraverseOperations>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerTraverseRowBuilder>().AsSelf().InstancePerOwned<AclManagerDialog>();
@@ -134,10 +210,17 @@ public class AclModule : Module
         builder.RegisterType<AclManagerDragDropHandler>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerActionOrchestrator>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclApplyPlanBuilder>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclApplyPhaseCatalog>().AsSelf().SingleInstance();
+        builder.RegisterType<AclApplySelectedStoreResolver>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclApplyPhaseExecutor>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclApplyPostProcessingPolicy>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclApplyExecutor>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclApplyPostProcessor>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerApplyOrchestrator>().AsSelf().InstancePerOwned<AclManagerDialog>();
-        builder.RegisterType<AclImportProcessor>().AsSelf().InstancePerOwned<AclManagerDialog>();
+        builder.RegisterType<AclImportProcessor>()
+            .AsSelf()
+            .As<IAclImportProcessor>()
+            .InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerExportImport>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerPathActionHelper>().AsSelf().InstancePerOwned<AclManagerDialog>();
         builder.RegisterType<AclManagerSelectionHandler>().AsSelf().InstancePerOwned<AclManagerDialog>();

@@ -1,6 +1,7 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Account;
 using RunFence.RunAs.UI.Forms;
 
 namespace RunFence.UI.Forms;
@@ -11,10 +12,10 @@ namespace RunFence.UI.Forms;
 /// </summary>
 public partial class IpcCallerSection : UserControl
 {
-    private readonly Func<IReadOnlyList<LocalUserAccount>> _getLocalUsers;
+    private readonly IWindowsAccountQueryService _accountQueryService;
     private readonly SidDisplayNameResolver _displayNameResolver;
     private readonly ISidEntryHelper _sidEntryHelper;
-    private Func<Form, DialogResult>? _showModalDialog;
+    private readonly IIpcCallerModalService _modalService;
     private IReadOnlyDictionary<string, string>? _sidNames;
     private Action<string, string>? _onSidNameLearned;
 
@@ -33,12 +34,16 @@ public partial class IpcCallerSection : UserControl
         _descLabel.Visible = true;
     }
 
-    public IpcCallerSection(Func<IReadOnlyList<LocalUserAccount>> getLocalUsers, ISidEntryHelper sidEntryHelper,
-        SidDisplayNameResolver displayNameResolver)
+    public IpcCallerSection(
+        IWindowsAccountQueryService accountQueryService,
+        ISidEntryHelper sidEntryHelper,
+        SidDisplayNameResolver displayNameResolver,
+        IIpcCallerModalService modalService)
     {
-        _getLocalUsers = getLocalUsers;
+        _accountQueryService = accountQueryService;
         _sidEntryHelper = sidEntryHelper;
         _displayNameResolver = displayNameResolver;
+        _modalService = modalService;
         InitializeComponent();
         _addButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22));
         _removeButton.Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33));
@@ -49,15 +54,6 @@ public partial class IpcCallerSection : UserControl
     {
         _sidNames = sidNames;
         _onSidNameLearned = onSidNameLearned;
-    }
-
-    /// <summary>
-    /// Sets a callback for showing modal dialogs with BeginModal/EndModal tracking.
-    /// If not set, plain ShowDialog() is used.
-    /// </summary>
-    public void SetShowModalDialog(Func<Form, DialogResult> showModalDialog)
-    {
-        _showModalDialog = showModalDialog;
     }
 
     public void SetCallers(List<string>? callers)
@@ -114,21 +110,20 @@ public partial class IpcCallerSection : UserControl
 
     private void OnAddClick(object? sender, EventArgs e)
     {
-        using var dlg = new CallerIdentityDialog(_getLocalUsers(), _sidEntryHelper);
-        var result = _showModalDialog?.Invoke(dlg) ?? dlg.ShowDialog();
-        if (result == DialogResult.OK && dlg.Result != null)
+        var owner = GetDialogOwner();
+        var result = _modalService.PromptForCallerIdentity(owner, _accountQueryService.GetLocalUsers(), _sidEntryHelper);
+        if (result.Accepted && result.SelectedSid != null)
         {
-            if (_listBox.Items.Cast<CallerDisplayItem>().Any(item => string.Equals(item.Sid, dlg.Result, StringComparison.OrdinalIgnoreCase)))
+            if (_listBox.Items.Cast<CallerDisplayItem>().Any(item => string.Equals(item.Sid, result.SelectedSid, StringComparison.OrdinalIgnoreCase)))
             {
-                MessageBox.Show("This caller is already in the list.",
-                    "Duplicate", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _modalService.ShowDuplicateCallerWarning(owner);
                 return;
             }
 
-            if (dlg.ResolvedName != null)
-                _onSidNameLearned?.Invoke(dlg.Result, dlg.ResolvedName);
+            if (result.DisplayName != null)
+                _onSidNameLearned?.Invoke(result.SelectedSid, result.DisplayName);
 
-            _listBox.Items.Add(new CallerDisplayItem(dlg.Result, _sidNames, _displayNameResolver));
+            _listBox.Items.Add(new CallerDisplayItem(result.SelectedSid, _sidNames, _displayNameResolver));
             Changed?.Invoke();
         }
     }
@@ -139,6 +134,15 @@ public partial class IpcCallerSection : UserControl
             return;
         _listBox.Items.RemoveAt(_listBox.SelectedIndex);
         Changed?.Invoke();
+    }
+
+    private IWin32Window? GetDialogOwner()
+    {
+        var form = FindForm();
+        if (form != null)
+            return form;
+
+        return IsHandleCreated ? this : null;
     }
 
     private class CallerDisplayItem(

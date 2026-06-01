@@ -14,7 +14,7 @@ public class AdditionalConfigImportCoordinator(
 {
     public AdditionalConfigImportResult ImportAdditionalConfig(string importJsonPath, string configPath)
     {
-        var normalizedConfigPath = Path.GetFullPath(configPath);
+        var normalizedConfigPath = AppConfigPathHelper.NormalizePath(configPath);
         var loadedPaths = appConfigService.GetLoadedConfigPaths() ?? [];
         var wasLoaded = loadedPaths.Any(path =>
             string.Equals(path, normalizedConfigPath, StringComparison.OrdinalIgnoreCase));
@@ -58,7 +58,10 @@ public class AdditionalConfigImportCoordinator(
                 AdditionalConfigImportStatus.RollbackFailed,
                 normalizedConfigPath,
                 [],
-                [reloadError]);
+                [
+                    reloadError,
+                    $"Failed to reload/parse previous config: {reloadPrevious.ErrorMessage ?? "Unknown error"}"
+                ]);
         }
 
         return new AdditionalConfigImportResult(
@@ -83,13 +86,10 @@ public class AdditionalConfigImportCoordinator(
         var previousReloadError = reloadPrevious.ErrorMessage ?? "Unknown error";
         log.Warn(
             $"Additional config import rollback failed to reload previously loaded config at {normalizedConfigPath}: {previousReloadError}");
-        var errors = importResult.Errors.Count > 0
-            ? importResult.Errors.Concat([$"Failed to reload previous config: {previousReloadError}"]).ToList()
-            : [$"Failed to reload previous config: {previousReloadError}"];
         return new AdditionalConfigImportResult(
             AdditionalConfigImportStatus.RollbackFailed,
             normalizedConfigPath,
             [],
-            errors);
+            [.. importResult.Errors, $"Failed to reload/parse previous config: {previousReloadError}"]);
     }
 }

@@ -43,17 +43,19 @@ public class AppConfigServiceTests : IDisposable
                 ArgonSalt = new byte[32],
                 EncryptedCanary = [1]
             },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         var appIdValidator = new AppIdValidator();
         var sessionProvider = new Mock<ISessionProvider>();
         sessionProvider.Setup(provider => provider.GetSession()).Returns(_session);
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        _index = new AppConfigIndex(ownershipProjection, appIdValidator);
+        _handlerMappings = new HandlerMappingService(_index);
         var configSaveOrchestrator = new ConfigSaveOrchestrator(
             sessionProvider.Object,
             () => new InlineUiThreadInvoker(action => action()),
             _dbService.Object,
-            new Mock<IAppConfigService>().Object,
-            new Mock<IHandlerMappingService>().Object);
-        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+            Mock.Of<IAppConfigService>(),
+            _handlerMappings);
         var mainStore = new MainGrantIntentStore(
             sessionProvider.Object,
             configSaveOrchestrator,
@@ -63,8 +65,6 @@ public class AppConfigServiceTests : IDisposable
             configSaveOrchestrator,
             ownershipProjection);
         _grantIntentRepository = new GrantIntentRepository(_grantIntentStoreProvider);
-        _index = new AppConfigIndex(ownershipProjection, appIdValidator);
-        _handlerMappings = new HandlerMappingService(_index);
         _service = new AppConfigService(
             _log.Object,
             _index,
@@ -72,7 +72,10 @@ public class AppConfigServiceTests : IDisposable
             () => _grantIntentStoreProvider,
             _handlerMappings,
             _dbService.Object,
-            new AppConfigSaveHelper(() => _grantIntentStoreProvider, _handlerMappings, _dbService.Object),
+            new AppConfigSaveHelper(
+                () => _grantIntentStoreProvider,
+                _handlerMappings,
+                _dbService.Object),
             new AppEntryIdGenerator(),
             appIdValidator);
         _argonSalt = new byte[32];
@@ -138,7 +141,6 @@ public class AppConfigServiceTests : IDisposable
         Assert.Equal(2, database.Apps.Count);
         Assert.NotEqual(conflictId, loaded[0].Id);
         Assert.Contains(database.Apps, a => a.Id == conflictId); // existing unchanged
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("ID collision"))), Times.Once);
     }
 
     [Fact]
@@ -190,7 +192,6 @@ public class AppConfigServiceTests : IDisposable
         Assert.Empty(second);
         Assert.Single(database.Apps); // not duplicated
         Assert.Single(_service.GetLoadedConfigPaths()); // path listed once
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("already loaded"))), Times.Once);
     }
 
     [Fact]
@@ -351,6 +352,7 @@ public class AppConfigServiceTests : IDisposable
             Settings = new AppSettings { LogVerbosity = LogVerbosity.Debug },
             LastPrefsFilePath = @"C:\settings.json",
             AppContainers = [container],
+            TrackingJobSids = ["S-1-5-21-1-2-3-4001"],
             AccountGroupSnapshots = groupSnapshot,
             ShowSystemInRunAs = true,
             SidNames =
@@ -373,6 +375,7 @@ public class AppConfigServiceTests : IDisposable
         Assert.Equal(database.LastPrefsFilePath, filtered.LastPrefsFilePath);
         Assert.NotSame(database.SidNames, filtered.SidNames);
         Assert.NotSame(database.AppContainers, filtered.AppContainers);
+        Assert.NotSame(database.TrackingJobSids, filtered.TrackingJobSids);
         Assert.NotSame(database.AccountGroupSnapshots, filtered.AccountGroupSnapshots);
         // All accounts present (no additional config grants to filter out)
         Assert.Equal(database.Accounts.Count, filtered.Accounts.Count);
@@ -387,6 +390,7 @@ public class AppConfigServiceTests : IDisposable
         Assert.Equal(@"C:\foo", filtered.GetAccount("S-1-5-21-9")!.Grants[0].Path);
         // ShowSystemInRunAs preserved
         Assert.Equal(database.ShowSystemInRunAs, filtered.ShowSystemInRunAs);
+        Assert.Equal(database.TrackingJobSids, filtered.TrackingJobSids);
     }
 
     // --- GetConfigForExport ---

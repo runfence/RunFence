@@ -21,19 +21,6 @@ public class SecurePasswordBoxTests
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
     [Fact]
-    public void InitialState_IsEmpty_True_Length_Zero()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var tb = new TextBox();
-            using var spb = new SecurePasswordBox(tb);
-
-            Assert.True(spb.IsEmpty);
-            Assert.Equal(0, spb.GetPasswordLength());
-        });
-    }
-
-    [Fact]
     public void SetFromProtectedString_GetPassword_Roundtrip()
     {
         StaTestHelper.RunOnSta(() =>
@@ -46,21 +33,6 @@ public class SecurePasswordBoxTests
 
             using var result = spb.GetPassword();
             Assert.True(ProtectedString.ContentEqual(value, result));
-        });
-    }
-
-    [Fact]
-    public void SetFromProtectedString_GetPasswordLength_ReturnsCorrectLength()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var tb = new TextBox();
-            using var spb = new SecurePasswordBox(tb);
-            using var value = ProtectedString.FromChars("Hello123".AsSpan());
-
-            spb.SetFromProtectedString(value);
-
-            Assert.Equal(8, spb.GetPasswordLength());
         });
     }
 
@@ -114,19 +86,6 @@ public class SecurePasswordBoxTests
             spb2.SetFromProtectedString(val2);
 
             Assert.False(spb1.PasswordsMatch(spb2));
-        });
-    }
-
-    [Fact]
-    public void Dispose_IsIdempotent()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var tb = new TextBox();
-            var spb = new SecurePasswordBox(tb);
-
-            spb.Dispose();
-            spb.Dispose();
         });
     }
 

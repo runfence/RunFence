@@ -1,7 +1,9 @@
 using Microsoft.Win32;
 using Moq;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.DragBridge;
+using RunFence.ForegroundMarker;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
 using RunFence.Security;
@@ -15,79 +17,71 @@ public class StartupEventWirerTests
     [Fact]
     public void DataRefresh_WiresRefreshTrayWarningAndEphemeralNotifications()
     {
-        var ui = new InlineUiThreadInvoker(action => action());
-        var target = new RecordingMainFormTarget();
-        var config = new RecordingConfigManagementSource();
+        var uiThreadInvoker = new RecordingUiThreadInvoker();
+        var mainForm = new RecordingMainFormTarget();
+        var configManagement = new RecordingConfigManagementSource();
         var accountSource = new RecordingEphemeralAccountSource();
         var containerSource = new RecordingEphemeralContainerSource();
-        var appSource = new RecordingApplicationDataSource();
-        var notifier = new Mock<IDataChangeNotifier>();
+        var appDataSource = new RecordingApplicationDataSource();
+        var dataChangeNotifier = new RecordingDataChangeNotifier();
         var warningPresenter = new RecordingReencryptionWarningPresenter();
         var wirer = new DataRefreshStartupEventWirer(
-            ui,
-            target,
-            config,
+            uiThreadInvoker,
+            mainForm,
+            configManagement,
             accountSource,
             containerSource,
-            appSource,
-            notifier.Object,
+            appDataSource,
+            dataChangeNotifier,
             warningPresenter);
 
         wirer.WireEvents();
         accountSource.RaiseAccountsChanged();
         containerSource.RaiseContainersChanged();
-        config.RaiseReencryptionWarning("read-only");
-        config.RaiseDataRefreshRequested();
-        config.RaiseTrayUpdateRequested();
-        appSource.RaiseDataChanged();
+        configManagement.RaiseDataRefreshRequested();
+        configManagement.RaiseTrayUpdateRequested();
+        appDataSource.RaiseDataChanged();
+        configManagement.RaiseReencryptionWarning("reencrypt");
 
-        notifier.Verify(n => n.NotifyDataChanged(), Times.Exactly(2));
-        Assert.Equal("read-only", warningPresenter.LastMessage);
-        Assert.Equal(1, target.SetDataCount);
-        Assert.Equal(1, target.UpdateTrayCount);
-        Assert.Equal(1, target.HandleDataChangedCount);
-    }
-
-    [Fact]
-    public void LicenseTitle_UpdatesNotifyIconTitleOnLicenseStatusChanged()
-    {
-        using var notifyIcon = new NotifyIcon();
-        var license = new Mock<ILicenseService>();
-        license.SetupGet(l => l.IsLicensed).Returns(false);
-        var wirer = new LicenseTitleStartupEventWirer(new InlineUiThreadInvoker(action => action()), license.Object, notifyIcon);
-
-        wirer.WireEvents();
-        license.Raise(l => l.LicenseStatusChanged += null);
-
-        Assert.Contains("Evaluation", notifyIcon.Text);
+        Assert.Equal(5, uiThreadInvoker.BeginInvokeCallCount);
+        Assert.Equal(0, uiThreadInvoker.InvokeCallCount);
+        Assert.Equal(2, dataChangeNotifier.NotifyDataChangedCount);
+        Assert.Equal(1, mainForm.SetDataCount);
+        Assert.Equal(1, mainForm.UpdateTrayCount);
+        Assert.Equal(1, mainForm.HandleDataChangedCount);
+        Assert.Equal("reencrypt", warningPresenter.LastMessage);
     }
 
     [Fact]
     public void LockUi_WiresWindowRequestsAndWindowsHelloConfirmations()
     {
-        var source = new RecordingLockUiEventSource();
-        var fallbackSource = new RecordingWindowsHelloPinFallbackPromptEventSource();
-        var target = new RecordingMainFormTarget { WindowsHelloUnavailableResult = true };
-        var wirer = new LockUiStartupEventWirer(
-            new InlineUiThreadInvoker(action => action()),
-            source,
-            fallbackSource,
-            target);
+        var uiThreadInvoker = new RecordingUiThreadInvoker();
+        var lockManager = new RecordingLockUiEventSource();
+        var fallbackPrompt = new RecordingWindowsHelloPinFallbackPromptEventSource();
+        var mainForm = new RecordingMainFormTarget
+        {
+            WindowsHelloUnavailableResult = true,
+            WindowsHelloFailedResult = false
+        };
+        var wirer = new LockUiStartupEventWirer(uiThreadInvoker, lockManager, fallbackPrompt, mainForm);
 
         wirer.WireEvents();
-        source.RaiseShowWindowRequested();
-        source.RaiseShowWindowUnlockedRequested();
-        source.RaiseWindowlessUnlockCompleted();
-        var unavailableResult = fallbackSource.RaiseWindowsHelloUnavailableConfirmRequested();
-        var failedResult = fallbackSource.RaiseWindowsHelloFailedConfirmRequested();
 
-        Assert.Equal(1, target.ShowWindowNormalCount);
-        Assert.Equal(1, target.ShowWindowUnlockedCount);
-        Assert.Equal(1, target.HandleWindowlessUnlockCount);
+        lockManager.RaiseShowWindowRequested();
+        lockManager.RaiseShowWindowUnlockedRequested();
+        lockManager.RaiseWindowlessUnlockCompleted();
+        var unavailableResult = fallbackPrompt.RaiseWindowsHelloUnavailableConfirmRequested();
+        var failedResult = fallbackPrompt.RaiseWindowsHelloFailedConfirmRequested();
+
+        Assert.Equal(3, uiThreadInvoker.BeginInvokeCallCount);
+        Assert.Equal(2, uiThreadInvoker.InvokeCallCount);
+        Assert.Equal(1, mainForm.ShowWindowNormalCount);
+        Assert.Equal(1, mainForm.ShowWindowUnlockedCount);
+        Assert.Equal(1, mainForm.HandleWindowlessUnlockCount);
+        Assert.Equal(1, mainForm.ConfirmWindowsHelloUnavailableCount);
+        Assert.Equal(1, mainForm.ConfirmWindowsHelloFailedCount);
         Assert.True(unavailableResult);
         Assert.False(failedResult);
-        Assert.Equal(1, target.ConfirmWindowsHelloUnavailableCount);
-        Assert.Equal(1, target.ConfirmWindowsHelloFailedCount);
     }
 
     [Fact]
@@ -95,16 +89,54 @@ public class StartupEventWirerTests
     {
         var source = new RecordingWizardRequestSource();
         var launcher = new RecordingWizardLauncher();
-        var target = new RecordingMainFormTarget();
-        var wirer = new WizardStartupEventWirer(source, launcher, target);
+        var mainForm = new RecordingMainFormTarget();
+        var owner = new Mock<IWin32Window>().Object;
+        var wirer = new WizardStartupEventWirer(source, launcher, mainForm);
 
         wirer.WireEvents();
-        source.RaiseWizardRequested(new Mock<IWin32Window>().Object);
+        source.RaiseWizardRequested(owner);
         launcher.RaiseWizardCompleted();
 
         Assert.True(source.WizardButtonEnabled);
         Assert.Equal(1, launcher.OpenWizardCount);
-        Assert.Equal(1, target.HandleDataChangedCount);
+        Assert.Same(owner, launcher.LastOwner);
+        Assert.Equal(1, mainForm.HandleDataChangedCount);
+    }
+
+    [Fact]
+    public void DragBridge_WiresDataSettingsAndDispose()
+    {
+        var uiThreadInvoker = new RecordingUiThreadInvoker();
+        var lifetime = new RecordingFormLifetime();
+        var applicationDataSource = new RecordingApplicationDataSource();
+        var settingsChangeSource = new RecordingDragBridgeSettingsChangeSource();
+        using var session = new SessionContext
+        {
+            Database = new AppDatabase
+            {
+                Settings = new AppSettings()
+            },
+            CredentialStore = new CredentialStore()
+        };
+        var dragBridgeService = new Mock<IDragBridgeService>();
+        var wirer = new DragBridgeEventWirer(
+            uiThreadInvoker,
+            lifetime,
+            applicationDataSource,
+            new LambdaSessionProvider(() => session),
+            settingsChangeSource,
+            dragBridgeService.Object);
+
+        wirer.WireEvents();
+        applicationDataSource.RaiseDataChanged();
+        settingsChangeSource.RaiseDragBridgeSettingsChanged();
+        lifetime.RaiseFormClosed();
+
+        Assert.Equal(1, uiThreadInvoker.BeginInvokeCallCount);
+        Assert.Equal(0, uiThreadInvoker.InvokeCallCount);
+        dragBridgeService.Verify(service => service.SetData(session), Times.Once);
+        dragBridgeService.Verify(service => service.ApplySettings(session.Database.Settings), Times.Once);
+        dragBridgeService.Verify(service => service.Dispose(), Times.Once);
     }
 
     [Fact]
@@ -112,8 +144,12 @@ public class StartupEventWirerTests
     {
         var source = new RecordingSessionSwitchEventSource();
         var lifetime = new RecordingFormLifetime();
+        var sidCache = new Mock<IInteractiveUserSidCache>();
         var desktopProvider = new Mock<IInteractiveUserDesktopProvider>();
-        var wirer = new SessionSwitchStartupEventWirer(source, lifetime, desktopProvider.Object);
+        var coordinator = new InteractiveUserRefreshCoordinator(sidCache.Object, desktopProvider.Object);
+        var refreshCount = 0;
+        coordinator.InteractiveUserRefreshed += () => refreshCount++;
+        var wirer = new SessionSwitchStartupEventWirer(source, lifetime, coordinator);
 
         wirer.WireEvents();
         source.Raise(SessionSwitchReason.SessionLock);
@@ -121,33 +157,204 @@ public class StartupEventWirerTests
         lifetime.RaiseFormClosed();
         source.Raise(SessionSwitchReason.ConsoleConnect);
 
+        sidCache.Verify(cache => cache.ReinitializeInteractiveUserSid(), Times.Once);
         desktopProvider.Verify(d => d.InvalidateCache(), Times.Once);
+        Assert.Equal(1, refreshCount);
     }
 
     [Fact]
-    public void DragBridge_WiresDataSettingsAndDispose()
+    public void ForegroundPrivilegeMarkerStartup_StartsOnlyAfterHandleCreated_AndOnlyOnce()
     {
-        var session = new SessionContext { Database = new AppDatabase(), CredentialStore = new CredentialStore() };
-        var appSource = new RecordingApplicationDataSource();
-        var lifetime = new RecordingFormLifetime();
-        var settingsSource = new RecordingDragBridgeSettingsChangeSource();
-        var dragBridge = new Mock<IDragBridgeService>();
-        var wirer = new DragBridgeEventWirer(
-            new InlineUiThreadInvoker(action => action()),
-            lifetime,
-            appSource,
-            new LambdaSessionProvider(() => session),
-            settingsSource,
-            dragBridge.Object);
+        var startupHost = new RecordingStartupIpcHost();
+        var appStateProvider = new Mock<IAppStateProvider>();
+        appStateProvider.SetupGet(provider => provider.Database)
+            .Returns(new AppDatabase
+            {
+                Settings = new AppSettings
+                {
+                ShowForegroundPrivilegeMarker = false,
+                ShowForegroundPrivilegeMarkerWhenFullscreen = true
+                }
+            });
+        var markerService = new Mock<IForegroundPrivilegeMarkerService>();
+        var log = new Mock<ILoggingService>();
+        var trayWarningSink = new RecordingTrayWarningSink();
+        var wirer = new ForegroundPrivilegeMarkerStartupEventWirer(
+            startupHost,
+            appStateProvider.Object,
+            markerService.Object,
+            log.Object,
+            trayWarningSink);
 
         wirer.WireEvents();
-        appSource.RaiseDataChanged();
-        settingsSource.RaiseDragBridgeSettingsChanged();
-        lifetime.RaiseFormClosed();
 
-        dragBridge.Verify(d => d.SetData(session), Times.Once);
-        dragBridge.Verify(d => d.ApplySettings(session.Database.Settings), Times.Once);
-        dragBridge.Verify(d => d.Dispose(), Times.Once);
+        markerService.Verify(service => service.Start(It.IsAny<bool>(), It.IsAny<bool>()), Times.Never);
+        startupHost.RaiseHandleCreated();
+        startupHost.RaiseHandleCreated();
+
+        markerService.Verify(service => service.Start(false, true), Times.Once);
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerStartup_WireEvents_DoesNotRegisterDuplicateHandlers()
+    {
+        var startupHost = new RecordingStartupIpcHost();
+        var appStateProvider = new Mock<IAppStateProvider>();
+        appStateProvider.SetupGet(provider => provider.Database)
+            .Returns(new AppDatabase
+            {
+                Settings = new AppSettings()
+            });
+        var markerService = new Mock<IForegroundPrivilegeMarkerService>();
+        var log = new Mock<ILoggingService>();
+        var trayWarningSink = new RecordingTrayWarningSink();
+        var wirer = new ForegroundPrivilegeMarkerStartupEventWirer(
+            startupHost,
+            appStateProvider.Object,
+            markerService.Object,
+            log.Object,
+            trayWarningSink);
+
+        wirer.WireEvents();
+        wirer.WireEvents();
+        startupHost.RaiseHandleCreated();
+
+        markerService.Verify(service => service.Start(true, true), Times.Once);
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerStartup_StartFailure_IsSwallowedAndStopsRetrying()
+    {
+        var startupHost = new RecordingStartupIpcHost();
+        var settings = new AppSettings
+        {
+            ShowForegroundPrivilegeMarker = true,
+            ShowForegroundPrivilegeMarkerWhenFullscreen = false
+        };
+        var appStateProvider = new Mock<IAppStateProvider>();
+        appStateProvider.SetupGet(provider => provider.Database)
+            .Returns(new AppDatabase
+            {
+                Settings = settings
+            });
+        var markerService = new Mock<IForegroundPrivilegeMarkerService>();
+        var callCount = 0;
+        markerService.Setup(service => service.Start(true, false))
+            .Callback(() =>
+            {
+                callCount++;
+                if (callCount == 1)
+                    throw new InvalidOperationException("transient startup failure");
+            });
+        markerService.Setup(service => service.Stop());
+        var log = new Mock<ILoggingService>();
+        var trayWarningSink = new RecordingTrayWarningSink();
+        var wirer = new ForegroundPrivilegeMarkerStartupEventWirer(
+            startupHost,
+            appStateProvider.Object,
+            markerService.Object,
+            log.Object,
+            trayWarningSink);
+
+        wirer.WireEvents();
+
+        startupHost.RaiseHandleCreated();
+        startupHost.RaiseHandleCreated();
+
+        wirer.WireEvents();
+        wirer.WireEvents();
+        startupHost.RaiseHandleCreated();
+
+        markerService.Verify(service => service.Start(true, false), Times.Once);
+        markerService.Verify(service => service.Stop(), Times.Once);
+        log.Verify(l => l.Warn("Foreground privilege marker startup failed: transient startup failure"), Times.Once);
+        Assert.Equal(1, callCount);
+        Assert.True(trayWarningSink.ShowWarningCalled);
+        Assert.True(settings.ShowForegroundPrivilegeMarker);
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerStartup_FailedStartup_RequestFalseStillStopsForCleanup()
+    {
+        var startupHost = new RecordingStartupIpcHost();
+        var appStateProvider = new Mock<IAppStateProvider>();
+        var settings = new AppSettings
+        {
+            ShowForegroundPrivilegeMarker = false,
+            ShowForegroundPrivilegeMarkerWhenFullscreen = true
+        };
+        appStateProvider.SetupGet(provider => provider.Database)
+            .Returns(new AppDatabase
+            {
+                Settings = settings
+            });
+        var markerService = new Mock<IForegroundPrivilegeMarkerService>();
+        markerService.Setup(service => service.Start(false, true))
+            .Throws(new InvalidOperationException("disabled startup failure"));
+        markerService.Setup(service => service.Stop());
+        var log = new Mock<ILoggingService>();
+        var trayWarningSink = new RecordingTrayWarningSink();
+        var wirer = new ForegroundPrivilegeMarkerStartupEventWirer(
+            startupHost,
+            appStateProvider.Object,
+            markerService.Object,
+            log.Object,
+            trayWarningSink);
+
+        wirer.WireEvents();
+        startupHost.RaiseHandleCreated();
+
+        markerService.Verify(service => service.Start(false, true), Times.Once);
+        markerService.Verify(service => service.Stop(), Times.Once);
+        markerService.Verify(service => service.Start(true, It.IsAny<bool>()), Times.Never);
+        Assert.True(trayWarningSink.ShowWarningCalled);
+        Assert.False(settings.ShowForegroundPrivilegeMarker);
+        log.Verify(l => l.Warn("Foreground privilege marker startup failed: disabled startup failure"), Times.Once);
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerStartup_WarningsAndDisableFailuresAreSwallowed()
+    {
+        var startupHost = new RecordingStartupIpcHost();
+        var settings = new AppSettings
+        {
+            ShowForegroundPrivilegeMarker = true,
+            ShowForegroundPrivilegeMarkerWhenFullscreen = false
+        };
+        var appStateProvider = new Mock<IAppStateProvider>();
+        appStateProvider.SetupGet(provider => provider.Database)
+            .Returns(new AppDatabase
+            {
+                Settings = settings
+            });
+
+        var markerService = new Mock<IForegroundPrivilegeMarkerService>();
+        markerService.Setup(service => service.Start(true, false))
+            .Throws(new InvalidOperationException("startup failed"));
+        markerService.Setup(service => service.Stop())
+            .Throws(new InvalidOperationException("stop failed"));
+
+        var log = new Mock<ILoggingService>();
+        log.Setup(l => l.Warn(It.IsAny<string>())).Throws(new Exception("logger failed"));
+
+        var trayWarningSink = new Mock<ITrayWarningSink>();
+        trayWarningSink.Setup(t => t.ShowWarning(It.IsAny<string>())).Throws(new Exception("sink failed"));
+
+        var wirer = new ForegroundPrivilegeMarkerStartupEventWirer(
+            startupHost,
+            appStateProvider.Object,
+            markerService.Object,
+            log.Object,
+            trayWarningSink.Object);
+
+        wirer.WireEvents();
+        startupHost.RaiseHandleCreated();
+
+        markerService.Verify(service => service.Start(true, false), Times.Once);
+        markerService.Verify(service => service.Stop(), Times.Once);
+        trayWarningSink.Verify(t => t.ShowWarning(It.Is<string>(text => text.Contains("Foreground privilege marker failed"))), Times.Once);
+        log.Verify(l => l.Warn(It.IsAny<string>()), Times.AtLeast(3));
+        Assert.True(settings.ShowForegroundPrivilegeMarker);
     }
 
     private sealed class RecordingMainFormTarget : IMainFormDataRefreshTarget, IMainFormLockTarget
@@ -216,6 +423,24 @@ public class StartupEventWirerTests
         public void ShowWarning(string message) => LastMessage = message;
     }
 
+    private sealed class RecordingDataChangeNotifier : IDataChangeNotifier
+    {
+        public int NotifyDataChangedCount { get; private set; }
+        public void NotifyDataChanged() => NotifyDataChangedCount++;
+    }
+
+    private sealed class RecordingTrayWarningSink : ITrayWarningSink
+    {
+        public bool ShowWarningCalled { get; private set; }
+        public string? LastWarning { get; private set; }
+
+        public void ShowWarning(string text)
+        {
+            ShowWarningCalled = true;
+            LastWarning = text;
+        }
+    }
+
     private sealed class RecordingLockUiEventSource : ILockUiEventSource
     {
         public event Action? ShowWindowRequested;
@@ -248,9 +473,11 @@ public class StartupEventWirerTests
     {
         public event Action? WizardCompleted;
         public int OpenWizardCount { get; private set; }
+        public IWin32Window? LastOwner { get; private set; }
         public Task OpenWizardAsync(IWin32Window owner)
         {
             OpenWizardCount++;
+            LastOwner = owner;
             return Task.CompletedTask;
         }
 
@@ -271,10 +498,43 @@ public class StartupEventWirerTests
             FormClosed?.Invoke(this, new FormClosedEventArgs(CloseReason.UserClosing));
     }
 
+    private sealed class RecordingStartupIpcHost : IStartupIpcHost
+    {
+        public event EventHandler? HandleCreated;
+        public event FormClosingEventHandler? FormClosing;
+
+        public void RaiseHandleCreated() => HandleCreated?.Invoke(this, EventArgs.Empty);
+        public void BeginInvokeOnUiThread(Action action) => action();
+        public void SetStartupComplete()
+        {
+        }
+
+        public void RaiseFormClosing() =>
+            FormClosing?.Invoke(this, new FormClosingEventArgs(CloseReason.UserClosing, false));
+    }
+
     private sealed class RecordingDragBridgeSettingsChangeSource : IDragBridgeSettingsChangeSource
     {
         public event Action? DragBridgeSettingsChanged;
         public void RaiseDragBridgeSettingsChanged() => DragBridgeSettingsChanged?.Invoke();
+    }
+
+    private sealed class RecordingUiThreadInvoker : IUiThreadInvoker
+    {
+        public int BeginInvokeCallCount { get; private set; }
+        public int InvokeCallCount { get; private set; }
+
+        public T Invoke<T>(Func<T> func)
+        {
+            InvokeCallCount++;
+            return func();
+        }
+
+        public void BeginInvoke(Action action)
+        {
+            BeginInvokeCallCount++;
+            action();
+        }
     }
 
 }

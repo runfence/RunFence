@@ -32,7 +32,7 @@ public record AccountPickerStepOptions(
 public class AccountPickerStep : WizardStepPage
 {
     private readonly Action<string?, bool> _setSelection;
-    private readonly ILocalGroupMembershipService _groupMembership;
+    private readonly ILocalGroupQueryService _groupMembership;
     private readonly ILocalUserProvider _localUserProvider;
     private readonly List<CredentialEntry> _credentials;
     private readonly CredentialDisplayItemFactory _credentialDisplayItemFactory;
@@ -69,7 +69,7 @@ public class AccountPickerStep : WizardStepPage
     /// </param>
     public AccountPickerStep(
         Action<string?, bool> setSelection,
-        ILocalGroupMembershipService groupMembership,
+        ILocalGroupQueryService groupMembership,
         ILocalUserProvider localUserProvider,
         CredentialDisplayItemFactory credentialDisplayItemFactory,
         CredentialFilterHelper credentialFilterHelper,

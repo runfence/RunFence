@@ -13,7 +13,9 @@ public class SidMigrationService(
     ISidAclScanService aclScan,
     ISidNameCacheService sidNameCache,
     IInteractiveUserSidResolver interactiveUserSidResolver,
-    IDatabaseProvider databaseProvider) : ISidMigrationService
+    IDatabaseProvider databaseProvider,
+    SidMigrationCoreMutationService coreMutationService,
+    ITrackingJobStateStore? trackingJobStateStore = null) : ISidMigrationService
 {
     public List<SidMigrationMapping> BuildMappings(
         IReadOnlyList<CredentialEntry> credentials,
@@ -88,50 +90,8 @@ public class SidMigrationService(
         CredentialStore credentialStore)
     {
         var database = databaseProvider.GetDatabase();
-        var sidMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var m in mappings)
-            sidMap[m.OldSid] = m.NewSid;
-
-        int credCount = 0, appCount = 0, ipcCount = 0, allowCount = 0;
-
-        var credentialsToRemove = new List<CredentialEntry>();
-        foreach (var entry in credentialStore.Credentials)
-        {
-            if (sidMap.TryGetValue(entry.Sid, out var newSid))
-            {
-                // If a credential for the new SID already exists, remove the orphaned old-SID credential
-                // rather than leaving it as an unresolvable SID in the credential store (e.g. RunAs dialog).
-                if (credentialStore.Credentials.Any(c =>
-                        c != entry && string.Equals(c.Sid, newSid, StringComparison.OrdinalIgnoreCase)))
-                {
-                    credentialsToRemove.Add(entry);
-                    continue;
-                }
-                entry.Sid = newSid;
-                credCount++;
-            }
-        }
-        foreach (var orphan in credentialsToRemove)
-            credentialStore.Credentials.Remove(orphan);
-
-        foreach (var app in database.Apps)
-        {
-            if (sidMap.TryGetValue(app.AccountSid, out var newSid))
-            {
-                app.AccountSid = newSid;
-                appCount++;
-            }
-        }
-
-        foreach (var app in database.Apps)
-        {
-            ipcCount += ReplaceSidInStringList(app.AllowedIpcCallers, sidMap);
-            allowCount += ReplaceSidInAllowAclEntries(app.AllowedAclEntries, sidMap);
-        }
-
-        // Migrate AccountEntry SIDs
-        foreach (var mapping in mappings)
-            ipcCount += MergeAccountEntries(database, mapping);
+        var counts = coreMutationService.ApplyCoreMappings(mappings, credentialStore, database);
+        var sidMap = coreMutationService.CreateSidMap(mappings);
 
         // Update grant paths that reference old profile directories (e.g. C:\Users\OldName\...)
         // Only update paths that no longer exist on disk — paths that still exist are intentionally
@@ -157,11 +117,14 @@ public class SidMigrationService(
         if (sidMap.TryGetValue(database.Settings.LastUsedRunAsAccountSid ?? "", out var newLast))
             database.Settings.LastUsedRunAsAccountSid = newLast;
 
+        foreach (var mapping in mappings)
+            trackingJobStateStore?.MigrateTrackingJobSid(mapping.OldSid, mapping.NewSid, saveImmediately: false);
+
         // JobKeeper identities are intentionally left keyed to the original SID. They are durable
         // reconnect hints for already-running keepers, not general SID-owned data to rewrite during
         // migration, and must not be copied or re-keyed onto the replacement SID here.
 
-        return new MigrationCounts(credCount, appCount, ipcCount, allowCount);
+        return counts;
     }
 
     public (int credentials, int apps, int ipcCallers) DeleteSidsFromAppData(
@@ -177,132 +140,13 @@ public class SidMigrationService(
 
             // Keep any persisted JobKeeper identity under its original SID unless some other explicit
             // stale-keeper cleanup path removes it. Deletion must not synthesize a replacement SID entry.
+            // CleanupSidFromAppData also removes same-transaction tracking-job SID state.
             var (removedApps, removedCallers) = sidCleanup.CleanupSidFromAppData(sid);
             deletedApps += removedApps;
             deletedCallers += removedCallers;
         }
 
         return (deletedCreds, deletedApps, deletedCallers);
-    }
-
-    private static int ReplaceSidInStringList(List<string>? items, IReadOnlyDictionary<string, string> sidMap)
-    {
-        if (items == null)
-            return 0;
-
-        int count = 0;
-        for (int i = 0; i < items.Count; i++)
-        {
-            if (sidMap.TryGetValue(items[i], out var newSid))
-            {
-                items[i] = newSid;
-                count++;
-            }
-        }
-
-        // Deduplicate by SID (keep first occurrence)
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        items.RemoveAll(s => !seen.Add(s));
-
-        return count;
-    }
-
-    private static int ReplaceSidInAllowAclEntries(List<AllowAclEntry>? items, IReadOnlyDictionary<string, string> sidMap)
-    {
-        if (items == null)
-            return 0;
-
-        int count = 0;
-        for (int i = 0; i < items.Count; i++)
-        {
-            var item = items[i];
-            if (sidMap.TryGetValue(item.Sid, out var newSid))
-            {
-                items[i] = item with { Sid = newSid };
-                count++;
-            }
-        }
-
-        // Deduplicate by SID: when two entries share the same SID after migration,
-        // OR their boolean permission flags together into the first occurrence instead of
-        // discarding the second entry (which may carry additional permissions).
-        var firstIndexBySid = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        for (int i = 0; i < items.Count;)
-        {
-            var sid = items[i].Sid;
-            if (firstIndexBySid.TryGetValue(sid, out var firstIdx))
-            {
-                // Merge boolean flags into the first occurrence
-                var first = items[firstIdx];
-                var duplicate = items[i];
-                items[firstIdx] = first with
-                {
-                    AllowExecute = first.AllowExecute || duplicate.AllowExecute,
-                    AllowWrite = first.AllowWrite || duplicate.AllowWrite
-                };
-                items.RemoveAt(i);
-            }
-            else
-            {
-                firstIndexBySid[sid] = i;
-                i++;
-            }
-        }
-
-        return count;
-    }
-
-    /// <summary>
-    /// Migrates the <see cref="AccountEntry"/> for <paramref name="mapping"/>.OldSid to the
-    /// new SID in <paramref name="database"/>. When an entry for the new SID already exists,
-    /// boolean flags are OR-merged, grants are union-merged, firewall keeps the non-default side,
-    /// and the old entry is removed. Returns 1 if the migrated entry is (or becomes) an IPC caller,
-    /// otherwise 0.
-    /// </summary>
-    private static int MergeAccountEntries(AppDatabase database, SidMigrationMapping mapping)
-    {
-        var oldEntry = database.GetAccount(mapping.OldSid);
-        if (oldEntry == null)
-            return 0;
-
-        var existingNew = database.GetAccount(mapping.NewSid);
-        if (existingNew != null)
-        {
-            // Merge: OR booleans, merge Grants, keep earliest DeleteAfterUtc
-            existingNew.IsIpcCaller |= oldEntry.IsIpcCaller;
-            existingNew.TrayFolderBrowser |= oldEntry.TrayFolderBrowser;
-            existingNew.TrayDiscovery |= oldEntry.TrayDiscovery;
-            existingNew.TrayTerminal |= oldEntry.TrayTerminal;
-            if ((int)oldEntry.PrivilegeLevel > (int)existingNew.PrivilegeLevel)
-                existingNew.PrivilegeLevel = oldEntry.PrivilegeLevel;
-            if (oldEntry.DeleteAfterUtc.HasValue &&
-                (!existingNew.DeleteAfterUtc.HasValue || oldEntry.DeleteAfterUtc < existingNew.DeleteAfterUtc))
-                existingNew.DeleteAfterUtc = oldEntry.DeleteAfterUtc;
-            foreach (var g in oldEntry.Grants)
-            {
-                if (!existingNew.Grants.Any(e => string.Equals(e.Path, g.Path, StringComparison.OrdinalIgnoreCase)
-                                                 && e.IsDeny == g.IsDeny && e.IsTraverseOnly == g.IsTraverseOnly))
-                    existingNew.Grants.Add(g);
-            }
-
-            // Merge firewall: use non-default if one exists
-            if (!existingNew.Firewall.IsDefault && !oldEntry.Firewall.IsDefault)
-            {
-                // Both non-default: keep existing (conservative)
-            }
-            else if (!oldEntry.Firewall.IsDefault)
-            {
-                existingNew.Firewall = oldEntry.Firewall;
-            }
-
-            database.Accounts.Remove(oldEntry);
-        }
-        else
-        {
-            oldEntry.Sid = mapping.NewSid;
-        }
-
-        return oldEntry.IsIpcCaller || existingNew?.IsIpcCaller == true ? 1 : 0;
     }
 
     /// <summary>

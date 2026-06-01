@@ -16,12 +16,12 @@ namespace RunFence.Tests;
 /// </summary>
 public class AclManagerScanServiceTests
 {
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantSyncService> _grantSyncService = new();
     private readonly Mock<ISessionSaver> _sessionSaver = new();
     private readonly Mock<ILoggingService> _log = new();
 
     private AclManagerScanService CreateService() =>
-        new(_pathGrantService.Object, () => _sessionSaver.Object, _log.Object);
+        new(_grantSyncService.Object, () => _sessionSaver.Object, _log.Object);
 
     [Fact]
     public async Task ScanAsync_EmptyFolder_CallsUpdateFromPathForRootAndAncestors()
@@ -33,7 +33,7 @@ public class AclManagerScanServiceTests
         await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
 
         // Root should be processed, plus ancestors up to drive root.
-        _pathGrantService.Verify(
+        _grantSyncService.Verify(
             s => s.UpdateFromPath(tempDir.Path, "S-1-5-21-0-0-0-1000"),
             Times.Once);
     }
@@ -52,10 +52,10 @@ public class AclManagerScanServiceTests
 
         await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
 
-        _pathGrantService.Verify(
+        _grantSyncService.Verify(
             s => s.UpdateFromPath(fileA, "S-1-5-21-0-0-0-1000"),
             Times.Once);
-        _pathGrantService.Verify(
+        _grantSyncService.Verify(
             s => s.UpdateFromPath(fileB, "S-1-5-21-0-0-0-1000"),
             Times.Once);
     }
@@ -71,7 +71,7 @@ public class AclManagerScanServiceTests
 
         await service.ScanAsync(tempDir.Path, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
 
-        _pathGrantService.Verify(
+        _grantSyncService.Verify(
             s => s.UpdateFromPath(subDir, "S-1-5-21-0-0-0-1000"),
             Times.Once);
     }
@@ -80,7 +80,7 @@ public class AclManagerScanServiceTests
     public async Task ScanAsync_UpdateFromPathReturnsTrue_CountsAsUpdated()
     {
         using var tempDir = new TempDirectory("rftest_scan");
-        _pathGrantService.Setup(s => s.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()))
+        _grantSyncService.Setup(s => s.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()))
             .Returns(true);
 
         var service = CreateService();
@@ -96,7 +96,7 @@ public class AclManagerScanServiceTests
     public async Task ScanAsync_NoTrackedChanges_DoesNotSaveConfig()
     {
         using var tempDir = new TempDirectory("rftest_scan");
-        _pathGrantService.Setup(s => s.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()))
+        _grantSyncService.Setup(s => s.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()))
             .Returns(false);
 
         var service = CreateService();
@@ -138,7 +138,7 @@ public class AclManagerScanServiceTests
         await service.ScanAsync(subDir, "S-1-5-21-0-0-0-1000", progress, CancellationToken.None);
 
         // tempDir is an ancestor of subDir and should be visited.
-        _pathGrantService.Verify(
+        _grantSyncService.Verify(
             s => s.UpdateFromPath(tempDir.Path, "S-1-5-21-0-0-0-1000"),
             Times.Once);
     }
@@ -162,7 +162,7 @@ public class AclManagerScanServiceTests
     public async Task ScanAsync_WhenAnyPathFails_ThrowsIOException()
     {
         using var tempDir = new TempDirectory("rftest_scan");
-        _pathGrantService.Setup(s => s.UpdateFromPath(tempDir.Path, It.IsAny<string?>()))
+        _grantSyncService.Setup(s => s.UpdateFromPath(tempDir.Path, It.IsAny<string?>()))
             .Throws(new UnauthorizedAccessException("denied"));
 
         var service = CreateService();

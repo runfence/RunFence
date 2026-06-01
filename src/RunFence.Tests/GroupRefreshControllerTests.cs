@@ -7,7 +7,6 @@ using RunFence.Infrastructure;
 using RunFence.Tests.Helpers;
 using RunFence.UI.Controls;
 using Xunit;
-using System.Runtime.ExceptionServices;
 
 namespace RunFence.Tests;
 
@@ -32,7 +31,7 @@ public class GroupRefreshControllerTests
     [Fact]
     public void RefreshNow_IncludesSelectionBeforeAndAfter_AndMarksMembersRefreshed()
     {
-        StaTestHelper.RunOnSta(() =>
+        StaTestHelper.RunAsyncOnSta(async () =>
         {
             var groupQuery = new Mock<ILocalGroupQueryService>();
             groupQuery.Setup(g => g.GetLocalGroups()).Returns([
@@ -62,7 +61,7 @@ public class GroupRefreshControllerTests
                 return Task.CompletedTask;
             };
 
-            WaitForTask(controller.RefreshNow());
+            await controller.RefreshNow();
 
             Assert.NotNull(completion);
             Assert.Null(completion!.SelectedSidBeforeRefresh);
@@ -74,7 +73,7 @@ public class GroupRefreshControllerTests
     [Fact]
     public void RefreshNow_WhenSelectionChanges_ReportsOldAndNewSids()
     {
-        StaTestHelper.RunOnSta(() =>
+        StaTestHelper.RunAsyncOnSta(async () =>
         {
             var groupQuery = new Mock<ILocalGroupQueryService>();
             groupQuery.Setup(g => g.GetLocalGroups()).Returns([
@@ -112,29 +111,11 @@ public class GroupRefreshControllerTests
                 return Task.CompletedTask;
             };
 
-            WaitForTask(controller.RefreshNow());
+            await controller.RefreshNow();
 
             Assert.NotNull(completion);
             Assert.Equal("S-1-5-32-545", completion!.SelectedSidBeforeRefresh);
             Assert.Equal("S-1-5-32-544", completion.SelectedSidAfterRefresh);
         });
-    }
-
-    private static void WaitForTask(Task task, int timeoutMs = 3000)
-    {
-        StaTestHelper.PumpUntil(
-            () => task.IsCompleted,
-            TimeSpan.FromMilliseconds(timeoutMs),
-            "Task did not complete in time.");
-
-        if (task.IsFaulted)
-        {
-            ExceptionDispatchInfo.Capture(task.Exception.InnerException ?? task.Exception).Throw();
-        }
-
-        if (task.IsCanceled)
-        {
-            throw new TaskCanceledException(task);
-        }
     }
 }

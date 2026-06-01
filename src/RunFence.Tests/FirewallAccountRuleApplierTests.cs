@@ -13,6 +13,7 @@ public class FirewallAccountRuleApplierTests
     private const string Username = "alice";
 
     private readonly Mock<ILoggingService> _log = new();
+    private readonly Mock<IFirewallRuleQueryService> _ruleQueryService = new();
     private readonly Mock<IFirewallRuleManager> _ruleManager = new();
     private readonly Mock<INetworkInterfaceInfoProvider> _networkInfo = new();
     private readonly Mock<IWfpLocalhostBlocker> _wfpBlocker = new();
@@ -23,10 +24,20 @@ public class FirewallAccountRuleApplierTests
         _networkInfo.Setup(n => n.GetDnsServerAddresses()).Returns([]);
         _networkInfo.Setup(n => n.GetLocalAddresses()).Returns([]);
         var addressBuilder = new FirewallAddressExclusionBuilder(new FirewallAddressRangeBuilder(), _networkInfo.Object);
-        var comApplier = new FirewallComRuleApplier(_ruleManager.Object, addressBuilder, _log.Object);
+        var rollbackCoordinator = new FirewallRuleRollbackCoordinator(_ruleQueryService.Object, _ruleManager.Object, _log.Object);
         var wfpApplier = new FirewallWfpRuleApplier(_wfpBlocker.Object, _wfpIcmpBlocker.Object, _log.Object);
-        return new FirewallAccountRuleApplier(comApplier, wfpApplier);
+
+        return new FirewallAccountRuleApplier(
+            _ruleQueryService.Object,
+            new FirewallRulePairSynchronizer(_ruleManager.Object, addressBuilder),
+            rollbackCoordinator,
+            wfpApplier);
     }
+
+    private static void SetupCurrentRules(
+        Mock<IFirewallRuleQueryService> ruleQueryService,
+        IReadOnlyList<FirewallRuleInfo> existingRules)
+        => ruleQueryService.Setup(r => r.GetExistingRulesBySid(Sid)).Returns(() => existingRules.ToList());
 
     [Fact]
     public void ApplyFirewallRules_SuccessPath_AddsBlockRulesAndAppliesWfp()
@@ -35,6 +46,7 @@ public class FirewallAccountRuleApplierTests
         _ruleManager.Setup(r => r.GetRulesByGroup("RunFence")).Returns(() => currentRules.ToList());
         _ruleManager.Setup(r => r.AddRule(It.IsAny<FirewallRuleInfo>()))
             .Callback<FirewallRuleInfo>(currentRules.Add);
+        SetupCurrentRules(_ruleQueryService, currentRules);
 
         BuildApplier().ApplyFirewallRules(
             Sid,
@@ -43,18 +55,14 @@ public class FirewallAccountRuleApplierTests
             previousSettings: null,
             resolvedDomainsCache: new Dictionary<string, IReadOnlyList<string>>());
 
-        // Block rules were added (at least IPv4 and IPv6 internet rules)
         Assert.NotEmpty(currentRules);
         Assert.All(currentRules, r => Assert.Equal("RunFence", r.Grouping));
         Assert.All(currentRules, r => Assert.Contains(Username, r.Name));
 
-        // WFP localhost blocker applied with the account's SID (AllowLocalhost=true → apply=false because apply = !AllowLocalhost)
         _wfpBlocker.Verify(w => w.Apply(
             Sid,
             false,
             It.IsAny<IReadOnlyList<string>>()), Times.Once);
-
-        // WFP ICMP blocker applied alongside internet block
         _wfpIcmpBlocker.Verify(w => w.Apply(Sid, true), Times.Once);
     }
 
@@ -77,6 +85,7 @@ public class FirewallAccountRuleApplierTests
             });
         _ruleManager.Setup(r => r.RemoveRule(It.IsAny<string>()))
             .Callback<string>(name => currentRules.RemoveAll(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)));
+        SetupCurrentRules(_ruleQueryService, currentRules);
 
         var result = BuildApplier().ApplyFirewallRules(
             Sid,
@@ -117,6 +126,7 @@ public class FirewallAccountRuleApplierTests
         _ruleManager.Setup(r => r.RemoveRule(It.IsAny<string>()))
             .Callback<string>(name => currentRules.RemoveAll(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)));
         _wfpIcmpBlocker.Setup(w => w.Apply(Sid, true)).Throws(new WfpFilterHelperException("icmp failed"));
+        SetupCurrentRules(_ruleQueryService, currentRules);
 
         var result = BuildApplier().ApplyFirewallRules(
             Sid,
@@ -135,6 +145,65 @@ public class FirewallAccountRuleApplierTests
             true,
             It.Is<IReadOnlyList<string>>(ports => ports.SequenceEqual(new[] { "53", "49152-65535" }))), Times.Once);
         _wfpIcmpBlocker.Verify(w => w.Apply(Sid, false), Times.Once);
+    }
+
+    [Fact]
+    public void ApplyFirewallRules_QueriesExistingRulesOnceBeforeMutatingRules()
+    {
+        var operationLog = new List<string>();
+        var currentRules = new List<FirewallRuleInfo>();
+
+        _ruleManager.Setup(r => r.GetRulesByGroup("RunFence")).Returns(() => currentRules.ToList());
+        _ruleManager.Setup(r => r.AddRule(It.IsAny<FirewallRuleInfo>()))
+            .Callback<FirewallRuleInfo>(rule =>
+            {
+                operationLog.Add($"AddRule:{rule.Name}");
+                currentRules.Add(rule);
+            });
+        _ruleManager.Setup(r => r.RemoveRule(It.IsAny<string>()))
+            .Callback<string>(name => operationLog.Add($"RemoveRule:{name}"));
+        _ruleManager.Setup(r => r.UpdateRule(It.IsAny<string>(), It.IsAny<FirewallRuleInfo>()))
+            .Callback<string, FirewallRuleInfo>((name, _) => operationLog.Add($"UpdateRule:{name}"));
+        _ruleQueryService.Setup(r => r.GetExistingRulesBySid(Sid))
+            .Callback(() => operationLog.Add("QueryRules"))
+            .Returns(() => currentRules.ToList());
+
+        BuildApplier().ApplyFirewallRules(
+            Sid,
+            Username,
+            new FirewallAccountSettings { AllowInternet = false },
+            previousSettings: null,
+            resolvedDomainsCache: new Dictionary<string, IReadOnlyList<string>>());
+
+        Assert.NotEmpty(operationLog);
+        Assert.Equal("QueryRules", operationLog.First());
+        Assert.Equal(1, operationLog.Count(op => op == "QueryRules"));
+        Assert.Contains(operationLog.Skip(1), op => op.StartsWith("AddRule", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void RefreshAllowlistRules_WhenAlreadyAllowed_DoesNotQueryRules()
+    {
+        var result = BuildApplier().RefreshAllowlistRules(
+            Sid,
+            Username,
+            new FirewallAccountSettings { AllowInternet = true, AllowLan = true },
+            new Dictionary<string, IReadOnlyList<string>>());
+
+        Assert.False(result);
+        _ruleQueryService.Verify(r => r.GetExistingRulesBySid(It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void RefreshLocalAddressRules_WhenLocalhostAllowed_DoesNotQueryRules()
+    {
+        var result = BuildApplier().RefreshLocalAddressRules(
+            Sid,
+            Username,
+            new FirewallAccountSettings { AllowLocalhost = true });
+
+        Assert.False(result);
+        _ruleQueryService.Verify(r => r.GetExistingRulesBySid(It.IsAny<string>()), Times.Never);
     }
 
     private static FirewallRuleInfo MakeRule(

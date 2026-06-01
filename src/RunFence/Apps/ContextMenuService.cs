@@ -1,15 +1,36 @@
 using Microsoft.Win32;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Infrastructure;
 
 namespace RunFence.Apps;
 
-public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvider) : IContextMenuService
+public class ContextMenuService(
+    ILoggingService log,
+    IAppIconProvider iconProvider,
+    IProgramDataObjectProvisioner programDataObjectProvisioner,
+    IProgramDataKnownPathResolver programDataKnownPathResolver) : IContextMenuService
 {
+    private readonly IRegistryKey _hklm = new WindowsRegistryKey(Registry.LocalMachine);
+    private readonly string? _launcherPathOverride;
+
+    public ContextMenuService(
+        ILoggingService log,
+        IAppIconProvider iconProvider,
+        IProgramDataObjectProvisioner programDataObjectProvisioner,
+        IProgramDataKnownPathResolver programDataKnownPathResolver,
+        IRegistryKey hklm,
+        string? launcherPathOverride)
+        : this(log, iconProvider, programDataObjectProvisioner, programDataKnownPathResolver)
+    {
+        _hklm = hklm;
+        _launcherPathOverride = launcherPathOverride;
+    }
+
     public void Register()
     {
         log.Info("ContextMenuService: registering context menu.");
-        var launcherPath = Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
+        var launcherPath = _launcherPathOverride ?? Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName);
         if (!File.Exists(launcherPath))
         {
             log.Warn($"Launcher not found at {launcherPath}, skipping context menu registration");
@@ -22,9 +43,9 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
         {
             try
             {
-                using var shellKey = Registry.LocalMachine.CreateSubKey(registryPath);
+                using var shellKey = _hklm.CreateSubKey(registryPath);
                 shellKey.SetValue(null, "RunFence...");
-                shellKey.SetValue("Icon", PathConstants.ExportedIconPath);
+                shellKey.SetValue("Icon", programDataKnownPathResolver.GetFilePath(ProgramDataPolicies.ContextMenuIcon));
 
                 using var commandKey = shellKey.CreateSubKey("command");
                 commandKey.SetValue(null, $"\"{launcherPath}\" \"%1\"");
@@ -45,7 +66,7 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
         {
             try
             {
-                Registry.LocalMachine.DeleteSubKeyTree(registryPath, false);
+                _hklm.DeleteSubKeyTree(registryPath, false);
             }
             catch (Exception ex)
             {
@@ -55,7 +76,7 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
 
         try
         {
-            var iconPath = PathConstants.ExportedIconPath;
+            var iconPath = programDataKnownPathResolver.GetFilePath(ProgramDataPolicies.ContextMenuIcon);
             if (File.Exists(iconPath))
                 File.Delete(iconPath);
         }
@@ -71,14 +92,15 @@ public class ContextMenuService(ILoggingService log, IAppIconProvider iconProvid
     {
         try
         {
-            var iconPath = PathConstants.ExportedIconPath;
-            var dir = Path.GetDirectoryName(iconPath);
-            if (!string.IsNullOrEmpty(dir))
-                Directory.CreateDirectory(dir);
-
             var icon = iconProvider.GetAppIcon();
-            using var fs = new FileStream(iconPath, FileMode.Create, FileAccess.Write);
-            icon.Save(fs);
+            using (var fs = programDataObjectProvisioner.CreateOrReplaceFile(
+                       ProgramDataPolicies.ContextMenuIcon,
+                       FileShare.Read))
+            {
+                icon.Save(fs);
+                fs.Flush();
+            }
+
         }
         catch (Exception ex)
         {

@@ -2,6 +2,7 @@ using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.DragBridge.UI.Forms;
+using RunFence.ForegroundMarker;
 using RunFence.Infrastructure;
 using RunFence.Persistence.UI.Forms;
 using RunFence.Startup;
@@ -10,7 +11,7 @@ using RunFence.Startup.UI;
 namespace RunFence.UI.Forms;
 
 /// <remarks>Deps above threshold: 18 deps: all are already-extracted independent feature sections/handlers. Tab-based split would create artificial cross-tab state sharing. Each handler already owns its own concern. Reviewed 2026-04-20.</remarks>
-public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
+public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource, IOptionsPanelLifecycleView
 {
     private static readonly LogVerbosity[] LogVerbosityComboValues =
     {
@@ -32,12 +33,13 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
     private readonly SecurityCheckRunner _securityCheckHandler;
     private readonly IAutoStartService _autoStartService;
     private readonly OptionsStartWithoutPinHandler _startWithoutPinHandler;
-    private readonly OptionsPanelDataLoader _dataLoader;
     private readonly OptionsIcmpSection _icmpSection;
     private readonly OptionsFolderBrowserSection _folderBrowserSection;
+    private readonly OptionsForegroundPrivilegeMarkerSection _foregroundPrivilegeMarkerSection;
     private readonly OptionsPanelCheckboxHandler _checkboxHandler;
     private readonly IAssociationAutoSetService _autoSetService;
     private readonly AccountConfigTransferOrchestrator _migrateOrchestrator;
+    private readonly OptionsPanelLifecycleCoordinator _lifecycleCoordinator;
 
     private readonly IpcCallerSection _callerSection;
     private readonly ConfigManagerSection _configSection;
@@ -62,12 +64,13 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         IAutoStartService autoStartService,
         OptionsStartWithoutPinHandler startWithoutPinHandler,
         OptionsMaintenanceLaunchHandler maintenanceLaunchHandler,
-        OptionsPanelDataLoader dataLoader,
         OptionsIcmpSection icmpSection,
         OptionsFolderBrowserSection folderBrowserSection,
+        OptionsForegroundPrivilegeMarkerSection foregroundPrivilegeMarkerSection,
         OptionsPanelCheckboxHandler checkboxHandler,
         IAssociationAutoSetService autoSetService,
         AccountConfigTransferOrchestrator migrateOrchestrator,
+        OptionsPanelLifecycleCoordinator lifecycleCoordinator,
         Func<IpcCallerSection> ipcCallerSectionFactory,
         Func<ConfigManagerSection> configManagerSectionFactory,
         Func<DragBridgeSection> dragBridgeSectionFactory)
@@ -81,92 +84,32 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         _securityCheckHandler = securityCheckRunner;
         _autoStartService = autoStartService;
         _startWithoutPinHandler = startWithoutPinHandler;
-        _dataLoader = dataLoader;
         _icmpSection = icmpSection;
         _folderBrowserSection = folderBrowserSection;
+        _foregroundPrivilegeMarkerSection = foregroundPrivilegeMarkerSection;
         _checkboxHandler = checkboxHandler;
         _autoSetService = autoSetService;
         _migrateOrchestrator = migrateOrchestrator;
+        _lifecycleCoordinator = lifecycleCoordinator;
+        _lifecycleCoordinator.Initialize(this);
 
         _callerSection = ipcCallerSectionFactory();
-        _callerSection.SetShowModalDialog(dlg => ShowModalDialog(dlg));
         _callerSection.Changed += OnCallerChanged;
 
         _configSection = configManagerSectionFactory();
         _configSection.ConfigLoadRequested += path => ConfigLoadRequested?.Invoke(path);
         _configSection.ConfigUnloadRequested += path => ConfigUnloadRequested?.Invoke(path);
-        _configSection.DataChanged += () => DataChanged?.Invoke();
+        _configSection.DataChanged += () =>
+        {
+            _lifecycleCoordinator.HandleDataChanged();
+            DataChanged?.Invoke();
+        };
 
         _dragBridgeSection = dragBridgeSectionFactory();
         _dragBridgeSection.Changed += OnDragBridgeSettingsChanged;
 
         InitializeComponent();
-        BuildDynamicContent();
-    }
-
-    private void BuildDynamicContent()
-    {
-        _logVerbosityComboBox.Items.AddRange(LogVerbosityComboValues.Cast<object>().ToArray());
-
-        // Set inline browse button heights to match adjacent text boxes for DPI correctness
-        _folderBrowseButton.Height = _folderBrowserExeTextBox.PreferredHeight;
-        _folderBrowseButton.Top = _folderBrowserExeTextBox.Top;
-        _settingsBrowseButton.Height = _defaultSettingsPathTextBox.PreferredHeight;
-        _settingsBrowseButton.Top = _defaultSettingsPathTextBox.Top;
-
-        // Set images (runtime bitmap generation)
-        _changePinBtn.Image = UiIconFactory.CreateToolbarIcon("\u2731", Color.FromArgb(0x33, 0x66, 0x99), 16);
-        _cleanupBtn.Image = UiIconFactory.CreateToolbarIcon("\u2716", Color.FromArgb(0x99, 0x33, 0x33), 16);
-        _securityCheckBtn.Image = UiIconFactory.CreateToolbarIcon("\u26A0", Color.FromArgb(0x22, 0x8B, 0x22), 16);
-        _migrateAccountBtn.Image = UiIconFactory.CreateToolbarIcon("\u2794", Color.FromArgb(0x33, 0x66, 0x99), 16);
-
-        // Tooltips
-        _tooltip.SetToolTip(_cleanupBtn, "Revert all firewall rules, app-managed ACLs, launcher shortcut changes, and associations for saved apps, then exit RunFence");
-        _tooltip.SetToolTip(_securityCheckBtn, "Scan startup folders and registry for security issues");
-        _tooltip.SetToolTip(_migrateAccountBtn, "Move the complete RunFence configuration and encrypted credentials to another administrator account");
-        _tooltip.SetToolTip(_autoLockTimeoutUpDown, "Minutes after being sent to tray before RunFence GUI is hidden. IPC remains active. Set to 0 to lock immediately.");
-        _callerSection.SetGroupTitle("Launcher Access Control");
-        _callerSection.SetDescription("Restrict which accounts can launch apps via IPC. Empty = unrestricted.");
-        _tooltip.SetToolTip(_exportSettingsButton, "Export current session's desktop settings to a file");
-
-        // Add section UserControls to their containers
-        _dragBridgeSection.Dock = DockStyle.Fill;
-        _dragBridgePlaceholder.Controls.Add(_dragBridgeSection);
-
-        _callerSection.Dock = DockStyle.Fill;
-        _callerGroup.Controls.Add(_callerSection);
-
-        _configSection.Dock = DockStyle.Fill;
-        _rightConfigPanel.Controls.Add(_configSection);
-
-        // Wire runtime controls into injected sections after InitializeComponent().
-        // Note: folder browser exe-path Leave is wired inside OptionsFolderBrowserSection.Initialize.
-        _folderBrowserSection.Initialize(
-            _folderBrowserExeTextBox,
-            _defaultSettingsPathTextBox,
-            _exportSettingsButton,
-            _operationGuard,
-            this,
-            () => Database.Settings,
-            DebounceSave);
-
-        _checkboxHandler.Initialize(
-            _autoLockCheckBox,
-            _autoLockTimeoutUpDown,
-            () => Database.Settings,
-            SaveSettings);
-
-        _icmpSection.Initialize(
-            _blockIcmpCheckBox,
-            SaveSettings);
-
-        // TextChanged handlers (OnDataSet removes/re-adds these around value assignment)
-        _folderBrowserArgsTextBox.TextChanged += OnFolderBrowserArgsChanged;
-        _defaultSettingsPathTextBox.TextChanged += OnDefaultSettingsPathChanged;
-        // Note: _folderBrowseButton, _settingsBrowseButton, _exportSettingsButton wired in Designer.cs
-        // to thin delegators below. Checkbox/numericupdown handlers (autoStart, idleTimeout, autoLock,
-        // unlockMode, contextMenu, log verbosity, startWithoutPin) are wired only in OnDataSet (remove → set value
-        // → re-add pattern) — do not wire here.
+        _lifecycleCoordinator.BuildDynamicContent();
     }
 
     public void RegisterContextHelp(ContextHelpForm host)
@@ -177,89 +120,12 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
 
         host.SetContextHelp(_folderBrowserGroup, ContextHelpTextCatalog.Options_FolderBrowser);
         host.SetContextHelp(_desktopSettingsGroup, ContextHelpTextCatalog.Options_DesktopSettingsTransfer);
-        host.SetContextHelp(_blockIcmpCheckBox, ContextHelpTextCatalog.Options_FirewallIcmp);
+        host.SetContextHelp(_firewallGroup, ContextHelpTextCatalog.Options_FirewallIcmp);
 
         _configSection.RegisterContextHelp(host);
     }
 
-    protected override async void OnDataSet()
-    {
-        try
-        {
-            _callerSection.SetSidNames(Database.SidNames, (sid, name) => Database.UpdateSidName(sid, name));
-
-            // Load settings via data loader (may enforce license restrictions on Database.Settings)
-            var (state, settingsChangedByLicense) = await _dataLoader.LoadSettingsAsync(Database.Settings);
-
-            if (IsDisposed)
-                return;
-
-            // Apply loaded state to controls (remove handlers to avoid spurious saves during population)
-            _autoStartCheckBox.CheckedChanged -= OnAutoStartChanged;
-            _idleTimeoutCheckBox.CheckedChanged -= OnIdleTimeoutCheckChanged;
-            _idleTimeoutUpDown.ValueChanged -= OnIdleTimeoutChanged;
-            _autoLockCheckBox.CheckedChanged -= OnAutoLockCheckChanged;
-            _autoLockTimeoutUpDown.ValueChanged -= OnAutoLockTimeoutChanged;
-
-            _autoStartCheckBox.Checked = state.AutoStartEnabled;
-            _idleTimeoutCheckBox.Checked = state.IdleTimeoutEnabled;
-            _idleTimeoutUpDown.Value = state.IdleTimeoutMinutes;
-            _idleTimeoutUpDown.Enabled = state.IdleTimeoutEnabled;
-            _autoLockCheckBox.Checked = state.AutoLockEnabled;
-            _autoLockTimeoutUpDown.Value = state.AutoLockTimeoutMinutes;
-            _autoLockTimeoutUpDown.Enabled = state.AutoLockEnabled;
-
-            _autoStartCheckBox.CheckedChanged += OnAutoStartChanged;
-            _idleTimeoutCheckBox.CheckedChanged += OnIdleTimeoutCheckChanged;
-            _idleTimeoutUpDown.ValueChanged += OnIdleTimeoutChanged;
-            _autoLockCheckBox.CheckedChanged += OnAutoLockCheckChanged;
-            _autoLockTimeoutUpDown.ValueChanged += OnAutoLockTimeoutChanged;
-
-            _folderBrowserArgsTextBox.TextChanged -= OnFolderBrowserArgsChanged;
-            _defaultSettingsPathTextBox.TextChanged -= OnDefaultSettingsPathChanged;
-            _folderBrowserExeTextBox.Text = state.FolderBrowserExePath;
-            _folderBrowserArgsTextBox.Text = state.FolderBrowserArguments;
-            _defaultSettingsPathTextBox.Text = state.DefaultDesktopSettingsPath;
-            _folderBrowserArgsTextBox.TextChanged += OnFolderBrowserArgsChanged;
-            _defaultSettingsPathTextBox.TextChanged += OnDefaultSettingsPathChanged;
-
-            _unlockModeComboBox.SelectedIndexChanged -= OnUnlockModeComboChanged;
-            _unlockModeComboBox.SelectedIndex = state.UnlockModeIndex;
-            _unlockModeComboBox.SelectedIndexChanged += OnUnlockModeComboChanged;
-
-            _contextMenuCheckBox.CheckedChanged -= OnContextMenuChanged;
-            _contextMenuCheckBox.Checked = state.EnableContextMenu;
-            _contextMenuCheckBox.CheckedChanged += OnContextMenuChanged;
-
-            _logVerbosityComboBox.SelectedIndexChanged -= OnLogVerbosityChanged;
-            var logVerbosityIndex = Array.IndexOf(LogVerbosityComboValues, state.LogVerbosity);
-            _logVerbosityComboBox.SelectedIndex = logVerbosityIndex >= 0
-                ? logVerbosityIndex
-                : Array.IndexOf(LogVerbosityComboValues, LogVerbosity.Info);
-            _logVerbosityComboBox.SelectedIndexChanged += OnLogVerbosityChanged;
-
-            _startWithoutPinCheckBox.CheckedChanged -= OnStartWithoutPinChanged;
-            _startWithoutPinCheckBox.Checked = _startWithoutPinHandler.IsStartWithoutPinEnabled;
-            _startWithoutPinCheckBox.CheckedChanged += OnStartWithoutPinChanged;
-
-            _dragBridgeSection.LoadFromSettings(Database.Settings);
-
-            _blockIcmpCheckBox.CheckedChanged -= _icmpSection.OnBlockIcmpChanged;
-            _blockIcmpCheckBox.Checked = Database.Settings.BlockIcmpWhenInternetBlocked;
-            _blockIcmpCheckBox.CheckedChanged += _icmpSection.OnBlockIcmpChanged;
-
-            if (settingsChangedByLicense)
-                SaveSettings();
-
-            RefreshCallerList();
-            _configSection.RefreshConfigList();
-        }
-        catch (Exception ex)
-        {
-            _log.Error("OptionsPanel.OnDataSet failed", ex);
-            _log.Warn($"OptionsPanel load presentation error: {ex.Message}");
-        }
-    }
+    protected override async void OnDataSet() => await _lifecycleCoordinator.OnDataSet(Database);
 
     // --- Settings handlers ---
 
@@ -344,6 +210,9 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
         _checkboxHandler.OnAutoLockTimeoutChanged((int)_autoLockTimeoutUpDown.Value);
         DebounceSave();
     }
+
+    private void OnBlockIcmpCheckChanged(object? sender, EventArgs e)
+        => _icmpSection.SetBlockIcmp(_blockIcmpCheckBox.Checked);
 
     private void OnContextMenuChanged(object? sender, EventArgs e)
     {
@@ -546,4 +415,136 @@ public partial class OptionsPanel : DataPanel, IDragBridgeSettingsChangeSource
     {
         _settingsHandler.SaveSettings(() => SettingsChanged?.Invoke());
     }
+
+    void IOptionsPanelLifecycleView.BuildDynamicContent()
+    {
+        _logVerbosityComboBox.Items.AddRange(LogVerbosityComboValues.Cast<object>().ToArray());
+
+        _folderBrowseButton.Height = _folderBrowserExeTextBox.PreferredHeight;
+        _folderBrowseButton.Top = _folderBrowserExeTextBox.Top;
+        _settingsBrowseButton.Height = _defaultSettingsPathTextBox.PreferredHeight;
+        _settingsBrowseButton.Top = _defaultSettingsPathTextBox.Top;
+
+        _changePinBtn.Image = UiIconFactory.CreateToolbarIcon("\u2731", Color.FromArgb(0x33, 0x66, 0x99), 16);
+        _cleanupBtn.Image = UiIconFactory.CreateToolbarIcon("\u2716", Color.FromArgb(0x99, 0x33, 0x33), 16);
+        _securityCheckBtn.Image = UiIconFactory.CreateToolbarIcon("\u26A0", Color.FromArgb(0x22, 0x8B, 0x22), 16);
+        _migrateAccountBtn.Image = UiIconFactory.CreateToolbarIcon("\u2794", Color.FromArgb(0x33, 0x66, 0x99), 16);
+
+        _tooltip.SetToolTip(_cleanupBtn, "Revert all firewall rules, app-managed ACLs, launcher shortcut changes, and associations for saved apps, then exit RunFence");
+        _tooltip.SetToolTip(_securityCheckBtn, "Scan startup folders and registry for security issues");
+        _tooltip.SetToolTip(_migrateAccountBtn, "Move the complete RunFence configuration and encrypted credentials to another administrator account");
+        _tooltip.SetToolTip(_autoLockTimeoutUpDown, "Minutes after being sent to tray before RunFence GUI is hidden. IPC remains active. Set to 0 to lock immediately.");
+        _callerSection.SetGroupTitle("Launcher Access Control");
+        _callerSection.SetDescription("Restrict which accounts can launch apps via IPC. Empty = unrestricted.");
+        _tooltip.SetToolTip(_exportSettingsButton, "Export current session's desktop settings to a file");
+
+        _dragBridgeSection.Dock = DockStyle.Fill;
+        _dragBridgePlaceholder.Controls.Add(_dragBridgeSection);
+
+        _callerSection.Dock = DockStyle.Fill;
+        _callerGroup.Controls.Add(_callerSection);
+
+        _configSection.Dock = DockStyle.Fill;
+        _rightConfigPanel.Controls.Add(_configSection);
+
+        _folderBrowserSection.Initialize(
+            _folderBrowserExeTextBox,
+            _defaultSettingsPathTextBox,
+            _exportSettingsButton,
+            _operationGuard,
+            this,
+            () => Database.Settings,
+            DebounceSave);
+
+        _foregroundPrivilegeMarkerSection.Initialize(
+            _foregroundPrivilegeMarkerCheckBox,
+            _foregroundPrivilegeMarkerFullscreenCheckBox,
+            () => Database.Settings,
+            SaveSettings);
+
+        _checkboxHandler.Initialize(
+            _autoLockCheckBox,
+            _autoLockTimeoutUpDown,
+            () => Database.Settings,
+            SaveSettings);
+
+        _icmpSection.Initialize(
+            _blockIcmpCheckBox,
+            SaveSettings);
+
+        _folderBrowserArgsTextBox.TextChanged += OnFolderBrowserArgsChanged;
+        _defaultSettingsPathTextBox.TextChanged += OnDefaultSettingsPathChanged;
+    }
+
+    void IOptionsPanelLifecycleView.SetCallerSidNames(IReadOnlyDictionary<string, string> sidNames, Action<string, string> onSidNameLearned)
+        => _callerSection.SetSidNames(sidNames, onSidNameLearned);
+
+    bool IOptionsPanelLifecycleView.StartWithoutPinEnabled => _startWithoutPinHandler.IsStartWithoutPinEnabled;
+
+    void IOptionsPanelLifecycleView.ApplyLoadedState(OptionsPanelState state, bool startWithoutPinEnabled, bool blockIcmpWhenInternetBlocked)
+    {
+        _autoStartCheckBox.CheckedChanged -= OnAutoStartChanged;
+        _idleTimeoutCheckBox.CheckedChanged -= OnIdleTimeoutCheckChanged;
+        _idleTimeoutUpDown.ValueChanged -= OnIdleTimeoutChanged;
+        _autoLockCheckBox.CheckedChanged -= OnAutoLockCheckChanged;
+        _autoLockTimeoutUpDown.ValueChanged -= OnAutoLockTimeoutChanged;
+
+        _autoStartCheckBox.Checked = state.AutoStartEnabled;
+        _idleTimeoutCheckBox.Checked = state.IdleTimeoutEnabled;
+        _idleTimeoutUpDown.Value = state.IdleTimeoutMinutes;
+        _idleTimeoutUpDown.Enabled = state.IdleTimeoutEnabled;
+        _autoLockCheckBox.Checked = state.AutoLockEnabled;
+        _autoLockTimeoutUpDown.Value = state.AutoLockTimeoutMinutes;
+        _autoLockTimeoutUpDown.Enabled = state.AutoLockEnabled;
+        _foregroundPrivilegeMarkerSection.ApplyLoadedState(
+            state.ShowForegroundPrivilegeMarker,
+            state.ShowForegroundPrivilegeMarkerWhenFullscreen);
+
+        _autoStartCheckBox.CheckedChanged += OnAutoStartChanged;
+        _idleTimeoutCheckBox.CheckedChanged += OnIdleTimeoutCheckChanged;
+        _idleTimeoutUpDown.ValueChanged += OnIdleTimeoutChanged;
+        _autoLockCheckBox.CheckedChanged += OnAutoLockCheckChanged;
+        _autoLockTimeoutUpDown.ValueChanged += OnAutoLockTimeoutChanged;
+
+        _folderBrowserArgsTextBox.TextChanged -= OnFolderBrowserArgsChanged;
+        _defaultSettingsPathTextBox.TextChanged -= OnDefaultSettingsPathChanged;
+        _folderBrowserExeTextBox.Text = state.FolderBrowserExePath;
+        _folderBrowserArgsTextBox.Text = state.FolderBrowserArguments;
+        _defaultSettingsPathTextBox.Text = state.DefaultDesktopSettingsPath;
+        _folderBrowserArgsTextBox.TextChanged += OnFolderBrowserArgsChanged;
+        _defaultSettingsPathTextBox.TextChanged += OnDefaultSettingsPathChanged;
+
+        _unlockModeComboBox.SelectedIndexChanged -= OnUnlockModeComboChanged;
+        _unlockModeComboBox.SelectedIndex = state.UnlockModeIndex;
+        _unlockModeComboBox.SelectedIndexChanged += OnUnlockModeComboChanged;
+
+        _contextMenuCheckBox.CheckedChanged -= OnContextMenuChanged;
+        _contextMenuCheckBox.Checked = state.EnableContextMenu;
+        _contextMenuCheckBox.CheckedChanged += OnContextMenuChanged;
+
+        _logVerbosityComboBox.SelectedIndexChanged -= OnLogVerbosityChanged;
+        var logVerbosityIndex = Array.IndexOf(LogVerbosityComboValues, state.LogVerbosity);
+        _logVerbosityComboBox.SelectedIndex = logVerbosityIndex >= 0
+            ? logVerbosityIndex
+            : Array.IndexOf(LogVerbosityComboValues, LogVerbosity.Info);
+        _logVerbosityComboBox.SelectedIndexChanged += OnLogVerbosityChanged;
+
+        _startWithoutPinCheckBox.CheckedChanged -= OnStartWithoutPinChanged;
+        _startWithoutPinCheckBox.Checked = startWithoutPinEnabled;
+        _startWithoutPinCheckBox.CheckedChanged += OnStartWithoutPinChanged;
+
+        _dragBridgeSection.LoadFromSettings(Database.Settings);
+
+        _blockIcmpCheckBox.CheckedChanged -= OnBlockIcmpCheckChanged;
+        _blockIcmpCheckBox.Checked = blockIcmpWhenInternetBlocked;
+        _blockIcmpCheckBox.CheckedChanged += OnBlockIcmpCheckChanged;
+    }
+
+    void IOptionsPanelLifecycleView.RefreshCallerAndConfigLists()
+    {
+        RefreshCallerList();
+        _configSection.RefreshConfigList();
+    }
+
+    void IOptionsPanelLifecycleView.SaveSettings() => SaveSettings();
 }

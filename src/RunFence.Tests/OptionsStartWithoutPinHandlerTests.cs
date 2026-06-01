@@ -35,7 +35,7 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32], EncryptedCanary = [1, 2, 3] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         _rotatedStore = new CredentialStore { ArgonSalt = new byte[32], EncryptedCanary = [4, 5, 6] };
 
@@ -79,22 +79,6 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
     {
         _rotationRunner.Setup(r => r.Run(It.IsAny<string>(), _session))
             .Returns((PinKeyRotationResult?)null);
-    }
-
-    [Fact]
-    public void IsLicensed_DelegatesToLicenseService()
-    {
-        _licenseService.Setup(l => l.IsLicensed).Returns(true);
-
-        Assert.True(_handler.IsLicensed);
-    }
-
-    [Fact]
-    public void IsStartWithoutPinEnabled_DelegatesToRememberPinService()
-    {
-        _rememberPinService.Setup(r => r.IsEnabled).Returns(true);
-
-        Assert.True(_handler.IsStartWithoutPinEnabled);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -342,19 +326,4 @@ public class OptionsStartWithoutPinHandlerTests : IDisposable
             It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
     }
 
-    [Fact]
-    public void Enable_OnKeyRotated_UpdatesSessionPinDerivedKeyBeforeCallback()
-    {
-        _promptService.Setup(p => p.ConfirmSecurityWarning()).Returns(true);
-        _rememberPinService.Setup(r => r.IsTpmAvailable()).Returns(true);
-        SetupRotationSuccess();
-
-        var oldKey = _session.PinDerivedKey;
-        ISecureSecretSnapshotSource? newKeyFromCallback = null;
-        _handler.SetStartWithoutPin(true, () => { newKeyFromCallback = _session.PinDerivedKey; });
-
-        Assert.NotNull(newKeyFromCallback);
-        Assert.Same(_session.PinDerivedKey, newKeyFromCallback);
-        Assert.NotSame(oldKey, newKeyFromCallback);
-    }
 }

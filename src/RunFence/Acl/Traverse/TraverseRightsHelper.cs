@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using RunFence.Acl.Permissions;
+using RunFence.Core;
 
 namespace RunFence.Acl.Traverse;
 
@@ -11,14 +12,19 @@ public static class TraverseRightsHelper
     public static bool HasEffectiveTraverse(
         string dirPath, string sid, IReadOnlyList<string> groupSids,
         IAclPermissionService aclPermission,
-        IFileSystemPathInfo pathInfo)
+        IFileSystemPathInfo pathInfo,
+        bool unelevated = true)
     {
         try
         {
             if (!pathInfo.DirectoryExists(dirPath))
                 return false;
             var security = pathInfo.GetDirectorySecurity(dirPath);
-            return aclPermission.HasEffectiveRights(security, sid, groupSids, TraverseRights);
+            return aclPermission.HasEffectiveRights(
+                security,
+                sid,
+                unelevated ? AclComputeHelper.ExcludeAdministratorsGroup(groupSids) : groupSids,
+                TraverseRights);
         }
         catch
         {
@@ -31,9 +37,10 @@ public static class TraverseRightsHelper
         string sid,
         IReadOnlyList<string> groupSids,
         IAclPermissionService aclPermission,
-        IFileSystemPathInfo pathInfo)
+        IFileSystemPathInfo pathInfo,
+        bool unelevated = true)
     {
-        if (HasEffectiveTraverse(dirPath, sid, groupSids, aclPermission, pathInfo))
+        if (HasEffectiveTraverse(dirPath, sid, groupSids, aclPermission, pathInfo, unelevated))
             return true;
 
         return AclHelper.IsSpecificContainerSid(sid) &&
@@ -42,6 +49,7 @@ public static class TraverseRightsHelper
                    AclHelper.AllApplicationPackagesSid,
                    [],
                    aclPermission,
-                   pathInfo);
+                   pathInfo,
+                   unelevated);
     }
 }

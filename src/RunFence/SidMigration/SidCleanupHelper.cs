@@ -8,7 +8,9 @@ namespace RunFence.SidMigration;
 /// Cleans apps, IPC callers, tray SIDs, and per-app references.
 /// Does NOT touch credentials — callers handle those.
 /// </summary>
-public class SidCleanupHelper(IDatabaseProvider databaseProvider) : ISidCleanupHelper
+public class SidCleanupHelper(
+    IDatabaseProvider databaseProvider,
+    ITrackingJobStateStore? trackingJobStateStore = null) : ISidCleanupHelper
 {
     public (int removedApps, int removedIpcCallers) CleanupSidFromAppData(
         string sid, bool removeApps = true)
@@ -38,6 +40,7 @@ public class SidCleanupHelper(IDatabaseProvider databaseProvider) : ISidCleanupH
         }
 
         database.AccountGroupSnapshots?.Remove(sid);
+        trackingJobStateStore?.RemoveTrackingJobSid(sid, saveImmediately: false);
 
         return (removedApps, removedCallers);
     }
@@ -64,6 +67,8 @@ public class SidCleanupHelper(IDatabaseProvider databaseProvider) : ISidCleanupH
             var containerEntry = database.GetAccount(containerSid);
             if (containerEntry != null)
                 database.Accounts.Remove(containerEntry);
+
+            trackingJobStateStore?.RemoveTrackingJobSid(containerSid, saveImmediately: false);
         }
 
         return (removedApps, removedContainers);

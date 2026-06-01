@@ -24,7 +24,7 @@ public class LockManagerTests : IDisposable
         {
             Database = _database,
             CredentialStore = new CredentialStore()
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _credentialUnlockService.Setup(c => c.VerifyPin()).Returns(CredentialUnlockResult.Canceled);
         _credentialUnlockService.Setup(c => c.VerifyAsync(It.IsAny<CredentialUnlockMode>())).ReturnsAsync(CredentialUnlockResult.Canceled);
         _uiThreadInvoker.Setup(i => i.Invoke(It.IsAny<Func<bool>>())).Returns<Func<bool>>(f => f());

@@ -90,7 +90,7 @@ public class AccountCreationOrchestrator(
 
                 if (completionState.HasPackages && !completionState.InternetBlocked)
                 {
-                    launchService.InstallPackages(
+                    await launchService.InstallPackagesAsync(
                         completionState.SelectedInstallPackages,
                         new AccountLaunchIdentity(completionState.CreatedSid));
                 }

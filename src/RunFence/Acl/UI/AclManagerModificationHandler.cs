@@ -1,7 +1,6 @@
 using RunFence.Acl;
 using RunFence.Acl.UI.Forms;
 using RunFence.Core;
-using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
@@ -20,7 +19,8 @@ public class AclManagerModificationHandler(
     IDatabaseProvider databaseProvider,
     AclManagerTraverseOperations traverseOperations,
     AclManagerActionOrchestrator actionHandler,
-    IReparsePointPromptHelper reparsePointHelper)
+    IReparsePointPromptHelper reparsePointHelper,
+    IOpenFileDialogAdapterFactory openFileDialogFactory)
 {
     private IAclManagerDialogHost _dialogHost = null!;
     private string _sid = null!;
@@ -29,13 +29,13 @@ public class AclManagerModificationHandler(
     private Action _refreshGrantsGrid = null!;
     private Action _refreshTraverseGrid = null!;
     private Action _updateActionButtons = null!;
-
-    public CancellationTokenSource? CancelScanCts { get; private set; }
+    private AclManagerScanCancellationController _scanCancellation = null!;
 
     public void Initialize(
         IAclManagerDialogHost dialogHost,
         string sid,
         AclManagerPendingChanges pending,
+        AclManagerScanCancellationController scanCancellation,
         AclManagerDialogControls controls,
         Action refreshGrantsGrid,
         Action refreshTraverseGrid,
@@ -44,6 +44,7 @@ public class AclManagerModificationHandler(
         _dialogHost = dialogHost;
         _sid = sid;
         _pending = pending;
+        _scanCancellation = scanCancellation;
         _controls = controls;
         _refreshGrantsGrid = refreshGrantsGrid;
         _refreshTraverseGrid = refreshTraverseGrid;
@@ -69,7 +70,7 @@ public class AclManagerModificationHandler(
         _controls.ScanStatusLabel.Text = "Scanning...";
         _controls.ScanStatusLabel.Visible = true;
 
-        CancelScanCts = new CancellationTokenSource();
+        var scanToken = _scanCancellation.BeginScan();
         int updated;
         try
         {
@@ -78,7 +79,7 @@ public class AclManagerModificationHandler(
                 if (!_dialogHost.IsDisposed)
                     _controls.ScanStatusLabel.Text = $"Scanning... ({n} items scanned)";
             });
-            updated = await scanService.ScanAsync(selectedPath, _sid, progress, CancelScanCts.Token);
+            updated = await scanService.ScanAsync(selectedPath, _sid, progress, scanToken);
         }
         catch (OperationCanceledException)
         {
@@ -92,8 +93,7 @@ public class AclManagerModificationHandler(
         }
         finally
         {
-            CancelScanCts?.Dispose();
-            CancelScanCts = null;
+            _scanCancellation.CompleteScan();
             if (!_dialogHost.IsDisposed)
             {
                 _controls.ScanStatusLabel.Visible = false;
@@ -116,14 +116,14 @@ public class AclManagerModificationHandler(
                 var dbPaths = new HashSet<(string, bool)>(
                     accountGrants.Select(g => (Path.GetFullPath(g.Path), g.IsDeny)),
                     new GrantPathKeyComparer());
-                var pendingAddKeysToRemove = _pending.PendingAdds.Keys
+                var pendingAddKeysToRemove = _pending.Grants.GetPendingAddsSnapshot().Keys
                     .Where(k => dbPaths.Contains(k)).ToList();
                 foreach (var key in pendingAddKeysToRemove)
-                    _pending.PendingAdds.Remove(key);
-                var pendingModKeysToRemove = _pending.PendingModifications.Keys
+                    _pending.Grants.RemoveGrant(key.Path, key.IsDeny);
+                var pendingModKeysToRemove = _pending.Grants.GetPendingModificationsSnapshot().Keys
                     .Where(k => dbPaths.Contains(k)).ToList();
                 foreach (var key in pendingModKeysToRemove)
-                    _pending.PendingModifications.Remove(key);
+                    _pending.Grants.RemoveGrantModification(key.Path, key.IsDeny, out _);
             }
 
             _refreshGrantsGrid();
@@ -179,11 +179,11 @@ public class AclManagerModificationHandler(
         }
         else
         {
-            using var ofd = new OpenFileDialog();
+            using var openDialogAdapter = openFileDialogFactory.Create();
+            var ofd = openDialogAdapter.Dialog;
             ofd.Title = "Select file to add Allow grant";
             ofd.Filter = "All files (*.*)|*.*";
-            FileDialogHelper.AddInteractiveUserCustomPlaces(ofd);
-            if (ofd.ShowDialog(_dialogHost) != DialogResult.OK)
+            if (openDialogAdapter.ShowDialog(_dialogHost) != DialogResult.OK)
                 return;
             selectedPath = ofd.FileName;
         }
@@ -223,10 +223,10 @@ public class AclManagerModificationHandler(
         if (selectedEntries.Count == 0)
             return;
 
-        int traverseBefore = _pending.PendingTraverseAdds.Count + _pending.PendingTraverseRemoves.Count;
+        int traverseBefore = _pending.Traverse.GetPendingAddsSnapshot().Count + _pending.Traverse.GetPendingRemovesSnapshot().Count;
         foreach (var entry in selectedEntries)
             actionHandler.RemoveGrantPathDeferred(entry);
-        int traverseAfter = _pending.PendingTraverseAdds.Count + _pending.PendingTraverseRemoves.Count;
+        int traverseAfter = _pending.Traverse.GetPendingAddsSnapshot().Count + _pending.Traverse.GetPendingRemovesSnapshot().Count;
 
         _refreshGrantsGrid();
         if (traverseAfter != traverseBefore)
@@ -242,10 +242,10 @@ public class AclManagerModificationHandler(
         if (selectedEntries.Count == 0)
             return;
 
-        int traverseBefore = _pending.PendingTraverseAdds.Count + _pending.PendingTraverseRemoves.Count;
+        int traverseBefore = _pending.Traverse.GetPendingAddsSnapshot().Count + _pending.Traverse.GetPendingRemovesSnapshot().Count;
         foreach (var entry in selectedEntries)
             actionHandler.UntrackGrantPath(entry);
-        int traverseAfter = _pending.PendingTraverseAdds.Count + _pending.PendingTraverseRemoves.Count;
+        int traverseAfter = _pending.Traverse.GetPendingAddsSnapshot().Count + _pending.Traverse.GetPendingRemovesSnapshot().Count;
 
         _refreshGrantsGrid();
         if (traverseAfter != traverseBefore)

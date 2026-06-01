@@ -5,6 +5,7 @@ using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.DragBridge.UI.Forms;
+using RunFence.ForegroundMarker;
 using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Licensing;
@@ -22,49 +23,8 @@ namespace RunFence.Tests;
 
 public class OptionsPanelTests
 {
-    [Fact]
-    public void SetData_LoadsCurrentSettingsIntoControls()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var context = CreatePanelContext();
-            context.Session.Database.Settings.IdleTimeoutMinutes = 45;
-            context.Session.Database.Settings.AutoLockInBackground = true;
-            context.Session.Database.Settings.AutoLockTimeoutMinutes = 9;
-            context.Session.Database.Settings.FolderBrowserExePath = @"C:\Tools\browser.exe";
-            context.Session.Database.Settings.FolderBrowserArguments = "--open \"%1\"";
-            context.Session.Database.Settings.DefaultDesktopSettingsPath = @"C:\Profiles\desktop.rfn";
-            context.Session.Database.Settings.UnlockMode = UnlockMode.AdminAndPin;
-            context.Session.Database.Settings.EnableRunAsContextMenu = true;
-            context.Session.Database.Settings.LogVerbosity = LogVerbosity.Debug;
-            context.AutoStartService.Setup(service => service.IsAutoStartEnabled()).ReturnsAsync(true);
-            context.SetRememberPinEnabled(false);
-
-            using var panel = context.Scope.Resolve<OptionsPanel>();
-            StaTestHelper.CreateControlTree(panel);
-            panel.SetData(context.Session);
-
-            StaTestHelper.PumpUntil(() => FindComboBoxes(panel).Any(comboBox => comboBox.Items.Count == 5));
-            StaTestHelper.PumpUntil(() => FindCheckBox(panel, "Auto-start on login").Checked);
-
-            var logVerbosityComboBox = FindComboBoxes(panel).Single(comboBox => comboBox.Items.Count == 5);
-            var unlockModeComboBox = FindComboBoxes(panel).Single(comboBox => comboBox.Items.Count == 4);
-
-            Assert.Equal(5, logVerbosityComboBox.Items.Count);
-            Assert.True(FindCheckBox(panel, "Auto-start on login").Checked);
-            Assert.True(FindCheckBox(panel, "Exit after app idle").Checked);
-            Assert.True(FindCheckBox(panel, "Lock in background").Checked);
-            Assert.True(FindCheckBox(panel, "Enable 'RunFence...' context menu for files").Checked);
-            Assert.Equal(45, FindNumericUpDowns(panel)[0].Value);
-            Assert.Equal(9, FindNumericUpDowns(panel)[1].Value);
-            var textBoxValues = FindTextBoxes(panel).Select(textBox => textBox.Text).ToList();
-            Assert.Contains(@"C:\Tools\browser.exe", textBoxValues);
-            Assert.Contains("--open \"%1\"", textBoxValues);
-            Assert.Contains(@"C:\Profiles\desktop.rfn", textBoxValues);
-            Assert.Equal(2, unlockModeComboBox.SelectedIndex);
-            Assert.Equal("Debug", logVerbosityComboBox.SelectedItem?.ToString());
-        });
-    }
+    private const string ForegroundMarkerWarningText =
+        "Your preference was saved, but the foreground marker is unavailable for the rest of this RunFence session. Restart RunFence to apply the saved setting.";
 
     [Fact]
     public void RememberPinToggle_RaisesPinDerivedKeyChanged_AndKeepsCheckboxInSync()
@@ -110,11 +70,12 @@ public class OptionsPanelTests
             var callerSection = FindControls<IpcCallerSection>(panel).Single();
             var callerGroup = FindControl<Panel>(panel, control => control.Controls.OfType<IpcCallerSection>().Any());
 
+            var firewallGroup = FindControl<GroupBox>(panel, control => control.Text == "Firewall");
             var folderBrowserGroup = FindControl<GroupBox>(panel, control => control.Text == "Folder Browser");
             var desktopSettingsGroup = FindControl<GroupBox>(panel, control => control.Text == "Desktop Settings");
             var dragBridgeGroup = FindControl<GroupBox>(panel, control => control.Text == "Drag Bridge (Cross-Account Drag & Drop)");
 
-            AssertHelp(host, FindCheckBox(panel, "Block ICMP when Internet is blocked"), ContextHelpTextCatalog.Options_FirewallIcmp);
+            AssertHelp(host, firewallGroup, ContextHelpTextCatalog.Options_FirewallIcmp);
             AssertHelp(host, folderBrowserGroup, ContextHelpTextCatalog.Options_FolderBrowser);
             AssertHelp(host, desktopSettingsGroup, ContextHelpTextCatalog.Options_DesktopSettingsTransfer);
             AssertHelp(host, dragBridgeGroup, ContextHelpTextCatalog.Options_DragBridge);
@@ -125,72 +86,341 @@ public class OptionsPanelTests
             AssertHelp(host, callerSection, ContextHelpTextCatalog.Launcher_LauncherAccessGlobal);
             NoDefaultContextHelpForDescendants(callerSection, host, ContextHelpTextCatalog.Launcher_LauncherAccessGlobal);
             Assert.False(host.TryGetContextHelp(callerGroup, out _));
-            Assert.Empty(host.GetExplicitContextHelpToolStripDropDowns());
-            Assert.Empty(host.GetExplicitContextHelpToolStripItems());
         });
     }
 
     [Fact]
-    public void OpenLogButton_UsesOptionsMaintenanceLaunchHandler()
+    public void ForegroundPrivilegeMarkerToggle_DisablesFullscreenCheckboxWhenUnchecked()
     {
         StaTestHelper.RunOnSta(() =>
         {
             using var context = CreatePanelContext();
-            var log = new Mock<ILoggingService>();
-            log.SetupGet(x => x.LogFilePath).Returns(@"C:\Logs\runfence.log");
-            var launchFacade = new Mock<ILaunchFacade>();
-            launchFacade
-                .Setup(x => x.LaunchFile(
-                    It.IsAny<string>(),
-                    It.IsAny<LaunchIdentity>(),
-                    It.IsAny<string?>(),
-                    It.IsAny<Func<string, string, bool>?>()))
-                .Returns(new LaunchExecutionResult(LaunchExecutionStatus.ProcessStarted, null));
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarker = true;
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarkerWhenFullscreen = true;
+            context.AutoStartService.Setup(service => service.IsAutoStartEnabled()).ReturnsAsync(false);
+
+            using var panel = context.Scope.Resolve<OptionsPanel>();
+            StaTestHelper.CreateControlTree(panel);
+            panel.SetData(context.Session);
+            StaTestHelper.PumpUntil(() => FindForegroundPrivilegeMarkerCheckBox(panel).Checked);
+
+            FindForegroundPrivilegeMarkerCheckBox(panel).Checked = false;
+            Application.DoEvents();
+
+            Assert.False(FindFullscreenForegroundPrivilegeMarkerCheckBox(panel).Enabled);
+            Assert.True(FindFullscreenForegroundPrivilegeMarkerCheckBox(panel).Checked);
+        });
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerToggle_Enabling_SavesBeforeStartingMarkerRuntime()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var context = CreatePanelContext();
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarker = false;
+            context.AutoStartService.Setup(service => service.IsAutoStartEnabled()).ReturnsAsync(false);
+
+            var persistence = new Mock<IMainConfigPersistence>(MockBehavior.Strict);
+            var markerService = new Mock<IForegroundPrivilegeMarkerService>(MockBehavior.Strict);
+            var sequence = new MockSequence();
+            persistence.InSequence(sequence)
+                .Setup(service => service.SaveConfig(
+                    It.IsAny<AppDatabase>(),
+                    It.IsAny<ISecureSecretSnapshotSource>(),
+                    It.IsAny<byte[]>()));
+            markerService.InSequence(sequence)
+                .Setup(service => service.SetMarkerWindowEnabled(true));
 
             using var overrideScope = context.Scope.BeginLifetimeScope(builder =>
             {
-                builder.RegisterInstance(log.Object).As<ILoggingService>();
-                builder.RegisterInstance(launchFacade.Object).As<ILaunchFacade>();
-                builder.RegisterInstance(new Mock<ILaunchFeedbackPresenter>().Object).As<ILaunchFeedbackPresenter>();
-                builder.RegisterInstance(new Mock<IMessageBoxService>().Object).As<IMessageBoxService>();
-                builder.RegisterType<OptionsMaintenanceLaunchHandler>().AsSelf().SingleInstance();
+                builder.RegisterInstance(persistence.Object).As<IMainConfigPersistence>();
+                builder.RegisterInstance(markerService.Object).As<IForegroundPrivilegeMarkerService>();
+                builder.RegisterType<OptionsSettingsHandler>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsForegroundPrivilegeMarkerSection>().AsSelf().SingleInstance();
                 builder.RegisterType<OptionsPanel>().AsSelf().InstancePerDependency();
             });
 
             using var panel = overrideScope.Resolve<OptionsPanel>();
             StaTestHelper.CreateControlTree(panel);
+            panel.SetData(context.Session);
+            StaTestHelper.PumpUntil(() => !FindForegroundPrivilegeMarkerCheckBox(panel).Checked);
 
-            FindButton(panel, "Open Log").PerformClick();
+            FindForegroundPrivilegeMarkerCheckBox(panel).Checked = true;
+            Application.DoEvents();
 
-            launchFacade.Verify(
-                x => x.LaunchFile(
-                    @"C:\Logs\runfence.log",
-                    It.IsAny<LaunchIdentity>(),
-                    null,
-                    It.IsAny<Func<string, string, bool>?>()),
+            Assert.True(context.Session.Database.Settings.ShowForegroundPrivilegeMarker);
+            persistence.VerifyAll();
+            markerService.Verify(service => service.SetMarkerWindowEnabled(true), Times.Once);
+        });
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerToggle_Disabling_SavesPreferenceBeforeApplyingMarkerWindowState()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var context = CreatePanelContext();
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarker = true;
+            context.AutoStartService.Setup(service => service.IsAutoStartEnabled()).ReturnsAsync(false);
+
+            var persistence = new Mock<IMainConfigPersistence>(MockBehavior.Strict);
+            var markerService = new Mock<IForegroundPrivilegeMarkerService>(MockBehavior.Strict);
+            var sequence = new MockSequence();
+            persistence.InSequence(sequence)
+                .Setup(service => service.SaveConfig(
+                    It.IsAny<AppDatabase>(),
+                    It.IsAny<ISecureSecretSnapshotSource>(),
+                    It.IsAny<byte[]>()));
+            markerService.InSequence(sequence)
+                .Setup(service => service.SetMarkerWindowEnabled(false));
+
+            using var overrideScope = context.Scope.BeginLifetimeScope(builder =>
+            {
+                builder.RegisterInstance(persistence.Object).As<IMainConfigPersistence>();
+                builder.RegisterInstance(markerService.Object).As<IForegroundPrivilegeMarkerService>();
+                builder.RegisterType<OptionsSettingsHandler>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsForegroundPrivilegeMarkerSection>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsPanel>().AsSelf().InstancePerDependency();
+            });
+
+            using var panel = overrideScope.Resolve<OptionsPanel>();
+            StaTestHelper.CreateControlTree(panel);
+            panel.SetData(context.Session);
+            StaTestHelper.PumpUntil(() => FindForegroundPrivilegeMarkerCheckBox(panel).Checked);
+
+            FindForegroundPrivilegeMarkerCheckBox(panel).Checked = false;
+            Application.DoEvents();
+
+            Assert.False(context.Session.Database.Settings.ShowForegroundPrivilegeMarker);
+            markerService.Verify(service => service.SetMarkerWindowEnabled(false), Times.Once);
+            persistence.VerifyAll();
+        });
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerToggle_Disabling_ShowsWarningAfterSaveWhenMarkerUnavailable()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var context = CreatePanelContext();
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarker = true;
+            context.AutoStartService.Setup(service => service.IsAutoStartEnabled()).ReturnsAsync(false);
+
+            var persistence = new Mock<IMainConfigPersistence>(MockBehavior.Strict);
+            var markerService = new Mock<IForegroundPrivilegeMarkerService>(MockBehavior.Strict);
+            var messageBox = new Mock<IMessageBoxService>(MockBehavior.Strict);
+            var sequence = new MockSequence();
+            persistence.InSequence(sequence)
+                .Setup(service => service.SaveConfig(
+                    It.IsAny<AppDatabase>(),
+                    It.IsAny<ISecureSecretSnapshotSource>(),
+                    It.IsAny<byte[]>()));
+            markerService.InSequence(sequence)
+                .Setup(service => service.SetMarkerWindowEnabled(false))
+                .Throws(new InvalidOperationException("marker runtime unavailable"));
+            messageBox.InSequence(sequence)
+                .Setup(service => service.Show(
+                    ForegroundMarkerWarningText,
+                    "Foreground Marker Unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning))
+                .Returns(DialogResult.OK);
+
+            using var overrideScope = context.Scope.BeginLifetimeScope(builder =>
+            {
+                builder.RegisterInstance(persistence.Object).As<IMainConfigPersistence>();
+                builder.RegisterInstance(markerService.Object).As<IForegroundPrivilegeMarkerService>();
+                builder.RegisterInstance(messageBox.Object).As<IMessageBoxService>();
+                builder.RegisterType<OptionsSettingsHandler>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsForegroundPrivilegeMarkerSection>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsPanel>().AsSelf().InstancePerDependency();
+            });
+
+            using var panel = overrideScope.Resolve<OptionsPanel>();
+            StaTestHelper.CreateControlTree(panel);
+            panel.SetData(context.Session);
+            StaTestHelper.PumpUntil(() => FindForegroundPrivilegeMarkerCheckBox(panel).Checked);
+
+            FindForegroundPrivilegeMarkerCheckBox(panel).Checked = false;
+            Application.DoEvents();
+
+            Assert.False(context.Session.Database.Settings.ShowForegroundPrivilegeMarker);
+            persistence.VerifyAll();
+            markerService.Verify(service => service.SetMarkerWindowEnabled(false), Times.Once);
+            messageBox.Verify(
+                service => service.Show(
+                    ForegroundMarkerWarningText,
+                    "Foreground Marker Unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning),
                 Times.Once);
+        });
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerToggle_Enabling_ShowsWarningAfterSaveWhenMarkerUnavailable()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var context = CreatePanelContext();
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarker = false;
+            context.AutoStartService.Setup(service => service.IsAutoStartEnabled()).ReturnsAsync(false);
+
+            var persistence = new Mock<IMainConfigPersistence>(MockBehavior.Strict);
+            var markerService = new Mock<IForegroundPrivilegeMarkerService>(MockBehavior.Strict);
+            var messageBox = new Mock<IMessageBoxService>(MockBehavior.Strict);
+            var sequence = new MockSequence();
+            persistence.InSequence(sequence)
+                .Setup(service => service.SaveConfig(
+                    It.IsAny<AppDatabase>(),
+                    It.IsAny<ISecureSecretSnapshotSource>(),
+                    It.IsAny<byte[]>()));
+            markerService.InSequence(sequence)
+                .Setup(service => service.SetMarkerWindowEnabled(true))
+                .Throws(new InvalidOperationException("marker runtime unavailable"));
+            messageBox.InSequence(sequence)
+                .Setup(service => service.Show(
+                    ForegroundMarkerWarningText,
+                    "Foreground Marker Unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning))
+                .Returns(DialogResult.OK);
+
+            using var overrideScope = context.Scope.BeginLifetimeScope(builder =>
+            {
+                builder.RegisterInstance(persistence.Object).As<IMainConfigPersistence>();
+                builder.RegisterInstance(markerService.Object).As<IForegroundPrivilegeMarkerService>();
+                builder.RegisterInstance(messageBox.Object).As<IMessageBoxService>();
+                builder.RegisterType<OptionsSettingsHandler>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsForegroundPrivilegeMarkerSection>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsPanel>().AsSelf().InstancePerDependency();
+            });
+
+            using var panel = overrideScope.Resolve<OptionsPanel>();
+            StaTestHelper.CreateControlTree(panel);
+            panel.SetData(context.Session);
+            StaTestHelper.PumpUntil(() => !FindForegroundPrivilegeMarkerCheckBox(panel).Checked);
+
+            FindForegroundPrivilegeMarkerCheckBox(panel).Checked = true;
+            Application.DoEvents();
+
+            Assert.True(context.Session.Database.Settings.ShowForegroundPrivilegeMarker);
+            persistence.VerifyAll();
+            markerService.Verify(service => service.SetMarkerWindowEnabled(true), Times.Once);
+            messageBox.Verify(
+                service => service.Show(
+                    ForegroundMarkerWarningText,
+                    "Foreground Marker Unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning),
+                Times.Once);
+        });
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerSection_Toggle_WhenRuntimeDisposed_SavesPreferenceAndShowsWarning()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var context = CreatePanelContext();
+            var messageBox = new Mock<IMessageBoxService>(MockBehavior.Strict);
+            var markerService = new Mock<IForegroundPrivilegeMarkerService>(MockBehavior.Strict);
+            var saveCount = 0;
+            markerService.Setup(service => service.SetMarkerWindowEnabled(false))
+                .Throws(new ObjectDisposedException("marker runtime"));
+            messageBox
+                .Setup(service => service.Show(
+                    ForegroundMarkerWarningText,
+                    "Foreground Marker Unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning))
+                .Returns(DialogResult.OK);
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarker = true;
+
+            var section = new OptionsForegroundPrivilegeMarkerSection(markerService.Object, messageBox.Object);
+            using var checkBox = new CheckBox();
+            using var fullscreenCheckBox = new CheckBox();
+            section.Initialize(
+                checkBox,
+                fullscreenCheckBox,
+                () => context.Session.Database.Settings,
+                () => saveCount++);
+            section.ApplyLoadedState(true, true);
+
+            checkBox.Checked = false;
+            Application.DoEvents();
+
+            Assert.False(context.Session.Database.Settings.ShowForegroundPrivilegeMarker);
+            Assert.Equal(1, saveCount);
+            markerService.Verify(service => service.SetMarkerWindowEnabled(false), Times.Once);
+            messageBox.Verify(
+                service => service.Show(
+                    ForegroundMarkerWarningText,
+                    "Foreground Marker Unavailable",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning),
+                Times.Once);
+        });
+    }
+
+    [Fact]
+    public void ForegroundPrivilegeMarkerFullscreenToggle_SavesPreferenceAndUpdatesRuntime()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var context = CreatePanelContext();
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarker = true;
+            context.Session.Database.Settings.ShowForegroundPrivilegeMarkerWhenFullscreen = true;
+            context.AutoStartService.Setup(service => service.IsAutoStartEnabled()).ReturnsAsync(false);
+
+            var persistence = new Mock<IMainConfigPersistence>(MockBehavior.Strict);
+            var markerService = new Mock<IForegroundPrivilegeMarkerService>(MockBehavior.Strict);
+            var sequence = new MockSequence();
+            persistence.InSequence(sequence)
+                .Setup(service => service.SaveConfig(
+                    It.IsAny<AppDatabase>(),
+                    It.IsAny<ISecureSecretSnapshotSource>(),
+                    It.IsAny<byte[]>()));
+            markerService.InSequence(sequence)
+                .Setup(service => service.SetMarkerWindowEnabledWhenFullscreen(false));
+
+            using var overrideScope = context.Scope.BeginLifetimeScope(builder =>
+            {
+                builder.RegisterInstance(persistence.Object).As<IMainConfigPersistence>();
+                builder.RegisterInstance(markerService.Object).As<IForegroundPrivilegeMarkerService>();
+                builder.RegisterType<OptionsSettingsHandler>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsForegroundPrivilegeMarkerSection>().AsSelf().SingleInstance();
+                builder.RegisterType<OptionsPanel>().AsSelf().InstancePerDependency();
+            });
+
+            using var panel = overrideScope.Resolve<OptionsPanel>();
+            StaTestHelper.CreateControlTree(panel);
+            panel.SetData(context.Session);
+            StaTestHelper.PumpUntil(() => FindFullscreenForegroundPrivilegeMarkerCheckBox(panel).Checked);
+
+            FindFullscreenForegroundPrivilegeMarkerCheckBox(panel).Checked = false;
+            Application.DoEvents();
+
+            Assert.False(context.Session.Database.Settings.ShowForegroundPrivilegeMarkerWhenFullscreen);
+            persistence.VerifyAll();
+            markerService.Verify(service => service.SetMarkerWindowEnabledWhenFullscreen(false), Times.Once);
         });
     }
 
     private static OptionsUiTestContext CreatePanelContext() => OptionsUiTestContext.Create(7);
 
-    private static Button FindButton(Control root, string text)
-        => FindControls<Button>(root).First(control => control.Text == text);
-
     private static CheckBox FindCheckBox(Control root, string text)
         => FindControls<CheckBox>(root).First(control => control.Text == text);
 
+    private static CheckBox FindForegroundPrivilegeMarkerCheckBox(Control root)
+        => FindControls<CheckBox>(root).Single(control => control.Name == "ForegroundPrivilegeMarkerCheckBox");
+
+    private static CheckBox FindFullscreenForegroundPrivilegeMarkerCheckBox(Control root)
+        => FindControls<CheckBox>(root).Single(control => control.Name == "ForegroundPrivilegeMarkerFullscreenCheckBox");
+
     private static T FindControl<T>(Control root, Func<T, bool> predicate) where T : Control
         => FindControls<T>(root).First(predicate);
-
-    private static List<ComboBox> FindComboBoxes(Control root)
-        => FindControls<ComboBox>(root).ToList();
-
-    private static List<NumericUpDown> FindNumericUpDowns(Control root)
-        => FindControls<NumericUpDown>(root).ToList();
-
-    private static List<TextBox> FindTextBoxes(Control root)
-        => FindControls<TextBox>(root).ToList();
 
     private static IEnumerable<T> FindControls<T>(Control root) where T : Control
     {

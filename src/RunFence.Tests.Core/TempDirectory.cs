@@ -25,6 +25,7 @@ public sealed class TempDirectory : IDisposable
 
         try
         {
+            var root = NormalizePath(Path);
             var currentUser = WindowsIdentity.GetCurrent().User;
             if (currentUser == null)
             {
@@ -38,22 +39,64 @@ public sealed class TempDirectory : IDisposable
             while (pendingDirectories.Count > 0)
             {
                 var directoryPath = pendingDirectories.Pop();
+                if (!IsUnderTempRoot(directoryPath, root))
+                    continue;
+
                 GrantCurrentUserFullControl(directoryPath, isDirectory: true, currentUser);
 
                 foreach (var filePath in Directory.GetFiles(directoryPath))
                 {
-                    GrantCurrentUserFullControl(filePath, isDirectory: false, currentUser);
+                    if (!IsUnderTempRoot(filePath, root))
+                        continue;
+
+                    if (!IsReparsePoint(filePath))
+                        GrantCurrentUserFullControl(filePath, isDirectory: false, currentUser);
+
                     try
                     {
                         File.SetAttributes(filePath, File.GetAttributes(filePath) & ~FileAttributes.ReadOnly);
                     }
-                    catch (UnauthorizedAccessException)
+                    catch (Exception)
+                    {
+                    }
+
+                    try
+                    {
+                        File.Delete(filePath);
+                    }
+                    catch (Exception)
                     {
                     }
                 }
 
                 foreach (var childDirectory in Directory.GetDirectories(directoryPath))
+                {
+                    if (!IsUnderTempRoot(childDirectory, root))
+                        continue;
+
+                    if (IsReparsePoint(childDirectory))
+                    {
+                        try
+                        {
+                            File.SetAttributes(childDirectory, File.GetAttributes(childDirectory) & ~FileAttributes.ReadOnly);
+                        }
+                        catch (Exception)
+                        {
+                        }
+
+                        try
+                        {
+                            Directory.Delete(childDirectory);
+                        }
+                        catch (Exception)
+                        {
+                        }
+
+                        continue;
+                    }
+
                     pendingDirectories.Push(childDirectory);
+                }
             }
 
             Directory.Delete(Path, recursive: true);
@@ -64,7 +107,25 @@ public sealed class TempDirectory : IDisposable
         }
     }
 
-    private static void GrantCurrentUserFullControl(string path, bool isDirectory, SecurityIdentifier currentUser)
+    private string NormalizePath(string path)
+        => global::System.IO.Path.GetFullPath(path).TrimEnd(global::System.IO.Path.DirectorySeparatorChar, global::System.IO.Path.AltDirectorySeparatorChar) + global::System.IO.Path.DirectorySeparatorChar;
+
+    private bool IsUnderTempRoot(string candidatePath, string root)
+        => NormalizePath(candidatePath).StartsWith(root, StringComparison.OrdinalIgnoreCase);
+
+    private bool IsReparsePoint(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+    }
+
+    private void GrantCurrentUserFullControl(string path, bool isDirectory, SecurityIdentifier currentUser)
     {
         if (isDirectory)
         {

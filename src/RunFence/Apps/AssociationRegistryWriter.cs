@@ -1,4 +1,3 @@
-using Microsoft.Win32;
 using RunFence.Core;
 using RunFence.Core.Helpers;
 
@@ -6,19 +5,20 @@ namespace RunFence.Apps;
 
 /// <summary>
 /// Performs all HKCU registry write operations for per-user association overrides.
-/// Receives the HKU root key as a method parameter — it is an OS singleton, not a DI dependency.
+/// Receives the HKU root key as a method parameter because callers may use test registry roots.
 /// </summary>
 public class AssociationRegistryWriter(
     ILoggingService log,
-    Func<RegistryKey, AssociationFallbackRegistry> registryFactory,
+    Func<IRegistryKey, AssociationFallbackRegistry> registryFactory,
     Func<IAssociationFallbackRegistry, AssociationFallbackRestoreService> restoreServiceFactory)
+    : IAssociationRegistryWriter
 {
     /// <summary>
     /// Sets the HKCU default value for a file extension to the RunFence ProgId,
     /// storing the original value in RunFenceFallback so it can be restored later.
     /// No-ops when already set to the expected ProgId.
     /// </summary>
-    public void AutoSetExtension(RegistryKey hku, string sid, string key)
+    public void AutoSetExtension(IRegistryKey hku, string sid, string key)
     {
         using var extKey = hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
 
@@ -39,7 +39,7 @@ public class AssociationRegistryWriter(
     /// storing the original command in RunFenceFallback so it can be restored later.
     /// No-ops when already set to the expected command.
     /// </summary>
-    public void AutoSetProtocol(RegistryKey hku, string sid, string key, string launcherPath)
+    public void AutoSetProtocol(IRegistryKey hku, string sid, string key, string launcherPath)
     {
         using var protocolKey = hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
         using var commandKey = hku.CreateSubKey($@"{sid}\Software\Classes\{key}\shell\open\command");
@@ -62,7 +62,7 @@ public class AssociationRegistryWriter(
     /// storing the original ProgId in RunFenceFallback.
     /// No-ops when already set to the expected class name.
     /// </summary>
-    public void AutoSetDirectClassExtension(RegistryKey hku, string sid, string key, string className)
+    public void AutoSetDirectClassExtension(IRegistryKey hku, string sid, string key, string className)
     {
         using var extKey = hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
         var currentDefault = extKey.GetValue(null) as string;
@@ -81,7 +81,7 @@ public class AssociationRegistryWriter(
     /// storing the original ProgId in RunFenceFallback.
     /// No-ops when already set to the expected command.
     /// </summary>
-    public void AutoSetDirectCommandExtension(RegistryKey hku, string sid, string key, string command)
+    public void AutoSetDirectCommandExtension(IRegistryKey hku, string sid, string key, string command)
     {
         using var extKey = hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
         using var commandKey = hku.CreateSubKey($@"{sid}\Software\Classes\{key}\shell\open\command");
@@ -106,7 +106,7 @@ public class AssociationRegistryWriter(
     /// storing the original command in RunFenceFallback.
     /// No-ops when already set to the expected command.
     /// </summary>
-    public void AutoSetDirectCommandProtocol(RegistryKey hku, string sid, string key, string command)
+    public void AutoSetDirectCommandProtocol(IRegistryKey hku, string sid, string key, string command)
     {
         using var protocolKey = hku.CreateSubKey($@"{sid}\Software\Classes\{key}");
         using var commandKey = hku.CreateSubKey($@"{sid}\Software\Classes\{key}\shell\open\command");
@@ -127,7 +127,7 @@ public class AssociationRegistryWriter(
     /// Restores the original handler for the given association key by reading the RunFenceFallback value.
     /// </summary>
     public void RestoreKey(
-        RegistryKey hku,
+        IRegistryKey hku,
         string sid,
         string key)
     {
@@ -143,7 +143,7 @@ public class AssociationRegistryWriter(
     /// Removes stale per-user RunFence ProgId entries (backward compatibility migration
     /// from per-user ProgIds to HKLM ProgIds).
     /// </summary>
-    public void CleanStalePerUserProgIds(RegistryKey classesKey, string contextDescription)
+    public void CleanStalePerUserProgIds(IRegistryKey classesKey, string contextDescription)
     {
         foreach (var name in classesKey.GetSubKeyNames()
                      .Where(n => n.StartsWith(PathConstants.HandlerProgIdPrefix, StringComparison.OrdinalIgnoreCase))

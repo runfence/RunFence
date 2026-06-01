@@ -2,19 +2,21 @@ using Moq;
 using RunFence.Acl.Permissions;
 using RunFence.Apps;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
 
 /// <summary>
 /// Tests for <see cref="ExeAssociationRegistryReader"/>.
-/// Uses Registry.CurrentUser with unique subkeys as HKU and HKLM overrides.
+/// Uses in-memory HKU and HKLM overrides.
 /// A fake SID "S-1-2-3" is returned by a mocked <see cref="IInteractiveUserResolver"/>.
 /// Registry hive infrastructure is shared via <see cref="RegistryTestHelper"/>.
 /// </summary>
 public class ExeAssociationRegistryReaderTests : IDisposable
 {
     private const string TestSid = "S-1-2-3";
+    private const string AppAccountSid = "S-1-2-4";
     private const string AppExe = @"C:\Apps\myapp.exe";
 
     private readonly RegistryTestHelper _registry = new("ReaderHku", "ReaderHklm");
@@ -29,7 +31,12 @@ public class ExeAssociationRegistryReaderTests : IDisposable
     public void Dispose() => _registry.Dispose();
 
     private ExeAssociationRegistryReader CreateReader() =>
-        new(_registry.HiveManager.Object, _interactiveUserResolver.Object, _registry.HklmRoot, _registry.HkuRoot);
+        new(
+            _registry.HiveManager.Object,
+            _interactiveUserResolver.Object,
+            new AssociationRegistryProtocolMarkerReader(),
+            _registry.HklmRoot,
+            _registry.HkuRoot);
 
     private void SetHkuProtocol(string protocol, string command)
     {
@@ -64,6 +71,14 @@ public class ExeAssociationRegistryReaderTests : IDisposable
         cmdKey.SetValue(null, command);
     }
 
+    private void SetAccountProtocol(string sid, string protocol, string command)
+    {
+        using var key = _registry.HkuRoot.CreateSubKey($@"{sid}\Software\Classes\{protocol}");
+        key.SetValue("URL Protocol", "");
+        using var cmdKey = _registry.HkuRoot.CreateSubKey($@"{sid}\Software\Classes\{protocol}\shell\open\command");
+        cmdKey.SetValue(null, command);
+    }
+
     // --- Protocol in HKU with non-default args ---
 
     [Fact]
@@ -78,6 +93,17 @@ public class ExeAssociationRegistryReaderTests : IDisposable
     }
 
     [Fact]
+    public void GetHandledAssociations_LoadedAppAccountHiveMatchingExe_IncludesKey()
+    {
+        SetAccountProtocol(AppAccountSid, "mailto", $@"""{AppExe}"" --account ""%1""");
+
+        var reader = CreateReader();
+        var keys = reader.GetHandledAssociations(AppExe, AppAccountSid);
+
+        Assert.Contains("mailto", keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void GetNonDefaultArguments_HkuProtocolWithFlag_ReturnsArgs()
     {
         SetHkuProtocol("http", $@"""{AppExe}"" -- ""%1""");
@@ -86,6 +112,81 @@ public class ExeAssociationRegistryReaderTests : IDisposable
         var args = reader.GetNonDefaultArguments(AppExe, "http");
 
         Assert.Equal("-- \"%1\"", args);
+    }
+
+    [Fact]
+    public void GetNonDefaultArguments_LoadedAppAccountHiveProtocolWithFlag_ReturnsArgs()
+    {
+        SetAccountProtocol(AppAccountSid, "mailto", $@"""{AppExe}"" --account ""%1""");
+
+        var reader = CreateReader();
+        var args = reader.GetNonDefaultArguments(AppExe, "mailto", AppAccountSid);
+
+        Assert.Equal("--account \"%1\"", args);
+    }
+
+    [Fact]
+    public void GetHandledAssociations_AppAccountHiveNotLoaded_SkipsAccountClasses()
+    {
+        SetAccountProtocol(AppAccountSid, "mailto", $@"""{AppExe}"" --account ""%1""");
+        _registry.HiveManager.Setup(h => h.IsHiveLoaded(AppAccountSid)).Returns(false);
+
+        var reader = CreateReader();
+        var keys = reader.GetHandledAssociations(AppExe, AppAccountSid);
+
+        Assert.DoesNotContain("mailto", keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetHandledAssociations_InteractiveUserUnavailable_StillUsesLoadedAppAccountHive()
+    {
+        SetAccountProtocol(AppAccountSid, "mailto", $@"""{AppExe}"" --account ""%1""");
+        _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
+
+        var reader = CreateReader();
+        var keys = reader.GetHandledAssociations(AppExe, AppAccountSid);
+
+        Assert.Contains("mailto", keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetHandledAssociations_AppAccountHiveLoadsAfterCachedMiss_RefreshesForLoadedState()
+    {
+        SetAccountProtocol(AppAccountSid, "mailto", $@"""{AppExe}"" --account ""%1""");
+        _registry.HiveManager.Setup(h => h.IsHiveLoaded(AppAccountSid)).Returns(false);
+        var reader = CreateReader();
+
+        var beforeLoad = reader.GetHandledAssociations(AppExe, AppAccountSid);
+
+        _registry.HiveManager.Setup(h => h.IsHiveLoaded(AppAccountSid)).Returns(true);
+        var afterLoad = reader.GetHandledAssociations(AppExe, AppAccountSid);
+
+        Assert.DoesNotContain("mailto", beforeLoad, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("mailto", afterLoad, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetHandledAssociations_KeyInAccountAndInteractiveHives_UsesAccountHiveSuggestion()
+    {
+        SetAccountProtocol(AppAccountSid, "http", $@"""{AppExe}"" --account ""%1""");
+        SetHkuProtocol("http", @"""C:\Other\otherapp.exe"" %1");
+
+        var reader = CreateReader();
+        var keys = reader.GetHandledAssociations(AppExe, AppAccountSid);
+
+        Assert.Contains("http", keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetNonDefaultArguments_KeyInAccountAndInteractiveHives_AccountHiveWins()
+    {
+        SetAccountProtocol(AppAccountSid, "http", $@"""{AppExe}"" --account ""%1""");
+        SetHkuProtocol("http", $@"""{AppExe}"" --interactive ""%1""");
+
+        var reader = CreateReader();
+        var args = reader.GetNonDefaultArguments(AppExe, "http", AppAccountSid);
+
+        Assert.Equal("--account \"%1\"", args);
     }
 
     // --- Extension in HKLM via ProgId resolution ---
@@ -154,6 +255,31 @@ public class ExeAssociationRegistryReaderTests : IDisposable
         Assert.Contains("http", keys, StringComparer.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void GetHandledAssociations_CustomAppDataProtocolMatchingExe_IncludesKey()
+    {
+        const string appDataExe = @"C:\Users\Vlad\AppData\Local\Postman\app-12.7.6\Postman.exe";
+        SetHkuProtocol("postman", $@"""{appDataExe}"" ""%1""");
+
+        var reader = CreateReader();
+        var keys = reader.GetHandledAssociations(appDataExe);
+
+        Assert.Contains("postman", keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GetHandledAssociations_MatchingExeWithDifferentDirectorySeparators_IncludesKey()
+    {
+        const string commandExe = @"C:\Users\Vlad\AppData\Local\Postman\app-12.7.6\Postman.exe";
+        const string selectedExe = "C:/Users/Vlad/AppData/Local/Postman/app-12.7.6/Postman.exe";
+        SetHkuProtocol("postman", $@"""{commandExe}"" ""%1""");
+
+        var reader = CreateReader();
+        var keys = reader.GetHandledAssociations(selectedExe);
+
+        Assert.Contains("postman", keys, StringComparer.OrdinalIgnoreCase);
+    }
+
     // --- Default args → GetNonDefaultArguments returns null ---
 
     [Fact]
@@ -182,20 +308,6 @@ public class ExeAssociationRegistryReaderTests : IDisposable
         var args = reader.GetNonDefaultArguments(AppExe, "http");
 
         Assert.Equal("--hku \"%1\"", args);
-    }
-
-    // --- Cache: GetHandledAssociations called twice → same instance ---
-
-    [Fact]
-    public void GetHandledAssociations_CalledTwice_ReturnsSameList()
-    {
-        SetHkuProtocol("http", $@"""{AppExe}"" %1");
-
-        var reader = CreateReader();
-        var first = reader.GetHandledAssociations(AppExe);
-        var second = reader.GetHandledAssociations(AppExe);
-
-        Assert.Same(first, second);
     }
 
     // --- Cache: GetNonDefaultArguments after GetHandledAssociations ---

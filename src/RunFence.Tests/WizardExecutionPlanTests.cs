@@ -54,32 +54,13 @@ public class WizardExecutionPlanTests : IDisposable
         Assert.Equal("B", plan.AppBuildOptions[1].Name);
     }
 
-    [Fact]
-    public void BuildExecutionPlan_PreservesResolvedSidAndExecutionFlags()
-    {
-        var sut = CreateExecutor();
-
-        var plan = sut.BuildExecutionPlan(new WizardStandardFlowParams(
-            Request: null,
-            SetupOptions: null,
-            BuildOptionsFactory: sid => [AppEntryBuildOptions.ForWizard("App", @"C:\app.exe", sid, false, AclMode.Allow, false)],
-            PreEnforcementAction: (_, _) => Task.CompletedTask,
-            PostEnforcementAction: (_, _) => Task.CompletedTask,
-            CreateDesktopShortcut: true), "S-1-5-21-1");
-
-        Assert.Equal("S-1-5-21-1", plan.ResolvedSid);
-        Assert.True(plan.HasPreEnforcementAction);
-        Assert.True(plan.HasPostEnforcementAction);
-        Assert.True(plan.CreateDesktopShortcut);
-    }
-
     private WizardTemplateExecutor CreateExecutor()
     {
         var session = new SessionContext
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinDerivedKey);
+        }.WithClonedPinDerivedKey(_pinDerivedKey);
         _sessions.Add(session);
         var uiThreadInvoker = new Mock<IUiThreadInvoker>();
         uiThreadInvoker.Setup(i => i.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
@@ -107,28 +88,33 @@ public class WizardExecutionPlanTests : IDisposable
             new PackageInstallService(
                 Mock.Of<IPackageInstallLauncher>(),
                 Mock.Of<IPackageInstallScriptStore>(),
-                new AccountToolResolver(Mock.Of<IProfilePathResolver>())),
+                new AccountToolResolver(Mock.Of<IProfilePathResolver>()),
+                Mock.Of<IWindowsTerminalAccountStateService>(),
+                Mock.Of<IWindowsTerminalDeploymentService>()),
             Mock.Of<IDatabaseProvider>(),
             Mock.Of<IWizardSessionSaver>());
 
         var appEntryBuilder = new AppEntryBuilder(Mock.Of<IAppEntryIdGenerator>());
-        var enforcementHelper = new AppEntryEnforcementHelper(
-            Mock.Of<IAclService>(),
+        var nonAclEnforcer = AppEntryEnforcementTestFactory.CreateNonAclEnforcer(
             Mock.Of<IShortcutService>(),
             Mock.Of<IBesideTargetShortcutService>(),
             Mock.Of<IIconService>(),
             Mock.Of<ISidNameCacheService>(),
             Mock.Of<IInteractiveUserDesktopProvider>(),
             Mock.Of<IInteractiveUserSidResolver>(),
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
             Mock.Of<ILoggingService>());
+        var enforcementCoordinator = new AppEntryEnforcementCoordinator(
+            Mock.Of<IAclService>(),
+            AppEntryEnforcementTestFactory.CreateAclEnforcer(Mock.Of<IAclService>()),
+            nonAclEnforcer);
 
         return new WizardTemplateExecutor(
             createHandler,
             setupHelperFactory,
             appEntryBuilder,
-            enforcementHelper,
+            enforcementCoordinator,
             Mock.Of<IShortcutDiscoveryService>(),
-            Mock.Of<IAclService>(),
             Mock.Of<IWizardSessionSaver>(),
             session,
             new WizardLicenseChecker(

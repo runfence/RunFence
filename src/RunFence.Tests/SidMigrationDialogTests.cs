@@ -1,4 +1,3 @@
-using Autofac;
 using Moq;
 using System.ComponentModel;
 using RunFence.Account;
@@ -9,7 +8,6 @@ using RunFence.Infrastructure;
 using RunFence.SidMigration;
 using RunFence.SidMigration.UI;
 using RunFence.SidMigration.UI.Forms;
-using RunFence.Startup;
 using RunFence.Tests.Helpers;
 using Xunit;
 
@@ -17,30 +15,6 @@ namespace RunFence.Tests;
 
 public class SidMigrationDialogTests
 {
-    [Fact]
-    public void Initialize_KeepsSecondaryButtonAsCancelButtonOnFirstStep()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var foundationContainer = ContainerRegistrationBuilder.BuildFoundationContainer();
-            using var session = new SessionContext
-{
-                Database = new AppDatabase { SidNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) },
-                CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
-            using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
-                foundationContainer,
-                session,
-                new StartupOptions(false, false));
-            using var dialog = sessionScope.Resolve<SidMigrationDialogFactory>().Create();
-            StaTestHelper.CreateControlTree(dialog);
-
-            var cancelButton = FindButton(dialog, "Cancel");
-
-            Assert.Same(cancelButton, dialog.CancelButton);
-        });
-    }
-
     [Fact]
     public void Escape_OnFirstStep_IsHandledWhenCancelIsVisible()
     {
@@ -66,7 +40,7 @@ public class SidMigrationDialogTests
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+            }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
             using var controller = new SidMigrationWorkflowController(
                 session,
                 Mock.Of<ISidMigrationService>(),
@@ -100,7 +74,7 @@ public class SidMigrationDialogTests
 {
             Database = new AppDatabase { SidNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) },
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
 
         var sidMigrationService = new Mock<ISidMigrationService>();
         sidMigrationService.Setup(service => service.DiscoverOrphanedSidsAsync(
@@ -146,9 +120,6 @@ public class SidMigrationDialogTests
                 new SidMigrationDiskScanStepController()),
             session);
     }
-
-    private static Button FindButton(Control root, string textPrefix)
-        => FindControls<Button>(root).First(control => control.Text.StartsWith(textPrefix, StringComparison.Ordinal));
 
     private static IEnumerable<T> FindControls<T>(Control root) where T : Control
     {

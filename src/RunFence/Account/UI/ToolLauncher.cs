@@ -12,47 +12,77 @@ namespace RunFence.Account.UI;
 public class ToolLauncher(
     ILaunchFacade launchFacade,
     AccountToolResolver toolResolver,
+    IWindowsTerminalAccountStateService windowsTerminalAccountStateService,
+    TerminalLaunchIdentitySelector terminalLaunchIdentitySelector,
     IPackageInstallService packageInstallService,
+    IWindowsTerminalDeploymentProgressRunner windowsTerminalDeploymentProgressRunner,
+    IWindowsTerminalLaunchRefreshService windowsTerminalLaunchRefreshService,
     ILaunchFeedbackPresenter launchFeedbackPresenter,
     ILoggingService log)
 {
-    public void OpenCmd(LaunchIdentity identity)
+    public Task OpenCmdAsync(LaunchIdentity identity, bool requestTerminalRefresh = false, IWin32Window? owner = null)
     {
         if (identity is AppContainerLaunchIdentity)
         {
             var cmdExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
-            RunWithErrorHandling("Launch CMD",
+            return RunWithErrorHandlingAsync("Launch CMD",
                 () =>
                 {
                     using var launch = launchFacade.LaunchFile(new ProcessLaunchTarget(cmdExe), identity, permissionPrompt: (_, _) => true);
-                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("Command Prompt", LaunchFeedbackSource.InteractiveUi));
+                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("Command Prompt", LaunchFeedbackSource.InteractiveUi)
+                    {
+                        Owner = owner
+                    });
+                    return Task.CompletedTask;
                 });
         }
         else
         {
-            var terminalExe = toolResolver.ResolveTerminalExe(identity.Sid);
-            var profilePath = toolResolver.GetProfileRoot(identity.Sid);
-            var isWt = !terminalExe.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
-            var launchIdentity = isWt && identity is AccountLaunchIdentity { PrivilegeLevel: null } acctIdentity
-                ? acctIdentity with { PrivilegeLevel = PrivilegeLevel.Basic }
-                : identity;
-            RunWithErrorHandling("Launch CMD", () =>
-            {
-                try
-                {
-                    using var launch = launchFacade.LaunchFile(new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath), launchIdentity, permissionPrompt: (_, _) => true);
-                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The terminal", LaunchFeedbackSource.InteractiveUi)
-                    {
-                        SummaryName = Path.GetFileName(terminalExe)
-                    });
-                }
-                catch (Exception ex) when (isWt && ex is not OperationCanceledException && ex is not GrantOperationException)
-                {
-                    log.Error($"Launch {terminalExe} failed, falling back to cmd.exe", ex);
-                    using var launch = launchFacade.LaunchFile(new ProcessLaunchTarget("cmd.exe", WorkingDirectory: profilePath), identity, permissionPrompt: (_, _) => true);
-                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("Command Prompt", LaunchFeedbackSource.InteractiveUi));
-                }
-            });
+            var originalAccountIdentity = (AccountLaunchIdentity)identity;
+            return RunWithErrorHandlingAsync(
+                "Launch CMD",
+                () => OpenTerminalForAccountAsync(originalAccountIdentity, requestTerminalRefresh, owner));
+        }
+    }
+
+    public async Task<TerminalLaunchStatus> OpenTerminalForAccountAsync(
+        AccountLaunchIdentity launchIdentity,
+        bool requestTerminalRefresh = false,
+        IWin32Window? owner = null)
+    {
+        await windowsTerminalLaunchRefreshService.EnsureSharedDeploymentExistsBeforeTerminalLaunchAsync(launchIdentity);
+        var terminalExe = windowsTerminalAccountStateService.ResolveLaunchTarget(launchIdentity);
+        var profilePath = toolResolver.GetProfileRoot(launchIdentity.Sid);
+        var isWt = !terminalExe.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
+        var resolvedLaunchIdentity = terminalLaunchIdentitySelector.ResolveLaunchIdentity(launchIdentity, terminalExe);
+
+        try
+        {
+            var target = new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath);
+            using var launch = launchFacade.LaunchFile(target, resolvedLaunchIdentity, permissionPrompt: (_, _) => true);
+            var status = ShowTerminalLaunchFeedback(
+                launch,
+                "The terminal",
+                Path.GetFileName(terminalExe),
+                owner,
+                launchIdentity,
+                requestTerminalRefresh);
+            return status;
+        }
+        catch (Exception ex) when (isWt && ex is not OperationCanceledException && ex is not GrantOperationException)
+        {
+            log.Error($"Launch {terminalExe} failed, falling back to cmd.exe", ex);
+            using var launch = launchFacade.LaunchFile(
+                new ProcessLaunchTarget("cmd.exe", WorkingDirectory: profilePath),
+                launchIdentity,
+                permissionPrompt: (_, _) => true);
+            return ShowTerminalLaunchFeedback(
+                launch,
+                "Command Prompt",
+                null,
+                owner,
+                launchIdentity,
+                requestTerminalRefresh);
         }
     }
 
@@ -77,24 +107,33 @@ public class ToolLauncher(
         });
     }
 
-    public void InstallPackage(InstallablePackage package, AccountLaunchIdentity identity)
+    public Task InstallPackageAsync(InstallablePackage package, AccountLaunchIdentity identity)
+        => InstallPackagesAsync([package], identity, $"Install {package.DisplayName}");
+
+    public Task InstallPackagesAsync(IReadOnlyList<InstallablePackage> packages, AccountLaunchIdentity identity)
+        => InstallPackagesAsync(packages, identity, "Install packages");
+
+    private async Task InstallPackagesAsync(
+        IReadOnlyList<InstallablePackage> packages,
+        AccountLaunchIdentity identity,
+        string label)
     {
-        RunWithErrorHandling($"Install {package.DisplayName}",
-            () => launchFeedbackPresenter.ShowMaintenanceWarning(
-                packageInstallService.InstallPackages([package], identity),
-                new LaunchFeedbackContext("The package installer", LaunchFeedbackSource.InteractiveUi)));
+        await RunWithErrorHandlingAsync(label, async () =>
+        {
+            var packagesToInstall = KnownPackages.ExpandWithDependencies(packages);
+            var warnings = packagesToInstall.Contains(KnownPackages.WindowsTerminal)
+                ? await windowsTerminalDeploymentProgressRunner.RunAsync(
+                    "Preparing shared Windows Terminal deployment...",
+                    cancellationToken => packageInstallService.InstallPackagesAsync(packages, identity, cancellationToken))
+                : await packageInstallService.InstallPackagesAsync(packages, identity, CancellationToken.None);
+
+            launchFeedbackPresenter.ShowMaintenanceWarning(
+                warnings,
+                new LaunchFeedbackContext("The package installer", LaunchFeedbackSource.InteractiveUi));
+        });
     }
 
-    public void InstallPackages(IReadOnlyList<InstallablePackage> packages, AccountLaunchIdentity identity)
-    {
-        RunWithErrorHandling(
-            "Install packages",
-            () => launchFeedbackPresenter.ShowMaintenanceWarning(
-                packageInstallService.InstallPackages(packages, identity),
-                new LaunchFeedbackContext("The package installer", LaunchFeedbackSource.InteractiveUi)));
-    }
-
-    public bool IsWindowsTerminal(string sid) => !toolResolver.ResolveTerminalExe(sid).Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
+    public bool IsWindowsTerminal(string sid) => !windowsTerminalAccountStateService.ResolveLaunchTarget(sid).Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
 
     public bool IsPackageInstalled(InstallablePackage package, string sid) => packageInstallService.IsPackageInstalled(package, sid);
 
@@ -124,6 +163,58 @@ public class ToolLauncher(
             log.Error($"{label} failed", ex);
             MessageBox.Show($"{label} failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private async Task RunWithErrorHandlingAsync(string label, Func<Task> launchAction)
+    {
+        try
+        {
+            await launchAction();
+        }
+        catch (CredentialNotFoundException ex)
+        {
+            MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch (MissingPasswordException ex)
+        {
+            MessageBox.Show(ex.Message, "Missing Password", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (GrantOperationException ex)
+        {
+            launchFeedbackPresenter.ShowGrantFailure(ex, new LaunchFeedbackContext(label, LaunchFeedbackSource.InteractiveUi));
+        }
+        catch (Exception ex)
+        {
+            log.Error($"{label} failed", ex);
+            MessageBox.Show($"{label} failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private TerminalLaunchStatus ShowTerminalLaunchFeedback(
+        LaunchExecutionResult launch,
+        string startedItem,
+        string? summaryName,
+        IWin32Window? owner,
+        AccountLaunchIdentity launchIdentity,
+        bool requestTerminalRefresh)
+    {
+        launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext(startedItem, LaunchFeedbackSource.InteractiveUi)
+        {
+            Owner = owner,
+            SummaryName = summaryName
+        });
+
+        var refreshRequested = false;
+        if (requestTerminalRefresh)
+        {
+            windowsTerminalLaunchRefreshService.TryStartOnlineRefreshAfterTerminalLaunch(launchIdentity);
+            refreshRequested = true;
+        }
+
+        return new TerminalLaunchStatus(startedItem, summaryName, refreshRequested);
     }
 
 }

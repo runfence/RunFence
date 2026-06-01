@@ -2,13 +2,14 @@ using Moq;
 using RunFence.Acl.Permissions;
 using RunFence.Apps;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
 
 /// <summary>
 /// Tests for <see cref="InteractiveUserAssociationReader"/>.
-/// Uses Registry.CurrentUser as HKU/HKLM override with a fake SID.
+/// Uses in-memory HKU/HKLM overrides with a fake SID.
 /// Interactive user SID is provided via a mocked <see cref="IInteractiveUserResolver"/>.
 /// Registry hive infrastructure is shared via <see cref="RegistryTestHelper"/>.
 /// </summary>
@@ -29,7 +30,12 @@ public class InteractiveUserAssociationReaderTests : IDisposable
     public void Dispose() => _registry.Dispose();
 
     private InteractiveUserAssociationReader CreateReader()
-        => new(_registry.HiveManager.Object, _interactiveUserResolver.Object, _registry.HkuRoot, _registry.HklmRoot);
+        => new(
+            _registry.HiveManager.Object,
+            _interactiveUserResolver.Object,
+            new AssociationRegistryProtocolMarkerReader(),
+            _registry.HkuRoot,
+            _registry.HklmRoot);
 
     private void SetHkuExtension(string ext, string progId)
     {

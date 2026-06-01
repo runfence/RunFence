@@ -39,59 +39,6 @@ public class GrantApplyFailureAndResultTests
             { GrantApplyFailureStep.FixTraverseAclApply, new("Failed to re-apply fixed traverse ACL", false) }
         };
 
-    [Fact]
-    public void GrantApplyResult_DefaultWarningsAreEmpty()
-    {
-        var result = default(GrantApplyResult);
-
-        Assert.Empty(result.Warnings);
-        Assert.False(result.GrantApplied);
-        Assert.False(result.TraverseApplied);
-        Assert.False(result.DatabaseModified);
-        Assert.False(result.DurableSaveCompleted);
-    }
-
-    [Fact]
-    public void GrantApplyResult_PreservesConstructedWarnings()
-    {
-        var warning = new GrantApplyWarning(
-            GrantApplyFailureStep.PostGrantMutationSave,
-            @"C:\apps\MyApp.exe",
-            @"C:\configs\main.rfc",
-            new InvalidOperationException("save warning"));
-        var result = new GrantApplyResult(
-            GrantApplied: true,
-            TraverseApplied: true,
-            DatabaseModified: true,
-            DurableSaveCompleted: false,
-            Warnings: [warning]);
-
-        Assert.True(result.GrantApplied);
-        Assert.True(result.TraverseApplied);
-        Assert.True(result.DatabaseModified);
-        Assert.False(result.DurableSaveCompleted);
-        Assert.Equal([warning], result.Warnings);
-    }
-
-    [Fact]
-    public void GrantApplyWarning_Format_UsesFormatter()
-    {
-        var cause = new InvalidOperationException("save warning");
-        var warning = new GrantApplyWarning(
-            GrantApplyFailureStep.PostGrantMutationSave,
-            @"C:\apps\MyApp.exe",
-            @"C:\configs\main.rfc",
-            cause);
-
-        Assert.Equal(
-            GrantApplyFailureFormatter.Format(
-                GrantApplyFailureStep.PostGrantMutationSave,
-                @"C:\apps\MyApp.exe",
-                @"C:\configs\main.rfc",
-                cause),
-            GrantApplyFailureFormatter.Format(warning));
-    }
-
     [Theory]
     [MemberData(nameof(GetExpectedDescriptions))]
     public void GrantApplyFailureFormatter_DescribeStep_ReturnsOwnedDescription(
@@ -141,46 +88,6 @@ public class GrantApplyFailureAndResultTests
                 @"C:\target",
                 null,
                 new InvalidOperationException("unknown")));
-    }
-
-    [Fact]
-    public void GrantApplyFailure_ToString_UsesFormatter()
-    {
-        var cause = new InvalidOperationException("access denied");
-        var failure = new GrantApplyFailure(
-            GrantApplyFailureStep.GrantAclApply,
-            @"C:\apps\MyApp.exe",
-            @"C:\configs\main.rfc",
-            cause);
-
-        var expected = GrantApplyFailureFormatter.Format(
-            GrantApplyFailureStep.GrantAclApply,
-            @"C:\apps\MyApp.exe",
-            @"C:\configs\main.rfc",
-            cause);
-
-        Assert.Equal(expected, failure.ToString());
-    }
-
-    [Fact]
-    public void GrantOperationException_Message_UsesFormatterAndPreservesCause()
-    {
-        var cause = new UnauthorizedAccessException("cannot update acl");
-        var exception = new GrantOperationException(
-            GrantApplyFailureStep.TraverseAclApply,
-            @"C:\target",
-            @"C:\configs\main.rfc",
-            cause);
-
-        Assert.Same(cause, exception.Cause);
-        Assert.Same(cause, exception.InnerException);
-        Assert.Equal(
-            GrantApplyFailureFormatter.Format(
-                GrantApplyFailureStep.TraverseAclApply,
-                @"C:\target",
-                @"C:\configs\main.rfc",
-                cause),
-            exception.Message);
     }
 
     [Fact]

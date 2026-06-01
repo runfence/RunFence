@@ -1,9 +1,14 @@
+using Autofac;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Moq;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Launch;
 using RunFence.Persistence;
+using RunFence.Persistence.UI;
+using RunFence.RunAs;
+using RunFence.Startup;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -74,7 +79,15 @@ public class DatabaseServiceTests : IDisposable
     [Fact]
     public void SaveConfig_And_LoadConfig_EncryptedRoundTrip()
     {
-        var db = new AppDatabase();
+        var db = new AppDatabase
+        {
+            TrackingJobSids =
+            [
+                "S-1-5-21-1-2-3-1001",
+                "s-1-5-21-1-2-3-1001",
+                "S-1-5-21-1-2-3-1002"
+            ]
+        };
         db.Apps.Add(new AppEntry { Name = "TestApp", ExePath = @"C:\test.exe" });
 
         _service.SaveConfig(db, _pinDerivedKeySource, _argonSalt);
@@ -82,6 +95,9 @@ public class DatabaseServiceTests : IDisposable
 
         Assert.Single(loaded.Apps);
         Assert.Equal("TestApp", loaded.Apps[0].Name);
+        Assert.Equal(
+            ["S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"],
+            loaded.TrackingJobSids);
     }
 
     [Fact]
@@ -174,23 +190,6 @@ public class DatabaseServiceTests : IDisposable
 
         var result = _service.VerifyConfigIntegrity(_pinDerivedKeySource);
         Assert.Equal(ConfigIntegrityResult.FirstRun, result);
-    }
-
-    [Fact]
-    public void SaveCredentialStore_And_LoadCredentialStore_RoundTrip()
-    {
-        var store = new CredentialStore
-        {
-            ArgonSalt = new byte[32],
-            EncryptedCanary = [1, 2, 3],
-            Credentials = [new() { Sid = "S-1-5-21-0-0-0-1001" }]
-        };
-
-        _service.SaveCredentialStore(store);
-        var loaded = _service.LoadCredentialStore();
-
-        Assert.Single(loaded.Credentials);
-        Assert.Equal("S-1-5-21-0-0-0-1001", loaded.Credentials[0].Sid);
     }
 
     [Fact]
@@ -415,6 +414,49 @@ public class DatabaseServiceTests : IDisposable
         var loaded = serviceWithFilter.LoadConfig(_pinDerivedKeySource);
         Assert.Single(loaded.Apps);
         Assert.Equal("main1", loaded.Apps[0].Id);
+    }
+
+    [Fact]
+    public void SaveCredentialStoreAndConfig_WithAppFilter_PreservesTrackingJobSids()
+    {
+        var filter = new TestAppFilter(db => new AppDatabase
+        {
+            Apps = db.Apps.Select(app => app.Clone()).ToList(),
+            Accounts = db.Accounts.Select(account => account.Clone()).ToList(),
+            Settings = db.Settings.Clone(),
+            TrackingJobSids = db.TrackingJobSids?.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+        });
+
+        var dir = Path.Combine(_tempDir.Path, "tracking-filter-test");
+        Directory.CreateDirectory(dir);
+        var serviceWithFilter = new DatabaseService(
+            _log.Object,
+            new TestConfigPaths(dir),
+            _atomicFileWriter,
+            appFilter: filter,
+            allowPlaintextConfig: false);
+
+        var database = new AppDatabase
+        {
+            TrackingJobSids =
+            [
+                "S-1-5-21-1-2-3-1001",
+                "s-1-5-21-1-2-3-1001",
+                "S-1-5-21-1-2-3-1002"
+            ]
+        };
+        var store = new CredentialStore
+        {
+            ArgonSalt = new byte[Constants.Argon2SaltSize],
+            EncryptedCanary = [1, 2, 3]
+        };
+
+        serviceWithFilter.SaveCredentialStoreAndConfig(store, database, _pinDerivedKeySource);
+
+        var loaded = serviceWithFilter.LoadConfig(_pinDerivedKeySource);
+        Assert.Equal(
+            ["S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"],
+            loaded.TrackingJobSids);
     }
 
     [Fact]
@@ -796,19 +838,18 @@ public class DatabaseServiceTests : IDisposable
     }
 
     [Fact]
-    public void LoadCredentialStore_DoesNotLogLoadedGoodBackupWarning()
+    public void AutofacRegistration_ResolvesAllFocusedPersistenceInterfacesToSameScopedInstance()
     {
-        var store = new CredentialStore
-        {
-            ArgonSalt = new byte[Constants.Argon2SaltSize],
-            EncryptedCanary = [1, 2, 3]
-        };
-        _service.SaveCredentialStore(store);
+        using var container = ContainerRegistrationBuilder.BuildFoundationContainer();
+        using var scope = container.BeginLifetimeScope();
 
-        var loaded = _service.LoadCredentialStore();
-
-        Assert.Equal(store.ArgonSalt, loaded.ArgonSalt);
-        _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Never);
+        var root = scope.Resolve<IDatabaseService>();
+        Assert.Same(root, scope.Resolve<ICredentialStorePersistence>());
+        Assert.Same(root, scope.Resolve<IMainConfigPersistence>());
+        Assert.Same(root, scope.Resolve<IAppConfigPersistence>());
+        Assert.Same(root, scope.Resolve<IConfigIntegrityVerifier>());
+        Assert.Same(root, scope.Resolve<IConfigSaltReader>());
+        Assert.Same(root, scope.Resolve<IConfigReencryptionPersistence>());
     }
 
     // Helper for filter test

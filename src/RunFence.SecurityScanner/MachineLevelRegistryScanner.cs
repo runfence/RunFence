@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using Microsoft.Win32;
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.SecurityScanner;
@@ -10,7 +11,8 @@ public class MachineLevelRegistryScanner(
     IIfeoRegistryAccess ifeoRegistry,
     IWindowsComponentRegistryAccess windowsComponentRegistry,
     IFileSystemDataAccess fileSystem,
-    AclCheckHelper aclCheck)
+    AclCheckHelper aclCheck,
+    ILoggingService log)
 {
     private const FileSystemRights MissingResolvedPathParentFileCreateRightsMask =
         FileSystemRights.WriteData |
@@ -62,7 +64,7 @@ public class MachineLevelRegistryScanner(
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to check Winlogon: {ex.Message}");
+            log.Error("Failed to check Winlogon.", ex);
         }
     }
 
@@ -91,7 +93,7 @@ public class MachineLevelRegistryScanner(
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to check AppInit_DLLs: {ex.Message}");
+            log.Error("Failed to check AppInit_DLLs.", ex);
         }
     }
 
@@ -142,7 +144,7 @@ public class MachineLevelRegistryScanner(
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to scan IFEO: {ex.Message}");
+            log.Error("Failed to scan IFEO.", ex);
         }
     }
 
@@ -165,7 +167,7 @@ public class MachineLevelRegistryScanner(
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to scan Print Monitors: {ex.Message}");
+            log.Error("Failed to scan Print Monitors.", ex);
         }
 
         try
@@ -185,7 +187,7 @@ public class MachineLevelRegistryScanner(
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to scan LSA packages: {ex.Message}");
+            log.Error("Failed to scan LSA packages.", ex);
         }
 
         try
@@ -205,7 +207,7 @@ public class MachineLevelRegistryScanner(
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to scan Network Providers: {ex.Message}");
+            log.Error("Failed to scan Network Providers.", ex);
         }
     }
 
@@ -285,7 +287,7 @@ public class MachineLevelRegistryScanner(
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to check ACL for missing resolved DLL path '{resolvedPath}': {ex.Message}");
+            log.Error($"Failed to check ACL for missing resolved DLL path '{resolvedPath}'.", ex);
         }
     }
 

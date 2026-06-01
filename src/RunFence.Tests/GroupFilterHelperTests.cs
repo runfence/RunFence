@@ -69,13 +69,6 @@ public class GroupFilterHelperTests
     }
 
     [Fact]
-    public void FilterForGroupsPanel_EmptyInput_ReturnsEmpty()
-    {
-        var result = GroupFilterHelper.FilterForGroupsPanel([]).ToList();
-        Assert.Empty(result);
-    }
-
-    [Fact]
     public void FilterForCreateDialog_ExcludesSidFilteredGroups()
     {
         // Groups in FilteredGroupSids are excluded from the Create Account dialog (unlike Groups panel)

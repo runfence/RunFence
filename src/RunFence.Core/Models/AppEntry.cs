@@ -96,6 +96,9 @@ public class AppEntry
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public AppEnforcementRetryStatus? EnforcementRetryStatus { get; set; }
 
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<ShortcutProtectionState>? ShortcutProtectionStates { get; set; }
+
     public AppEntry Clone() => new()
     {
         Id = Id,
@@ -129,5 +132,6 @@ public class AppEntry
                 : new AppEnforcementRetryStatus(
                 EnforcementRetryStatus.FailureMessage,
                 EnforcementRetryStatus.LastFailedUtc),
+        ShortcutProtectionStates = ShortcutProtectionStates?.ToList(),
     };
 }

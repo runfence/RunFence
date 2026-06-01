@@ -12,8 +12,11 @@ namespace RunFence.Launch.Container;
 /// logic distinct from data folder lifecycle logic.
 /// </summary>
 public class AppContainerDataFolderService(
-    IPathGrantService pathGrantService,
-    IAclAccessor aclAccessor,
+    IGrantMutatorService grantMutatorService,
+    ITraverseService traverseService,
+    IPathSecurityDescriptorAccessor aclAccessor,
+    IProgramDataDirectoryProvisioningService programDataDirectoryProvisioningService,
+    IProgramDataManagedObjectRepairService programDataManagedObjectRepairService,
     IAppContainerPathProvider pathProvider)
     : IAppContainerDataFolderService
 {
@@ -27,19 +30,25 @@ public class AppContainerDataFolderService(
     /// </summary>
     public void EnsureContainerDataFolder(AppContainerEntry entry, string containerSid)
     {
+        programDataDirectoryProvisioningService.EnsureRoot();
         EnsureContainersRootAcl();
         var dataRoot = GetContainerDataPath(entry.Name);
+        var expectedOwnerSids = GetExpectedProfileOwnerSids(containerSid);
+
+        if (Directory.Exists(dataRoot))
+            programDataManagedObjectRepairService.EnsureManagedDirectoryOwner(dataRoot, expectedOwnerSids);
 
         foreach (var subDir in new[] { "Temp", "Roaming", "Local", "ProgramData" })
             Directory.CreateDirectory(Path.Combine(dataRoot, subDir));
 
+        EnsureProfileTreeOwners(dataRoot, expectedOwnerSids);
         EnsureContainerDataRootGrant(containerSid, dataRoot);
 
         // Grant traverse on intermediate directories so the AppContainer token can
         // reach its data folder. AppContainer dual-check requires an ACE on every
         // directory in the path - SeChangeNotifyPrivilege doesn't help here.
         // Tracking in AccountGrants allows RevertTraverseAccess to clean up naturally.
-        pathGrantService.AddTraverse(containerSid, dataRoot);
+        traverseService.AddTraverse(containerSid, dataRoot);
         VerifyExplicitAllowRule(dataRoot, containerSid, ContainerDataRootRights);
     }
 
@@ -55,7 +64,7 @@ public class AppContainerDataFolderService(
             return;
 
         EnsureContainerDataRootGrant(containerSid, dataPath);
-        pathGrantService.AddTraverse(containerSid, dataPath);
+        traverseService.AddTraverse(containerSid, dataPath);
         VerifyExplicitAllowRule(dataPath, containerSid, ContainerDataRootRights);
     }
 
@@ -81,7 +90,7 @@ public class AppContainerDataFolderService(
         if (!Directory.Exists(dataRoot))
             return;
 
-        pathGrantService.AddGrant(
+        grantMutatorService.AddGrant(
             interactiveSid.Value,
             dataRoot,
             isDeny: false,
@@ -91,7 +100,7 @@ public class AppContainerDataFolderService(
     }
 
     private void EnsureContainerDataRootGrant(string containerSid, string dataPath) =>
-        pathGrantService.AddGrant(
+        grantMutatorService.AddGrant(
             containerSid,
             dataPath,
             isDeny: false,
@@ -103,32 +112,41 @@ public class AppContainerDataFolderService(
 
     private void EnsureContainersRootAcl()
     {
-        Directory.CreateDirectory(_containersRootPath);
-        aclAccessor.ModifyAclWithFallback(_containersRootPath, isFolder: true, security =>
+        var managedAcRoot = programDataDirectoryProvisioningService.EnsureKnownDirectory(
+            ProgramDataPolicies.Ac);
+        if (!string.Equals(
+                Path.GetFullPath(managedAcRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetFullPath(_containersRootPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
         {
-            if (IsContainersRootAclHardened(security))
-                return false;
+            throw new InvalidOperationException(
+                $"AppContainer containers root path '{_containersRootPath}' does not match managed ProgramData AC root '{managedAcRoot}'.");
+        }
+    }
 
-            security.SetAccessRuleProtection(true, false);
-            var existingRules = security.GetAccessRules(true, true, typeof(SecurityIdentifier))
-                .Cast<FileSystemAccessRule>()
-                .ToList();
-            foreach (var rule in existingRules)
-                security.RemoveAccessRule(rule);
+    private void EnsureProfileTreeOwners(string dataRoot, IReadOnlyCollection<string> expectedOwnerSids)
+    {
+        programDataManagedObjectRepairService.EnsureManagedDirectoryOwner(dataRoot, expectedOwnerSids);
 
-            security.AddAccessRule(CreateFullControlRule(WellKnownSidType.BuiltinAdministratorsSid));
-            security.AddAccessRule(CreateFullControlRule(WellKnownSidType.LocalSystemSid));
-            AdminOperationMockAccessHelper.AddCurrentProcessFileSystemAccess(
-                security,
-                FileSystemRights.FullControl,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.None);
-            return true;
-        });
+        foreach (var subDir in new[] { "Temp", "Roaming", "Local", "ProgramData" })
+        {
+            programDataManagedObjectRepairService.EnsureManagedDirectoryOwner(
+                Path.Combine(dataRoot, subDir),
+                expectedOwnerSids);
+        }
+    }
 
-        var hardenedSecurity = aclAccessor.GetSecurity(_containersRootPath);
-        if (!IsContainersRootAclHardened(hardenedSecurity))
-            throw new InvalidOperationException($"AppContainer containers root ACL verification failed for '{_containersRootPath}'.");
+    private static IReadOnlyCollection<string> GetExpectedProfileOwnerSids(string containerSid)
+    {
+        var expectedOwnerSids = new List<string> { new SecurityIdentifier(containerSid).Value };
+        var interactiveSid = NativeTokenHelper.TryGetInteractiveUserSid();
+        if (interactiveSid != null &&
+            !expectedOwnerSids.Contains(interactiveSid.Value, StringComparer.OrdinalIgnoreCase))
+        {
+            expectedOwnerSids.Add(interactiveSid.Value);
+        }
+
+        return expectedOwnerSids;
     }
 
     private string GetContainerDataPath(string profileName)
@@ -151,50 +169,4 @@ public class AppContainerDataFolderService(
         }
     }
 
-    private static bool IsContainersRootAclHardened(FileSystemSecurity security)
-    {
-        if (!security.AreAccessRulesProtected)
-            return false;
-
-        var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier))
-            .Cast<FileSystemAccessRule>()
-            .ToList();
-        var expectedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value,
-            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null).Value
-        };
-        var currentMockSid = AdminOperationMockAccessHelper.GetCurrentProcessSidWhenUsingMocks();
-        if (currentMockSid != null)
-            expectedSids.Add(currentMockSid.Value);
-
-        if (rules.Count != expectedSids.Count)
-            return false;
-
-        return rules.All(rule => IsExpectedRootRule(rule, expectedSids));
-    }
-
-    private static bool IsExpectedRootRule(FileSystemAccessRule rule, HashSet<string> expectedSids)
-    {
-        if (rule.AccessControlType != AccessControlType.Allow)
-            return false;
-        if (rule.IdentityReference is not SecurityIdentifier sid)
-            return false;
-        if (rule.FileSystemRights != FileSystemRights.FullControl)
-            return false;
-        if (rule.InheritanceFlags != (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit))
-            return false;
-        if (rule.PropagationFlags != PropagationFlags.None)
-            return false;
-
-        return expectedSids.Contains(sid.Value);
-    }
-
-    private static FileSystemAccessRule CreateFullControlRule(WellKnownSidType sidType)
-        => new(
-            new SecurityIdentifier(sidType, null),
-            FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None,
-            AccessControlType.Allow);
 }

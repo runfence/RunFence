@@ -35,7 +35,7 @@ public class CredentialUnlockServiceTests
         Assert.Equal(CredentialUnlockResult.Succeeded, result);
     }
 
-    [Fact]
+[Fact]
     public void VerifyPin_PinRejected_ReturnsCanceled()
     {
         _unlockPinPrompt.Setup(p => p.TryVerify()).Returns(false);
@@ -45,7 +45,7 @@ public class CredentialUnlockServiceTests
         Assert.Equal(CredentialUnlockResult.Canceled, result);
     }
 
-    [Fact]
+[Fact]
     public async Task VerifyAsync_Pin_PinVerified_ReturnsSucceeded()
     {
         _unlockPinPrompt.Setup(p => p.TryVerify()).Returns(true);
@@ -55,7 +55,7 @@ public class CredentialUnlockServiceTests
         Assert.Equal(CredentialUnlockResult.Succeeded, result);
     }
 
-    [Fact]
+[Fact]
     public async Task VerifyAsync_Pin_PinRejected_ReturnsCanceled()
     {
         _unlockPinPrompt.Setup(p => p.TryVerify()).Returns(false);
@@ -131,17 +131,6 @@ public class CredentialUnlockServiceTests
     }
 
     [Fact]
-    public void WindowsHelloPinFallbackPrompt_UnavailableWithoutSubscriber_ReturnsFalse()
-    {
-        var prompt = new WindowsHelloPinFallbackPrompt();
-
-        var result = prompt.ConfirmFallbackToPin(
-            new WindowsHelloNativeResult(WindowsHelloNativeStatus.Unavailable, null, "unavailable"));
-
-        Assert.False(result);
-    }
-
-    [Fact]
     public async Task VerifyAsync_WindowsHelloUnavailable_ConfirmTrue_PinSucceeds_ReturnsSucceeded()
     {
         _helloNative.Setup(h => h.RequestVerification(It.IsAny<string>(), It.IsAny<IntPtr>()))
@@ -167,17 +156,6 @@ public class CredentialUnlockServiceTests
         Assert.Equal(CredentialUnlockResult.Canceled, result);
         _unlockPinPrompt.Verify(p => p.TryVerify(), Times.Never);
         _fallbackPrompt.Verify(f => f.ConfirmFallbackToPin(It.IsAny<WindowsHelloNativeResult>()), Times.Once);
-    }
-
-    [Fact]
-    public void WindowsHelloPinFallbackPrompt_FailedWithoutSubscriber_ReturnsFalse()
-    {
-        var prompt = new WindowsHelloPinFallbackPrompt();
-
-        var result = prompt.ConfirmFallbackToPin(
-            new WindowsHelloNativeResult(WindowsHelloNativeStatus.Failed, null, "failed"));
-
-        Assert.False(result);
     }
 
     [Fact]

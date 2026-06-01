@@ -1,5 +1,4 @@
 using RunFence.Core;
-using RunFence.Launch;
 
 namespace RunFence.Infrastructure;
 
@@ -8,20 +7,30 @@ namespace RunFence.Infrastructure;
 /// Restricted jobs are fail-closed: callers must not resume a suspended restricted process
 /// unless assignment and UI policy application return a successful result.
 /// </summary>
-public sealed class ProcessJobManager(ILoggingService log, IJobObjectApi jobObjectApi) : IProcessJobManager, IDisposable
+public sealed class ProcessJobManager(
+    ILoggingService log,
+    IJobObjectApi jobObjectApi) : IProcessJobManager, IDisposable
 {
-    public const uint JobObjectKeepAliveAccess = ProcessLaunchNative.SYNCHRONIZE;
+    private const int ErrorFileNotFound = 2;
+    public const uint JobObjectUiLimitHandles = 0x0001;
+    public const uint JobObjectUiLimitDisplaySettings = 0x0010;
+    public const uint JobObjectUiLimitDesktop = 0x0040;
+    public const uint JobObjectUiLimitExitWindows = 0x0080;
+    public const uint JobObjectUiLimitSystemParameters = 0x0008;
+    public const uint JobObjectQuery = 0x0004;
+    public const uint JobObjectKeepAliveAccess = KernelObjectAccessRights.Synchronize;
     public const uint JobObjectReconnectAccess =
-        FileSecurityNative.READ_CONTROL | ProcessLaunchNative.SYNCHRONIZE | JobNative.JOB_OBJECT_QUERY;
+        FileSecurityNative.READ_CONTROL | KernelObjectAccessRights.Synchronize | JobObjectQuery;
+    public const uint JobObjectLimitKillOnJobClose = 0x00002000;
     public const string RestrictedJobSecurityDescriptor = "O:BAG:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)";
 
     private const int ErrorAlreadyExists = 183;
 
-    public const uint UiRestrictionFlags = JobNative.JOB_OBJECT_UILIMIT_HANDLES
-        | JobNative.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
-        | JobNative.JOB_OBJECT_UILIMIT_DESKTOP
-        | JobNative.JOB_OBJECT_UILIMIT_EXITWINDOWS
-        | JobNative.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;
+    public const uint UiRestrictionFlags = JobObjectUiLimitHandles
+        | JobObjectUiLimitDisplaySettings
+        | JobObjectUiLimitDesktop
+        | JobObjectUiLimitExitWindows
+        | JobObjectUiLimitSystemParameters;
 
     private readonly Dictionary<string, IntPtr> _trackingJobs = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, IntPtr> _restrictedJobs = new(StringComparer.OrdinalIgnoreCase);
@@ -51,15 +60,13 @@ public sealed class ProcessJobManager(ILoggingService log, IJobObjectApi jobObje
         }
     }
 
-    public HashSet<int>? GetJobMembers(string sid)
+    public HashSet<int>? GetJobMembers(string sid, bool reopenTrackingJob)
     {
         lock (_lock)
         {
             HashSet<int>? result = null;
-            foreach (var jobs in new[] { _trackingJobs, _restrictedJobs, _lowIntegrityJobs })
+            foreach (var hJob in EnumerateKnownJobHandles(sid, reopenTrackingJob))
             {
-                if (!jobs.TryGetValue(sid, out var hJob))
-                    continue;
                 var pids = jobObjectApi.QueryProcessIds(hJob);
                 if (pids == null)
                     continue;
@@ -79,24 +86,6 @@ public sealed class ProcessJobManager(ILoggingService log, IJobObjectApi jobObje
         {
             var jobs = isLow ? _lowIntegrityJobs : _restrictedJobs;
             return jobs.TryGetValue(sid, out var hJob) ? jobObjectApi.QueryProcessIds(hJob) : null;
-        }
-    }
-
-    public IntPtr TryGetRestrictedJobForPid(int pid)
-    {
-        lock (_lock)
-        {
-            foreach (var jobs in new[] { _restrictedJobs, _lowIntegrityJobs })
-            {
-                foreach (var (_, hJob) in jobs)
-                {
-                    var pids = jobObjectApi.QueryProcessIds(hJob);
-                    if (pids?.Contains(pid) == true)
-                        return hJob;
-                }
-            }
-
-            return IntPtr.Zero;
         }
     }
 
@@ -202,6 +191,42 @@ public sealed class ProcessJobManager(ILoggingService log, IJobObjectApi jobObje
         jobs[sid] = hJob;
         return JobAssignmentResult.Success(assignment, assignment, jobName, processId,
             applyRestrictions, limitPolicyApplied: applyRestrictions, hJob);
+    }
+
+    private IEnumerable<IntPtr> EnumerateKnownJobHandles(string sid, bool reopenTrackingJob)
+    {
+        var trackingHandle = GetTrackingJobHandleForMembership(sid, reopenTrackingJob);
+        if (trackingHandle != IntPtr.Zero)
+            yield return trackingHandle;
+
+        foreach (var jobs in new[] { _restrictedJobs, _lowIntegrityJobs })
+        {
+            if (jobs.TryGetValue(sid, out var handle))
+                yield return handle;
+        }
+    }
+
+    private IntPtr GetTrackingJobHandleForMembership(string sid, bool reopenTrackingJob)
+    {
+        if (_trackingJobs.TryGetValue(sid, out var existingHandle))
+            return existingHandle;
+
+        if (!reopenTrackingJob || !SidResolutionHelper.NeedsProcessJobTracking(sid))
+            return IntPtr.Zero;
+
+        string jobName = $@"Global\RunFence_Job_{sid}";
+        var reopenedHandle = jobObjectApi.OpenJobObject(JobObjectReconnectAccess, false, jobName);
+        if (reopenedHandle == IntPtr.Zero)
+        {
+            int error = jobObjectApi.GetLastWin32Error();
+            if (error != ErrorFileNotFound)
+                log.Warn($"ProcessJobManager: failed to reopen tracking job '{jobName}' for {sid}: Win32 error {error}.");
+
+            return IntPtr.Zero;
+        }
+
+        _trackingJobs[sid] = reopenedHandle;
+        return reopenedHandle;
     }
 
     private bool HasExpectedUiRestrictions(IntPtr hJob)

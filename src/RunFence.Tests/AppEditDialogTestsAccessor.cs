@@ -16,6 +16,7 @@ using RunFence.Launching.Resolution;
 using RunFence.Persistence;
 using RunFence.UI;
 using RunFence.UI.Forms;
+using RunFence.Tests.Helpers;
 
 namespace RunFence.Tests;
 
@@ -23,7 +24,7 @@ internal static class AppEditDialogTestsAccessor
 {
     public static AppEditDialog CreateDialogForContextHelp(IShortcutDiscoveryService? discoveryService = null)
     {
-        var appConfig = CreateAppConfigService();
+        var appConfig = new AppConfigTestContext();
 
         var sidResolver = new Mock<ISidResolver>();
         sidResolver.Setup(s => s.TryResolveName(It.IsAny<string>())).Returns<string>(sid => sid);
@@ -39,7 +40,7 @@ internal static class AppEditDialogTestsAccessor
             new AclAllowListGridHandler(),
             new AllowListEntryFactory(
                 Mock.Of<ILocalUserProvider>(),
-                Mock.Of<ILocalGroupMembershipService>(),
+                Mock.Of<ILocalGroupQueryService>(),
                 Mock.Of<ISidEntryHelper>(),
                 displayNameResolver),
             aclConfigValidator,
@@ -48,16 +49,24 @@ internal static class AppEditDialogTestsAccessor
         var browseHelper = new AppEditBrowseHelper(
             discoveryService ?? Mock.Of<IShortcutDiscoveryService>(),
             Mock.Of<IShortcutIconHelper>(),
-            new ShortcutTargetResolver(Mock.Of<IShortcutComHelper>()),
+            Mock.Of<IAppDiscoveryDialogService>(),
+            Mock.Of<IMessageBoxService>(),
+            new ShortcutTargetResolver(Mock.Of<IShortcutGateway>()),
             new LambdaSessionProvider(() => new SessionContext
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32))),
-            Mock.Of<IExecutableKindService>());
+            }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32))),
+            Mock.Of<IExecutableKindService>(),
+            new AppEntryHandlerPathSuggestionService(Mock.Of<IHandlerCommandTargetReader>(), Mock.Of<IHandlerPathIconProbe>()),
+            Mock.Of<IOpenFileDialogAdapterFactory>(),
+            Mock.Of<IFolderBrowserDialogAdapterFactory>());
 
         var associationHandler = CreateAssociationHandler();
-        var saveHandler = new AppEditDialogSaveHandler(associationHandler, appConfig);
+        var saveHandler = new AppEditDialogSaveHandler(
+            associationHandler,
+            appConfig.Service,
+            Mock.Of<ILoggingService>());
         var executablePathResolver = new Mock<IExecutablePathResolver>();
         executablePathResolver.Setup(r => r.TryResolvePath(It.IsAny<string>(), It.IsAny<ExecutablePathResolutionContext>()))
             .Returns<string, ExecutablePathResolutionContext>((path, _) => path);
@@ -72,49 +81,64 @@ internal static class AppEditDialogTestsAccessor
 
         var credentialDisplayItemFactory = new CredentialDisplayItemFactory(sidResolver.Object, profilePathResolver.Object);
         var populator = new AppEditDialogPopulator(
-            appConfig,
+            appConfig.Service,
             credentialDisplayItemFactory,
             new CredentialFilterHelper(sidResolver.Object));
         var initializer = new AppEditDialogInitializer(
             new AppEditPopulator(),
             idGenerator.Object,
-            appConfig,
+            appConfig.Service,
             associationHandler);
         var initializationBinder = new AppEditDialogInitializationBinder(
             populator,
             initializer,
             credentialDisplayItemFactory,
             () => new IpcCallerSection(
-                () => [],
+                Mock.Of<IWindowsAccountQueryService>(service => service.GetLocalUsers() == Array.Empty<LocalUserAccount>()),
                 Mock.Of<ISidEntryHelper>(),
-                displayNameResolver));
+                displayNameResolver,
+                Mock.Of<IIpcCallerModalService>()));
         var submitController = new AppEditDialogSubmitController(
             controller,
-            saveHandler);
+            saveHandler,
+            associationHandler,
+            appConfig.Service,
+            new AppEntryChangeClassifier());
+        var programFilesProvider = new Mock<IProgramFilesPathProvider>();
+        programFilesProvider.Setup(provider => provider.GetProgramFilesRoots()).Returns(Array.Empty<string>());
+        var repairer = new VersionedPathRepairer(new TestBackupIntentFileSystem());
+        var repairTrustPolicy = new VersionedPathAutoRepairTrustPolicy(programFilesProvider.Object, profilePathResolver.Object);
+        var repairOptionsBuilder = new VersionedPathRepairOptionsBuilder(profilePathResolver.Object);
+        var pathRepairSuggester = new AppEntryEditPathRepairSuggester(
+            repairer,
+            repairTrustPolicy,
+            repairOptionsBuilder,
+            Mock.Of<IMessageBoxService>());
 
         return new AppEditDialog(
-            appConfig,
+            appConfig.Service,
             aclSection,
             browseHelper,
             new AppEditAccountSwitchHandler(),
-            controller,
             submitController,
+            Mock.Of<ILoggingService>(),
             executablePathResolver.Object,
             new HandlerAssociationsSection(),
             initializationBinder,
-            Mock.Of<IUserConfirmationService>(service => service.Confirm(It.IsAny<string>(), It.IsAny<string>()) == true));
+            Mock.Of<IUserConfirmationService>(service => service.Confirm(It.IsAny<string>(), It.IsAny<string>()) == true),
+            Mock.Of<IHandlerAssociationMutationService>(),
+            new HandlerAssociationsChildDialogCoordinator(
+                () => new HandlerAssociationEditDialog(),
+                Mock.Of<IExeAssociationRegistryReader>(),
+                Mock.Of<IMessageBoxService>(),
+                Mock.Of<IModalCoordinator>()),
+            Mock.Of<IUiIconService>(),
+            new AppEditDialogSnapshotProvider(),
+            pathRepairSuggester);
     }
 
     public static AppEditDialogCommandContext CreateNoOpCommandContext()
-        => new(() => Task.CompletedTask);
-
-    private static IAppConfigService CreateAppConfigService()
-    {
-        var appConfig = new Mock<IAppConfigService>();
-        appConfig.SetupGet(s => s.HasLoadedConfigs).Returns(false);
-        appConfig.Setup(s => s.GetLoadedConfigPaths()).Returns([]);
-        return appConfig.Object;
-    }
+        => new(_ => Task.CompletedTask);
 
     private static AppEditAssociationHandler CreateAssociationHandler()
     {
@@ -133,5 +157,24 @@ internal static class AppEditDialogTestsAccessor
             databaseProvider,
             () => new HandlerMappingMutationHandler(
                 handlerMappingService.Object));
+    }
+
+    private sealed class TestBackupIntentFileSystem : IBackupIntentFileSystem
+    {
+        public BackupIntentPathState GetFileState(string path) => BackupIntentPathState.Exists;
+
+        public BackupIntentPathState GetDirectoryState(string path) => BackupIntentPathState.Exists;
+
+        public bool TryEnumerateDirectories(string path, out IReadOnlyList<string> directories)
+        {
+            directories = [];
+            return true;
+        }
+
+        public bool TryGetDirectoryLastWriteTimeUtc(string path, out DateTime lastWriteTimeUtc)
+        {
+            lastWriteTimeUtc = default;
+            return false;
+        }
     }
 }

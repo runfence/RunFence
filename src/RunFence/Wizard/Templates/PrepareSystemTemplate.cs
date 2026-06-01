@@ -28,7 +28,7 @@ public class PrepareSystemTemplate(
     public string DisplayName => "Prepare System";
     public string Description => "Replace broad ACEs on data drives so only you (or Administrators) can read files.";
     public string IconEmoji => "\U0001F6E1\uFE0F";
-    public Action<IWin32Window>? PostWizardAction => null;
+    public Func<IWin32Window, Task>? PostWizardAction => null;
 
     public void Cleanup()
     {

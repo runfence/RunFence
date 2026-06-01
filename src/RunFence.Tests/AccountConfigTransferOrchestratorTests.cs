@@ -15,7 +15,7 @@ public class AccountConfigTransferOrchestratorTests : IDisposable
     private const string TargetSid = "S-1-5-21-test-sid";
 
     private readonly Mock<IAccountConfigMigrationService> _migrationService = new();
-    private readonly Mock<ILocalGroupMembershipService> _localGroupMembership = new();
+    private readonly Mock<ILocalGroupQueryService> _localGroupMembership = new();
     private readonly Mock<ISidNameCacheService> _sidNameCache = new();
     private readonly ICredentialEncryptionSpanService _encryptionService = new CredentialEncryptionService(new NativeDpapiProtector());
     private readonly Mock<ILoggingService> _log = new();
@@ -38,7 +38,7 @@ public class AccountConfigTransferOrchestratorTests : IDisposable
                 EncryptedCanary = [1, 2, 3],
                 Credentials = []
             },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
     }
 
     public void Dispose() => _session.Dispose();

@@ -7,6 +7,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Tests.Helpers;
 using RunFence.UI;
 using Xunit;
 
@@ -24,7 +25,7 @@ public class AclManagerTraverseHelperTests
         database.GetOrCreateAccount(WellKnownSecuritySids.AllApplicationPackagesSid).Grants.Add(sharedEntry);
 
         var helper = CreateHelper(database, loadedConfigPaths: [], out var grid);
-        helper.Initialize(grid, ContainerSid, isContainer: true, new AclManagerPendingChanges(), sortHelper: null);
+        helper.Initialize(grid, ContainerSid, isContainer: true, new AclManagerPendingChanges(), [], new AclManagerSectionHeaderFactory(), sortHelper: null);
 
         helper.PopulateTraverseGrid();
 
@@ -62,7 +63,7 @@ public class AclManagerTraverseHelperTests
             [ownEntry, otherEntry, manualEntry]);
 
         var helper = CreateHelper(database, loadedConfigPaths: [], out var grid);
-        helper.Initialize(grid, ContainerSid, isContainer: true, new AclManagerPendingChanges(), sortHelper: null);
+        helper.Initialize(grid, ContainerSid, isContainer: true, new AclManagerPendingChanges(), [], new AclManagerSectionHeaderFactory(), sortHelper: null);
 
         helper.PopulateTraverseGrid();
 
@@ -94,7 +95,7 @@ public class AclManagerTraverseHelperTests
             loadedConfigPaths: [additionalStore.ConfigPath!],
             out var grid,
             provider);
-        helper.Initialize(grid, ContainerSid, isContainer: true, new AclManagerPendingChanges(), sortHelper: null);
+        helper.Initialize(grid, ContainerSid, isContainer: true, new AclManagerPendingChanges(), [], new AclManagerSectionHeaderFactory(), sortHelper: null);
 
         helper.PopulateTraverseGrid();
 
@@ -119,8 +120,6 @@ public class AclManagerTraverseHelperTests
         grid.Columns.Add(new DataGridViewImageColumn { Name = AclManagerGrantsHelper.ColIcon });
         grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "TraversePath" });
 
-        var appConfigService = new Mock<IAppConfigService>();
-        appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(loadedConfigPaths);
         var aclPermission = new Mock<IAclPermissionService>();
         aclPermission.Setup(s => s.ResolveAccountGroupSids(It.IsAny<string>())).Returns([]);
         var provider = storeProvider ?? new TestGrantIntentStoreProvider(new TestGrantIntentStore());
@@ -132,7 +131,8 @@ public class AclManagerTraverseHelperTests
             databaseProvider,
             reparsePointHelper.Object,
             aclPermission.Object,
-            pathInfo);
+            pathInfo,
+            Mock.Of<IOpenFileDialogAdapterFactory>());
         var resolver = new TraverseEntryResolver(
             aclPermission.Object,
             new Mock<ITraverseAcl>().Object,
@@ -141,9 +141,11 @@ public class AclManagerTraverseHelperTests
             new Mock<IAclPathIconProvider>().Object,
             resolver);
 
+        var appConfig = new AppConfigTestContext();
+        foreach (var path in loadedConfigPaths)
+            appConfig.AddLoadedConfig(path);
         return new AclManagerTraverseHelper(
-            appConfigService.Object,
-            aclPermission.Object,
+            appConfig.Service,
             repository,
             provider,
             databaseProvider,

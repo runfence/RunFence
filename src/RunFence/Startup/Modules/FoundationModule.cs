@@ -1,5 +1,6 @@
 using Autofac;
 using RunFence.Core;
+using RunFence.Core.Ipc;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
 using RunFence.Launching.Resolution;
@@ -36,12 +37,23 @@ public class FoundationModule : Module
                 (parameterInfo, _) => parameterInfo.Name == "appFilter",
                 (_, context) => context.ResolveOptional<IAppFilter>())
             .WithParameter("allowPlaintextConfig", false)
-            .As<IDatabaseService>().As<IConfigRepository>().As<ICredentialRepository>().InstancePerLifetimeScope();
+            .As<IDatabaseService>()
+            .As<IConfigRepository>()
+            .As<ICredentialRepository>()
+            .As<ICredentialStorePersistence>()
+            .As<IMainConfigPersistence>()
+            .As<IAppConfigPersistence>()
+            .As<IConfigIntegrityVerifier>()
+            .As<IConfigSaltReader>()
+            .As<IConfigReencryptionPersistence>()
+            .InstancePerLifetimeScope();
         builder.RegisterType<SidResolver>().As<ISidResolver>().SingleInstance();
         builder.RegisterType<ProfilePathResolver>().As<IProfilePathResolver>().SingleInstance();
+        builder.RegisterType<ProgramFilesPathProvider>().As<IProgramFilesPathProvider>().SingleInstance();
         builder.RegisterType<InteractiveUserSidResolver>().As<IInteractiveUserSidResolver>().SingleInstance();
         builder.RegisterType<FileSystemExecutableFileSystem>().As<IExecutableFileSystem>().SingleInstance();
         builder.RegisterType<RegistryProfilePathReader>().As<IProfilePathReader>().SingleInstance();
+        builder.RegisterType<AppExecLinkReader>().As<IAppExecLinkReader>().SingleInstance();
         builder.RegisterType<WindowsAppsAliasPathResolver>().As<IWindowsAppsAliasPathResolver>().SingleInstance();
         builder.RegisterType<WindowsAppsPackageIdentityResolver>().As<IWindowsAppsPackageIdentityResolver>().SingleInstance();
         builder.RegisterType<ExecutablePathResolver>().As<IExecutablePathResolver>().SingleInstance();
@@ -52,8 +64,14 @@ public class FoundationModule : Module
         builder.RegisterType<ModalCoordinator>().As<IModalCoordinator>().SingleInstance();
         builder.RegisterType<PinResetFlowRunner>().As<IPinResetFlowRunner>().SingleInstance();
         builder.RegisterType<StartupUI>().As<IStartupUI>().SingleInstance();
+        builder.RegisterType<DefaultIpcClient>().As<IIpcClient>().InstancePerDependency();
         builder.RegisterType<SessionProvider>()
             .As<ISessionProvider>().As<IDatabaseProvider>().AsSelf().SingleInstance();
+        builder.RegisterType<SingleInstanceService>().As<ISingleInstanceService>().InstancePerDependency();
+        builder.RegisterType<RunningInstanceSidProvider>().As<IRunningInstanceSidProvider>().InstancePerDependency();
+        builder.RegisterType<SessionAcquisitionHandler>()
+            .AsSelf()
+            .InstancePerDependency();
 
         builder.RegisterType<SidDisplayNameResolver>()
             .AsSelf()

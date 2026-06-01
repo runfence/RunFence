@@ -1,38 +1,76 @@
 using RunFence.Core.Models;
+using RunFence.Persistence;
 using System.Windows.Forms;
 
 namespace RunFence.Apps.UI;
 
 public class AppEditDialogSubmitController(
     AppEditDialogController controller,
-    AppEditDialogSaveHandler saveHandler)
+    AppEditDialogSaveHandler saveHandler,
+    AppEditAssociationHandler associationHandler,
+    IAppConfigService appConfigService,
+    AppEntryChangeClassifier changeClassifier)
 {
-    public Task<AppEditDialogSubmitResult> SubmitAsync(AppEditDialogSubmitRequest request)
+    public AppEditDialogSubmitResult Submit(AppEditDialogSubmitRequest request)
     {
         var buildResult = controller.ValidateAndBuild(request.Input);
         if (buildResult.Result == null)
         {
-            return Task.FromResult(new AppEditDialogSubmitResult(
+            return new AppEditDialogSubmitResult(
                 DialogResult: null,
                 Result: null,
                 HasUnsavedMutations: false,
-                StatusText: buildResult.StatusText));
+                StatusText: buildResult.StatusText);
         }
 
-        return Task.FromResult(new AppEditDialogSubmitResult(
+        return new AppEditDialogSubmitResult(
             DialogResult: null,
             Result: buildResult.Result,
             HasUnsavedMutations: false,
-            StatusText: buildResult.StatusText));
+            StatusText: buildResult.StatusText);
     }
 
     public async Task<AppEditDialogSubmitResult> ApplyExistingResultAsync(AppEditDialogApplyRequest request)
     {
-        var saveResult = await saveHandler.TrySaveAndApply(
+        var previousApp = request.Database?.Apps
+            .FirstOrDefault(app => string.Equals(app.Id, request.Result.Id, StringComparison.Ordinal))
+            ?.Clone();
+        var previousAssociations = request.Database != null
+            ? associationHandler.GetCurrentAssociations(request.Result.Id) ?? []
+            : [];
+        var previousConfigPath = previousApp != null
+            ? appConfigService.GetConfigPath(previousApp.Id)
+            : null;
+        var changeSet = previousApp != null
+            ? changeClassifier.Classify(
+                previousApp,
+                request.Result,
+                previousAssociations,
+                request.CurrentAssociations,
+                previousConfigPath,
+                request.SelectedConfigPath)
+            : new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: request.CurrentAssociations.Count > 0,
+                RequiresManagedShortcutRefresh: false,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly);
+
+        if (previousApp != null)
+            AppEntryShortcutProtectionStateHelper.ApplyExistingEditState(previousApp, request.Result, changeSet);
+
+        var applyContext = new AppEditDialogApplyContext(
             request.Result,
+            previousApp,
+            changeSet,
+            previousConfigPath,
             request.SelectedConfigPath,
+            request.CurrentAssociations);
+
+        var saveResult = await saveHandler.TrySaveAndApply(
             request.Database,
-            request.CurrentAssociations,
+            applyContext,
             request.ApplyAsync);
 
         return saveResult.Status switch

@@ -387,11 +387,6 @@ public sealed class RunAsCreatedAccountPersistenceCoordinatorTests : IDisposable
         Assert.NotNull(database.GetAccount(sid)?.DeleteAfterUtc);
         Assert.Empty(credentialStore.Credentials);
         dataChangeNotifier.Verify(n => n.NotifyDataChanged(), Times.Once);
-        log.Verify(
-            l => l.Error(
-                It.Is<string>(m => m.Contains("missing rollback state", StringComparison.Ordinal)),
-                ex),
-            Times.Once);
     }
 
     private SessionContext CreateSession(AppDatabase database, CredentialStore credentialStore)
@@ -401,7 +396,7 @@ public sealed class RunAsCreatedAccountPersistenceCoordinatorTests : IDisposable
 {
             Database = database,
             CredentialStore = credentialStore,
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }

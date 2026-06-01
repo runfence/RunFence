@@ -17,7 +17,6 @@ public static class QuickAccessHelper
                 }
                 catch (COMException)
                 {
-                    // Best-effort: skip paths that fail to pin via COM
                 }
             }
         }
@@ -33,7 +32,9 @@ public static class QuickAccessHelper
         try
         {
             dynamic? qa = shell.Namespace("shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}");
-            if (qa == null) return;
+            if (qa == null)
+                return;
+
             var items = qa.Items();
             int count = items.Count;
             for (int i = count - 1; i >= 0; i--)
@@ -46,13 +47,11 @@ public static class QuickAccessHelper
                 }
                 catch (COMException)
                 {
-                    // Best-effort: skip items that fail to unpin via COM
                 }
             }
         }
         catch (COMException)
         {
-            // Quick Access namespace unavailable — nothing to unpin
         }
         finally
         {

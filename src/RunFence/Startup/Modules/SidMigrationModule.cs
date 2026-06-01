@@ -18,13 +18,25 @@ public class SidMigrationModule : Module
             .As<ISidMigrationService>()
             .SingleInstance();
 
-        builder.RegisterType<SidDeletionHandler>()
+        builder.RegisterType<SidMigrationCoreMutationService>()
             .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<SidMigrationApplicationService>()
             .AsSelf()
             .InstancePerDependency();
+
+        builder.RegisterType<SidMigrationMutationApplier>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<SidMigrationDataMappingPlanner>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<SidMigrationDeletionPlanner>()
+            .AsSelf()
+            .SingleInstance();
 
         builder.RegisterType<InAppMigrationHandler>()
             .AsSelf()

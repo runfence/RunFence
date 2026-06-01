@@ -36,7 +36,7 @@ public class ConfigEnforcementOrchestrator(
     IAclService aclService,
     IIconService iconService,
     ILoggingService log,
-    AppEntryEnforcementHelper enforcementHelper,
+    AppEntryEnforcementCoordinator enforcementCoordinator,
     IShortcutDiscoveryService shortcutDiscovery) : ILoadedAppsCleanup
 {
     public void ApplyLoadedAppsEnforcement(IReadOnlyList<AppEntry> loadedApps)
@@ -47,7 +47,7 @@ public class ConfigEnforcementOrchestrator(
         {
             try
             {
-                enforcementHelper.ApplyChanges(app, database.Apps, shortcutCache);
+                enforcementCoordinator.ApplyChanges(app, database.Apps, shortcutCache);
             }
             catch (Exception ex)
             {
@@ -67,7 +67,7 @@ public class ConfigEnforcementOrchestrator(
         {
             try
             {
-                enforcementHelper.RevertChanges(app, remainingApps.Append(app).ToList(), shortcutCache);
+                enforcementCoordinator.RevertChanges(app, remainingApps.Append(app).ToList(), shortcutCache);
                 iconService.DeleteIcon(app.Id);
             }
             catch (Exception ex)
@@ -88,7 +88,7 @@ public class ConfigEnforcementOrchestrator(
         {
             try
             {
-                enforcementHelper.RevertChanges(app, database.Apps, shortcutCache);
+                enforcementCoordinator.RevertChanges(app, database.Apps, shortcutCache);
             }
             catch (Exception ex)
             {

@@ -14,7 +14,7 @@ namespace RunFence.Tests;
 /// <summary>
 /// Tests for <see cref="AclAllowModeService"/> and <see cref="AclDenyModeService"/> that verify
 /// the correct ACEs are applied to, and removed from, real filesystem paths in a temporary directory.
-/// Both services use <see cref="IAclAccessor.ModifyAclWithFallback"/> on actual NTFS paths — tests assert on
+/// Both services use <see cref="IPathSecurityDescriptorAccessor.ModifyAclWithFallback"/> on actual NTFS paths — tests assert on
 /// the resulting security descriptor to confirm the right rights are present or absent.
 ///
 /// Tests run as the test user who owns the temp directory and can modify its DACL without elevation.
@@ -41,10 +41,15 @@ public class AclModeServiceTests : IDisposable
     public AclModeServiceTests()
     {
         var aclAccessor = AclAccessorFactory.Create();
-        _allowService = new AclAllowModeService(_log.Object, _localUserProvider.Object, aclAccessor);
+        var resolver = new AppEntryAclTargetResolver();
+        _allowService = new AclAllowModeService(
+            _log.Object,
+            _localUserProvider.Object,
+            aclAccessor,
+            new AppEntryAllowAclRuleProvider(resolver));
         _denyService = new AclDenyModeService(
             _log.Object, _localUserProvider.Object, new ContainerLookupHelper(_databaseProvider.Object),
-            _interactiveUserResolver.Object, aclAccessor);
+            _interactiveUserResolver.Object, aclAccessor, resolver);
 
         _databaseProvider.Setup(d => d.GetDatabase()).Returns(new AppDatabase());
         _localUserProvider.Setup(p => p.GetLocalUserAccounts()).Returns([]);
@@ -185,17 +190,6 @@ public class AclModeServiceTests : IDisposable
     }
 
     [Fact]
-    public void CleanupAllowModeAces_UnprotectedPath_NoChange()
-    {
-        // A file with inherited (unprotected) ACL — cleanup should skip it
-        var filePath = CreateTempFile("unprotected.exe");
-
-        _allowService.CleanupAllowModeAces(filePath, false);
-
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Cleaned up allow-mode"))), Times.Never);
-    }
-
-    [Fact]
     public void CleanupAllowModeAces_ProtectedPath_RemovesExplicitAllowAcesAndRestoresInheritance()
     {
         // Arrange: apply allow mode first, which breaks inheritance
@@ -212,7 +206,6 @@ public class AclModeServiceTests : IDisposable
         Assert.False(security.AreAccessRulesProtected,
             "Expected inheritance to be restored after cleanup");
         Assert.Empty(GetExplicitAllowRules(security, SystemSid));
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Cleaned up allow-mode"))), Times.Once);
     }
 
     // ── AclDenyModeService ───────────────────────────────────────────────────

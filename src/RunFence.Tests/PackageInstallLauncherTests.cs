@@ -23,7 +23,7 @@ public class PackageInstallLauncherTests
             })
             .Returns(new LaunchExecutionResult(
                 LaunchExecutionStatus.ProcessStarted,
-                ProcessInfo.FromManagedProcess(null),
+                TestProcessInfoFactory.Empty(),
                 ["warning"]));
 
         var launcher = new PackageInstallLauncher(launchFacade.Object);
@@ -36,6 +36,7 @@ public class PackageInstallLauncherTests
         Assert.Equal("powershell.exe", capturedTarget!.ExePath);
         Assert.Contains("-ExecutionPolicy", capturedTarget.Arguments, StringComparison.Ordinal);
         Assert.Contains("Bypass", capturedTarget.Arguments, StringComparison.Ordinal);
+        Assert.Contains("[Console]::Error.WriteLine($_)", capturedTarget.Arguments, StringComparison.Ordinal);
         Assert.Contains("Read-Host -Prompt", capturedTarget.Arguments, StringComparison.Ordinal);
         Assert.Contains("'C:\\Temp\\install''script.ps1'", capturedTarget.Arguments, StringComparison.Ordinal);
         Assert.Equal(["warning"], result.MaintenanceWarnings);

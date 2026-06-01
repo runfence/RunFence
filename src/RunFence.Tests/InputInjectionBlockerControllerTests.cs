@@ -30,7 +30,7 @@ public class InputInjectionBlockerControllerTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessionProvider.Setup(s => s.GetSession()).Returns(_session);
         _controller = new InputInjectionBlockerController(
             _blocker.Object,

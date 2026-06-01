@@ -12,7 +12,7 @@ namespace RunFence.Account.Lifecycle;
 public class AccountDeletionService(
     IAccountLifecycleManager lifecycleManager,
     IAccountCredentialManager credentialManager,
-    IPathGrantService pathGrantService,
+    IGrantAccountCleanupService grantAccountCleanupService,
     IFirewallCleanupService firewallCleanupService,
     IGlobalIcmpSettingsApplier globalIcmpSettingsApplier,
     ISidCleanupHelper sidCleanup,
@@ -58,7 +58,7 @@ public class AccountDeletionService(
         var cleanupWarnings = new List<string>();
         if (database.GetAccount(sid)?.Grants is { Count: > 0 })
         {
-            var grantRemovalResult = pathGrantService.RemoveAll(sid);
+            var grantRemovalResult = grantAccountCleanupService.RemoveAll(sid);
             cleanupWarnings.AddRange(grantRemovalResult.Warnings.Select(GrantApplyFailureFormatter.Format));
         }
 

@@ -3,6 +3,7 @@ using Moq;
 using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.ForegroundMarker;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
 using RunFence.Persistence;
@@ -57,6 +58,7 @@ public sealed class OptionsUiTestContext : IDisposable
         var licenseService = new Mock<ILicenseService>();
         var appConfigService = new Mock<IAppConfigService>();
         var pinService = new Mock<IPinService>();
+        var foregroundPrivilegeMarkerService = new Mock<IForegroundPrivilegeMarkerService>();
 
         promptService.Setup(service => service.ConfirmSecurityWarning()).Returns(true);
         rememberPinService.Setup(service => service.IsTpmAvailable()).Returns(true);
@@ -67,7 +69,7 @@ public sealed class OptionsUiTestContext : IDisposable
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
 
         rotationRunner
             .Setup(runner => runner.Run(It.IsAny<string>(), It.IsAny<SessionContext>()))
@@ -89,9 +91,14 @@ public sealed class OptionsUiTestContext : IDisposable
             builder.RegisterInstance(licenseService.Object).As<ILicenseService>();
             builder.RegisterInstance(appConfigService.Object).As<IAppConfigService>();
             builder.RegisterInstance(pinService.Object).As<IPinService>();
+            builder.RegisterInstance(foregroundPrivilegeMarkerService.Object).As<IForegroundPrivilegeMarkerService>();
             builder.RegisterType<PinChangeOrchestrator>().AsSelf().SingleInstance();
             builder.RegisterType<OptionsStartWithoutPinHandler>().AsSelf().SingleInstance();
             builder.RegisterType<OptionsPanelDataLoader>().AsSelf().SingleInstance();
+            builder.RegisterType<OptionsForegroundPrivilegeMarkerSection>().AsSelf().SingleInstance();
+            builder.RegisterType<OptionsPanelLifecycleCoordinator>().AsSelf().InstancePerDependency();
+            builder.RegisterType<MainFormContentCoordinator>().AsSelf().InstancePerDependency();
+            builder.RegisterType<MainFormMessageRouter>().AsSelf().InstancePerDependency();
             builder.RegisterType<OptionsPanel>().AsSelf().InstancePerDependency();
             builder.RegisterType<MainForm>().AsSelf().InstancePerDependency();
         });

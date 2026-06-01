@@ -1,11 +1,18 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Acl;
 using RunFence.Core;
 
 namespace RunFence.PrefTrans;
 
-public class SettingsTransferStagingService : ISettingsTransferStagingService
+public class SettingsTransferStagingService(
+    IProgramDataDirectoryProvisioningService programDataDirectoryProvisioningService,
+    IProgramDataObjectProvisioner programDataObjectProvisioner,
+    IProgramDataKnownPathResolver programDataKnownPathResolver) : ISettingsTransferStagingService
 {
+    private readonly string sharedTempRoot = programDataKnownPathResolver.GetDirectoryPath(
+        ProgramDataPolicies.Temp);
+
     public string CreateSharedTempFilePath(string extension)
     {
         var normalizedExtension = string.IsNullOrWhiteSpace(extension) ? ".tmp" : extension;
@@ -18,7 +25,7 @@ public class SettingsTransferStagingService : ISettingsTransferStagingService
     }
 
     public string CreateSharedTempDirectoryPath()
-        => Path.Combine(SharedTempRoot, $"rfn_transfer_{Guid.NewGuid():N}");
+        => Path.Combine(sharedTempRoot, $"rfn_transfer_{Guid.NewGuid():N}");
 
     public string CopyImportFileToRestrictedTemp(string sourcePath, string tempPath, string interactiveSid)
     {
@@ -34,19 +41,7 @@ public class SettingsTransferStagingService : ISettingsTransferStagingService
             throw new ArgumentException("Temporary destination path must include a directory.", nameof(tempPath));
 
         CreateRestrictedExportDirectory(destinationDirectory, interactiveSid);
-        var security = BuildRestrictedFileSecurity(interactiveSid);
-        using (var destination = FileSystemAclExtensions.Create(
-                   new FileInfo(tempPath),
-                   FileMode.CreateNew,
-                   FileSystemRights.Write,
-                   FileShare.None,
-                   4096,
-                   FileOptions.None,
-                   security))
-        using (var source = File.OpenRead(sourcePath))
-        {
-            source.CopyTo(destination);
-        }
+        File.Copy(sourcePath, tempPath, overwrite: false);
 
         return tempPath;
     }
@@ -59,16 +54,16 @@ public class SettingsTransferStagingService : ISettingsTransferStagingService
             throw new ArgumentException("Interactive SID is required.", nameof(interactiveSid));
 
         var normalizedPath = Path.GetFullPath(tempDirectoryPath);
-        var parentDirectory = Path.GetDirectoryName(normalizedPath);
-        if (!string.IsNullOrEmpty(parentDirectory))
-            Directory.CreateDirectory(parentDirectory);
+        programDataDirectoryProvisioningService.EnsureRoot();
+        programDataDirectoryProvisioningService.EnsureKnownDirectory(ProgramDataPolicies.Temp);
+        programDataDirectoryProvisioningService.EnsureTraverseOnlyAccess(sharedTempRoot, interactiveSid, ProgramDataDirectoryAclProfile.TrustedOnly);
 
-        var security = BuildRestrictedDirectorySecurity(interactiveSid);
-        var directoryInfo = new DirectoryInfo(normalizedPath);
-        if (directoryInfo.Exists)
-            directoryInfo.SetAccessControl(security);
-        else
-            directoryInfo.Create(security);
+        programDataObjectProvisioner.CreateOrRepairDirectory(
+            new ProgramDataExplicitDirectoryRequest(
+                normalizedPath,
+                ProgramDataDirectoryAclProfile.CurrentProcessUserFullControl,
+                [CreateDirectoryAccess(interactiveSid, FileSystemRights.Modify)],
+                ReplaceExistingSecurity: true));
 
         return normalizedPath;
     }
@@ -107,67 +102,13 @@ public class SettingsTransferStagingService : ISettingsTransferStagingService
         return null;
     }
 
-    public FileSecurity BuildRestrictedFileSecurity(string interactiveSid)
-    {
-        var security = new FileSecurity();
-        security.SetAccessRuleProtection(true, false);
-
-        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        security.AddAccessRule(new FileSystemAccessRule(
-            admins, FileSystemRights.FullControl, AccessControlType.Allow));
-
-        var currentUser = WindowsIdentity.GetCurrent().User;
-        if (currentUser != null)
-        {
-            security.AddAccessRule(new FileSystemAccessRule(
-                currentUser, FileSystemRights.FullControl, AccessControlType.Allow));
-        }
-
-        security.AddAccessRule(new FileSystemAccessRule(
-            new SecurityIdentifier(interactiveSid),
-            FileSystemRights.Read | FileSystemRights.Synchronize,
-            AccessControlType.Allow));
-
-        return security;
-    }
-
-    public DirectorySecurity BuildRestrictedDirectorySecurity(string interactiveSid)
-    {
-        var security = new DirectorySecurity();
-        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-
-        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        security.AddAccessRule(new FileSystemAccessRule(
-            admins,
-            FileSystemRights.FullControl,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None,
-            AccessControlType.Allow));
-
-        var currentUser = WindowsIdentity.GetCurrent().User;
-        if (currentUser != null)
-        {
-            security.AddAccessRule(new FileSystemAccessRule(
-                currentUser,
-                FileSystemRights.FullControl,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.None,
-                AccessControlType.Allow));
-        }
-
-        security.AddAccessRule(new FileSystemAccessRule(
-            new SecurityIdentifier(interactiveSid),
-            FileSystemRights.Modify,
-            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-            PropagationFlags.None,
-            AccessControlType.Allow));
-
-        return security;
-    }
-
     public void CopyExportFileToDestination(string sourcePath, string destinationPath)
         => File.Copy(sourcePath, destinationPath, overwrite: true);
 
-    private static string SharedTempRoot
-        => Path.Combine(PathConstants.ProgramDataDir, "temp");
+    private static ProgramDataPrincipalAccess CreateDirectoryAccess(string sid, FileSystemRights rights)
+        => new(
+            new SecurityIdentifier(sid),
+            rights,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+            PropagationFlags.None);
 }

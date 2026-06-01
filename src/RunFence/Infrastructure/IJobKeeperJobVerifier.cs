@@ -4,5 +4,5 @@ namespace RunFence.Infrastructure;
 
 public interface IJobKeeperJobVerifier
 {
-    JobKeeperJobVerificationResult Verify(JobKeeperInstanceIdentity identity, int keeperPid);
+    JobKeeperJobVerificationResult Verify(int keeperPid);
 }

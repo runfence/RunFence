@@ -19,7 +19,7 @@ internal record ScanContext(
     IReadOnlySet<(string ExePath, string AccountSid)> ExistingApps,
     List<StartMenuEntry> Results);
 
-public class StartMenuDiscoveryService(IProfilePathResolver profilePathResolver, IShortcutComHelper shortcutHelper, ILoggingService log)
+public class StartMenuDiscoveryService(IProfilePathResolver profilePathResolver, IShortcutGateway shortcutGateway, ILoggingService log)
 {
     private static readonly HashSet<string> SupportedExtensions = new(StringComparer.OrdinalIgnoreCase)
         { ".exe", ".com", ".bat", ".cmd", ".ps1" };
@@ -83,7 +83,7 @@ public class StartMenuDiscoveryService(IProfilePathResolver profilePathResolver,
             string? target;
             try
             {
-                target = shortcutHelper.GetShortcutDefinition(lnkPath).TargetPath;
+                target = shortcutGateway.Read(lnkPath).TargetPath;
             }
             catch
             {
@@ -187,7 +187,7 @@ public class StartMenuDiscoveryService(IProfilePathResolver profilePathResolver,
             {
                 try
                 {
-                    var target = shortcutHelper.GetShortcutDefinition(lnkPath).TargetPath;
+                    var target = shortcutGateway.Read(lnkPath).TargetPath;
                     if (string.IsNullOrEmpty(target))
                         continue;
                     if (currentUserProfile != null)

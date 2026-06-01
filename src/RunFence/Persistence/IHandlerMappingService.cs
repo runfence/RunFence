@@ -58,13 +58,13 @@ public interface IHandlerMappingService
     void RenameAppIdInConfigMappings(string configPath, string oldAppId, string newAppId);
 
     /// <summary>
-    /// Registers handler mappings from a loaded extra config. Called by AppConfigService on load.
+    /// Registers handler mappings from a loaded extra config during additional-config load.
     /// </summary>
     void RegisterConfigMappings(string configPath, Dictionary<string, HandlerMappingEntry> mappings);
 
     /// <summary>
     /// Removes handler mappings for an unloaded extra config.
-    /// Called by AppConfigService on unload.
+    /// Called during additional-config unload.
     /// </summary>
     void UnregisterConfigMappings(string configPath);
 

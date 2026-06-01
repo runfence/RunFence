@@ -21,6 +21,11 @@ partial class HandlerAssociationsSection
     private ToolStripMenuItem _ctxEdit;
     private ToolStripMenuItem _ctxRemove;
 
+    public HandlerAssociationsSection()
+    {
+        InitializeComponent();
+    }
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
@@ -57,6 +62,7 @@ partial class HandlerAssociationsSection
         // _addButton
         _addButton.DisplayStyle = ToolStripItemDisplayStyle.Image;
         _addButton.ToolTipText = "Add association...";
+        _addButton.Enabled = false;
         _addButton.Click += OnAddClick;
 
         // _editButton
@@ -74,10 +80,13 @@ partial class HandlerAssociationsSection
         // _dataGrid
         _dataGrid.Dock = DockStyle.Fill;
         _dataGrid.ContextMenuStrip = _contextMenu;
+        _dataGrid.Enabled = false;
         _dataGrid.Columns.AddRange(new DataGridViewColumn[] { colKey, colArgsTemplate });
+        _dataGrid.CellDoubleClick += OnCellDoubleClick;
         _dataGrid.SelectionChanged += OnSelectionChanged;
         _dataGrid.KeyDown += OnKeyDown;
         _dataGrid.MouseDown += OnMouseDown;
+        _dataGrid.MouseUp += OnMouseUp;
 
         // colKey
         colKey.HeaderText = "Association";

@@ -1,5 +1,4 @@
 using RunFence.Apps;
-using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -9,7 +8,6 @@ namespace RunFence.Persistence;
 public class MainConfigImportRepairService(
     IAppConfigService appConfigService,
     IHandlerMappingService handlerMappingService,
-    IPathGrantService pathGrantService,
     ILoggingService log,
     IAppEntryIdGenerator idGenerator,
     AppIdValidator appIdValidator)
@@ -113,15 +111,4 @@ public class MainConfigImportRepairService(
         }
     }
 
-    public IReadOnlyList<string> ApplyOrphanedGrantRemovals(MainConfigImportRepairPlan repairPlan)
-    {
-        var warnings = new List<string>();
-        foreach (var sid in repairPlan.OrphanedGrantSids)
-        {
-            var result = pathGrantService.RemoveAll(sid);
-            warnings.AddRange(result.Warnings.Select(GrantApplyFailureFormatter.Format));
-        }
-
-        return warnings;
-    }
 }

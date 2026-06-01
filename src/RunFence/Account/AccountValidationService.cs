@@ -4,7 +4,7 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Account;
 
-public class AccountValidationService(ILoggingService log, ILocalGroupMembershipService localGroupMembership, IProcessListService processListService) : IAccountValidationService
+public class AccountValidationService(ILoggingService log, ILocalGroupQueryService localGroupMembership, IProcessListService processListService) : IAccountValidationService
 {
     public void ValidateNotCurrentAccount(string sid, string action)
     {

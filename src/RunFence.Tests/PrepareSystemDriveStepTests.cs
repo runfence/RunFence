@@ -50,7 +50,10 @@ public class PrepareSystemDriveStepTests
         DriveAclReplacer? driveAclReplacer = null,
         IPrepareSystemDriveInfoSource? driveInfoSource = null)
     {
-        driveAclReplacer ??= new DriveAclReplacer(Mock.Of<IPathGrantService>(), Mock.Of<RunFence.Core.ILoggingService>());
+        driveAclReplacer ??= new DriveAclReplacer(
+            Mock.Of<IGrantSyncService>(),
+            Mock.Of<RunFence.Core.ILoggingService>(),
+            AclAccessorFactory.Create());
         driveInfoSource ??= Mock.Of<IPrepareSystemDriveInfoSource>();
 
         return new PrepareSystemDriveStep(

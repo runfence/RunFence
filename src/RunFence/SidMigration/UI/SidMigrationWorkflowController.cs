@@ -82,6 +82,7 @@ public sealed class SidMigrationWorkflowController : IDisposable
                 break;
 
             case 2:
+                _state.DiscoveryState = SidMigrationDiscoveryState.Performed;
                 ShowStep(3);
                 break;
 
@@ -235,6 +236,7 @@ public sealed class SidMigrationWorkflowController : IDisposable
         {
             _state.RootPaths = pathStep.CollectSelectedPaths();
             _state.SavedPathState = pathStep.SavedState;
+            _state.DiscoveryState = SidMigrationDiscoveryState.Skipped;
             ShowStep(3);
         };
 
@@ -266,6 +268,7 @@ public sealed class SidMigrationWorkflowController : IDisposable
                 _state.OrphanedSids = await _sidMigrationService.DiscoverOrphanedSidsAsync(_state.RootPaths, progress, ct);
             }, "Discovery scan", progressStep, onCompleted: () =>
             {
+                _state.DiscoveryState = SidMigrationDiscoveryState.Performed;
                 var result = _discoveryStepController.BuildResult(_state.OrphanedSids);
                 statusLabel.Text = result.CompletionText;
 
@@ -311,7 +314,7 @@ public sealed class SidMigrationWorkflowController : IDisposable
         UpdateView(
             mappingStep,
             "Step 3: Review SID Mappings",
-            "Start Scan",
+            _state.DiscoveryState == SidMigrationDiscoveryState.Performed ? "Execute" : "Start Scan",
             nextEnabled: false,
             nextVisible: true,
             secondaryEnabled: false);
@@ -339,25 +342,10 @@ public sealed class SidMigrationWorkflowController : IDisposable
                     ct);
             }, "Disk scan", progressStep, onCompleted: () =>
             {
-                var result = _diskScanStepController.BuildResult(_state.ScanResults, _state.SidsToDelete);
-                if (result.OwnerDeleteBlockingSids.Count > 0)
-                {
-                    _messageBoxService.Show(
-                        owner,
-                        "Delete cannot be used for SIDs that still own files or folders.\n\n" +
-                        string.Join(Environment.NewLine, result.OwnerDeleteBlockingSids) +
-                        "\n\nGo back and choose Migrate with a replacement SID for those entries.",
-                        "Owner Migration Required",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
-                    ShowStep(3);
-                    return;
-                }
-
                 ShowStep(5);
             }, onCancel: () =>
             {
-                statusLabel.Text = _diskScanStepController.BuildResult(_state.ScanResults, _state.SidsToDelete).CancelText;
+                statusLabel.Text = _diskScanStepController.BuildResult(_state.ScanResults).CancelText;
                 UpdateView(nextEnabled: _state.ScanResults.Count > 0, secondaryEnabled: true);
             }, onNavigateBackAfterCancel: NavigateBack);
         };
@@ -470,6 +458,9 @@ public sealed class SidMigrationWorkflowController : IDisposable
 
     private bool CanShowBack()
     {
+        if (_state.CurrentStep == 3)
+            return _state.DiscoveryState == SidMigrationDiscoveryState.Skipped;
+
         return _state.CurrentStep > 1 && _state.CurrentStep != 6 && _state.CurrentStep != 7;
     }
 

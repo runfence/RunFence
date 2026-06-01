@@ -13,20 +13,11 @@ public class AppConfigIndex(
     AppIdValidator appIdValidator)
     : IAppFilter
 {
-    // appId → normalized config path (absent = main config)
     private readonly Dictionary<string, string> _appConfigMap =
         new(StringComparer.OrdinalIgnoreCase);
 
-    // loaded (normalized) config paths, in insertion order
     private readonly List<string> _loadedPaths = [];
 
-    // --- IAppFilter ---
-
-    /// <summary>
-    /// Returns a shallow clone of the database containing only main-config apps and grants.
-    /// Pure data transform — no I/O.
-    /// </summary>
-    // WARNING: When adding new AppDatabase properties, update this method.
     public AppDatabase FilterForMainConfig(AppDatabase database)
     {
         var mainApps = database.Apps
@@ -57,6 +48,7 @@ public class AppConfigIndex(
             SidNames = new Dictionary<string, string>(database.SidNames, StringComparer.OrdinalIgnoreCase),
             JobKeeperInstances = database.JobKeeperInstances?.ToDictionary(
                 kvp => kvp.Key, kvp => kvp.Value with { }, StringComparer.OrdinalIgnoreCase),
+            TrackingJobSids = database.TrackingJobSids?.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             AppContainers = database.AppContainers.Select(c => c.Clone()).ToList(),
             Accounts = accounts,
             AccountGroupSnapshots = database.AccountGroupSnapshots?.ToDictionary(
@@ -64,8 +56,6 @@ public class AppConfigIndex(
             ShowSystemInRunAs = database.ShowSystemInRunAs,
         };
     }
-
-    // --- Query ---
 
     public string? GetConfigPath(string appId)
     {
@@ -80,9 +70,6 @@ public class AppConfigIndex(
 
     public bool HasLoadedConfigs => _loadedPaths.Count > 0;
 
-    public List<string> GetUnavailableConfigPaths() =>
-        _loadedPaths.Where(p => !File.Exists(p)).ToList();
-
     public List<AppEntry> GetAppsForConfig(string normalizedPath, AppDatabase database) =>
         database.Apps
             .Where(a => _appConfigMap.TryGetValue(a.Id, out var p) &&
@@ -93,8 +80,6 @@ public class AppConfigIndex(
         => new(
             new Dictionary<string, string>(_appConfigMap, StringComparer.OrdinalIgnoreCase),
             _loadedPaths.ToList());
-
-    // --- Mutation ---
 
     public void AssignApp(string appId, string normalizedPath)
     {

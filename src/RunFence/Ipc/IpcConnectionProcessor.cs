@@ -139,20 +139,44 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
     private async Task<(byte[] buffer, int bytesRead)> AssembleMessage(NamedPipeServerStream pipe, CancellationToken ct)
     {
         var buffer = new byte[IpcConstants.MaxPipeMessageSize];
-        int bytesRead = await pipe.ReadAsync(buffer, ct);
+        int bytesRead;
+        try
+        {
+            bytesRead = await pipe.ReadAsync(buffer, ct);
+        }
+        catch (IOException)
+        {
+            return (buffer, 0);
+        }
 
-        if (pipe.IsMessageComplete)
+        if (bytesRead == 0)
+            return (buffer, 0);
+
+        if (!TryIsMessageComplete(pipe, out var messageComplete))
+            return (buffer, 0);
+
+        if (messageComplete)
             return (buffer, bytesRead);
 
         const long maxAssembledSize = 2L * IpcConstants.MaxPipeMessageSize;
         using var ms = new MemoryStream();
         ms.Write(buffer, 0, bytesRead);
         bool overflow = false;
-        while (!pipe.IsMessageComplete)
+        while (!messageComplete)
         {
-            int chunk = await pipe.ReadAsync(buffer, ct);
+            int chunk;
+            try
+            {
+                chunk = await pipe.ReadAsync(buffer, ct);
+            }
+            catch (IOException)
+            {
+                return (buffer, 0);
+            }
+
             if (chunk == 0)
-                break;
+                return (buffer, 0);
+
             ms.Write(buffer, 0, chunk);
             if (ms.Length > maxAssembledSize)
             {
@@ -160,6 +184,9 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
                 overflow = true;
                 break;
             }
+
+            if (!TryIsMessageComplete(pipe, out messageComplete))
+                return (buffer, 0);
         }
 
         if (overflow)
@@ -173,5 +200,19 @@ public class IpcConnectionProcessor(ILoggingService log, IIpcIdentityExtractor i
         }
 
         return (assembled, assembled.Length);
+    }
+
+    private static bool TryIsMessageComplete(NamedPipeServerStream pipe, out bool complete)
+    {
+        try
+        {
+            complete = pipe.IsMessageComplete;
+            return true;
+        }
+        catch (IOException)
+        {
+            complete = false;
+            return false;
+        }
     }
 }

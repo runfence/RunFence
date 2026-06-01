@@ -2,6 +2,7 @@ using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Persistence;
 
 namespace RunFence.Account.Lifecycle;
 
@@ -15,7 +16,8 @@ public class EphemeralAccountService(
     IUiThreadInvoker uiThreadInvoker,
     ITrayBalloonService trayBalloon,
     ISidResolver sidResolver,
-    IPathGrantService pathGrantService)
+    IGrantAccountCleanupService grantAccountCleanupService,
+    ITrackingJobStateStore trackingJobStateStore)
     : IDisposable, IBackgroundService, IEphemeralAccountChangeSource
 {
     private EphemeralTimerHelper? _timer;
@@ -100,7 +102,8 @@ public class EphemeralAccountService(
             {
                 log.Info($"EphemeralAccountService: permanentizing expired entry for SID {entry.Sid} (username not resolvable); clearing grants to prevent stale state.");
                 entry.DeleteAfterUtc = null;
-                var untrackResult = pathGrantService.UntrackAll(entry.Sid);
+                var untrackResult = grantAccountCleanupService.UntrackAll(entry.Sid);
+                trackingJobStateStore.RemoveTrackingJobSid(entry.Sid, saveImmediately: false);
                 database.RemoveAccountIfEmpty(entry.Sid);
                 ShowCleanupWarnings(untrackResult.Warnings.Select(GrantApplyFailureFormatter.Format).ToList());
                 changed = true;
@@ -120,7 +123,8 @@ public class EphemeralAccountService(
         {
             log.Info($"EphemeralAccountService: permanentizing orphaned entry for SID {entry.Sid} (account not found on system and no credentials); clearing grants to prevent stale state.");
             entry.DeleteAfterUtc = null;
-            var untrackResult = pathGrantService.UntrackAll(entry.Sid);
+            var untrackResult = grantAccountCleanupService.UntrackAll(entry.Sid);
+            trackingJobStateStore.RemoveTrackingJobSid(entry.Sid, saveImmediately: false);
             ShowCleanupWarnings(untrackResult.Warnings.Select(GrantApplyFailureFormatter.Format).ToList());
             database.RemoveAccountIfEmpty(entry.Sid);
         }

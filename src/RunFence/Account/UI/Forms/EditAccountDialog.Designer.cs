@@ -191,7 +191,7 @@ partial class EditAccountDialog
         _privilegeLevelComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         _privilegeLevelComboBox.Location = new Point(305, 207);
         _privilegeLevelComboBox.Size = new Size(200, 23);
-        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "Basic", "Isolated", "Low Integrity" });
+        _privilegeLevelComboBox.Items.AddRange(new object[] { "Highest Allowed", "High Integrity", "Basic", "Isolated", "Low Integrity" });
 
         // _ephemeralCheckBox
         _ephemeralCheckBox.Text = "Ephemeral (auto-delete after 24h)";

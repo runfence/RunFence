@@ -41,18 +41,11 @@ public sealed class ConfigSaveOrchestratorTests : IDisposable
     {
         using var uiInvoker = new DedicatedThreadUiInvoker();
         var databaseService = new Mock<IDatabaseService>();
-        var appConfigService = new Mock<IAppConfigService>();
-        var handlerMappingService = new Mock<IHandlerMappingService>();
         var configPath = Path.GetFullPath(@"C:\configs\extra.rfn");
-        appConfigService
-            .Setup(service => service.GetAppsForConfig(configPath, _database))
-            .Returns([]);
 
         var orchestrator = CreateOrchestrator(
             uiInvoker,
-            appConfigService: appConfigService,
-            databaseService: databaseService,
-            handlerMappingService: handlerMappingService);
+            databaseService: databaseService);
 
         var saveThreadId = 0;
         databaseService
@@ -89,22 +82,23 @@ public sealed class ConfigSaveOrchestratorTests : IDisposable
 
     private ConfigSaveOrchestrator CreateOrchestrator(
         IUiThreadInvoker uiThreadInvoker,
-        Mock<IAppConfigService>? appConfigService = null,
         Mock<IDatabaseService>? databaseService = null,
-        Mock<IHandlerMappingService>? handlerMappingService = null)
+        Mock<IAppConfigService>? appConfigService = null)
     {
         var sessionProvider = new SessionProvider();
         sessionProvider.SetSession(new SessionContext
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_pinKey));
+        }.WithClonedPinDerivedKey(_pinKey));
+        var effectiveDatabaseService = databaseService ?? new Mock<IDatabaseService>();
+        var effectiveAppConfigService = appConfigService ?? new Mock<IAppConfigService>();
 
         return new ConfigSaveOrchestrator(
             sessionProvider,
             () => uiThreadInvoker,
-            (databaseService ?? new Mock<IDatabaseService>()).Object,
-            (appConfigService ?? new Mock<IAppConfigService>()).Object,
-            (handlerMappingService ?? new Mock<IHandlerMappingService>()).Object);
+            effectiveDatabaseService.Object,
+            effectiveAppConfigService.Object,
+            Mock.Of<IHandlerMappingService>());
     }
 }

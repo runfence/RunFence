@@ -1,9 +1,9 @@
 using Moq;
-using Microsoft.Win32;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Licensing;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -13,6 +13,7 @@ public class LicenseServiceTests : IDisposable
     private static readonly byte[] TestPublicKeyBytes = LicenseTestKey.PublicKeyBytes;
 
     private readonly string _licenseFilePath = Path.Combine(Path.GetTempPath(), $"license_test_{Guid.NewGuid():N}.dat");
+    private readonly InMemoryRegistryKey _registryRoot = InMemoryRegistryKey.CreateRoot("LicenseNag");
     private readonly string _registryKeyPath = $@"Software\RunFenceTests\{Guid.NewGuid():N}";
     private readonly LicenseValidator _validator = new(TestPublicKeyBytes);
 
@@ -38,13 +39,7 @@ public class LicenseServiceTests : IDisposable
             File.Delete(_licenseFilePath);
         if (File.Exists(_licenseFilePath + ".bak"))
             File.Delete(_licenseFilePath + ".bak");
-        try
-        {
-            Registry.CurrentUser.DeleteSubKeyTree(_registryKeyPath, throwOnMissingSubKey: false);
-        }
-        catch
-        {
-        }
+        _registryRoot.Dispose();
     }
 
     private sealed class ServiceFixture(
@@ -88,10 +83,10 @@ public class LicenseServiceTests : IDisposable
         };
 
         var session = new SessionContext
-{
+        {
             Database = database,
             CredentialStore = store,
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
 
         var machineProvider = new TestMachineIdProvider(TestMachineHash);
         var licenseStore = new LicenseFileStore(_licenseFilePath);
@@ -112,6 +107,13 @@ public class LicenseServiceTests : IDisposable
         configureCredentialCounter?.Invoke(credentialCounter);
 
         var log = new Mock<ILoggingService>();
+        var nagStore = new RegistryLicenseNagStore(_registryKeyPath, _registryRoot);
+        var nagService = new LicenseNagService(nagStore);
+        var nagEligibilityService = new LicenseNagEligibilityService(
+            sessionProvider.Object,
+            sessionSaver.Object,
+            credentialCounter.Object,
+            log.Object);
 
         var svc = new LicenseService(
             machineProvider,
@@ -119,10 +121,9 @@ public class LicenseServiceTests : IDisposable
             validationService,
             restrictionService,
             formatter,
-            _registryKeyPath,
+            nagService,
+            nagEligibilityService,
             sessionProvider.Object,
-            sessionSaver.Object,
-            credentialCounter.Object,
             log.Object);
 
         svc.Initialize();
@@ -478,6 +479,7 @@ public class LicenseServiceTests : IDisposable
 
         Assert.True(shouldNag);
         Assert.False(svc.IsLicensed);
+        Assert.False(File.Exists(_licenseFilePath));
         Assert.Equal(1, statusChangedCount);
     }
 
@@ -498,6 +500,7 @@ public class LicenseServiceTests : IDisposable
 
         Assert.False(shouldNag);
         Assert.False(svc.IsLicensed);
+        Assert.False(File.Exists(_licenseFilePath));
     }
 
     // --- Helpers ---

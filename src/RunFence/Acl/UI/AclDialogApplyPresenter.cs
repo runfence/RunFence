@@ -1,21 +1,7 @@
 using RunFence.Acl;
+using RunFence.UI.DialogApply;
 
 namespace RunFence.Acl.UI;
-
-public enum DialogApplyPresentationStatus
-{
-    RenderedSuccess,
-    RenderedWarning,
-    RenderedValidationFailure,
-    RenderedFailure
-}
-
-public sealed record DialogApplyPresentationResult(
-    DialogApplyPresentationStatus Status,
-    int ChangedCount = 0,
-    bool RetainPendingInput = false,
-    IReadOnlyList<string>? Warnings = null,
-    IReadOnlyList<string>? Errors = null);
 
 public class AclDialogApplyPresenter
 {

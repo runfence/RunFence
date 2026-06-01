@@ -5,21 +5,35 @@ using RunFence.Core.Models;
 
 namespace RunFence.Infrastructure;
 
-public class LocalGroupQueryService(
-    ILoggingService log,
-    GroupMembershipApi groupMembership,
-    ISidResolver sidResolver,
-    ILocalUserProvider localUserProvider) : ILocalGroupQueryService, ILocalGroupQueryMaintenanceService
+public class LocalGroupQueryService : ILocalGroupQueryService, ILocalGroupQueryMaintenanceService
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(30);
+    private readonly ILoggingService _log;
+    private readonly GroupMembershipApi _groupMembership;
+    private readonly ISidResolver _sidResolver;
+    private readonly ILocalUserProvider _localUserProvider;
 
-    private readonly CachedLookup<bool, List<LocalUserAccount>> _localGroupsCache = new(CacheTtl);
-    private readonly CachedLookup<string, List<LocalUserAccount>> _groupsForUserCache =
-        new(CacheTtl, StringComparer.OrdinalIgnoreCase);
-    private readonly CachedLookup<string, List<LocalUserAccount>> _membersCache =
-        new(CacheTtl, StringComparer.OrdinalIgnoreCase);
-    private readonly CachedLookup<string, string?> _descriptionCache =
-        new(CacheTtl, StringComparer.OrdinalIgnoreCase);
+    private readonly CachedLookup<bool, List<LocalUserAccount>> _localGroupsCache;
+    private readonly CachedLookup<string, List<LocalUserAccount>> _groupsForUserCache;
+    private readonly CachedLookup<string, List<LocalUserAccount>> _membersCache;
+    private readonly CachedLookup<string, string?> _descriptionCache;
+
+    public LocalGroupQueryService(
+        ILoggingService log,
+        GroupMembershipApi groupMembership,
+        ISidResolver sidResolver,
+        ILocalUserProvider localUserProvider,
+        IClock clock)
+    {
+        _localGroupsCache = new CachedLookup<bool, List<LocalUserAccount>>(CacheTtl, clock);
+        _groupsForUserCache = new(CacheTtl, StringComparer.OrdinalIgnoreCase, clock);
+        _membersCache = new(CacheTtl, StringComparer.OrdinalIgnoreCase, clock);
+        _descriptionCache = new(CacheTtl, StringComparer.OrdinalIgnoreCase, clock);
+        _log = log;
+        _groupMembership = groupMembership;
+        _sidResolver = sidResolver;
+        _localUserProvider = localUserProvider;
+    }
 
     public GroupQueryResult QueryGroupsForUser(string sid)
     {
@@ -44,14 +58,14 @@ public class LocalGroupQueryService(
             if (IsLocalGroup(sid))
                 return [];
 
-            var name = localUserProvider.GetLocalUserAccounts()
+            var name = _localUserProvider.GetLocalUserAccounts()
                            .FirstOrDefault(u => string.Equals(u.Sid, sid, StringComparison.OrdinalIgnoreCase))
                            ?.Username
-                       ?? sidResolver.TryResolveName(sid);
+                       ?? _sidResolver.TryResolveName(sid);
             if (name == null)
                 return [];
 
-            var netApiResult = groupMembership.NetUserGetLocalGroups(name);
+            var netApiResult = _groupMembership.NetUserGetLocalGroups(name);
             if (netApiResult.ReturnCode != 0 || netApiResult.BufPtr == IntPtr.Zero)
             {
                 if (netApiResult.BufPtr != IntPtr.Zero)
@@ -67,7 +81,7 @@ public class LocalGroupQueryService(
                 {
                     var entry = Marshal.PtrToStructure<GroupMembershipNative.LOCALGROUP_USERS_INFO_0>(
                         IntPtr.Add(netApiResult.BufPtr, i * structSize));
-                    var groupSid = sidResolver.TryResolveSid(entry.lgrui0_name);
+                    var groupSid = _sidResolver.TryResolveSid(entry.lgrui0_name);
                     if (groupSid != null)
                         groups.Add(new LocalUserAccount(entry.lgrui0_name, groupSid));
                 }
@@ -81,7 +95,7 @@ public class LocalGroupQueryService(
         }
         catch (Exception ex)
         {
-            log.Error($"Failed to get groups for user SID {sid}", ex);
+            _log.Error($"Failed to get groups for user SID {sid}", ex);
             return [];
         }
     }
@@ -110,7 +124,7 @@ public class LocalGroupQueryService(
             using var queryFilter = new GroupPrincipal(context);
             using var searcher = new PrincipalSearcher(queryFilter);
             var groups = new List<LocalUserAccount>();
-            var allPrincipals = groupMembership.GetLocalGroups(() => searcher.FindAll().ToList());
+            var allPrincipals = _groupMembership.GetLocalGroups(() => searcher.FindAll().ToList());
             foreach (var principal in allPrincipals)
             {
                 try
@@ -128,7 +142,7 @@ public class LocalGroupQueryService(
         }
         catch (Exception ex)
         {
-            log.Error("Failed to enumerate local groups", ex);
+            _log.Error("Failed to enumerate local groups", ex);
             return [];
         }
     }
@@ -159,7 +173,7 @@ public class LocalGroupQueryService(
                 return [];
 
             var members = new List<LocalUserAccount>();
-            var allPrincipals = groupMembership.GetMembersOfGroup(groupSid, () => group.Members.ToList());
+            var allPrincipals = _groupMembership.GetMembersOfGroup(groupSid, () => group.Members.ToList());
             foreach (var principal in allPrincipals)
             {
                 try
@@ -177,7 +191,7 @@ public class LocalGroupQueryService(
         }
         catch (Exception ex)
         {
-            log.Error($"Failed to get members of group SID {groupSid}", ex);
+            _log.Error($"Failed to get members of group SID {groupSid}", ex);
             return [];
         }
     }
@@ -205,11 +219,11 @@ public class LocalGroupQueryService(
         try
         {
             var groupName = GetGroupName(groupSid);
-            return groupName == null ? null : groupMembership.ReadLocalGroupDescription(groupName, groupSid);
+            return groupName == null ? null : _groupMembership.ReadLocalGroupDescription(groupName, groupSid);
         }
         catch (Exception ex)
         {
-            log.Error($"Failed to get description for group SID {groupSid}", ex);
+            _log.Error($"Failed to get description for group SID {groupSid}", ex);
             return null;
         }
     }
@@ -218,7 +232,7 @@ public class LocalGroupQueryService(
         sid.StartsWith("S-1-5-32-", StringComparison.OrdinalIgnoreCase) ||
         GetLocalGroups().Any(g => string.Equals(g.Sid, sid, StringComparison.OrdinalIgnoreCase));
 
-    public bool IsUserAccountEnabled(string username) => groupMembership.IsUserAccountEnabled(username);
+    public bool IsUserAccountEnabled(string username) => _groupMembership.IsUserAccountEnabled(username);
 
     void ILocalGroupQueryMaintenanceService.InvalidateUserGroupMembership(string userSid, IEnumerable<string> groupSids)
     {
@@ -247,7 +261,7 @@ public class LocalGroupQueryService(
         if (cached != null)
             return cached.Username;
 
-        var resolved = sidResolver.TryResolveName(groupSid);
+        var resolved = _sidResolver.TryResolveName(groupSid);
         if (resolved == null)
             return null;
 

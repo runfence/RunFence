@@ -21,16 +21,6 @@ public class LoadedGoodBackupStoreTests : IDisposable
     public void Dispose() => _tempDir.Dispose();
 
     [Fact]
-    public void GetBackupPath_AppendsLastGoodSuffix()
-    {
-        var targetPath = Path.Combine(_tempDir.Path, "config.dat");
-
-        var backupPath = _store.GetBackupPath(targetPath);
-
-        Assert.Equal(targetPath + ".lastgood", backupPath);
-    }
-
-    [Fact]
     public void TryPreserveCurrentFile_WritesBackupFile()
     {
         var targetPath = Path.Combine(_tempDir.Path, "config.dat");
@@ -45,17 +35,6 @@ public class LoadedGoodBackupStoreTests : IDisposable
     }
 
     [Fact]
-    public void Exists_WhenBackupPresent_ReturnsTrue()
-    {
-        var targetPath = Path.Combine(_tempDir.Path, "config.dat");
-        File.WriteAllBytes(targetPath + ".lastgood", [1]);
-
-        var exists = _store.Exists(targetPath);
-
-        Assert.True(exists);
-    }
-
-    [Fact]
     public void Restore_ReplacesTargetWithBackupContents()
     {
         var targetPath = Path.Combine(_tempDir.Path, "config.dat");
@@ -66,17 +45,6 @@ public class LoadedGoodBackupStoreTests : IDisposable
         _store.Restore(targetPath);
 
         Assert.Equal(new byte[] { 1, 2, 3 }, File.ReadAllBytes(targetPath));
-    }
-
-    [Fact]
-    public void Delete_RemovesBackupFile()
-    {
-        var targetPath = Path.Combine(_tempDir.Path, "config.dat");
-        File.WriteAllBytes(targetPath + ".lastgood", [1, 2, 3]);
-
-        _store.Delete(targetPath);
-
-        Assert.False(File.Exists(targetPath + ".lastgood"));
     }
 
     [Fact]

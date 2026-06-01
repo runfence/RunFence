@@ -64,6 +64,7 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<LogonScriptIniManager>().AsSelf().SingleInstance();
+        builder.RegisterType<LogonScriptStateRollbackStore>().AsSelf().SingleInstance();
 
         builder.RegisterType<GroupPolicyScriptHelper>()
             .As<IGroupPolicyScriptHelper>()
@@ -171,6 +172,14 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<AccountsPanelLifecycleCoordinator>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<AccountsPanelSelectionSaveCoordinator>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<AccountPanelActions>()
             .AsSelf()
             .SingleInstance();
@@ -219,6 +228,75 @@ public class AccountModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<WindowsTerminalDeploymentPaths>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalPrivilegeLaunchExecutableService>()
+            .As<IWindowsTerminalPrivilegeLaunchExecutableService>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalAccountStateService>()
+            .As<IWindowsTerminalAccountStateService>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalReleaseHttpTransport>()
+            .As<IWindowsTerminalReleaseHttpTransport>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalReleaseParser>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalReleaseClient>()
+            .As<IWindowsTerminalReleaseClient>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalDeploymentScriptBuilder>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalDeploymentConsoleRunner>()
+            .As<IWindowsTerminalDeploymentConsoleRunner>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalDeploymentDirectoryCleaner>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalExecutableSignatureVerifier>()
+            .As<IWindowsTerminalExecutableSignatureVerifier>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalPayloadFileInspector>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalPackageVerifier>()
+            .As<IWindowsTerminalPackageVerifier>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalSharedDeploymentSecurityService>()
+            .As<IWindowsTerminalSharedDeploymentSecurityService>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalPackageCacheService>()
+            .As<IWindowsTerminalPackageCacheService>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalDeploymentService>()
+            .As<IWindowsTerminalDeploymentService>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalDeploymentProgressRunner>()
+            .As<IWindowsTerminalDeploymentProgressRunner>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowsTerminalLaunchRefreshService>()
+            .As<IWindowsTerminalLaunchRefreshService>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<TerminalLaunchIdentitySelector>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<PackageInstallScriptStore>()
             .As<IPackageInstallScriptStore>()
             .SingleInstance();
@@ -241,6 +319,7 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<AccountsPanelTimerCoordinator>()
+            .As<IAccountsPanelTimerCoordinator>()
             .AsSelf()
             .SingleInstance();
 
@@ -313,6 +392,7 @@ public class AccountModule : Module
             .SingleInstance();
 
         builder.RegisterType<AccountProcessDisplayManager>()
+            .As<IAccountsPanelProcessRefreshController>()
             .AsSelf()
             .SingleInstance();
 

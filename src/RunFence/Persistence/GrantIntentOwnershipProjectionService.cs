@@ -204,5 +204,5 @@ public class GrantIntentOwnershipProjectionService
     }
 
     private static string NormalizeConfigPath(string configPath)
-        => Path.GetFullPath(configPath);
+        => AppConfigPathHelper.NormalizePath(configPath);
 }

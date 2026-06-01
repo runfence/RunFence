@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using RunFence.Infrastructure;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
 
@@ -10,13 +11,15 @@ namespace RunFence.Wizard.UI.Forms.Steps;
 public class GamingFoldersStep : WizardStepPage
 {
     private readonly Action<List<string>> _setGameFolders;
+    private readonly IOpenFileDialogAdapterFactory _openFileDialogFactory;
 
     private FolderListEditor _editor = null!;
     private Label _tipLabel = null!;
 
-    public GamingFoldersStep(Action<List<string>> setGameFolders)
+    public GamingFoldersStep(Action<List<string>> setGameFolders, IOpenFileDialogAdapterFactory openFileDialogFactory)
     {
         _setGameFolders = setGameFolders;
+        _openFileDialogFactory = openFileDialogFactory;
         BuildContent();
     }
 
@@ -177,7 +180,7 @@ public class GamingFoldersStep : WizardStepPage
         SuspendLayout();
         Padding = new Padding(8);
 
-        _editor = new FolderListEditor();
+        _editor = new FolderListEditor(_openFileDialogFactory);
         _editor.Initialize(
             "Add folders where games will be installed. The gaming account will have full access (including ownership) " +
             "on these folders so launchers can install and update games.",

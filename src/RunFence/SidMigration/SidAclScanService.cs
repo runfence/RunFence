@@ -15,8 +15,11 @@ public class SidAclScanService(
     ILoggingService log,
     ISidResolver sidResolver,
     IFileSystemAclTraverser traverser,
-    IAclAccessor aclAccessor) : ISidAclScanService
+    IPathSecurityDescriptorAccessor aclAccessor) : ISidAclScanService
 {
+    private static readonly SecurityIdentifier AdministratorsSid =
+        new(WellKnownSidType.BuiltinAdministratorsSid, null);
+
     public async Task<List<OrphanedSid>> DiscoverOrphanedSidsAsync(
         IReadOnlyList<string> rootPaths,
         IProgress<(long scanned, long sidsFound)> onProgress,
@@ -47,9 +50,7 @@ public class SidAclScanService(
                                 sidCounts[sidStr] = entry;
                             }
 
-                            if (entry.SamplePaths.Count < OrphanedSid.MaxSamplePaths &&
-                                (entry.SamplePaths.Count == 0 || entry.SamplePaths[^1] != path))
-                                entry.SamplePaths.Add(path);
+                            TryAddSamplePath(entry.AceSamplePaths, path);
                             entry.AceCount++;
                         }
                     }
@@ -69,9 +70,7 @@ public class SidAclScanService(
                                     sidCounts[ownerStr] = entry;
                                 }
 
-                                if (entry.SamplePaths.Count < OrphanedSid.MaxSamplePaths &&
-                                    (entry.SamplePaths.Count == 0 || entry.SamplePaths[^1] != path))
-                                    entry.SamplePaths.Add(path);
+                                TryAddSamplePath(entry.OwnerSamplePaths, path);
                                 entry.OwnerCount++;
                             }
                         }
@@ -263,7 +262,7 @@ public class SidAclScanService(
 
                 try
                 {
-                    aclAccessor.ModifyOwnerAndAclWithFallback(hit.Path, hit.IsDirectory, security =>
+                    aclAccessor.ModifyOwnerAndAclWithFallback(hit.Path, security =>
                     {
                         bool changed = false;
 
@@ -307,11 +306,18 @@ public class SidAclScanService(
                         }
 
                         if (hit.MatchType.HasFlag(SidMigrationMatchType.Owner) &&
-                            hit.OwnerOldSid != null &&
-                            sidMap.TryGetValue(hit.OwnerOldSid, out var newOwnerStr))
+                            hit.OwnerOldSid != null)
                         {
-                            security.SetOwner(new SecurityIdentifier(newOwnerStr));
-                            changed = true;
+                            if (sidMap.TryGetValue(hit.OwnerOldSid, out var newOwnerStr))
+                            {
+                                security.SetOwner(new SecurityIdentifier(newOwnerStr));
+                                changed = true;
+                            }
+                            else if (deleteSids.Contains(hit.OwnerOldSid))
+                            {
+                                security.SetOwner(AdministratorsSid);
+                                changed = true;
+                            }
                         }
 
                         return changed;
@@ -355,5 +361,14 @@ public class SidAclScanService(
                 throw new IOException($"Protected root ACL could not be read: '{root}'.", ex);
             }
         }
+    }
+
+    private static void TryAddSamplePath(List<string> samplePaths, string path)
+    {
+        if (samplePaths.Count >= OrphanedSid.MaxSamplePaths)
+            return;
+
+        if (samplePaths.Count == 0 || samplePaths[^1] != path)
+            samplePaths.Add(path);
     }
 }

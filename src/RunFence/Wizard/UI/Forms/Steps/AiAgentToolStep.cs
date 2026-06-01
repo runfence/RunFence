@@ -1,5 +1,7 @@
 using RunFence.Account;
 using RunFence.Apps.Shortcuts;
+using RunFence.Apps.UI;
+using RunFence.Infrastructure;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
 
@@ -30,11 +32,14 @@ public class AiAgentToolStep : WizardStepPage
         Action<bool, string?> setOptions,
         IShortcutDiscoveryService discoveryService,
         IShortcutIconHelper iconHelper,
+        IOpenFileDialogAdapterFactory openFileDialogFactory,
+        IFolderBrowserDialogAdapterFactory folderBrowserDialogFactory,
+        IAppDiscoveryDialogService appDiscoveryDialogService,
         Func<IWizardProgressReporter, Task>? commitAction = null)
     {
         _setOptions = setOptions;
         _commitAction = commitAction;
-        BuildContent(discoveryService, iconHelper);
+        BuildContent(discoveryService, iconHelper, openFileDialogFactory, folderBrowserDialogFactory, appDiscoveryDialogService);
     }
 
     public override Task OnCommitBeforeNextAsync(IWizardProgressReporter progress)
@@ -66,7 +71,12 @@ public class AiAgentToolStep : WizardStepPage
         _setOptions(useAiPackage, appPath);
     }
 
-    private void BuildContent(IShortcutDiscoveryService discoveryService, IShortcutIconHelper iconHelper)
+    private void BuildContent(
+        IShortcutDiscoveryService discoveryService,
+        IShortcutIconHelper iconHelper,
+        IOpenFileDialogAdapterFactory openFileDialogFactory,
+        IFolderBrowserDialogAdapterFactory folderBrowserDialogFactory,
+        IAppDiscoveryDialogService appDiscoveryDialogService)
     {
         SuspendLayout();
         Padding = new Padding(8);
@@ -99,10 +109,16 @@ public class AiAgentToolStep : WizardStepPage
             Padding = new Padding(0, 8, 0, 4)
         };
 
-        _appPathBrowseControl = new AppPathBrowseControl(
-            discoveryService,
-            iconHelper,
-            dialogTitle: "Select Tool Executable");
+        _appPathBrowseControl = new AppPathBrowseControl();
+        _appPathBrowseControl.Initialize(
+            openFileDialogFactory,
+            folderBrowserDialogFactory,
+            new AppPathBrowseConfiguration(
+                "Select Tool Executable",
+                "Executable files (*.exe)|*.exe|All files (*.*)|*.*",
+                null,
+                AppPathBrowseMode.File));
+        _appPathBrowseControl.InitializeDiscovery(discoveryService, iconHelper, appDiscoveryDialogService);
         _appPathBrowseControl.Font = new Font("Segoe UI", 9);
 
         int appPathPanelHeight = _appPathLabel.PreferredHeight + _appPathLabel.Padding.Vertical + _appPathBrowseControl.Height;

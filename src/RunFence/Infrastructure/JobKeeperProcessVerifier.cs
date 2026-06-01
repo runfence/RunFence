@@ -1,6 +1,5 @@
 using System.IO.Pipes;
 using System.Security.Principal;
-using System.Text;
 using RunFence.Core;
 using RunFence.Core.Models;
 
@@ -8,7 +7,10 @@ namespace RunFence.Infrastructure;
 
 public sealed class JobKeeperProcessVerifier(
     IJobKeeperJobVerifier jobVerifier,
+    IJobKeeperClientProcessQuery clientProcessQuery,
     IProcessJobManager processJobManager,
+    IVerifiedRestrictedJobCache verifiedRestrictedJobCache,
+    ILoggingService log,
     string jobKeeperExePath) : IJobKeeperProcessVerifier
 {
     public JobKeeperProcessVerificationResult Verify(
@@ -19,37 +21,29 @@ public sealed class JobKeeperProcessVerifier(
     {
         try
         {
-            ProcessNative.GetNamedPipeClientProcessId(pipe.SafePipeHandle.DangerousGetHandle(), out var clientPid);
+            if (!clientProcessQuery.TryGetPipeClientProcessId(pipe, out var clientPid))
+                return JobKeeperProcessVerificationResult.Failure("pipe client PID was unavailable.");
 
-            using var handle = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, clientPid);
-            if (handle.IsInvalid)
-                return JobKeeperProcessVerificationResult.Failure($"OpenProcess failed for pipe client PID {clientPid}.");
-
-            var sb = new StringBuilder(1024);
-            uint size = (uint)sb.Capacity;
-            if (!ProcessNative.QueryFullProcessImageName(handle, 0, sb, ref size))
-                return JobKeeperProcessVerificationResult.Failure($"QueryFullProcessImageName failed for pipe client PID {clientPid}.");
-
-            if (!string.Equals(sb.ToString(), jobKeeperExePath, StringComparison.OrdinalIgnoreCase))
+            var processInfo = clientProcessQuery.QueryProcessInfo(clientPid);
+            if (processInfo.ImagePath == null)
             {
                 return JobKeeperProcessVerificationResult.Failure(
-                    $"pipe client image mismatch: expected '{jobKeeperExePath}', actual '{sb}'.");
+                    $"QueryFullProcessImageName failed for pipe client PID {clientPid}.");
             }
 
-            if (expectedPid > 0 && clientPid != (uint)expectedPid)
+            if (!string.Equals(processInfo.ImagePath, jobKeeperExePath, StringComparison.OrdinalIgnoreCase))
             {
                 return JobKeeperProcessVerificationResult.Failure(
-                    $"pipe client PID mismatch: expected {expectedPid}, actual {clientPid}.");
+                    $"pipe client image mismatch: expected '{jobKeeperExePath}', actual '{processInfo.ImagePath}'.");
             }
 
-            var ownerSid = NativeTokenHelper.TryGetProcessOwnerSid(clientPid);
-            if (ownerSid == null || !targetUserSid.Equals(ownerSid))
+            if (processInfo.OwnerSid == null || !targetUserSid.Equals(processInfo.OwnerSid))
             {
                 return JobKeeperProcessVerificationResult.Failure(
-                    $"pipe client owner SID mismatch: expected {targetUserSid.Value}, actual {ownerSid?.Value ?? "<unavailable>"}.");
+                    $"pipe client owner SID mismatch: expected {targetUserSid.Value}, actual {processInfo.OwnerSid?.Value ?? "<unavailable>"}.");
             }
 
-            var il = NativeTokenHelper.TryGetProcessIntegrityLevel(clientPid) ?? NativeTokenHelper.MandatoryLevelMedium;
+            var il = processInfo.IntegrityLevel ?? NativeTokenHelper.MandatoryLevelMedium;
             var isLow = identity.ExpectedMode == JobKeeperIntegrityMode.LowIntegrity;
             if ((il <= NativeTokenHelper.MandatoryLevelLow) != isLow)
             {
@@ -58,15 +52,31 @@ public sealed class JobKeeperProcessVerifier(
                     $"pipe client integrity mismatch: expected {expected}, actual 0x{il:X}.");
             }
 
-            var verification = jobVerifier.Verify(identity, (int)clientPid);
+            var verification = jobVerifier.Verify((int)clientPid);
             if (!verification.Succeeded)
             {
                 return JobKeeperProcessVerificationResult.Failure(
                     $"job verification failed: {verification.FailureReason ?? "unknown reason"}");
             }
 
-            processJobManager.RegisterVerifiedRestrictedJob(identity.TargetSid, isLow, verification.JobHandle);
-            return JobKeeperProcessVerificationResult.Success((int)clientPid);
+            var verifiedJobHandle = verification.JobHandle!;
+            try
+            {
+                processJobManager.RegisterVerifiedRestrictedJob(identity.TargetSid, isLow, verifiedJobHandle.Handle);
+                if (!verifiedRestrictedJobCache.TryAddDuplicate(verifiedJobHandle.Handle))
+                {
+                    log.Warn(
+                        $"JobKeeperProcessVerifier: failed to add verified restricted job for SID {identity.TargetSid} to classification cache.");
+                }
+
+                verifiedJobHandle.Release();
+                return JobKeeperProcessVerificationResult.Success((int)clientPid);
+            }
+            catch
+            {
+                verifiedJobHandle.Dispose();
+                throw;
+            }
         }
         catch (Exception ex)
         {

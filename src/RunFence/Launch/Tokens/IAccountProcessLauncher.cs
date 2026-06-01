@@ -1,3 +1,5 @@
+using RunFence.Launch;
+
 namespace RunFence.Launch.Tokens;
 
 public interface IAccountProcessLauncher
@@ -7,5 +9,5 @@ public interface IAccountProcessLauncher
     /// All fields on <paramref name="identity"/> must be fully resolved before calling:
     /// <c>Credentials</c> and <c>PrivilegeLevel</c> must be non-null.
     /// </summary>
-    ProcessInfo Launch(ProcessLaunchTarget target, AccountLaunchIdentity identity);
+    ProcessInfo? Launch(ProcessLaunchTarget target, AccountLaunchIdentity identity);
 }

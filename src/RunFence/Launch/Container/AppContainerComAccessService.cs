@@ -16,8 +16,8 @@ public class AppContainerComAccessService(
 {
     // COM rights: Execute(1) | ExecuteLocal(2) | ActivateLocal(8) = 11
     private const int ComRightsLocal = 11;
-    private readonly RegistryKey _appIdRoot = registryRoots.AppIdRoot;
-    private readonly RegistryKey _machineRoot = registryRoots.MachineRoot;
+    private readonly IRegistryKey _appIdRoot = registryRoots.AppIdRoot;
+    private readonly IRegistryKey _machineRoot = registryRoots.MachineRoot;
 
     public AppContainerComAccessResult GrantComAccess(string containerSid, string clsid)
         => ModifyComPermissions(containerSid, clsid, grant: true);
@@ -31,11 +31,11 @@ public class AppContainerComAccessService(
         try
         {
             var sid = new SecurityIdentifier(containerSid);
-            using RegistryKey? existingAppIdKey = _appIdRoot.OpenSubKey($@"AppID\{clsid}", writable: true);
+            using IRegistryKey? existingAppIdKey = _appIdRoot.OpenSubKey($@"AppID\{clsid}", writable: true);
             if (!grant && existingAppIdKey == null)
                 return AppContainerComAccessResult.Success();
 
-            using RegistryKey appIdKey = existingAppIdKey
+            using IRegistryKey appIdKey = existingAppIdKey
                 ?? _appIdRoot.CreateSubKey($@"AppID\{clsid}")
                 ?? throw new InvalidOperationException($"Unable to open AppID registry key for '{clsid}'.");
 
@@ -62,7 +62,7 @@ public class AppContainerComAccessService(
     }
 
     private PermissionWriteResult SetComPermissionEntry(
-        RegistryKey key,
+        IRegistryKey key,
         string valueName,
         SecurityIdentifier sid,
         bool grant)
@@ -141,7 +141,7 @@ public class AppContainerComAccessService(
         return oleKey?.GetValue(defaultValueName) as byte[];
     }
 
-    private void RollBackCreatedValues(RegistryKey appIdKey, IEnumerable<string> createdValues, string clsid)
+    private void RollBackCreatedValues(IRegistryKey appIdKey, IEnumerable<string> createdValues, string clsid)
     {
         foreach (var valueName in createdValues)
         {

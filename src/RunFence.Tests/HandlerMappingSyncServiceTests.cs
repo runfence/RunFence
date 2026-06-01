@@ -31,19 +31,6 @@ public class HandlerMappingSyncServiceTests
     }
 
     [Fact]
-    public void Sync_CallsRegistrationServiceAndAutoSet()
-    {
-        var (syncService, _, registrationService, autoSetService, _) = Make();
-
-        var result = syncService.Sync();
-
-        Assert.True(result.Succeeded);
-        Assert.Null(result.WarningMessage);
-        registrationService.Verify(r => r.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()), Times.Once);
-        autoSetService.Verify(a => a.AutoSetForAllUsers(), Times.Once);
-    }
-
-    [Fact]
     public void Sync_WhenRegistrationThrows_ReturnsWarningInsteadOfThrowing()
     {
         var (syncService, _, registrationService, autoSetService, _) = Make();
@@ -68,5 +55,31 @@ public class HandlerMappingSyncServiceTests
         autoSetService.Verify(a => a.RestoreKeyForAllUsers(".txt"), Times.Once);
         autoSetService.Verify(a => a.RestoreKeyForAllUsers("http"), Times.Once);
         registrationService.Verify(r => r.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()), Times.Once);
+    }
+
+    [Fact]
+    public void Sync_Success_AutoSetsForAllUsersAfterRegistration()
+    {
+        var (syncService, mappingService, registrationService, autoSetService, db) = Make();
+        var app = new AppEntry { Id = "app01", Name = "Test App" };
+        db.Apps.Add(app);
+        var expectedMappings = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
+        {
+            [".txt"] = new HandlerMappingEntry(app.Id, "\"%1\"")
+        };
+        mappingService.Setup(s => s.GetEffectiveHandlerMappings(db)).Returns(expectedMappings);
+        var sequence = new MockSequence();
+        registrationService.InSequence(sequence)
+            .Setup(r => r.Sync(expectedMappings, db.Apps));
+        autoSetService.InSequence(sequence)
+            .Setup(a => a.AutoSetForAllUsers())
+            .Returns(default(AssociationAutoSetResult)!);
+
+        var result = syncService.Sync();
+
+        Assert.True(result.Succeeded);
+        Assert.Null(result.WarningMessage);
+        registrationService.Verify(r => r.Sync(expectedMappings, db.Apps), Times.Once);
+        autoSetService.Verify(a => a.AutoSetForAllUsers(), Times.Once);
     }
 }

@@ -2,12 +2,13 @@ using System.Security.AccessControl;
 using System.Text;
 using RunFence.Core;
 using RunFence.Acl;
-using RunFence.Persistence;
 
 namespace RunFence.PrefTrans;
 
 public class SettingsTransferAccessGrantService(
-    IPathGrantService pathGrantService,
+    IGrantMutatorService grantMutatorService,
+    ITraverseService traverseService,
+    IGrantIntentSnapshotService grantIntentSnapshotService,
     IGrantAceService grantAceService,
     ILoggingService log)
     : ISettingsTransferAccessGrantService
@@ -24,7 +25,7 @@ public class SettingsTransferAccessGrantService(
 
         try
         {
-            var result = pathGrantService.EnsureAccess(sid, normalizedPath, rights, confirm: null);
+            var result = grantMutatorService.EnsureAccess(sid, normalizedPath, rights, confirm: null);
             return new SettingsTransferGrantResult(
                 true,
                 result.DatabaseModified,
@@ -52,7 +53,7 @@ public class SettingsTransferAccessGrantService(
         try
         {
             cleanupEntry = PrepareTransferCleanupEntry(sid, normalizedPath, isDirectory);
-            var result = pathGrantService.EnsureAccess(sid, normalizedPath, rights, confirm: null);
+            var result = grantMutatorService.EnsureAccess(sid, normalizedPath, rights, confirm: null);
             if (result.DatabaseModified && cleanupEntry != null)
                 RecordCleanupEntry(cleanupEntry);
 
@@ -83,7 +84,7 @@ public class SettingsTransferAccessGrantService(
         try
         {
             cleanupEntry = PrepareCleanupOnlyEntry(sid, normalizedPath, isDirectory);
-            var result = pathGrantService.EnsureTemporaryAccess(sid, normalizedPath, rights, confirm: null);
+            var result = grantMutatorService.EnsureTemporaryAccess(sid, normalizedPath, rights, confirm: null);
             bool accessCreated = result.GrantApplied || result.TraverseApplied;
             if (accessCreated && cleanupEntry != null)
             {
@@ -126,7 +127,7 @@ public class SettingsTransferAccessGrantService(
             {
                 try
                 {
-                    pathGrantService.RestoreGrant(entry.Sid, entry.Path, isDeny: false, entry.GrantSnapshot);
+                    grantMutatorService.RestoreGrant(entry.Sid, entry.Path, isDeny: false, entry.GrantSnapshot);
                 }
                 catch (Exception ex)
                 {
@@ -150,7 +151,7 @@ public class SettingsTransferAccessGrantService(
 
             try
             {
-                pathGrantService.RestoreTraverse(entry.Sid, entry.TraversePath, entry.TraverseSnapshot);
+                traverseService.RestoreTraverse(entry.Sid, entry.TraversePath, entry.TraverseSnapshot);
             }
             catch (Exception ex)
             {
@@ -167,12 +168,12 @@ public class SettingsTransferAccessGrantService(
         var traversePath = isDirectory ? normalizedPath : Path.GetDirectoryName(normalizedPath);
         var traverseSnapshot = string.IsNullOrEmpty(traversePath)
             ? EmptyRestoreSnapshot
-            : pathGrantService.CaptureTraverseRestoreSnapshot(sid, traversePath);
+            : grantIntentSnapshotService.CaptureTraverseRestoreSnapshot(sid, traversePath);
         return new GrantCleanupEntry(
             sid,
             normalizedPath,
             traversePath,
-            pathGrantService.CaptureGrantRestoreSnapshot(sid, normalizedPath, isDeny: false),
+            grantIntentSnapshotService.CaptureGrantRestoreSnapshot(sid, normalizedPath, isDeny: false),
             traverseSnapshot,
             TargetCleanupAction.RestoreTrackedGrant);
     }
@@ -185,7 +186,7 @@ public class SettingsTransferAccessGrantService(
         var traversePath = isDirectory ? normalizedPath : Path.GetDirectoryName(normalizedPath);
         var traverseSnapshot = string.IsNullOrEmpty(traversePath)
             ? EmptyRestoreSnapshot
-            : pathGrantService.CaptureTraverseRestoreSnapshot(sid, traversePath);
+            : grantIntentSnapshotService.CaptureTraverseRestoreSnapshot(sid, traversePath);
         return new GrantCleanupEntry(
             sid,
             normalizedPath,

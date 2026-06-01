@@ -23,6 +23,9 @@ public static class FileSecurityNative
     public const uint GENERIC_READ = 0x80000000;
     public const uint GENERIC_WRITE = 0x40000000;
     public const uint DELETE = 0x00010000;
+    public const uint FILE_READ_DATA = 0x00000001;
+    public const uint FILE_LIST_DIRECTORY = 0x00000001;
+    public const uint FILE_READ_ATTRIBUTES = 0x00000080;
 
     public const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     public const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
@@ -38,6 +41,7 @@ public static class FileSecurityNative
     public const uint READ_CONTROL = 0x00020000;
     public const uint WRITE_DAC = 0x00040000;
     public const uint WRITE_OWNER = 0x00080000;
+    public const uint MAXIMUM_ALLOWED = 0x02000000;
 
     public enum SE_OBJECT_TYPE
     {
@@ -91,6 +95,12 @@ public static class FileSecurityNative
         SECURITY_INFORMATION SecurityInfo,
         IntPtr psidOwner, IntPtr psidGroup,
         IntPtr pDacl, IntPtr pSacl);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool SetFileSecurity(
+        string lpFileName,
+        uint securityInformation,
+        IntPtr pSecurityDescriptor);
 
     // ── Security descriptor manipulation ─────────────────────────────────────
 

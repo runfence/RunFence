@@ -1,6 +1,4 @@
 using RunFence.Core;
-using RunFence.Core.Infrastructure;
-using RunFence.Infrastructure;
 
 namespace RunFence.PrefTrans.UI.Forms;
 
@@ -31,7 +29,5 @@ public static class DesktopSettingsImportDialog
                 /* best effort */
             }
         }
-
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
     }
 }

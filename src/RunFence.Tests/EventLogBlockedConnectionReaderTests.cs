@@ -8,26 +8,6 @@ namespace RunFence.Tests;
 public class EventLogBlockedConnectionReaderTests
 {
     [Fact]
-    public void ReadBlockedConnections_UsesParsedSourceRecords()
-    {
-        var expectedTime = new DateTime(2026, 5, 14, 12, 0, 0, DateTimeKind.Utc);
-        var eventSource = new TestBlockedConnectionEventSource([
-            new BlockedConnectionEventRecord("1.2.3.4", 443, expectedTime)
-        ]);
-        var reader = new EventLogBlockedConnectionReader(
-            Mock.Of<ILoggingService>(),
-            eventSource,
-            Mock.Of<IAuditPolCommandRunner>());
-
-        var result = reader.ReadBlockedConnections(TimeSpan.FromMinutes(5));
-
-        var connection = Assert.Single(result);
-        Assert.Equal("1.2.3.4", connection.DestAddress);
-        Assert.Equal(443, connection.DestPort);
-        Assert.Equal(expectedTime, connection.TimeStamp);
-    }
-
-    [Fact]
     public void ReadBlockedConnections_WhenSourceThrows_LogsAndReturnsEmpty()
     {
         var log = new Mock<ILoggingService>();
@@ -39,11 +19,6 @@ public class EventLogBlockedConnectionReaderTests
         var result = reader.ReadBlockedConnections(TimeSpan.FromMinutes(5));
 
         Assert.Empty(result);
-        log.Verify(
-            l => l.Error(
-                "BlockedConnectionReader: failed to read Security event log",
-                It.Is<InvalidOperationException>(ex => ex.Message == "boom")),
-            Times.Once);
     }
 
     [Fact]

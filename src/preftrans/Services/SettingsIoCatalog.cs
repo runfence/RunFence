@@ -9,12 +9,30 @@ public static class SettingsIoCatalog
         IBroadcastHelper broadcast,
         IUserProfileFilter userProfileFilter)
     {
+        var taskbarProfilePathPatcher = new TaskbarProfilePathPatcher();
+        var taskbarLegacyOwnershipDetector = new TaskbarLegacyOwnershipDetector(taskbarProfilePathPatcher);
+        ITaskbarRegistryStore taskbarRegistryStore = new TaskbarRegistryStore(safe);
+        var pinnedShortcutFolderProvider = new DefaultPinnedShortcutFolderProvider();
+        var pinnedShortcutReader = new WshPinnedShortcutReader();
+        var pinnedShortcutFileStore = new FileSystemPinnedShortcutFileStore();
+        IPinnedShortcutTransferService pinnedShortcutTransferService = new PinnedShortcutTransferService(
+            safe,
+            userProfileFilter,
+            taskbarProfilePathPatcher,
+            pinnedShortcutFolderProvider,
+            pinnedShortcutReader,
+            pinnedShortcutFileStore);
         var mouse = new MouseSettingsIO(safe, broadcast);
         var keyboard = new KeyboardSettingsIO(safe, broadcast);
         var scroll = new ScrollSettingsIO(safe, broadcast);
         var explorer = new ExplorerSettingsIO(safe, broadcast);
         var desktop = new DesktopSettingsIO(safe, broadcast);
-        var taskbar = new TaskbarSettingsIO(safe, broadcast, userProfileFilter);
+        var taskbar = new TaskbarSettingsIO(
+            taskbarRegistryStore,
+            pinnedShortcutTransferService,
+            taskbarLegacyOwnershipDetector,
+            taskbarProfilePathPatcher,
+            broadcast);
         var theme = new ThemeSettingsIO(safe, broadcast);
         var screenSaver = new ScreenSaverSettingsIO(safe, broadcast);
         var inputLanguage = new InputLanguageSettingsIO(safe, broadcast);

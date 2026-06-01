@@ -1,16 +1,15 @@
-using Microsoft.Win32;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 
 namespace RunFence.Launch;
 
 public class AssociationRegistryResolver(
     ILoggingService log,
-    RegistryKey? hklmOverride = null,
-    RegistryKey? hkuOverride = null)
+    IHklmClassesRootProvider hklmClassesRootProvider,
+    IHkuRootProvider hkuRootProvider,
+    IAssociationRegistryProtocolMarkerReader protocolMarkerReader)
+    : IAssociationRegistryReader
 {
-    private readonly RegistryKey _hklm = hklmOverride ?? Registry.LocalMachine;
-    private readonly RegistryKey _hku = hkuOverride ?? Registry.Users;
-
     public IEnumerable<AssociationRegistryCommandCandidate> ResolveFileCandidates(
         string sid,
         ProcessLaunchTarget originalTarget,
@@ -23,14 +22,15 @@ public class AssociationRegistryResolver(
         if (string.IsNullOrEmpty(effectiveExtension))
             yield break;
 
-        using var hkuClasses = _hku.OpenSubKey($@"{sid}\Software\Classes");
-        using var hklmClasses = _hklm.OpenSubKey(@"Software\Classes");
+        using var usersRoot = hkuRootProvider.OpenUsersRoot();
+        using var hkuClasses = usersRoot.OpenSubKey($@"{sid}\Software\Classes");
+        using var hklmClasses = hklmClassesRootProvider.OpenClassesRoot();
 
         var scopeLabel = BuildScopeLabel(sid, rejectUserProfileHandlers);
         var rawArgument = originalTarget.ExePath;
         var workingDirectory = ResolveAssociationWorkingDirectory(originalTarget);
 
-        var userChoiceProgId = ReadStringValue(_hku.OpenSubKey(
+        var userChoiceProgId = ReadStringValue(usersRoot.OpenSubKey(
             $@"{sid}\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{effectiveExtension}\UserChoice"),
             "ProgId");
         foreach (var candidate in ResolveProgIdCandidates(
@@ -101,12 +101,13 @@ public class AssociationRegistryResolver(
         if (!TryGetUrlScheme(url, out var scheme))
             yield break;
 
-        using var hkuClasses = _hku.OpenSubKey($@"{sid}\Software\Classes");
-        using var hklmClasses = _hklm.OpenSubKey(@"Software\Classes");
+        using var usersRoot = hkuRootProvider.OpenUsersRoot();
+        using var hkuClasses = usersRoot.OpenSubKey($@"{sid}\Software\Classes");
+        using var hklmClasses = hklmClassesRootProvider.OpenClassesRoot();
 
         var scopeLabel = BuildScopeLabel(sid, rejectUserProfileHandlers);
 
-        var userChoiceProgId = ReadStringValue(_hku.OpenSubKey(
+        var userChoiceProgId = ReadStringValue(usersRoot.OpenSubKey(
             $@"{sid}\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\{scheme}\UserChoice"),
             "ProgId");
         foreach (var candidate in ResolveProgIdCandidates(
@@ -128,9 +129,9 @@ public class AssociationRegistryResolver(
         if (hkuClasses != null)
         {
             using var protocolKey = hkuClasses.OpenSubKey(scheme);
-            if (protocolKey?.GetValue("URL Protocol") != null)
+            if (protocolMarkerReader.HasUrlProtocolMarker(protocolKey))
             {
-                using var userCommandKey = protocolKey.OpenSubKey(@"shell\open\command");
+                using var userCommandKey = protocolKey!.OpenSubKey(@"shell\open\command");
                 foreach (var candidate in BuildCommandCandidates(
                              sourceLabel: $"{scopeLabel} HKU protocol command",
                              resolutionSid: sid,
@@ -170,8 +171,8 @@ public class AssociationRegistryResolver(
     private IEnumerable<AssociationRegistryCommandCandidate> ResolveProgIdCandidates(
         string scopeLabel,
         string resolutionSid,
-        RegistryKey? hkuClasses,
-        RegistryKey? hklmClasses,
+        IRegistryKey? hkuClasses,
+        IRegistryKey? hklmClasses,
         string? progId,
         string rawArgument,
         string? workingDirectory,
@@ -223,7 +224,7 @@ public class AssociationRegistryResolver(
         }
     }
 
-    private static string? ReadStringValue(RegistryKey? key, string? valueName = null)
+    private static string? ReadStringValue(IRegistryKey? key, string? valueName = null)
     {
         using (key)
             return key?.GetValue(valueName) as string;
@@ -233,7 +234,7 @@ public class AssociationRegistryResolver(
         string sourceLabel,
         string resolutionSid,
         string? progId,
-        RegistryKey? commandKey,
+        IRegistryKey? commandKey,
         string rawArgument,
         string? workingDirectory,
         Dictionary<string, string>? environmentVariables,

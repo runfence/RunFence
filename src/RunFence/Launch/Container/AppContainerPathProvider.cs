@@ -1,10 +1,12 @@
+using RunFence.Acl;
+
 namespace RunFence.Launch.Container;
 
-public class AppContainerPathProvider : IAppContainerPathProvider
+public class AppContainerPathProvider(IProgramDataKnownPathResolver programDataKnownPathResolver) : IAppContainerPathProvider
 {
     public string GetContainersRootPath()
-        => AppContainerPaths.GetContainersRootPath();
+        => programDataKnownPathResolver.GetDirectoryPath(ProgramDataPolicies.Ac);
 
     public string GetContainerDataPath(string profileName)
-        => AppContainerPaths.GetContainerDataPath(profileName);
+        => Path.Combine(GetContainersRootPath(), profileName);
 }

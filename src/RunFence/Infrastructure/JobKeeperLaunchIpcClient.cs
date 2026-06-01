@@ -7,9 +7,13 @@ namespace RunFence.Infrastructure;
 public sealed class JobKeeperLaunchIpcClient(
     ILoggingService log,
     IJobKeeperRegistry registry,
-    IJobKeeperProcessTerminator processTerminator) : IJobKeeperLaunchIpcClient
+    IJobKeeperProcessTerminator processTerminator,
+    IJobObjectApi jobObjectApi,
+    IJobKeeperProcessHandleOpener processHandleOpener) : IJobKeeperLaunchIpcClient
 {
-    public async Task<int> SendLaunchRequestAsync(
+    private const uint SynchronizeAccess = 0x00100000;
+
+    public async Task<JobKeeperLaunchedProcess?> SendLaunchRequestAsync(
         string sid,
         bool isLow,
         JobKeeperLaunchRequest request,
@@ -17,7 +21,7 @@ public sealed class JobKeeperLaunchIpcClient(
         CancellationToken cancellationToken)
     {
         if (!registry.TryGet(sid, isLow, out var state))
-            return 0;
+            return null;
 
         NamedPipeServerStream pipe;
         int pid;
@@ -44,7 +48,7 @@ public sealed class JobKeeperLaunchIpcClient(
             {
                 log.Warn($"JobKeeper: null response from keeper for {sid}");
                 RemoveAndKill(sid, isLow, state, pid);
-                return 0;
+                return null;
             }
 
             if (response.Error != 0)
@@ -55,19 +59,60 @@ public sealed class JobKeeperLaunchIpcClient(
                 throw new JobKeeperChildLaunchException(message, response.Error);
             }
 
-            return response.Pid;
+            var duplicatedHandleValue = 0L;
+            if (response.ProcessHandleValue != 0)
+            {
+                var sourceProcessHandle = state.ProcessHandle;
+                var closeSourceProcessHandle = false;
+                if (sourceProcessHandle == IntPtr.Zero)
+                {
+                    sourceProcessHandle = processHandleOpener.OpenForDuplicate(pid);
+                    if (sourceProcessHandle == IntPtr.Zero)
+                    {
+                        log.Warn($"JobKeeper: failed to open keeper process handle for {sid} (pid={pid})");
+                        RemoveAndKill(sid, isLow, state, pid);
+                        return null;
+                    }
+
+                    closeSourceProcessHandle = true;
+                }
+
+                try
+                {
+                    if (!jobObjectApi.DuplicateHandleToProcess(
+                            sourceProcessHandle,
+                            new IntPtr(response.ProcessHandleValue),
+                            ProcessNative.GetCurrentProcess(),
+                            SynchronizeAccess | ProcessNative.ProcessQueryLimitedInformation,
+                            out var duplicatedHandle))
+                    {
+                        log.Warn($"JobKeeper: failed to duplicate launched child handle for {sid} (pid={response.Pid})");
+                        RemoveAndKill(sid, isLow, state, pid);
+                        return null;
+                    }
+
+                    duplicatedHandleValue = duplicatedHandle.ToInt64();
+                }
+                finally
+                {
+                    if (closeSourceProcessHandle)
+                        processHandleOpener.Close(sourceProcessHandle);
+                }
+            }
+
+            return new JobKeeperLaunchedProcess(response.Pid, duplicatedHandleValue);
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
             log.Warn($"JobKeeper: launch IPC timed out for {sid}");
             RemoveAndKill(sid, isLow, state, pid);
-            return 0;
+            return null;
         }
         catch (Exception ex) when (ex is not JobKeeperChildLaunchException)
         {
             log.Error($"JobKeeper: pipe error sending request for {sid}: {ex.Message}");
             RemoveAndKill(sid, isLow, state, pid);
-            return 0;
+            return null;
         }
         finally
         {

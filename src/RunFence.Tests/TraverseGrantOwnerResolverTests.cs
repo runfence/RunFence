@@ -12,6 +12,7 @@ public class TraverseGrantOwnerResolverTests
     private const string LowIntegritySid = AclHelper.LowIntegritySid;
     private const string SharedSid = AclHelper.AllApplicationPackagesSid;
     private const string ContainerSid = "S-1-15-2-99-1-2-3-4-5-6";
+    private const string OtherContainerSid = "S-1-15-2-99-1-2-3-4-5-7";
 
     private readonly TraverseGrantOwnerResolver _resolver = new();
 
@@ -127,5 +128,65 @@ public class TraverseGrantOwnerResolverTests
 
         Assert.NotNull(entry);
         Assert.Equal([ContainerSid], entry!.SourceSids);
+    }
+
+    [Fact]
+    public void RestoreTraverseEntry_SharedContainerManualSnapshot_PreservesUnrelatedSourceTrackedEntry()
+    {
+        var database = new AppDatabase();
+        var sharedStore = _resolver.GetOrCreateTraverseStore(database, ContainerSid);
+        var manualEntry = new GrantedPathEntry
+        {
+            Path = @"C:\Apps",
+            IsTraverseOnly = true,
+            SourceSids = null
+        };
+        sharedStore.Add(manualEntry);
+        sharedStore.Add(new GrantedPathEntry
+        {
+            Path = @"C:\Apps",
+            IsTraverseOnly = true,
+            SourceSids = [OtherContainerSid]
+        });
+
+        _resolver.RestoreTraverseEntry(database, ContainerSid, @"C:\Apps", manualEntry);
+
+        var entries = database.GetAccount(SharedSid)!.Grants;
+        Assert.Equal(2, entries.Count);
+        Assert.Contains(entries, entry => entry.SourceSids == null);
+        Assert.Contains(entries, entry => entry.SourceSids?.SequenceEqual([OtherContainerSid]) == true);
+    }
+
+    [Fact]
+    public void RestoreTraverseEntry_SharedContainerNullSnapshot_RemovesOnlySourceTrackedEntryForSid()
+    {
+        var database = new AppDatabase();
+        var sharedStore = _resolver.GetOrCreateTraverseStore(database, ContainerSid);
+        sharedStore.Add(new GrantedPathEntry
+        {
+            Path = @"C:\Apps",
+            IsTraverseOnly = true,
+            SourceSids = null
+        });
+        sharedStore.Add(new GrantedPathEntry
+        {
+            Path = @"C:\Apps",
+            IsTraverseOnly = true,
+            SourceSids = [ContainerSid]
+        });
+        sharedStore.Add(new GrantedPathEntry
+        {
+            Path = @"C:\Apps",
+            IsTraverseOnly = true,
+            SourceSids = [OtherContainerSid]
+        });
+
+        _resolver.RestoreTraverseEntry(database, ContainerSid, @"C:\Apps", snapshot: null);
+
+        var entries = database.GetAccount(SharedSid)!.Grants;
+        Assert.Equal(2, entries.Count);
+        Assert.Contains(entries, entry => entry.SourceSids == null);
+        Assert.Contains(entries, entry => entry.SourceSids?.SequenceEqual([OtherContainerSid]) == true);
+        Assert.DoesNotContain(entries, entry => entry.SourceSids?.SequenceEqual([ContainerSid]) == true);
     }
 }

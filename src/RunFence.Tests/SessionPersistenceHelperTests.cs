@@ -14,7 +14,7 @@ public class SessionPersistenceHelperTests : IDisposable
 
     private readonly SessionPersistenceHelper _persistenceHelper;
     private readonly Mock<ISidNameCacheService> _sidNameCache;
-    private readonly Mock<IConfigRepository> _configRepository;
+    private readonly Mock<IMainConfigPersistence> _configRepository;
     private readonly SecureSecret _pinKey;
     private readonly byte[] _argonSalt;
 
@@ -22,8 +22,8 @@ public class SessionPersistenceHelperTests : IDisposable
     {
         var log = new Mock<ILoggingService>();
         _sidNameCache = new Mock<ISidNameCacheService>();
-        var credentialRepository = new Mock<ICredentialRepository>();
-        _configRepository = new Mock<IConfigRepository>();
+        var credentialRepository = new Mock<IConfigReencryptionPersistence>();
+        _configRepository = new Mock<IMainConfigPersistence>();
         var pinKeyBytes = new byte[32];
         new Random(42).NextBytes(pinKeyBytes);
         _argonSalt = new byte[32];
@@ -149,9 +149,9 @@ public class SessionPersistenceHelperTests : IDisposable
     public async Task SaveConfig_WorkerThread_MarshalsEncryptedSaveToUiThread()
     {
         using var uiInvoker = new DedicatedThreadUiInvoker();
-        var configRepository = new Mock<IConfigRepository>();
+        var configRepository = new Mock<IMainConfigPersistence>();
         var helper = new SessionPersistenceHelper(
-            Mock.Of<ICredentialRepository>(),
+            Mock.Of<IConfigReencryptionPersistence>(),
             configRepository.Object,
             Mock.Of<ISidNameCacheService>(),
             () => uiInvoker,
@@ -171,10 +171,10 @@ public class SessionPersistenceHelperTests : IDisposable
     public async Task SaveCredentialStoreAndConfig_WorkerThread_MarshalsEncryptedSaveToUiThread()
     {
         using var uiInvoker = new DedicatedThreadUiInvoker();
-        var credentialRepository = new Mock<ICredentialRepository>();
+        var credentialRepository = new Mock<IConfigReencryptionPersistence>();
         var helper = new SessionPersistenceHelper(
             credentialRepository.Object,
-            Mock.Of<IConfigRepository>(),
+            Mock.Of<IMainConfigPersistence>(),
             Mock.Of<ISidNameCacheService>(),
             () => uiInvoker,
             Mock.Of<ILoggingService>());

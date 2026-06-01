@@ -1,4 +1,3 @@
-using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.PrefTrans;
@@ -8,7 +7,9 @@ namespace RunFence.UI;
 /// <summary>
 /// Handles desktop settings path configuration and export for <see cref="RunFence.UI.Forms.OptionsPanel"/>.
 /// </summary>
-public class OptionsDesktopSettingsHandler(ISettingsTransferService settingsTransferService)
+public class OptionsDesktopSettingsHandler(
+    ISettingsTransferService settingsTransferService,
+    IOpenFileDialogAdapterFactory openFileDialogFactory)
 {
     /// <summary>
     /// Commits the default desktop settings path to settings.
@@ -24,12 +25,12 @@ public class OptionsDesktopSettingsHandler(ISettingsTransferService settingsTran
     /// </summary>
     public string? BrowseDesktopSettings()
     {
-        using var dlg = new OpenFileDialog();
+        using var dlgAdapter = openFileDialogFactory.Create();
+        var dlg = dlgAdapter.Dialog;
         dlg.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*";
         dlg.Title = "Select Default Desktop Settings File";
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
 
-        return dlg.ShowDialog() == DialogResult.OK ? dlg.FileName : null;
+        return dlgAdapter.ShowDialog(owner: null) == DialogResult.OK ? dlg.FileName : null;
     }
 
     /// <summary>

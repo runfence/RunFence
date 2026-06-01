@@ -44,7 +44,7 @@ public class AppLifecycleStarter(
             eventWirer.WireEvents();
 
         // 4. Start background services in guaranteed order
-        //    (EphemeralAccountService → EphemeralContainerService → FirewallDnsRefreshService)
+        //    JobKeeper reconnect runs first so foreground marker classification restores cache state.
         foreach (var service in backgroundServices)
             service.Start();
 
@@ -67,7 +67,8 @@ public class AppLifecycleStarter(
             if (deferredStarted)
                 return;
             deferredStarted = true;
-            mainForm.BeginInvoke(() => deferredStartupRunner.Run(mainForm));
+            var deferredStartupMainForm = (IDeferredStartupMainForm)mainForm;
+            mainForm.BeginInvoke(() => deferredStartupRunner.Run(deferredStartupMainForm));
         };
     }
 }

@@ -17,7 +17,7 @@ public class EditAccountDialogCreateHandler(
     IUiThreadInvoker uiThreadInvoker,
     IAppStateProvider appState,
     SessionContext session,
-    IDatabaseService databaseService,
+    IMainConfigPersistence mainConfigPersistence,
     ISidNameCacheService sidNameCache)
 {
     public record CreateAccountRequest(
@@ -153,7 +153,7 @@ public class EditAccountDialogCreateHandler(
                 var entry = appState.Database.GetOrCreateAccount(sid);
                 entry.DeleteAfterUtc = request.IsEphemeral ? DateTime.UtcNow.AddHours(24) : null;
 
-                databaseService.SaveConfig(
+                mainConfigPersistence.SaveConfig(
                     appState.Database,
                     session.PinDerivedKey,
                     session.CredentialStore.ArgonSalt);

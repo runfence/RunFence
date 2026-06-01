@@ -51,7 +51,7 @@ public class GrantCoreOperations(
         {
             var acct = db.GetAccount(sid);
             if (acct == null) return (false, (bool?)null);
-            var conflict = FindNonTraverseGrantConflict(acct.Grants, normalized, isDeny);
+            var conflict = GrantEntryLookup.FindNonTraverseGrantConflict(acct.Grants, normalized, isDeny);
             return (conflict.HasSameModeEntry, conflict.OppositeModeEntry?.IsDeny);
         });
 
@@ -59,7 +59,7 @@ public class GrantCoreOperations(
         {
             dbAccessor.Write(db =>
             {
-                var entry = FindGrantEntryInDb(db, sid, normalized, isDeny);
+                var entry = GrantEntryLookup.FindGrantEntryInDb(db, sid, normalized, isDeny);
                 entry?.SavedRights = rights;
             });
             grantAceService.ApplyAce(normalized, sid, isDeny, rights, isFolder);
@@ -97,7 +97,7 @@ public class GrantCoreOperations(
 
         var (found, savedRights) = dbAccessor.Read(db =>
         {
-            var entry = FindGrantEntryInDb(db, sid, normalized, isDeny);
+            var entry = GrantEntryLookup.FindGrantEntryInDb(db, sid, normalized, isDeny);
             return entry != null ? (true, entry.SavedRights) : (false, (SavedRightsState?)null);
         });
 
@@ -110,7 +110,7 @@ public class GrantCoreOperations(
         dbAccessor.Write(db =>
         {
             var acct = db.GetAccount(sid);
-            var e = acct != null ? FindGrantEntryInList(acct.Grants, normalized, isDeny) : null;
+            var e = acct != null ? GrantEntryLookup.FindGrantEntryInList(acct.Grants, normalized, isDeny) : null;
             if (e != null)
                 acct!.Grants.Remove(e);
         });
@@ -139,7 +139,7 @@ public class GrantCoreOperations(
 
         dbAccessor.Write(db =>
         {
-            var entry = FindGrantEntryInDb(db, sid, normalized, isDeny);
+            var entry = GrantEntryLookup.FindGrantEntryInDb(db, sid, normalized, isDeny);
             entry?.SavedRights = savedRights;
         });
     }
@@ -154,7 +154,7 @@ public class GrantCoreOperations(
 
         var rights = dbAccessor.Read(db =>
         {
-            var entry = FindGrantEntryInDb(db, sid, normalized, isDeny);
+            var entry = GrantEntryLookup.FindGrantEntryInDb(db, sid, normalized, isDeny);
             return entry != null
                 ? entry.SavedRights ?? SavedRightsState.DefaultForMode(isDeny)
                 : null;
@@ -212,7 +212,7 @@ public class GrantCoreOperations(
             var account = database.GetAccount(sid);
             if (account == null) return;
 
-            var conflict = FindNonTraverseGrantConflict(account.Grants, normalized, isDeny);
+            var conflict = GrantEntryLookup.FindNonTraverseGrantConflict(account.Grants, normalized, isDeny);
             if (conflict.HasSameModeEntry)
             {
                 throw new InvalidOperationException(
@@ -228,57 +228,4 @@ public class GrantCoreOperations(
         });
     }
 
-    /// <summary>
-    /// Returns any existing non-traverse entry for the normalized path, split into same-mode and
-    /// opposite-mode matches using path plus <see cref="GrantedPathEntry.IsTraverseOnly"/> as the
-    /// coexistence key.
-    /// </summary>
-    public static GrantConflictResult FindNonTraverseGrantConflict(
-        IEnumerable<GrantedPathEntry> grants,
-        string normalized,
-        bool isDeny)
-    {
-        GrantedPathEntry? sameMode = null;
-        GrantedPathEntry? oppositeMode = null;
-
-        foreach (var entry in grants)
-        {
-            if (!string.Equals(entry.Path, normalized, StringComparison.OrdinalIgnoreCase) ||
-                entry.IsTraverseOnly)
-            {
-                continue;
-            }
-
-            if (entry.IsDeny == isDeny)
-                sameMode ??= entry;
-            else
-                oppositeMode ??= entry;
-
-            if (sameMode != null && oppositeMode != null)
-                break;
-        }
-
-        return new GrantConflictResult(sameMode, oppositeMode);
-    }
-
-    /// <summary>
-    /// Returns the non-traverse grant entry for <paramref name="sid"/> on <paramref name="normalized"/>
-    /// in the given <paramref name="database"/>, or null if not found.
-    /// </summary>
-    public static GrantedPathEntry? FindGrantEntryInDb(AppDatabase database, string sid,
-        string normalized, bool isDeny)
-    {
-        var account = database.GetAccount(sid);
-        return account != null ? FindGrantEntryInList(account.Grants, normalized, isDeny) : null;
-    }
-
-    /// <summary>
-    /// Returns the non-traverse grant entry for <paramref name="normalized"/> in <paramref name="grants"/>,
-    /// or null if not found.
-    /// </summary>
-    public static GrantedPathEntry? FindGrantEntryInList(List<GrantedPathEntry> grants,
-        string normalized, bool isDeny)
-        => grants.FirstOrDefault(e =>
-            string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase) &&
-            e.IsDeny == isDeny && !e.IsTraverseOnly);
 }

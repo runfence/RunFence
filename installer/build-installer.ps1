@@ -3,6 +3,27 @@ param([string]$Configuration = "Release")
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 
+function Get-WindowsSdkBuildToolsPackageVersion {
+    $packagesPath = Join-Path $root "src/Directory.Packages.props"
+    $xml = [xml](Get-Content $packagesPath -Raw -Encoding UTF8)
+
+    $property = $xml.Project.PropertyGroup.WindowsSdkBuildToolsPackageVersion
+    if ($null -ne $property -and -not [string]::IsNullOrWhiteSpace($property.InnerText)) {
+        return $property.InnerText.Trim()
+    }
+
+    $packageVersion = $xml.Project.ItemGroup.PackageVersion |
+        Where-Object { $_.Include -eq "Microsoft.Windows.SDK.BuildTools" } |
+        Select-Object -First 1
+    if ($null -eq $packageVersion -or [string]::IsNullOrWhiteSpace($packageVersion.Version)) {
+        throw "Microsoft.Windows.SDK.BuildTools package version not found in $packagesPath."
+    }
+
+    return $packageVersion.Version.Trim()
+}
+
+$windowsSdkBuildToolsPackageVersion = Get-WindowsSdkBuildToolsPackageVersion
+
 function Assert-InstallerArpLinksConfigured([string]$wxsPath) {
     $xml = [xml](Get-Content $wxsPath -Raw -Encoding UTF8)
     $ns = [System.Xml.XmlNamespaceManager]::new($xml.NameTable)
@@ -180,7 +201,7 @@ if (Test-Path $pfx) {
     if (-not $signtool) {
         # Probe NuGet global packages cache for Microsoft.Windows.SDK.BuildTools
         $nugetRoot = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { "$env:USERPROFILE\.nuget\packages" }
-        $candidate = Get-ChildItem "$nugetRoot\microsoft.windows.sdk.buildtools\*\bin\*\x64\signtool.exe" `
+        $candidate = Get-ChildItem "$nugetRoot\microsoft.windows.sdk.buildtools\$windowsSdkBuildToolsPackageVersion\bin\*\x64\signtool.exe" `
                          -ErrorAction SilentlyContinue |
                      Sort-Object FullName -Descending | Select-Object -First 1
         if ($candidate) { $signtool = $candidate.FullName }

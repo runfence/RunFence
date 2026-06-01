@@ -2,23 +2,26 @@ namespace RunFence.Infrastructure;
 
 /// <summary>
 /// Generic keyed cache with TTL expiry. Thread-safe via an internal lock.
-/// Encapsulates the check-TTL-fetch-store pattern repeated in <see cref="LocalGroupMembershipService"/>.
+/// Encapsulates the check-TTL-fetch-store pattern repeated in <see cref="LocalGroupQueryService"/>.
 /// </summary>
 public class CachedLookup<TKey, TValue> where TKey : notnull
 {
     private readonly TimeSpan _ttl;
+    private readonly IClock _clock;
     private readonly Lock _lock = new();
     private readonly Dictionary<TKey, (TValue Data, DateTime Time)> _cache;
 
-    public CachedLookup(TimeSpan ttl)
+    public CachedLookup(TimeSpan ttl, IClock clock)
     {
         _ttl = ttl;
+        _clock = clock;
         _cache = new Dictionary<TKey, (TValue, DateTime)>();
     }
 
-    public CachedLookup(TimeSpan ttl, IEqualityComparer<TKey> comparer)
+    public CachedLookup(TimeSpan ttl, IEqualityComparer<TKey> comparer, IClock clock)
     {
         _ttl = ttl;
+        _clock = clock;
         _cache = new Dictionary<TKey, (TValue, DateTime)>(comparer);
     }
 
@@ -30,14 +33,14 @@ public class CachedLookup<TKey, TValue> where TKey : notnull
     {
         lock (_lock)
         {
-            if (_cache.TryGetValue(key, out var cached) && DateTime.UtcNow - cached.Time < _ttl)
+            if (_cache.TryGetValue(key, out var cached) && _clock.UtcNow - cached.Time < _ttl)
                 return cached.Data;
         }
         var result = fetch();
         lock (_lock)
         {
-            if (!_cache.TryGetValue(key, out var existing) || DateTime.UtcNow - existing.Time >= _ttl)
-                _cache[key] = (result, DateTime.UtcNow);
+            if (!_cache.TryGetValue(key, out var existing) || _clock.UtcNow - existing.Time >= _ttl)
+                _cache[key] = (result, _clock.UtcNow);
         }
         return result;
     }

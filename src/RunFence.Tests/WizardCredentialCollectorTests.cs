@@ -22,7 +22,7 @@ public class WizardCredentialCollectorTests
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         if (addCredentialForSid)
             session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = Sid });
         return session;

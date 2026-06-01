@@ -41,6 +41,43 @@ public class AppEditDialogTests
     }
 
     [Fact]
+    public void DiscoverHandler_DisablesAppEntryControlsUntilDiscoveryCompletes()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            var gate = new ManualResetEventSlim(false);
+            var discoveryStarted = new ManualResetEventSlim(false);
+            var discovery = new Mock<IShortcutDiscoveryService>();
+            discovery.Setup(s => s.DiscoverApps()).Callback(() =>
+            {
+                discoveryStarted.Set();
+                gate.Wait();
+            }).Returns([]);
+
+            using var dialog = CreateDialog(discovery.Object);
+            StaTestHelper.CreateControlTree(dialog);
+
+            ref var tabControl = ref GetTabControl(dialog);
+            ref var buttonPanel = ref GetButtonPanel(dialog);
+
+            var discoverTask = InvokeHandleDiscoverAsync(dialog);
+
+            StaTestHelper.PumpUntil(
+                () => discoveryStarted.IsSet,
+                timeoutMessage: "Timed out waiting for app discovery to start.");
+
+            Assert.False(tabControl.Enabled);
+            Assert.False(buttonPanel.Enabled);
+
+            gate.Set();
+            StaTestHelper.RunAsyncWithMessagePump(async () => await discoverTask);
+
+            Assert.True(tabControl.Enabled);
+            Assert.True(buttonPanel.Enabled);
+        });
+    }
+
+    [Fact]
     public void Initialize_RegistersExpectedContextHelpTargets()
     {
         StaTestHelper.RunOnSta(() =>
@@ -143,6 +180,12 @@ public class AppEditDialogTests
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_statusLabel")]
     private static extern ref Label GetStatusLabel(AppEditDialog dialog);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_tabControl")]
+    private static extern ref TabControl GetTabControl(AppEditDialog dialog);
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_buttonPanel")]
+    private static extern ref Panel GetButtonPanel(AppEditDialog dialog);
 
     [UnsafeAccessor(UnsafeAccessorKind.Method, Name = "ShowStatusError")]
     private static extern void InvokeShowStatusError(AppEditDialog dialog, string? message);

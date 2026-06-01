@@ -12,7 +12,7 @@ public class SpecificContainerAceConflictDetectorTests
     public void HasExplicitSpecificContainerAce_ExplicitPackageSid_ReturnsTrue()
     {
         const string path = @"C:\Target";
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         var security = new DirectorySecurity();
         security.AddAccessRule(new FileSystemAccessRule(
             new SecurityIdentifier("S-1-15-2-123-456-789-100"),
@@ -30,7 +30,7 @@ public class SpecificContainerAceConflictDetectorTests
     public void HasExplicitSpecificContainerAce_AllApplicationPackages_ReturnsFalse()
     {
         const string path = @"C:\Target";
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         var security = new DirectorySecurity();
         security.AddAccessRule(new FileSystemAccessRule(
             new SecurityIdentifier(AclHelper.AllApplicationPackagesSid),
@@ -48,7 +48,7 @@ public class SpecificContainerAceConflictDetectorTests
     public void HasLowIntegrityAce_ExplicitLowIntegritySid_ReturnsTrue()
     {
         const string path = @"C:\Target";
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         var security = new DirectorySecurity();
         security.AddAccessRule(new FileSystemAccessRule(
             new SecurityIdentifier(AclHelper.LowIntegritySid),

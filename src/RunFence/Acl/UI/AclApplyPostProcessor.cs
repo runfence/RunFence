@@ -12,7 +12,9 @@ public class AclApplyPostProcessor(
     IGrantIntentRepository grantIntentRepository,
     IGrantIntentStoreProvider grantIntentStoreProvider,
     IQuickAccessPinService quickAccessPinService,
-    ITraverseGrantOwnerResolver traverseGrantOwnerResolver)
+    ITraverseGrantOwnerResolver traverseGrantOwnerResolver,
+    AclApplyPhaseCatalog phaseCatalog,
+    AclApplyPostProcessingPolicy postProcessingPolicy)
 {
     private static readonly GrantPathKeyComparer GrantPathComparer = new();
 
@@ -43,107 +45,45 @@ public class AclApplyPostProcessor(
         var successfulAddAllowPaths = plan.PendingAdds
             .Where(e => !e.IsDeny && !e.IsTraverseOnly)
             .Select(e => e.Path)
-            .Where(path => executionResult.WasCompleted(AclPendingOperationKind.GrantAdd, path, isDeny: false))
+            .Where(path => executionResult.WasCompleted(phaseCatalog.GetOperationKind(AclApplyPhase.GrantAdd), path, isDeny: false))
             .ToList();
         var successfulRemoveAllowPaths = plan.PendingRemoves
             .Where(e => !e.IsDeny && !e.IsTraverseOnly)
             .Select(e => e.Path)
-            .Where(path => executionResult.WasCompleted(AclPendingOperationKind.GrantRemove, path, isDeny: false))
+            .Where(path => executionResult.WasCompleted(phaseCatalog.GetOperationKind(AclApplyPhase.GrantRemove), path, isDeny: false))
             .ToList();
 
-        RetainOnlyUncompletedEntries(
-            plan.PendingAdds, pending.PendingAdds,
-            e => executionResult.WasCompleted(AclPendingOperationKind.GrantAdd, e.Path, e.IsDeny),
-            e => (e.Path, e.IsDeny));
-        RetainOnlyUncompletedEntries(
-            plan.PendingRemoves, pending.PendingRemoves,
-            e => executionResult.WasCompleted(AclPendingOperationKind.GrantRemove, e.Path, e.IsDeny),
-            e => (e.Path, e.IsDeny));
-        RetainOnlyUncompletedEntries(
-            plan.PendingModifications, pending.PendingModifications,
-            m => executionResult.WasCompleted(AclPendingOperationKind.GrantModification, m.Entry.Path, m.Entry.IsDeny),
-            m => (m.Entry.Path, m.Entry.IsDeny));
-        RetainOnlyUncompletedEntries(
-            plan.PendingGrantFixes, pending.PendingGrantFixes,
-            e => executionResult.WasCompleted(AclPendingOperationKind.GrantFix, e.Path, e.IsDeny),
-            e => (e.Path, e.IsDeny));
-        RetainOnlyUncompletedEntries(
-            plan.PendingTraverseAdds, pending.PendingTraverseAdds,
-            e => executionResult.WasCompleted(AclPendingOperationKind.TraverseAdd, e.Path, null),
-            e => e.Path);
-        RetainOnlyUncompletedEntries(
-            plan.PendingTraverseRemoves, pending.PendingTraverseRemoves,
-            e => executionResult.WasCompleted(AclPendingOperationKind.TraverseRemove, e.Path, null),
-            e => e.Path);
-        RetainOnlyUncompletedEntries(
-            plan.PendingTraverseFixes, pending.PendingTraverseFixes,
-            e => executionResult.WasCompleted(AclPendingOperationKind.TraverseFix, e.Path, null),
-            e => e.Path);
-        RetainOnlyUncompletedEntries(
-            plan.PendingUntrackGrants, pending.PendingUntrackGrants,
-            e => executionResult.WasCompleted(AclPendingOperationKind.GrantUntrack, e.Path, e.IsDeny),
-            e => (e.Path, e.IsDeny));
-        RetainOnlyUncompletedEntries(
-            plan.PendingUntrackTraverse, pending.PendingUntrackTraverse,
-            e => executionResult.WasCompleted(AclPendingOperationKind.TraverseUntrack, e.Path, null),
-            e => e.Path);
+        postProcessingPolicy.CleanupCompletedPending(plan, executionResult, pending);
         foreach (var move in plan.PendingConfigMoves)
         {
             var key = (move.Entry.Path, move.Entry.IsDeny);
-            var completedGrantOperation =
-                executionResult.WasCompleted(AclPendingOperationKind.GrantAdd, key.Path, key.IsDeny) ||
-                executionResult.WasCompleted(AclPendingOperationKind.GrantRemove, key.Path, key.IsDeny) ||
-                executionResult.WasCompleted(AclPendingOperationKind.GrantUntrack, key.Path, key.IsDeny) ||
-                plan.PendingModifications.Any(modification =>
-                    string.Equals(modification.Entry.Path, key.Path, StringComparison.OrdinalIgnoreCase) &&
-                    (modification.Entry.IsDeny == key.IsDeny || modification.NewIsDeny == key.IsDeny) &&
-                    executionResult.WasCompleted(
-                        AclPendingOperationKind.GrantModification,
-                        modification.Entry.Path,
-                        modification.Entry.IsDeny));
+            var completedGrantOperation = postProcessingPolicy.GrantConfigMoveHasCompletedOperation(move, plan, executionResult);
             if (shouldSkipFurtherMoves)
             {
                 if (completedGrantOperation)
-                    pending.PendingConfigMoves.Remove(key);
+                    pending.Grants.RemoveGrantConfigMove(key.Path, key.IsDeny, out _);
 
                 continue;
             }
 
-            var keep =
-                configMoveResult.FailedGrantMoves.Contains(key) ||
-                HasGrantError(executionResult.Errors, AclPendingOperationKind.GrantAdd, key.Path, key.IsDeny) ||
-                HasGrantError(executionResult.Errors, AclPendingOperationKind.GrantRemove, key.Path, key.IsDeny) ||
-                HasGrantError(executionResult.Errors, AclPendingOperationKind.GrantUntrack, key.Path, key.IsDeny) ||
-                HasGrantModificationError(plan.PendingModifications, executionResult.Errors, key.Path, key.IsDeny) ||
-                HasGrantError(executionResult.Errors, AclPendingOperationKind.GrantFix, key.Path, key.IsDeny);
-
-            if (!keep)
-                pending.PendingConfigMoves.Remove(key);
+            if (!postProcessingPolicy.ShouldKeepGrantConfigMove(move, plan, executionResult, configMoveResult.FailedGrantMoves))
+                pending.Grants.RemoveGrantConfigMove(key.Path, key.IsDeny, out _);
         }
 
         foreach (var move in plan.PendingTraverseConfigMoves)
         {
             var key = move.Entry.Path;
-            var completedTraverseOperation =
-                executionResult.WasCompleted(AclPendingOperationKind.TraverseAdd, key, null) ||
-                executionResult.WasCompleted(AclPendingOperationKind.TraverseRemove, key, null) ||
-                executionResult.WasCompleted(AclPendingOperationKind.TraverseUntrack, key, null);
+            var completedTraverseOperation = postProcessingPolicy.TraverseConfigMoveHasCompletedOperation(move, executionResult);
             if (shouldSkipFurtherMoves)
             {
                 if (completedTraverseOperation)
-                    pending.PendingTraverseConfigMoves.Remove(key);
+                    pending.Traverse.RemoveTraverseConfigMove(key, out _);
 
                 continue;
             }
 
-            var keep =
-                configMoveResult.FailedTraverseMoves.Contains(key) ||
-                HasTraverseError(executionResult.Errors, AclPendingOperationKind.TraverseAdd, key) ||
-                HasTraverseError(executionResult.Errors, AclPendingOperationKind.TraverseRemove, key) ||
-                HasTraverseError(executionResult.Errors, AclPendingOperationKind.TraverseUntrack, key) ||
-                HasTraverseError(executionResult.Errors, AclPendingOperationKind.TraverseFix, key);
-            if (!keep)
-                pending.PendingTraverseConfigMoves.Remove(key);
+            if (!postProcessingPolicy.ShouldKeepTraverseConfigMove(move, executionResult, configMoveResult.FailedTraverseMoves))
+                pending.Traverse.RemoveTraverseConfigMove(key, out _);
         }
 
         if (successfulAddAllowPaths.Count > 0)
@@ -189,7 +129,10 @@ public class AclApplyPostProcessor(
             if (plan.PendingGrantFixes.Any(e =>
                     string.Equals(e.Path, move.Entry.Path, StringComparison.OrdinalIgnoreCase) &&
                     e.IsDeny == move.Entry.IsDeny) &&
-                HasGrantError(executionErrors, AclPendingOperationKind.GrantFix, move.Entry.Path, move.Entry.IsDeny))
+                executionErrors.Any(error =>
+                    error.OperationKind == phaseCatalog.GetOperationKind(AclApplyPhase.GrantFix) &&
+                    error.IsDeny == move.Entry.IsDeny &&
+                    string.Equals(error.Path, move.Entry.Path, StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }
@@ -222,7 +165,9 @@ public class AclApplyPostProcessor(
             }
 
             if (plan.PendingTraverseFixes.Any(e => string.Equals(e.Path, move.Entry.Path, StringComparison.OrdinalIgnoreCase)) &&
-                HasTraverseError(executionErrors, AclPendingOperationKind.TraverseFix, move.Entry.Path))
+                executionErrors.Any(error =>
+                    error.OperationKind == phaseCatalog.GetOperationKind(AclApplyPhase.TraverseFix) &&
+                    string.Equals(error.Path, move.Entry.Path, StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }
@@ -355,52 +300,6 @@ public class AclApplyPostProcessor(
         if (!affectedStores.Any(existing => ReferenceEquals(existing, store)))
             affectedStores.Add(store);
     }
-
-    private static void RetainOnlyUncompletedEntries<TItem, TKey>(
-        IEnumerable<TItem> items,
-        Dictionary<TKey, TItem> pendingEntries,
-        Func<TItem, bool> wasCompleted,
-        Func<TItem, TKey> keySelector)
-        where TKey : notnull
-    {
-        foreach (var item in items)
-        {
-            if (wasCompleted(item))
-                pendingEntries.Remove(keySelector(item));
-        }
-    }
-
-    private static bool HasGrantError(
-        IReadOnlyList<AclApplyError> errors,
-        AclPendingOperationKind operationKind,
-        string path,
-        bool isDeny)
-        => errors.Any(error =>
-            error.OperationKind == operationKind &&
-            error.IsDeny == isDeny &&
-            string.Equals(error.Path, path, StringComparison.OrdinalIgnoreCase));
-
-    private static bool HasTraverseError(
-        IReadOnlyList<AclApplyError> errors,
-        AclPendingOperationKind operationKind,
-        string path)
-        => errors.Any(error =>
-            error.OperationKind == operationKind &&
-            string.Equals(error.Path, path, StringComparison.OrdinalIgnoreCase));
-
-    private static bool HasGrantModificationError(
-        IEnumerable<PendingModification> modifications,
-        IReadOnlyList<AclApplyError> errors,
-        string path,
-        bool isDeny)
-        => modifications.Any(modification =>
-            string.Equals(modification.Entry.Path, path, StringComparison.OrdinalIgnoreCase) &&
-            (modification.Entry.IsDeny == isDeny || modification.NewIsDeny == isDeny) &&
-            HasGrantError(
-                errors,
-                AclPendingOperationKind.GrantModification,
-                modification.Entry.Path,
-                modification.Entry.IsDeny));
 
     private sealed record ConfigMoveApplyResult(
         IReadOnlyList<GrantOperationException> Errors,

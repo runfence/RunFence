@@ -15,7 +15,8 @@ namespace RunFence.RunAs.UI;
 public class RunAsDialogState(
     string filePath,
     HashSet<string>? sidsNeedingPermission,
-    IAclPermissionService aclPermission)
+    IAclPermissionService aclPermission,
+    IRunAsAncestorPermissionPrompter permissionPrompter)
 {
     public CredentialEntry? SelectedCredential { get; private set; }
     public AppContainerEntry? SelectedContainer { get; private set; }
@@ -28,7 +29,7 @@ public class RunAsDialogState(
     /// Returns false if the user cancelled a permission dialog (selection should be cleared).
     /// </summary>
     public bool ResolveSelectionState(
-        object? selectedItem,
+        IRunAsAccountOption? selectedOption,
         Form? dialogOwner,
         AppEntry? currentExistingApp,
         PrivilegeLevel selectedPrivilegeLevel,
@@ -48,20 +49,20 @@ public class RunAsDialogState(
         updateOriginalShortcut = updateShortcutChecked;
         existingAppForLaunch = currentExistingApp;
 
-        switch (selectedItem)
+        switch (selectedOption)
         {
-            case CreateAccountItem:
+            case CreateAccountRunAsOption:
                 CreateNewAccountRequested = true;
                 PermissionGrant = null;
                 break;
-            case CreateContainerItem:
+            case CreateContainerRunAsOption:
                 CreateNewContainerRequested = true;
                 break;
-            case AppContainerDisplayItem containerItem:
+            case AppContainerRunAsOption containerOption:
             {
-                SelectedContainer = containerItem.Container;
+                SelectedContainer = containerOption.Container;
 
-                if (!TryResolvePermissionGrant(containerItem.ContainerSid, dialogOwner))
+                if (!TryResolvePermissionGrant(containerOption.Sid, dialogOwner))
                 {
                     SelectedContainer = null;
                     return false;
@@ -69,11 +70,11 @@ public class RunAsDialogState(
 
                 break;
             }
-            case CredentialDisplayItem item:
+            case CredentialRunAsOption credentialOption:
             {
-                SelectedCredential = item.Credential;
+                SelectedCredential = credentialOption.Credential;
 
-                if (!item.Credential.IsCurrentAccount && !TryResolvePermissionGrant(item.Credential.Sid, dialogOwner))
+                if (!credentialOption.IsCurrentAccount && !TryResolvePermissionGrant(credentialOption.Sid, dialogOwner))
                 {
                     SelectedCredential = null;
                     return false;
@@ -97,9 +98,7 @@ public class RunAsDialogState(
 
         try
         {
-            PermissionGrant = AclPermissionDialogHelper.ShowAncestorPermissionDialog(
-                owner, "Missing permissions", ancestors,
-                FileSystemRights.ReadAndExecute);
+            PermissionGrant = permissionPrompter.Prompt(owner, ancestors);
             return true;
         }
         catch (OperationCanceledException)

@@ -14,12 +14,12 @@ public class LaunchAccessManagerTests
     private const string TestPath = @"C:\apps\myapp";
     private const FileSystemRights TestRights = FileSystemRights.ReadAndExecute;
 
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantMutatorService> _grantMutatorService = new();
 
-    private LaunchAccessManager CreateManager() => new(_pathGrantService.Object);
+    private LaunchAccessManager CreateManager() => new(_grantMutatorService.Object);
 
     private void SetupEnsureAccess(string sid, GrantApplyResult result) =>
-        _pathGrantService
+        _grantMutatorService
             .Setup(s => s.EnsureAccess(sid, It.IsAny<string>(), It.IsAny<FileSystemRights>(),
                 It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
             .Returns(result);
@@ -32,10 +32,10 @@ public class LaunchAccessManagerTests
         SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult());
 
         var manager = CreateManager();
-        manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+        manager.EnsureAccess(identity, TestPath, TestRights, null);
 
-        _pathGrantService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, true), Times.Once);
-        _pathGrantService.Verify(s => s.EnsureAccess(AclHelper.LowIntegritySid, TestPath, TestRights, null, true), Times.Once);
+        _grantMutatorService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, true), Times.Once);
+        _grantMutatorService.Verify(s => s.EnsureAccess(AclHelper.LowIntegritySid, TestPath, TestRights, null, true), Times.Once);
     }
 
     [Fact]
@@ -46,25 +46,63 @@ public class LaunchAccessManagerTests
         SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult(DatabaseModified: true));
 
         var manager = CreateManager();
-        var result = manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+        var result = manager.EnsureAccess(identity, TestPath, TestRights, null);
 
         Assert.True(result.DatabaseModified);
     }
 
     [Fact]
-    public void EnsureAccess_BasicAccount_DoesNotCallLowIntegrityEnsureAccess()
+    public void EnsureAccess_IsolatedAccount_DoesNotCallLowIntegrityEnsureAccess()
     {
         var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.Isolated };
         SetupEnsureAccess(AccountSid, new GrantApplyResult());
 
         var manager = CreateManager();
-        manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+        manager.EnsureAccess(identity, TestPath, TestRights, null);
 
-        _pathGrantService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, true), Times.Once);
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, true), Times.Once);
+        _grantMutatorService.Verify(
             s => s.EnsureAccess(AclHelper.LowIntegritySid, It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()),
             Times.Never);
+    }
+
+    [Fact]
+    public void EnsureAccess_BasicAccount_UsesUnelevatedGrantCheck()
+    {
+        var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.Basic };
+        SetupEnsureAccess(AccountSid, new GrantApplyResult());
+
+        var manager = CreateManager();
+        manager.EnsureAccess(identity, TestPath, TestRights, null);
+
+        _grantMutatorService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, true), Times.Once);
+        _grantMutatorService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, false), Times.Never);
+    }
+
+    [Fact]
+    public void EnsureAccess_HighestAllowedAccount_UsesElevatedGrantCheck()
+    {
+        var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.HighestAllowed };
+        SetupEnsureAccess(AccountSid, new GrantApplyResult());
+
+        var manager = CreateManager();
+        manager.EnsureAccess(identity, TestPath, TestRights, null);
+
+        _grantMutatorService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, false), Times.Once);
+        _grantMutatorService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, true), Times.Never);
+    }
+
+    [Fact]
+    public void EnsureAccess_UnresolvedAccount_UsesUnelevatedGrantCheck()
+    {
+        var identity = new AccountLaunchIdentity(AccountSid);
+        SetupEnsureAccess(AccountSid, new GrantApplyResult());
+
+        var manager = CreateManager();
+        manager.EnsureAccess(identity, TestPath, TestRights, null);
+
+        _grantMutatorService.Verify(s => s.EnsureAccess(AccountSid, TestPath, TestRights, null, true), Times.Once);
     }
 
     [Fact]
@@ -75,13 +113,31 @@ public class LaunchAccessManagerTests
         SetupEnsureAccess(ContainerSid, new GrantApplyResult());
 
         var manager = CreateManager();
-        manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+        manager.EnsureAccess(identity, TestPath, TestRights, null);
 
-        _pathGrantService.Verify(s => s.EnsureAccess(ContainerSid, TestPath, TestRights, null, true), Times.Once);
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(s => s.EnsureAccess(ContainerSid, TestPath, TestRights, null, true), Times.Once);
+        _grantMutatorService.Verify(
             s => s.EnsureAccess(AclHelper.LowIntegritySid, It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()),
             Times.Never);
+    }
+
+    [Fact]
+    public void EnsureAccess_RawSid_ForwardsSidAndUnelevatedFlag()
+    {
+        _grantMutatorService
+            .Setup(s => s.EnsureAccess(AclHelper.AllApplicationPackagesSid, TestPath, TestRights, null, true))
+            .Returns(new GrantApplyResult(GrantApplied: true, DurableSaveCompleted: true));
+
+        var manager = CreateManager();
+        manager.EnsureAccess(AclHelper.AllApplicationPackagesSid, TestPath, TestRights, null, unelevated: true);
+
+        _grantMutatorService.Verify(s => s.EnsureAccess(
+            AclHelper.AllApplicationPackagesSid,
+            TestPath,
+            TestRights,
+            null,
+            true), Times.Once);
     }
 
     [Fact]
@@ -89,17 +145,16 @@ public class LaunchAccessManagerTests
     {
         var identity = new AccountLaunchIdentity(AccountSid) { PrivilegeLevel = PrivilegeLevel.LowIntegrity };
         Func<string, string, bool> confirm = (_, _) => true;
-        const bool unelevated = false;
         const FileSystemRights rights = FileSystemRights.Read;
 
         SetupEnsureAccess(AccountSid, new GrantApplyResult());
         SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult());
 
         var manager = CreateManager();
-        manager.EnsureAccess(identity, TestPath, rights, confirm, unelevated);
+        manager.EnsureAccess(identity, TestPath, rights, confirm);
 
-        _pathGrantService.Verify(
-            s => s.EnsureAccess(AclHelper.LowIntegritySid, TestPath, rights, null, unelevated),
+        _grantMutatorService.Verify(
+            s => s.EnsureAccess(AclHelper.LowIntegritySid, TestPath, rights, null, true),
             Times.Once);
     }
 
@@ -111,7 +166,7 @@ public class LaunchAccessManagerTests
         SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult());
 
         var manager = CreateManager();
-        var result = manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+        var result = manager.EnsureAccess(identity, TestPath, TestRights, null);
 
         Assert.True(result.DurableSaveCompleted);
     }
@@ -124,7 +179,7 @@ public class LaunchAccessManagerTests
         SetupEnsureAccess(AclHelper.LowIntegritySid, new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: true));
 
         var manager = CreateManager();
-        var result = manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+        var result = manager.EnsureAccess(identity, TestPath, TestRights, null);
 
         Assert.True(result.DatabaseModified);
         Assert.False(result.DurableSaveCompleted);
@@ -155,7 +210,7 @@ public class LaunchAccessManagerTests
             Warnings: [lowIntegrityWarning]));
 
         var manager = CreateManager();
-        var result = manager.EnsureAccess(identity, TestPath, TestRights, null, true);
+        var result = manager.EnsureAccess(identity, TestPath, TestRights, null);
 
         Assert.Equal([accountWarning, lowIntegrityWarning], result.Warnings);
     }

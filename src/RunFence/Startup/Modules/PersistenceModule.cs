@@ -3,6 +3,7 @@ using RunFence.Acl;
 using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Launch;
 using RunFence.Persistence;
 using RunFence.Persistence.UI;
 using RunFence.PrefTrans;
@@ -24,8 +25,9 @@ public class PersistenceModule : Module
             .SingleInstance();
 
         builder.RegisterType<HandlerSyncHelper>()
+            .As<IHandlerSyncService>()
             .AsSelf()
-            .SingleInstance();
+            .InstancePerDependency();
 
         builder.RegisterType<ConfigSaveOrchestrator>()
             .AsSelf()
@@ -40,6 +42,10 @@ public class PersistenceModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<SessionTrackingJobStateStore>()
+            .As<ITrackingJobStateStore>()
+            .InstancePerLifetimeScope();
+
         builder.RegisterType<AppConfigSaveHelper>()
             .AsSelf()
             .SingleInstance();
@@ -50,6 +56,7 @@ public class PersistenceModule : Module
             .SingleInstance();
 
         builder.RegisterType<AppConfigService>()
+            .AsSelf()
             .As<IAppConfigService>()
             .SingleInstance();
 
@@ -76,6 +83,22 @@ public class PersistenceModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<ConfigImportExportFilePicker>()
+            .As<IConfigImportExportFilePicker>()
+            .InstancePerDependency();
+
+        builder.RegisterType<ConfigExportController>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<MainConfigImportController>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<AdditionalConfigImportController>()
+            .AsSelf()
+            .InstancePerDependency();
+
         builder.RegisterType<ShutdownCleanupService>()
             .AsSelf()
             .SingleInstance();
@@ -97,6 +120,22 @@ public class PersistenceModule : Module
             .As<IPrefTransLauncher>()
             .SingleInstance();
 
+        builder.RegisterType<PrefTransLogWorkspace>()
+            .As<IPrefTransLogWorkspace>()
+            .SingleInstance();
+
+        builder.RegisterType<PrefTransProcessHandleFactory>()
+            .As<IPrefTransProcessHandleFactory>()
+            .SingleInstance();
+
+        builder.RegisterType<PrefTransTimeoutClockFactory>()
+            .As<IPrefTransTimeoutClockFactory>()
+            .SingleInstance();
+
+        builder.RegisterType<PrefTransProcessWaiter>()
+            .As<IPrefTransProcessWaiter>()
+            .SingleInstance();
+
         builder.RegisterType<SettingsTransferAccessGrantService>()
             .As<ISettingsTransferAccessGrantService>()
             .AsSelf()
@@ -116,7 +155,15 @@ public class PersistenceModule : Module
             .As<IAppHandlerRegistrationService>()
             .SingleInstance();
 
-        builder.RegisterType<AppEntryEnforcementHelper>().AsSelf().SingleInstance();
+        builder.RegisterType<AppEntryAclEnforcer>().AsSelf().SingleInstance();
+        builder.RegisterType<AppEntryNonAclEnforcer>().AsSelf().SingleInstance();
+        builder.RegisterType<AppEntryEnforcementCoordinator>().AsSelf().SingleInstance();
+        builder.RegisterType<VersionedPathAutoRepairTrustPolicy>().AsSelf().SingleInstance();
+        builder.RegisterType<VersionedPathRepairOptionsBuilder>().AsSelf().SingleInstance();
+        builder.RegisterType<AppEntryPathRepairCoordinator>().AsSelf().SingleInstance();
+        builder.RegisterType<AppEntryPathRepairCommitter>().AsSelf().SingleInstance();
+        builder.RegisterType<UiThreadAppEntryPathRepairService>().AsSelf().SingleInstance();
+        builder.RegisterType<RepairingAppEntryLauncher>().As<IAppEntryLauncher>().SingleInstance();
 
         builder.RegisterType<ConfigImportFileParser>().As<IConfigImportFileParser>().SingleInstance();
         builder.RegisterType<MainConfigImportPreservationCollector>().AsSelf().SingleInstance();

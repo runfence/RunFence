@@ -218,5 +218,5 @@ public class GamingExistingAccountPreparationServiceTests
         {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore()
-        }.WithOwnedPinDerivedKey(pinKey);
+        }.WithClonedPinDerivedKey(pinKey);
 }

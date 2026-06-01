@@ -44,6 +44,8 @@ public class RunAsCredentialListRenderer
             return;
 
         var item = listBox.Items[e.Index];
+        var listItem = item as RunAsAccountListItem;
+        var displayItem = listItem?.DisplayItem ?? item;
         bool isSelected = (e.State & DrawItemState.Selected) != 0;
 
         using var backBrush = new SolidBrush(isSelected ? SystemColors.Highlight : SystemColors.Window);
@@ -54,7 +56,15 @@ public class RunAsCredentialListRenderer
         var textBounds = e.Bounds with { X = e.Bounds.X + iconAreaWidth, Width = e.Bounds.Width - iconAreaWidth };
         var textFlags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine;
 
-        switch (item)
+        if (listItem?.IsSeparator == true)
+        {
+            TextRenderer.DrawText(e.Graphics, displayItem.ToString(), listBox.Font, e.Bounds,
+                SystemColors.GrayText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            e.DrawFocusRectangle();
+            return;
+        }
+
+        switch (displayItem)
         {
             case CredentialDisplayItem credItem:
             {
@@ -72,12 +82,8 @@ public class RunAsCredentialListRenderer
                 TextRenderer.DrawText(e.Graphics, containerItem.ToString(), listBox.Font, textBounds, textColor, textFlags);
                 break;
             }
-            case ContainerSeparatorItem:
-                TextRenderer.DrawText(e.Graphics, item.ToString(), listBox.Font, e.Bounds,
-                    SystemColors.GrayText, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
-                break;
             default:
-                TextRenderer.DrawText(e.Graphics, item.ToString(), listBox.Font, textBounds, textColor, textFlags);
+                TextRenderer.DrawText(e.Graphics, displayItem.ToString(), listBox.Font, textBounds, textColor, textFlags);
                 break;
         }
 

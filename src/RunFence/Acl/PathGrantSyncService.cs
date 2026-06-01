@@ -20,7 +20,9 @@ public class PathGrantSyncService(
     Func<IGrantIntentRepository> grantIntentRepository,
     ILoggingService log,
     IFileSystemPathInfo pathInfo,
-    ITraverseGrantOwnerResolver ownerResolver) : IGrantSyncService
+    ITraverseGrantOwnerResolver ownerResolver,
+    IDatabaseProvider databaseProvider,
+    AppEntryManagedAclScanFilter managedAclScanFilter) : IGrantSyncService
 {
     private IGrantIntentStoreProvider GrantIntentStoreProvider => grantIntentStoreProvider();
 
@@ -42,9 +44,13 @@ public class PathGrantSyncService(
 
         try
         {
+            var apps = databaseProvider.GetDatabase().Apps
+                .Where(app => app is { RestrictAcl: true, IsUrlScheme: false })
+                .ToList();
             var security = grantAceService.GetSecurity(normalized);
             var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false,
                 typeof(SecurityIdentifier));
+            var managedRuleFilter = managedAclScanFilter.Create(normalized, isFolder, apps);
             var ownerIdentity = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
             var adminsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
             bool isAdminOwner = ownerIdentity != null && ownerIdentity.Equals(adminsSid);
@@ -55,6 +61,8 @@ public class PathGrantSyncService(
             foreach (FileSystemAccessRule rule in rules)
             {
                 if (rule.IdentityReference is not SecurityIdentifier ruleSid)
+                    continue;
+                if (managedRuleFilter(rule))
                     continue;
 
                 var ruleSidStr = ruleSid.Value;
@@ -103,7 +111,7 @@ public class PathGrantSyncService(
         var (modified, entry) = dbAccessor.Write(database =>
         {
             var grants = database.GetOrCreateAccount(sid).Grants;
-            var entry = GrantCoreOperations.FindGrantEntryInList(grants, path, isDeny);
+            var entry = GrantEntryLookup.FindGrantEntryInList(grants, path, isDeny);
             if (entry != null)
             {
                 if (entry.SavedRights != rights)
@@ -128,7 +136,7 @@ public class PathGrantSyncService(
 
     private bool UpdateTraverseEntryFromPath(string sid, string path)
     {
-        var ownerSid = ownerResolver.ResolveStorageOwnerSid(sid);
+        var ownerSid = TraverseEntryLookup.ResolveStorageOwnerSid(sid);
         var (modified, entry) = dbAccessor.Write(database =>
         {
             var existing = ownerResolver.FindTraverseEntry(database, ownerSid, path);

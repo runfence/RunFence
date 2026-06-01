@@ -66,7 +66,7 @@ public class RunAsLaunchDispatcherTests : IDisposable
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }

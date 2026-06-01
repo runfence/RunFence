@@ -39,6 +39,10 @@ public class IpcModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<IpcUnlockRequestFlow>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<IpcMessageHandler>()
             .As<IIpcMessageHandler>()
             .SingleInstance();
@@ -49,6 +53,10 @@ public class IpcModule : Module
 
         builder.RegisterType<ShellFolderOpener>()
             .As<IShellFolderOpener>()
+            .SingleInstance();
+
+        builder.RegisterType<OpenFolderValidationLeaseReleaser>()
+            .As<IOpenFolderValidationLeaseReleaser>()
             .SingleInstance();
 
         builder.RegisterType<IpcOpenFolderHandler>()

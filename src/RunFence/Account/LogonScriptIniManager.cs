@@ -222,10 +222,7 @@ public partial class LogonScriptIniManager
         // gpt.ini uses ASCII-compatible encoding without BOM; a BOM prefix would break
         // the INI section parser. scripts.ini is different and requires UTF-16 LE BOM.
         File.WriteAllLines(tmpPath, lines, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        if (File.Exists(gptPath))
-            File.Replace(tmpPath, gptPath, null);
-        else
-            File.Move(tmpPath, gptPath);
+        PublishTemporaryFile(tmpPath, gptPath);
     }
 
     private static bool IsLogoffEntry(string cmdLine, string wrapperPath, string? legacyWrapperPath) =>
@@ -272,10 +269,31 @@ public partial class LogonScriptIniManager
         var tmpPath = Path.Combine(dir, Path.GetFileName(targetPath) + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp");
         // scripts.ini must be UTF-16 LE with BOM for Group Policy to read it
         File.WriteAllLines(tmpPath, lines, new UnicodeEncoding(bigEndian: false, byteOrderMark: true));
-        if (File.Exists(targetPath))
-            File.Replace(tmpPath, targetPath, null);
-        else
-            File.Move(tmpPath, targetPath);
+        PublishTemporaryFile(tmpPath, targetPath);
+    }
+
+    private static void PublishTemporaryFile(string tmpPath, string targetPath)
+    {
+        try
+        {
+            if (File.Exists(targetPath))
+                File.Replace(tmpPath, targetPath, null);
+            else
+                File.Move(tmpPath, targetPath);
+        }
+        catch
+        {
+            try
+            {
+                if (File.Exists(tmpPath))
+                    File.Delete(tmpPath);
+            }
+            catch
+            {
+            }
+
+            throw;
+        }
     }
 
     private static void CleanupEmptyDirs(string iniPath)

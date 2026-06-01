@@ -1,4 +1,5 @@
 using System.Security.AccessControl;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Acl.Permissions;
 
@@ -10,6 +11,8 @@ public class SettingsTransferService(
     Func<ISettingsTransferAccessGrantService> accessGrantServiceFactory,
     ISettingsTransferStagingService stagingService,
     IInteractiveUserResolver interactiveUserResolver,
+    IProgramDataPathPolicyService programDataPathPolicyService,
+    IProgramDataManagedObjectRepairService programDataManagedObjectRepairService,
     string baseDirectory)
     : ISettingsTransferService
 {
@@ -38,9 +41,11 @@ public class SettingsTransferService(
             return new SettingsTransferResult(false, noSessionMsg);
         }
 
+        bool requiresStaging = programDataPathPolicyService.IsUnderRoot(outputFilePath);
         var accessGrantService = accessGrantServiceFactory();
         bool databaseModified = false;
-        if (string.Equals(interactiveSid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase))
+        if (!requiresStaging &&
+            string.Equals(interactiveSid, SidResolutionHelper.GetCurrentUserSid(), StringComparison.OrdinalIgnoreCase))
         {
             try
             {
@@ -77,6 +82,7 @@ public class SettingsTransferService(
             if (!launcherResult.Success)
                 return launcherResult with { DatabaseModified = launcherResult.DatabaseModified || databaseModified };
 
+            programDataManagedObjectRepairService.EnsureManagedFileOwner(tempOutputPath);
             stagingService.CopyExportFileToDestination(tempOutputPath, outputFilePath);
             return launcherResult with { DatabaseModified = launcherResult.DatabaseModified || databaseModified };
         }

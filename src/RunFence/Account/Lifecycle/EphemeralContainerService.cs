@@ -11,7 +11,7 @@ namespace RunFence.Account.Lifecycle;
 /// </summary>
 public class EphemeralContainerService(
     IContainerDeletionService containerDeletion,
-    IDatabaseService databaseService,
+    IMainConfigPersistence mainConfigPersistence,
     ILoggingService log,
     ISessionProvider sessionProvider,
     IUiThreadInvoker uiThreadInvoker,
@@ -40,7 +40,7 @@ public class EphemeralContainerService(
 
         if (result.Changed)
         {
-            databaseService.SaveConfig(database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
+            mainConfigPersistence.SaveConfig(database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
             ContainersChanged?.Invoke();
         }
 
@@ -68,7 +68,7 @@ public class EphemeralContainerService(
 
     /// <summary>
     /// Instance wrapper used from <see cref="AppLifecycleStarter"/>: processes expired containers
-    /// at startup and saves the database via the injected <see cref="IDatabaseService"/> if any
+    /// at startup and saves the database via the injected <see cref="IMainConfigPersistence"/> if any
     /// containers were removed.
     /// </summary>
     public async Task ProcessExpiredContainersAtStartup()
@@ -76,7 +76,7 @@ public class EphemeralContainerService(
         var session = sessionProvider.GetSession();
         var result = await ProcessExpiredAtStartup(session.Database, containerDeletion, log, processListService);
         if (result.Changed)
-            databaseService.SaveConfig(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
+            mainConfigPersistence.SaveConfig(session.Database, session.PinDerivedKey, session.CredentialStore.ArgonSalt);
 
         ShowWarnings(result.Warnings);
     }

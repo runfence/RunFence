@@ -6,15 +6,20 @@ namespace RunFence.Launch;
 
 public class FolderHandlerRegistrationRollback(
     ILoggingService log,
-    IPathGrantService pathGrantService,
-    FolderHandlerRegistryStore registryStore)
+    IGrantMutatorService grantMutatorService,
+    ITraverseService traverseService,
+    IHkuRootProvider hkuRootProvider,
+    FolderHandlerRegistrationRollbackWriter rollbackWriter)
 {
     public void Rollback(FolderHandlerRegistrationEffects effects)
     {
         try
         {
-            if (effects.RegistryWritten || effects.RunOnceWritten || effects.SidTracked)
-                registryStore.Unregister(effects.AccountSid);
+            if (effects.RegistrationChangeSet != null)
+            {
+                using var usersRoot = hkuRootProvider.OpenUsersRoot();
+                rollbackWriter.RollbackRegistrationChanges(usersRoot, effects.AccountSid, effects.RegistrationChangeSet);
+            }
 
             if (effects.AccountGrantApplied || effects.AccountTraverseApplied ||
                 effects.LowIntegrityGrantApplied || effects.LowIntegrityTraverseApplied)
@@ -24,23 +29,23 @@ public class FolderHandlerRegistrationRollback(
                 {
                     if (effects.AccountGrantApplied)
                     {
-                        var result = pathGrantService.RemoveGrant(effects.AccountSid, launcherDir, isDeny: false);
+                        var result = grantMutatorService.RemoveGrant(effects.AccountSid, launcherDir, isDeny: false);
                         LogGrantWarnings(effects.AccountSid, launcherDir, result.Warnings);
                     }
                     if (effects.AccountTraverseApplied)
                     {
-                        var result = pathGrantService.RemoveTraverse(effects.AccountSid, launcherDir);
+                        var result = traverseService.RemoveTraverse(effects.AccountSid, launcherDir);
                         LogGrantWarnings(effects.AccountSid, launcherDir, result.Warnings);
                     }
 
                     if (effects.LowIntegrityGrantApplied)
                     {
-                        var result = pathGrantService.RemoveGrant(AclHelper.LowIntegritySid, launcherDir, isDeny: false);
+                        var result = grantMutatorService.RemoveGrant(AclHelper.LowIntegritySid, launcherDir, isDeny: false);
                         LogGrantWarnings(AclHelper.LowIntegritySid, launcherDir, result.Warnings);
                     }
                     if (effects.LowIntegrityTraverseApplied)
                     {
-                        var result = pathGrantService.RemoveTraverse(AclHelper.LowIntegritySid, launcherDir);
+                        var result = traverseService.RemoveTraverse(AclHelper.LowIntegritySid, launcherDir);
                         LogGrantWarnings(AclHelper.LowIntegritySid, launcherDir, result.Warnings);
                     }
                 }

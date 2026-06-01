@@ -40,7 +40,7 @@ public class ContainerInteractiveUserSync(
             var normalized = Path.GetFullPath(path);
             var tracked = DbAccessor.Write(db =>
             {
-                var entry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, normalized, isDeny: false);
+                var entry = GrantEntryLookup.FindGrantEntryInDb(db, iuSid, normalized, isDeny: false);
                 if (entry == null)
                     return false;
 
@@ -106,7 +106,7 @@ public class ContainerInteractiveUserSync(
 
         var revert = DbAccessor.Read(db =>
         {
-            var iuEntry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, path, isDeny: false);
+            var iuEntry = GrantEntryLookup.FindGrantEntryInDb(db, iuSid, path, isDeny: false);
             if (iuEntry == null)
                 return new InteractiveUserRevertDecision(false, null, false);
 
@@ -120,7 +120,7 @@ public class ContainerInteractiveUserSync(
         {
             DbAccessor.Write(db =>
             {
-                var entry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, path, isDeny: false);
+                var entry = GrantEntryLookup.FindGrantEntryInDb(db, iuSid, path, isDeny: false);
                 if (entry != null)
                 {
                     entry.SourceSids = revert.UpdatedSourceSids;
@@ -203,7 +203,7 @@ public class ContainerInteractiveUserSync(
             var result = new List<(string Path, List<string>? RemainingSources, bool RemoveGrant)>();
             foreach (var ce in containerGrants.Where(e => e is { IsDeny: false, IsTraverseOnly: false }))
             {
-                var iuEntry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, ce.Path, isDeny: false);
+                var iuEntry = GrantEntryLookup.FindGrantEntryInDb(db, iuSid, ce.Path, isDeny: false);
                 if (iuEntry == null)
                     continue;
 
@@ -224,7 +224,7 @@ public class ContainerInteractiveUserSync(
                 {
                     DbAccessor.Write(db =>
                     {
-                        var entry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, revert.Path, isDeny: false);
+                        var entry = GrantEntryLookup.FindGrantEntryInDb(db, iuSid, revert.Path, isDeny: false);
                         if (entry != null)
                         {
                             entry.SourceSids = revert.RemainingSources;
@@ -256,7 +256,7 @@ public class ContainerInteractiveUserSync(
         bool isFolder = pathInfo.DirectoryExists(path);
         var traverseDir = isFolder ? normalized : Path.GetDirectoryName(normalized);
         var snapshot = DbAccessor.Read(db =>
-            GrantCoreOperations.FindGrantEntryInDb(db, iuSid, normalized, isDeny: false)?.Clone());
+            GrantEntryLookup.FindGrantEntryInDb(db, iuSid, normalized, isDeny: false)?.Clone());
         var traverseSnapshot = string.IsNullOrEmpty(traverseDir)
             ? null
             : DbAccessor.Read(db => traverseGrantOwnerResolver.FindTraverseEntry(db, iuSid, traverseDir)?.Clone());
@@ -272,7 +272,7 @@ public class ContainerInteractiveUserSync(
             grantMutated = true;
             tracked = DbAccessor.Write(db =>
             {
-                var entry = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, normalized, isDeny: false);
+                var entry = GrantEntryLookup.FindGrantEntryInDb(db, iuSid, normalized, isDeny: false);
                 if (entry == null)
                     return false;
 
@@ -419,7 +419,7 @@ public class ContainerInteractiveUserSync(
                 GrantCore.AddGrant(iuSid, normalizedPath, isDeny: false, snapshot.SavedRights, ownerSid: null);
                 DbAccessor.Write(db =>
                 {
-                    var restored = GrantCoreOperations.FindGrantEntryInDb(db, iuSid, normalizedPath, isDeny: false);
+                    var restored = GrantEntryLookup.FindGrantEntryInDb(db, iuSid, normalizedPath, isDeny: false);
                     if (restored != null)
                     {
                         restored.SourceSids = snapshot.SourceSids?.ToList();

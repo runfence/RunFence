@@ -16,14 +16,14 @@ public class AccountsPanelGridInteraction
             case AccountRow accountRow:
                 switch (colName)
                 {
-                    case "Logon" when !row.Cells[colName].ReadOnly:
+                    case AccountGridColumns.Logon when !row.Cells[colName].ReadOnly:
                         return GridClickAction.ToggleLogon(accountRow);
-                    case "colAllowInternet" when !row.Cells[colName].ReadOnly:
+                    case AccountGridColumns.AllowInternet when !row.Cells[colName].ReadOnly:
                         return GridClickAction.ToggleInternet(accountRow);
                 }
 
                 break;
-            case ContainerRow containerRow when colName == "colAllowInternet" && !row.Cells[colName].ReadOnly:
+            case ContainerRow containerRow when colName == AccountGridColumns.AllowInternet && !row.Cells[colName].ReadOnly:
                 return GridClickAction.ToggleContainerInternet(containerRow);
         }
 
@@ -51,7 +51,7 @@ public class AccountsPanelGridInteraction
         bool isSortActive)
     {
         if (e is { Button: MouseButtons.Left, RowIndex: >= 0, ColumnIndex: >= 0 } &&
-            grid.Columns[e.ColumnIndex].Name == "Account" &&
+            grid.Columns[e.ColumnIndex].Name == AccountGridColumns.Account &&
             !isSortActive && e.X < 20)
         {
             var row = grid.Rows[e.RowIndex];
@@ -115,8 +115,8 @@ public class AccountsPanelGridInteraction
     {
         if (keyData == Keys.Space && selectedRow != null)
         {
-            if (!selectedRow.Cells["Import"].ReadOnly)
-                selectedRow.Cells["Import"].Value = selectedRow.Cells["Import"].Value is not true;
+            if (!selectedRow.Cells[AccountGridColumns.Import].ReadOnly)
+                selectedRow.Cells[AccountGridColumns.Import].Value = selectedRow.Cells[AccountGridColumns.Import].Value is not true;
             return true;
         }
 

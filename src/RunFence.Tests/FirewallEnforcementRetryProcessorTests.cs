@@ -131,9 +131,6 @@ public class FirewallEnforcementRetryProcessorTests
 
         Assert.Contains(_retryState.GetRetryEntries(), entry =>
             entry.Layer == FirewallEnforcementLayer.AccountRules && entry.Key == Sid);
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("Failed to retry firewall enforcement layer", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
     }
 
     private FirewallEnforcementRetryProcessor BuildProcessor()

@@ -16,13 +16,15 @@ public class GroupGridPopulator(
     ILocalGroupQueryService groupMembership,
     ILoggingService log,
     ISidNameCacheService sidNameCache)
+    : IGroupGridPopulator
 {
     private DataGridView _groupsGrid = null!;
     private DataGridView _membersGrid = null!;
     private Label _membersHeaderLabel = null!;
     private string? _currentMemberGroupSid;
+    private List<LocalUserAccount> _lastGroups = [];
 
-    public List<LocalUserAccount> LastGroups { get; private set; } = [];
+    public IReadOnlyList<LocalUserAccount> LastGroups => _lastGroups;
 
     private string? _preferredSelectSid;
 
@@ -67,12 +69,12 @@ public class GroupGridPopulator(
         // Re-read current selection after the async load — user may have changed it during the wait
         var targetSid = preferredSid ?? GetSelectedGroupSid() ?? selectedSid;
 
-        LastGroups = groups;
+        _lastGroups = groups;
         _groupsGrid.SuspendLayout();
         _groupsGrid.Rows.Clear();
         try
         {
-            foreach (var group in LastGroups)
+            foreach (var group in _lastGroups)
             {
                 // By design: timer stops when panel is hidden (GroupRefreshController/GroupsPanel.OnVisibleChanged)
                 sidNameCache.ResolveAndCache(group.Sid, group.Username);
@@ -124,16 +126,7 @@ public class GroupGridPopulator(
         _currentMemberGroupSid = groupSid;
         _membersGrid.Rows.Clear();
 
-        List<LocalUserAccount> members;
-        try
-        {
-            members = await Task.Run(() => groupMembership.GetMembersOfGroup(groupSid));
-        }
-        catch (Exception ex)
-        {
-            log.Error($"Failed to populate members for group SID {groupSid}", ex);
-            return;
-        }
+        var members = await Task.Run(() => groupMembership.GetMembersOfGroup(groupSid));
 
         if (_membersGrid.IsDisposed || _currentMemberGroupSid != groupSid)
             return;

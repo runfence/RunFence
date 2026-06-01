@@ -65,7 +65,7 @@ public class SecurityScanner
         (FileSystemRights.DeleteSubdirectoriesAndFiles, "DeleteSubdirectoriesAndFiles", "DeleteSubdirectoriesAndFiles"),
     ];
 
-    private readonly IScannerDataAccess _dataAccess;
+    private readonly IEnvironmentDataAccess _environment;
     private readonly AclCheckHelper _aclCheck;
     private readonly AutorunChecker _autorunChecker;
     private readonly PerUserScanner _perUserScanner;
@@ -73,19 +73,22 @@ public class SecurityScanner
     private readonly MachineLevelPolicyScanner _policyScanner;
     private readonly DiskRootScanner _diskRootScanner;
 
-    public SecurityScanner() : this(new DefaultScannerDataAccess())
+    public SecurityScanner(
+        IEnvironmentDataAccess environment,
+        AclCheckHelper aclCheck,
+        AutorunChecker autorunChecker,
+        PerUserScanner perUserScanner,
+        MachineLevelRegistryScanner registryScanner,
+        MachineLevelPolicyScanner policyScanner,
+        DiskRootScanner diskRootScanner)
     {
-    }
-
-    public SecurityScanner(IScannerDataAccess dataAccess)
-    {
-        _dataAccess = dataAccess;
-        _aclCheck = new AclCheckHelper(dataAccess, dataAccess, dataAccess);
-        _autorunChecker = new AutorunChecker(dataAccess, _aclCheck);
-        _perUserScanner = new PerUserScanner(dataAccess, _aclCheck, _autorunChecker);
-        _registryScanner = new MachineLevelRegistryScanner(dataAccess, dataAccess, dataAccess, dataAccess, dataAccess, _aclCheck);
-        _policyScanner = new MachineLevelPolicyScanner(dataAccess, _aclCheck, _perUserScanner);
-        _diskRootScanner = new DiskRootScanner(dataAccess, _aclCheck);
+        _environment = environment;
+        _aclCheck = aclCheck;
+        _autorunChecker = autorunChecker;
+        _perUserScanner = perUserScanner;
+        _registryScanner = registryScanner;
+        _policyScanner = policyScanner;
+        _diskRootScanner = diskRootScanner;
     }
 
     public static string FormatFileSystemRights(FileSystemRights rights, bool isDirectory)
@@ -170,15 +173,15 @@ public class SecurityScanner
             new Dictionary<string, List<AutorunCommandContext>>(StringComparer.OrdinalIgnoreCase),
             []);
 
-        var currentUserSid = _dataAccess.GetCurrentUserSid();
-        var interactiveUserSid = _dataAccess.GetInteractiveUserSid();
-        var adminSids = _dataAccess.GetAdminMemberSids();
+        var currentUserSid = _environment.GetCurrentUserSid();
+        var interactiveUserSid = _environment.GetInteractiveUserSid();
+        var adminSids = _environment.GetAdminMemberSids();
         // Pre-warm member caches for commonly-encountered builtin groups in parallel.
         // S-1-5-32-544 is already cached inside GetAdminMemberSids(); warm Users and Guests
         // so their first ACL check hits the cache rather than a synchronous AD lookup.
         _aclCheck.StartPrewarmGroupMembers("S-1-5-32-545", "S-1-5-32-546");
 
-        var allProfiles = _dataAccess.GetAllLocalUserProfiles();
+        var allProfiles = _environment.GetAllLocalUserProfiles();
         var userProfilePaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (sid, profilePath) in allProfiles)
         {

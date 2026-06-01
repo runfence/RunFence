@@ -9,16 +9,19 @@ namespace RunFence.Acl;
 /// <summary>
 /// Low-level NTFS ACE operations for grant entries.
 /// </summary>
-public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : IGrantAceService
+public class GrantAceService(
+    IPathSecurityDescriptorAccessor securityAccessor,
+    IExplicitAceAccessor explicitAceAccessor,
+    IFileSystemPathInfo pathInfo) : IGrantAceService
 {
-    public FileSystemSecurity GetSecurity(string path) => acl.GetSecurity(path);
+    public FileSystemSecurity GetSecurity(string path) => securityAccessor.GetSecurity(path);
 
     public void ApplyAce(string path, string sid, bool isDeny, SavedRightsState rights, bool isFolder)
     {
         var fsRights = isDeny
             ? GrantRightsMapper.MapDenyRights(rights, isFolder)
             : GrantRightsMapper.MapAllowRights(rights, isFolder);
-        acl.ApplyExplicitAce(path, sid, isDeny ? AccessControlType.Deny : AccessControlType.Allow, fsRights);
+        explicitAceAccessor.ApplyExplicitAce(path, sid, isDeny ? AccessControlType.Deny : AccessControlType.Allow, fsRights);
     }
 
     public void RevertAce(string path, string sid, bool isDeny)
@@ -28,13 +31,13 @@ public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : I
             ? rule => rule.FileSystemRights == TraverseRightsHelper.TraverseRights &&
                       rule.InheritanceFlags == InheritanceFlags.None
             : null;
-        acl.RemoveExplicitAces(path, sid, type, shouldSkip);
+        explicitAceAccessor.RemoveExplicitAces(path, sid, type, shouldSkip);
     }
 
     public GrantRightsState ReadGrantState(string path, string sid, IReadOnlyList<string> groupSids)
     {
         bool isFolder = pathInfo.DirectoryExists(path);
-        var security = acl.GetSecurity(path);
+        var security = securityAccessor.GetSecurity(path);
         var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
 
         FileSystemRights allowDirect = 0;
@@ -137,7 +140,7 @@ public class GrantAceService(IAclAccessor acl, IFileSystemPathInfo pathInfo) : I
 
         try
         {
-            var security = acl.GetSecurity(path);
+            var security = securityAccessor.GetSecurity(path);
             var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
             var identity = new SecurityIdentifier(sid);
 

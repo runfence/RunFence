@@ -3,6 +3,7 @@ using RunFence.Acl;
 using RunFence.Account;
 using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
+using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -31,18 +32,20 @@ public class RunAsAppEntryManagerTests
         _shortcutDiscovery.Setup(d => d.CreateTraversalCache()).Returns(() => new ShortcutTraversalCache([]));
     }
 
-    private AppEntryEnforcementHelper CreateEnforcementHelper()
-        => new(_aclService.Object, _shortcutService.Object, _besideTargetShortcutService.Object,
-            _iconService.Object, _sidNameCache.Object,
-            new Mock<IInteractiveUserDesktopProvider>().Object, new Mock<IInteractiveUserSidResolver>().Object,
-            new Mock<ILoggingService>().Object);
-
     private RunAsAppEntryManager CreateManager()
         => new(
             _appState.Object,
             _log.Object,
-            _aclService.Object,
-            CreateEnforcementHelper(),
+            AppEntryEnforcementTestFactory.CreateCoordinator(
+                _aclService.Object,
+                _shortcutService.Object,
+                _besideTargetShortcutService.Object,
+                _iconService.Object,
+                _sidNameCache.Object,
+                new Mock<IInteractiveUserDesktopProvider>().Object,
+                new Mock<IInteractiveUserSidResolver>().Object,
+                new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
+                new Mock<ILoggingService>().Object),
             _shortcutDiscovery.Object);
 
     // ── RevertAppChanges ──────────────────────────────────────────────────
@@ -56,7 +59,7 @@ public class RunAsAppEntryManagerTests
         var manager = CreateManager();
 
         // Act
-        var result = manager.RevertAppChanges(app);
+        var result = manager.RevertAppChanges(app, FullEnforcementChangeSet());
 
         // Assert: ACL reverted and ancestor ACLs recomputed (without the reverted app)
         Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
@@ -75,12 +78,11 @@ public class RunAsAppEntryManagerTests
         var manager = CreateManager();
 
         // Act — must not throw
-        var result = manager.RevertAppChanges(app);
+        var result = manager.RevertAppChanges(app, FullEnforcementChangeSet());
 
         // Assert
         Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
         Assert.Equal("Access denied", result.ErrorMessage);
-        _log.Verify(l => l.Error(It.Is<string>(s => s.Contains("BrokenApp")), It.IsAny<Exception>()), Times.Once);
         _aclService.Verify(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
     }
 
@@ -104,7 +106,7 @@ public class RunAsAppEntryManagerTests
         _aclService.Setup(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()))
             .Callback(() => callOrder.Add("apply"));
 
-        var result = CreateManager().RevertAppChanges(app);
+        var result = CreateManager().RevertAppChanges(app, FullEnforcementChangeSet());
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
         Assert.Equal("ancestor failed", result.ErrorMessage);
@@ -122,7 +124,7 @@ public class RunAsAppEntryManagerTests
         var manager = CreateManager();
 
         // Act
-        var result = manager.ApplyAppChanges(app);
+        var result = manager.ApplyAppChanges(app, FullEnforcementChangeSet());
 
         // Assert
         Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
@@ -138,7 +140,7 @@ public class RunAsAppEntryManagerTests
         _aclService.Setup(s => s.ApplyAcl(app, It.IsAny<IReadOnlyList<AppEntry>>()))
             .Throws(new InvalidOperationException("acl failed"));
 
-        var result = CreateManager().ApplyAppChanges(app);
+        var result = CreateManager().ApplyAppChanges(app, FullEnforcementChangeSet());
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.ConvenienceEnforcementFailed, result.Status);
         Assert.Equal("acl failed", result.WarningMessage);
@@ -152,7 +154,7 @@ public class RunAsAppEntryManagerTests
         _iconService.Setup(s => s.CreateBadgedIcon(app))
             .Throws(new InvalidOperationException("icon failed"));
 
-        var result = CreateManager().ApplyAppChanges(app);
+        var result = CreateManager().ApplyAppChanges(app, FullEnforcementChangeSet());
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.ConvenienceEnforcementFailed, result.Status);
         Assert.Equal("icon failed", result.WarningMessage);
@@ -166,7 +168,7 @@ public class RunAsAppEntryManagerTests
         _aclService.Setup(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()))
             .Throws(new InvalidOperationException("ancestor failed"));
 
-        var result = CreateManager().ApplyAppChanges(app);
+        var result = CreateManager().ApplyAppChanges(app, FullEnforcementChangeSet());
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.RequiredEnforcementFailed, result.Status);
         Assert.Equal("ancestor failed", result.WarningMessage);
@@ -192,7 +194,7 @@ public class RunAsAppEntryManagerTests
         var manager = CreateManager();
 
         // Act
-        var result = manager.RevertAppChanges(app);
+        var result = manager.RevertAppChanges(app, FullEnforcementChangeSet());
 
         // Assert: both shortcut operations called, RevertShortcuts before RemoveBesideTargetShortcut
         Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
@@ -201,4 +203,79 @@ public class RunAsAppEntryManagerTests
         Assert.True(callOrder.IndexOf("RevertShortcuts") < callOrder.IndexOf("RemoveBesideTargetShortcut"),
             "RevertShortcuts must be called before RemoveBesideTargetShortcut");
     }
+
+    [Fact]
+    public void RevertAppChanges_ManagedShortcutOnlyChange_DoesNotRemoveBesideTargetShortcut()
+    {
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
+        _database.Apps.Add(app);
+
+        var manager = CreateManager();
+        var result = manager.RevertAppChanges(
+            app,
+            new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: true,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly));
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        _shortcutService.Verify(s => s.RevertShortcuts(app, It.IsAny<ShortcutTraversalCache>()), Times.Once);
+        _besideTargetShortcutService.Verify(s => s.RemoveBesideTargetShortcut(It.IsAny<AppEntry>()), Times.Never);
+    }
+
+    [Fact]
+    public void ApplyAppChanges_ManagedShortcutOnlyChange_DoesNotApplyAcl()
+    {
+        var app = new AppEntry { Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
+        _database.Apps.Add(app);
+
+        var manager = CreateManager();
+        var result = manager.ApplyAppChanges(
+            app,
+            new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: true,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly));
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        _aclService.Verify(s => s.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
+    }
+
+    [Fact]
+    public void ApplyAppChanges_ManagedShortcutOnlyChange_DoesNotRecreateIcon()
+    {
+        var app = new AppEntry { Id = "app1", Name = "MyApp", AccountSid = UserSid, ManageShortcuts = true };
+        _database.Apps.Add(app);
+        _iconService.Setup(s => s.GetIconPath(app.Id)).Returns(@"C:\icons\app.ico");
+
+        var manager = CreateManager();
+        var result = manager.ApplyAppChanges(
+            app,
+            new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: true,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly));
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        _iconService.Verify(s => s.CreateBadgedIcon(It.IsAny<AppEntry>(), It.IsAny<string?>()), Times.Never);
+        _iconService.Verify(s => s.GetIconPath(app.Id), Times.Once);
+    }
+
+    private static AppEntryChangeSet FullEnforcementChangeSet()
+        => new(
+            RequiresAclReapply: true,
+            RequiresBesideTargetRefresh: true,
+            RequiresHandlerSync: false,
+            RequiresManagedShortcutRefresh: true,
+            RequiresIconRefresh: true,
+            ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly);
 }

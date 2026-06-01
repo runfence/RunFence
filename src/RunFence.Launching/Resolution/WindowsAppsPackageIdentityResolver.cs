@@ -1,23 +1,20 @@
-using System.Text;
-using RunFence.Launching.Windows;
-
 namespace RunFence.Launching.Resolution;
 
-public sealed class WindowsAppsPackageIdentityResolver(IWindowsAppsAliasPathResolver aliasPathResolver)
+public sealed class WindowsAppsPackageIdentityResolver(
+    IWindowsAppsAliasPathResolver aliasPathResolver,
+    IAppExecLinkReader appExecLinkReader)
     : IWindowsAppsPackageIdentityResolver
 {
-    private const int AppExecLinkStringListOffset = 12;
-
-    public bool TryResolvePackageFamilyName(string exePath, out string packageFamilyName)
-        => TryResolvePackageFamilyName(
+    public bool TryResolvePackageIdentity(string exePath, out WindowsAppsPackageIdentityResolution resolution)
+        => TryResolvePackageIdentity(
             exePath,
             new HashSet<string>(StringComparer.OrdinalIgnoreCase),
-            out packageFamilyName);
+            out resolution);
 
-    private bool TryResolvePackageFamilyName(
+    private bool TryResolvePackageIdentity(
         string exePath,
         HashSet<string> visitedPaths,
-        out string packageFamilyName)
+        out WindowsAppsPackageIdentityResolution resolution)
     {
         string normalizedPath;
         try
@@ -26,95 +23,51 @@ public sealed class WindowsAppsPackageIdentityResolver(IWindowsAppsAliasPathReso
         }
         catch
         {
-            packageFamilyName = string.Empty;
+            resolution = default;
             return false;
         }
 
         if (!visitedPaths.Add(normalizedPath))
         {
-            packageFamilyName = string.Empty;
+            resolution = default;
             return false;
         }
 
         if (WindowsAppsPackagePathParser.TryParsePackagePath(normalizedPath, out var directPackagePath))
         {
-            packageFamilyName = directPackagePath.PackageFamilyName;
+            resolution = new WindowsAppsPackageIdentityResolution(
+                new WindowsAppsPackageIdentity(
+                    directPackagePath.PackageFamilyName,
+                    directPackagePath.PackageFullName),
+                normalizedPath);
             return true;
         }
 
         if (aliasPathResolver.IsWindowsAppsAliasPath(normalizedPath)
-            && TryReadAppExecLinkStrings(normalizedPath, out var strings)
-            && TryResolvePackageFamilyNameFromAlias(strings, visitedPaths, out packageFamilyName))
+            && appExecLinkReader.TryReadStrings(normalizedPath, out var strings)
+            && TryResolvePackageIdentityFromAlias(strings, visitedPaths, out resolution))
         {
             return true;
         }
 
-        packageFamilyName = string.Empty;
+        resolution = default;
         return false;
     }
 
-    private static bool TryReadAppExecLinkStrings(string aliasPath, out IReadOnlyList<string> strings)
-    {
-        strings = [];
-        using var handle = LaunchingNative.CreateFile(
-            aliasPath,
-            0,
-            LaunchingNative.FileShareRead | LaunchingNative.FileShareWrite,
-            IntPtr.Zero,
-            LaunchingNative.OpenExisting,
-            LaunchingNative.FileFlagOpenReparsePoint | LaunchingNative.FileFlagBackupSemantics,
-            IntPtr.Zero);
-
-        if (handle.IsInvalid)
-            return false;
-
-        var buffer = new byte[LaunchingNative.MaximumReparseDataBufferSize];
-        if (!LaunchingNative.DeviceIoControl(
-                handle,
-                LaunchingNative.FsctlGetReparsePoint,
-                IntPtr.Zero,
-                0,
-                buffer,
-                (uint)buffer.Length,
-                out var bytesReturned,
-                IntPtr.Zero))
-        {
-            return false;
-        }
-
-        if (bytesReturned <= AppExecLinkStringListOffset
-            || BitConverter.ToUInt32(buffer, 0) != LaunchingNative.IoReparseTagAppExecLink)
-        {
-            return false;
-        }
-
-        var byteCount = (int)bytesReturned - AppExecLinkStringListOffset;
-        if (byteCount < 2)
-            return false;
-
-        if (byteCount % 2 != 0)
-            byteCount--;
-
-        strings = Encoding.Unicode
-            .GetString(buffer, AppExecLinkStringListOffset, byteCount)
-            .Split('\0', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return strings.Count > 0;
-    }
-
-    private bool TryResolvePackageFamilyNameFromAlias(
+    private bool TryResolvePackageIdentityFromAlias(
         IEnumerable<string> strings,
         HashSet<string> visitedPaths,
-        out string packageFamilyName)
+        out WindowsAppsPackageIdentityResolution resolution)
     {
         foreach (var value in strings)
         {
-            if (TryResolvePackageFamilyName(value, visitedPaths, out packageFamilyName))
+            if (TryResolvePackageIdentity(value, visitedPaths, out resolution))
             {
                 return true;
             }
         }
 
-        packageFamilyName = string.Empty;
+        resolution = default;
         return false;
     }
 }

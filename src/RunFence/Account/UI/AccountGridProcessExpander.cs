@@ -10,6 +10,7 @@ public class AccountGridProcessExpander(
 {
     private DataGridView _grid = null!;
     private readonly HashSet<string> _expandedSids = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, long> _toggleGenerationsBySid = new(StringComparer.OrdinalIgnoreCase);
     private HashSet<string> _sidsWithProcesses = new(StringComparer.OrdinalIgnoreCase);
 
     public void Initialize(DataGridView grid)
@@ -21,7 +22,7 @@ public class AccountGridProcessExpander(
     public bool HasProcesses(string sid) => _sidsWithProcesses.Contains(sid);
     public bool HasExpandedRows => _expandedSids.Count > 0;
 
-    public void Toggle(string? sid)
+    public async Task ToggleAsync(string? sid, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(sid))
             return;
@@ -30,18 +31,56 @@ public class AccountGridProcessExpander(
         if (parentRow == null)
             return;
 
+        var generation = NextToggleGeneration(sid);
         int scrollPos = _grid.FirstDisplayedScrollingRowIndex;
         if (!_expandedSids.Add(sid))
         {
             _expandedSids.Remove(sid);
             processRowGridUpdater.RemoveProcessRowsBelow(_grid, parentRow);
-        }
-        else
-        {
-            var processes = processListService.GetProcessesForSid(sid);
-            processRowGridUpdater.InsertProcessRows(_grid, parentRow, processes, sid);
+            _grid.InvalidateRow(parentRow.Index);
+            processRowGridUpdater.RestoreScrollPosition(_grid, scrollPos);
+            return;
         }
 
+        _grid.InvalidateRow(parentRow.Index);
+        IReadOnlyList<ProcessInfo> processes;
+        try
+        {
+            processes = await Task.Run(
+                () => processListService.GetProcessesForSid(sid, cancellationToken),
+                cancellationToken);
+        }
+        catch when (!IsCurrentToggleGeneration(sid, generation))
+        {
+            return;
+        }
+        catch
+        {
+            _expandedSids.Remove(sid);
+            if (!_grid.IsDisposed)
+            {
+                var currentParentRow = processRowGridUpdater.FindParentRow(_grid, sid);
+                if (currentParentRow != null)
+                    _grid.InvalidateRow(currentParentRow.Index);
+                processRowGridUpdater.RestoreScrollPosition(_grid, scrollPos);
+            }
+            throw;
+        }
+
+        if (_grid.IsDisposed || !IsCurrentToggleGeneration(sid, generation) || !_expandedSids.Contains(sid))
+            return;
+
+        parentRow = processRowGridUpdater.FindParentRow(_grid, sid);
+        if (parentRow == null)
+        {
+            _expandedSids.Remove(sid);
+            return;
+        }
+
+        processRowGridUpdater.RemoveProcessRowsBelow(_grid, parentRow);
+        processRowGridUpdater.InsertProcessRows(_grid, parentRow, processes, sid);
+
+        _grid.InvalidateRow(parentRow.Index);
         processRowGridUpdater.RestoreScrollPosition(_grid, scrollPos);
     }
 
@@ -147,4 +186,15 @@ public class AccountGridProcessExpander(
         ContainerRow cr => cr.ContainerSid,
         _ => null
     };
+
+    private long NextToggleGeneration(string sid)
+    {
+        _toggleGenerationsBySid.TryGetValue(sid, out var current);
+        var next = current + 1;
+        _toggleGenerationsBySid[sid] = next;
+        return next;
+    }
+
+    private bool IsCurrentToggleGeneration(string sid, long generation) =>
+        _toggleGenerationsBySid.TryGetValue(sid, out var current) && current == generation;
 }

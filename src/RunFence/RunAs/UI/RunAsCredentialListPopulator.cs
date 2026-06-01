@@ -54,9 +54,11 @@ public class RunAsCredentialListPopulator(
     public void Repopulate()
     {
         // Save selected SID / container name before clearing
-        string? selectedSid = (_listBox.SelectedItem as CredentialDisplayItem)?.Credential.Sid;
-        string? selectedContainerName = (_listBox.SelectedItem as AppContainerDisplayItem)?.Container.Name;
-        bool selectedCreate = _listBox.SelectedItem is CreateAccountItem;
+        var selectedItem = _listBox.SelectedItem as RunAsAccountListItem;
+        string? selectedSid = (selectedItem?.OptionSource as CredentialRunAsOptionSource)?.Credential.Sid;
+        string? selectedContainerName = (selectedItem?.OptionSource as AppContainerRunAsOptionSource)?.Container.Name;
+        bool selectedCreateAccount = selectedItem?.OptionSource is CreateAccountRunAsOptionSource;
+        bool selectedCreateContainer = selectedItem?.OptionSource is CreateContainerRunAsOptionSource;
 
         _listBox.Items.Clear();
 
@@ -64,18 +66,24 @@ public class RunAsCredentialListPopulator(
 
         if (_showSystemAccount)
         {
-            _listBox.Items.Add(_displayItemFactory.Create(
+            var displayItem = _displayItemFactory.Create(
                 _credentials,
                 Core.SidConstants.SystemSid,
                 _sidNames,
                 isEphemeral: false,
-                hasStoredCredentialOverride: false));
+                hasStoredCredentialOverride: false);
+            AddListItem(
+                displayItem,
+                new CredentialRunAsOptionSource(_listBox.Items.Count, displayItem.ToString(), displayItem.Credential));
             representedSids.Add(Core.SidConstants.SystemSid);
         }
 
         foreach (var cred in credentialFilterHelper.FilterResolvableCredentials(_credentials, _sidNames))
         {
-            _listBox.Items.Add(_displayItemFactory.Create(cred, _sidNames));
+            var displayItem = _displayItemFactory.Create(cred, _sidNames);
+            AddListItem(
+                displayItem,
+                new CredentialRunAsOptionSource(_listBox.Items.Count, displayItem.ToString(), displayItem.Credential));
             if (!string.IsNullOrEmpty(cred.Sid))
                 representedSids.Add(cred.Sid);
         }
@@ -96,12 +104,15 @@ public class RunAsCredentialListPopulator(
                     if (interactiveSid != null && string.Equals(user.Sid, interactiveSid, StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    _listBox.Items.Add(_displayItemFactory.Create(
+                    var displayItem = _displayItemFactory.Create(
                         _credentials,
                         user.Sid,
                         _sidNames,
                         isEphemeral: false,
-                        hasStoredCredentialOverride: false));
+                        hasStoredCredentialOverride: false);
+                    AddListItem(
+                        displayItem,
+                        new CredentialRunAsOptionSource(_listBox.Items.Count, displayItem.ToString(), displayItem.Credential));
                     representedSids.Add(user.Sid);
                 }
             }
@@ -113,36 +124,58 @@ public class RunAsCredentialListPopulator(
 
         if (interactiveSid != null && !representedSids.Contains(interactiveSid))
         {
-            _listBox.Items.Add(_displayItemFactory.Create(_credentials, interactiveSid, _sidNames));
+            var displayItem = _displayItemFactory.Create(_credentials, interactiveSid, _sidNames);
+            AddListItem(
+                displayItem,
+                new CredentialRunAsOptionSource(_listBox.Items.Count, displayItem.ToString(), displayItem.Credential));
             representedSids.Add(interactiveSid);
         }
 
         if (!string.IsNullOrEmpty(_initialAccountSid) && !representedSids.Contains(_initialAccountSid))
         {
-            _listBox.Items.Add(_displayItemFactory.Create(
+            var displayItem = _displayItemFactory.Create(
                 _credentials,
                 _initialAccountSid,
                 _sidNames,
                 isEphemeral: false,
-                hasStoredCredentialOverride: false));
+                hasStoredCredentialOverride: false);
+            AddListItem(
+                displayItem,
+                new CredentialRunAsOptionSource(_listBox.Items.Count, displayItem.ToString(), displayItem.Credential));
         }
 
-        _listBox.Items.Add(new CreateAccountItem());
+        var createAccountItem = new CreateAccountItem();
+        AddListItem(
+            createAccountItem,
+            new CreateAccountRunAsOptionSource(_listBox.Items.Count, createAccountItem.ToString()));
 
-        _listBox.Items.Add(new ContainerSeparatorItem());
+        AddListItem(new ContainerSeparatorItem(), optionSource: null, isSeparator: true);
         if (_appContainers != null)
         {
             foreach (var container in _appContainers.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
-                _listBox.Items.Add(new AppContainerDisplayItem(container, container.Sid));
+            {
+                var displayItem = new AppContainerDisplayItem(container, container.Sid);
+                AddListItem(
+                    displayItem,
+                    new AppContainerRunAsOptionSource(
+                        _listBox.Items.Count,
+                        displayItem.ToString(),
+                        displayItem.Container,
+                        displayItem.ContainerSid));
+            }
         }
 
-        _listBox.Items.Add(new CreateContainerItem());
+        var createContainerItem = new CreateContainerItem();
+        AddListItem(
+            createContainerItem,
+            new CreateContainerRunAsOptionSource(_listBox.Items.Count, createContainerItem.ToString()));
 
         // Restore selection
         if (selectedSid != null)
         {
-            var idx = FindItemIndex(item => item is CredentialDisplayItem di &&
-                                            string.Equals(di.Credential.Sid, selectedSid, StringComparison.OrdinalIgnoreCase));
+            var idx = FindItemIndex(listItem =>
+                listItem.OptionSource is CredentialRunAsOptionSource source
+                && string.Equals(source.Credential.Sid, selectedSid, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
             {
                 _listBox.SelectedIndex = idx;
@@ -152,8 +185,9 @@ public class RunAsCredentialListPopulator(
 
         if (selectedContainerName != null)
         {
-            var idx = FindItemIndex(item => item is AppContainerDisplayItem acdi &&
-                                            string.Equals(acdi.Container.Name, selectedContainerName, StringComparison.OrdinalIgnoreCase));
+            var idx = FindItemIndex(listItem =>
+                listItem.OptionSource is AppContainerRunAsOptionSource source
+                && string.Equals(source.Container.Name, selectedContainerName, StringComparison.OrdinalIgnoreCase));
             if (idx >= 0)
             {
                 _listBox.SelectedIndex = idx;
@@ -161,18 +195,37 @@ public class RunAsCredentialListPopulator(
             }
         }
 
-        if (selectedCreate)
+        if (selectedCreateAccount)
         {
-            var idx = FindItemIndex(item => item is CreateAccountItem);
+            var idx = FindItemIndex(listItem => listItem.OptionSource is CreateAccountRunAsOptionSource);
+            if (idx >= 0)
+            {
+                _listBox.SelectedIndex = idx;
+                return;
+            }
+        }
+
+        if (selectedCreateContainer)
+        {
+            var idx = FindItemIndex(listItem => listItem.OptionSource is CreateContainerRunAsOptionSource);
             if (idx >= 0)
                 _listBox.SelectedIndex = idx;
         }
     }
 
-    public int FindItemIndex(Func<object, bool> predicate)
+    private void AddListItem(object displayItem, RunAsAccountOptionSource? optionSource, bool isSeparator = false)
+    {
+        _listBox.Items.Add(new RunAsAccountListItem(
+            displayItem,
+            optionSource?.DisplayText ?? displayItem.ToString() ?? string.Empty,
+            optionSource,
+            isSeparator));
+    }
+
+    private int FindItemIndex(Func<RunAsAccountListItem, bool> predicate)
     {
         for (int i = 0; i < _listBox.Items.Count; i++)
-            if (predicate(_listBox.Items[i]))
+            if (_listBox.Items[i] is RunAsAccountListItem listItem && predicate(listItem))
                 return i;
         return -1;
     }

@@ -29,7 +29,7 @@ public sealed class LowIntegrityGrantSync(
         string? previousSaclLabel = null;
         DbAccessor.Write(db =>
         {
-            var entry = GrantCoreOperations.FindGrantEntryInDb(
+            var entry = GrantEntryLookup.FindGrantEntryInDb(
                 db, AclHelper.LowIntegritySid, path, isDeny: false);
             if (entry?.SourceSids == null) return;
             entry.SourceSids.RemoveAll(s =>

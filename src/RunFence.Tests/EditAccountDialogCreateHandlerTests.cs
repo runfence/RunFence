@@ -27,7 +27,7 @@ public class EditAccountDialogCreateHandlerTests
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         var uiThreadInvoker = new Mock<IUiThreadInvoker>();
         uiThreadInvoker.Setup(i => i.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
 

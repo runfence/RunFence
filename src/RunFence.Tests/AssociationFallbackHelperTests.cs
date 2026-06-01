@@ -363,7 +363,7 @@ public class LauncherOpenFolderHandlerTests
             Response = new IpcResponse { Success = true }
         };
         var starter = new TrackingProcessStarter();
-        var handler = new TestOpenFolderHandler(sender, starter) { CurrentProcessAdmin = false, OwnExplorerRunning = false };
+        var handler = new TestOpenFolderHandler(sender, starter, new RecordingNotifier()) { CurrentProcessAdmin = false, OwnExplorerRunning = false };
 
         var exitCode = handler.Handle(@"C:\tmp\sample");
 
@@ -375,11 +375,61 @@ public class LauncherOpenFolderHandlerTests
     }
 
     [Fact]
+    public void Handle_IpcFailure_ShowsNotifierErrorAndDoesNotLaunchExplorer()
+    {
+        var sender = new RecordingLauncherIpcCommandSender
+        {
+            Response = new IpcResponse { Success = false, ErrorMessage = "denied" }
+        };
+        var starter = new TrackingProcessStarter();
+        var notifier = new RecordingNotifier();
+        var handler = new TestOpenFolderHandler(sender, starter, notifier)
+        {
+            CurrentProcessAdmin = false,
+            OwnExplorerRunning = false
+        };
+
+        var exitCode = handler.Handle(@"C:\tmp\sample");
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(1, sender.SendCallCount);
+        Assert.Null(starter.LastStartInfo);
+        var message = Assert.Single(notifier.Messages);
+        Assert.Contains("denied", message, StringComparison.Ordinal);
+        Assert.Contains(@"C:\tmp\sample", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Handle_IpcFailureWithoutErrorMessage_UsesDefaultNotifierTextAndDoesNotLaunchExplorer()
+    {
+        var sender = new RecordingLauncherIpcCommandSender
+        {
+            Response = new IpcResponse { Success = false, ErrorMessage = null }
+        };
+        var starter = new TrackingProcessStarter();
+        var notifier = new RecordingNotifier();
+        var handler = new TestOpenFolderHandler(sender, starter, notifier)
+        {
+            CurrentProcessAdmin = false,
+            OwnExplorerRunning = false
+        };
+
+        var exitCode = handler.Handle(@"C:\tmp\sample");
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(1, sender.SendCallCount);
+        Assert.Null(starter.LastStartInfo);
+        var message = Assert.Single(notifier.Messages);
+        Assert.Contains("Could not open folder.", message, StringComparison.Ordinal);
+        Assert.Contains(@"C:\tmp\sample", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Handle_UsesDirectExplorer_WhenAdmin()
     {
         var sender = new RecordingLauncherIpcCommandSender();
         var starter = new TrackingProcessStarter();
-        var handler = new TestOpenFolderHandler(sender, starter) { CurrentProcessAdmin = true };
+        var handler = new TestOpenFolderHandler(sender, starter, new RecordingNotifier()) { CurrentProcessAdmin = true };
 
         var exitCode = handler.Handle(@"C:\tmp\sample");
 
@@ -397,6 +447,7 @@ public class LauncherOpenFolderHandlerTests
         var handler = new SessionAwareTestOpenFolderHandler(
             new RecordingLauncherIpcCommandSender(),
             new TrackingProcessStarter(),
+            new RecordingNotifier(),
             7,
             [new SessionAwareTestOpenFolderHandler.ExplorerOwnerInfo(101u, 8, ownSid)]);
 
@@ -413,6 +464,7 @@ public class LauncherOpenFolderHandlerTests
         var handler = new SessionAwareTestOpenFolderHandler(
             new RecordingLauncherIpcCommandSender(),
             new TrackingProcessStarter(),
+            new RecordingNotifier(),
             7,
             [
                 new SessionAwareTestOpenFolderHandler.ExplorerOwnerInfo(101u, 8, ownSid),
@@ -540,8 +592,11 @@ public sealed class TestOpenFolderHandler : OpenFolderHandler
 {
     private readonly ILauncherProcessStarter _starter;
 
-    public TestOpenFolderHandler(ILauncherIpcCommandSender sender, ILauncherProcessStarter starter)
-        : base(sender, starter)
+    public TestOpenFolderHandler(
+        ILauncherIpcCommandSender sender,
+        ILauncherProcessStarter starter,
+        ILauncherUserNotifier notifier)
+        : base(sender, starter, notifier)
     {
         _starter = starter;
     }
@@ -575,9 +630,10 @@ public sealed class SessionAwareTestOpenFolderHandler : OpenFolderHandler
     public SessionAwareTestOpenFolderHandler(
         ILauncherIpcCommandSender sender,
         ILauncherProcessStarter starter,
+        ILauncherUserNotifier notifier,
         int currentSessionId,
         IReadOnlyList<ExplorerOwnerInfo> explorers)
-        : base(sender, starter)
+        : base(sender, starter, notifier)
     {
         _currentSessionId = currentSessionId;
         _explorers = explorers;

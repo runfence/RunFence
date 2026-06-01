@@ -4,6 +4,7 @@ using RunFence.Acl.Permissions;
 using RunFence.Acl.QuickAccess;
 using RunFence.Acl.UI;
 using RunFence.Account;
+using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -27,13 +28,22 @@ public sealed class LambdaSessionProvider(Func<SessionContext> getSession) : ISe
 
 public static class SessionContextTestExtensions
 {
-    public static SessionContext WithOwnedPinDerivedKey(this SessionContext session, SecureSecret pinKey)
+    public static SessionContext WithPinDerivedKeyTakingOwnership(this SessionContext session, SecureSecret pinKey)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(pinKey);
+        session.ReplacePinDerivedKey(pinKey);
+        return session;
+    }
+
+    public static SessionContext WithClonedPinDerivedKey(this SessionContext session, SecureSecret pinKey)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(pinKey);
         session.ReplacePinDerivedKey(TestSecretFactory.Clone(pinKey));
         return session;
     }
+
 }
 
 public sealed class InlineUiThreadInvoker(Action<Action> invoke) : IUiThreadInvoker
@@ -47,6 +57,89 @@ public sealed class InlineUiThreadInvoker(Action<Action> invoke) : IUiThreadInvo
 
     // void Invoke(Action) — uses default interface impl (forwards to Invoke<T> via VoidStruct)
     public void BeginInvoke(Action action) => invoke(action);
+}
+
+public sealed class InMemoryShortcutProtectionStateStore : IShortcutProtectionStateStore
+{
+    private readonly Dictionary<string, List<ShortcutProtectionState>> _states =
+        new(StringComparer.Ordinal);
+
+    public ShortcutProtectionState? Load(string appId, string shortcutPath)
+    {
+        if (!_states.TryGetValue(appId, out var states))
+            return null;
+
+        var normalizedPath = Path.GetFullPath(shortcutPath);
+        return states.FirstOrDefault(state =>
+            string.Equals(Path.GetFullPath(state.ShortcutPath), normalizedPath, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public void Save(string appId, ShortcutProtectionState state)
+    {
+        if (!_states.TryGetValue(appId, out var states))
+        {
+            states = [];
+            _states[appId] = states;
+        }
+
+        var normalizedState = state with { ShortcutPath = Path.GetFullPath(state.ShortcutPath) };
+        var existingIndex = states.FindIndex(existing =>
+            string.Equals(existing.ShortcutPath, normalizedState.ShortcutPath, StringComparison.OrdinalIgnoreCase));
+        if (existingIndex >= 0)
+            states[existingIndex] = normalizedState;
+        else
+            states.Add(normalizedState);
+    }
+
+    public void Delete(string appId, string shortcutPath)
+    {
+        if (!_states.TryGetValue(appId, out var states))
+            return;
+
+        var normalizedPath = Path.GetFullPath(shortcutPath);
+        states.RemoveAll(state =>
+            string.Equals(Path.GetFullPath(state.ShortcutPath), normalizedPath, StringComparison.OrdinalIgnoreCase));
+        if (states.Count == 0)
+            _states.Remove(appId);
+    }
+
+    public void PruneMissingFiles(string appId)
+    {
+        if (!_states.TryGetValue(appId, out var states))
+            return;
+
+        states.RemoveAll(state =>
+        {
+            try
+            {
+                return !File.Exists(Path.GetFullPath(state.ShortcutPath));
+            }
+            catch
+            {
+                return false;
+            }
+        });
+
+        if (states.Count == 0)
+            _states.Remove(appId);
+    }
+}
+
+public static class ShortcutProtectionTestFactory
+{
+    public static ShortcutProtectionService Create(
+        ILoggingService? log = null,
+        IPathSecurityDescriptorAccessor? aclAccessor = null,
+        IShortcutProtectionStateStore? stateStore = null)
+    {
+        aclAccessor ??= AclAccessorFactory.Create();
+        return new ShortcutProtectionService(
+            log ?? Mock.Of<ILoggingService>(),
+            stateStore ?? new InMemoryShortcutProtectionStateStore(),
+            new ShortcutProtectionOwnershipCalculator(),
+            new ShortcutManagedDenyAceEditor(aclAccessor),
+            new InternalShortcutAclEditor(aclAccessor, new InternalShortcutAclPolicy()));
+    }
 }
 
 public sealed class ByteArrayCredentialEncryptionSpanAdapter(IByteArrayCredentialEncryptionService inner)
@@ -112,6 +205,54 @@ public sealed class TestRunFenceLauncherPathProvider(string launcherPath, bool e
     public bool Exists() => exists;
 }
 
+public static class AppEntryEnforcementTestFactory
+{
+    public static AppEntryAclEnforcer CreateAclEnforcer(IAclService aclService)
+        => new(aclService);
+
+    public static AppEntryNonAclEnforcer CreateNonAclEnforcer(
+        IShortcutService shortcutService,
+        IBesideTargetShortcutService besideTargetShortcutService,
+        IIconService iconService,
+        ISidNameCacheService sidNameCache,
+        IInteractiveUserDesktopProvider? desktopProvider = null,
+        IInteractiveUserSidResolver? interactiveUserSidResolver = null,
+        IRunFenceLauncherPathProvider? launcherPathProvider = null,
+        ILoggingService? log = null)
+        => new(
+            shortcutService,
+            besideTargetShortcutService,
+            iconService,
+            sidNameCache,
+            desktopProvider ?? Mock.Of<IInteractiveUserDesktopProvider>(),
+            interactiveUserSidResolver ?? Mock.Of<IInteractiveUserSidResolver>(),
+            launcherPathProvider ?? new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
+            log ?? Mock.Of<ILoggingService>());
+
+    public static AppEntryEnforcementCoordinator CreateCoordinator(
+        IAclService aclService,
+        IShortcutService shortcutService,
+        IBesideTargetShortcutService besideTargetShortcutService,
+        IIconService iconService,
+        ISidNameCacheService sidNameCache,
+        IInteractiveUserDesktopProvider? desktopProvider = null,
+        IInteractiveUserSidResolver? interactiveUserSidResolver = null,
+        IRunFenceLauncherPathProvider? launcherPathProvider = null,
+        ILoggingService? log = null)
+        => new(
+            aclService,
+            CreateAclEnforcer(aclService),
+            CreateNonAclEnforcer(
+                shortcutService,
+                besideTargetShortcutService,
+                iconService,
+                sidNameCache,
+                desktopProvider,
+                interactiveUserSidResolver,
+                launcherPathProvider,
+                log));
+}
+
 /// <summary>
 /// Shared test helpers for RunAs-related unit tests.
 /// </summary>
@@ -164,7 +305,7 @@ public sealed class FakeRunAsAppEditDialogHandler : RunAsAppEditDialogHandler, I
             new AppEntryPermissionPrompter(
                 new Mock<ILoggingService>().Object,
                 new Mock<IAclPermissionService>().Object,
-                new Mock<IPathGrantService>().Object,
+                new Mock<IGrantMutatorService>().Object,
                 new LambdaDatabaseProvider(() => new AppDatabase()),
                 new Mock<IQuickAccessPinService>().Object),
             new Mock<IModalCoordinator>().Object,
@@ -198,7 +339,7 @@ public sealed class FakeRunAsAppEditDialogHandler : RunAsAppEditDialogHandler, I
         {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore()
-        }.WithOwnedPinDerivedKey(pinKey);
+        }.WithClonedPinDerivedKey(pinKey);
 
     private sealed record State(SessionContext HandlerSession, SessionContext ShortcutSession);
 }

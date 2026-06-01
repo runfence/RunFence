@@ -9,11 +9,15 @@ namespace RunFence.Apps.UI.Forms;
 /// </summary>
 public partial class HandlerAssociationsSection : UserControl
 {
-    private readonly record struct AssociationRowData(List<string>? Prefixes, bool ReplacePrefixes);
+    private readonly record struct AssociationRowData(CombinedPrefixesState PrefixState);
 
-    private readonly IExeAssociationRegistryReader? _reader;
+    private IHandlerAssociationMutationService? _mutationService;
+    private HandlerAssociationsChildDialogCoordinator? _childDialogCoordinator;
+    private IUiIconService? _iconService;
+    private IHandlerAssociationsHost? _host;
     private List<string> _loadedKeys = [];
     private int _ctxRowIndex = -1;
+    private bool _isInitialized;
 
     public event Action? Changed;
 
@@ -22,21 +26,29 @@ public partial class HandlerAssociationsSection : UserControl
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public string ExePath { get; set; } = "";
 
-    public HandlerAssociationsSection()
-    {
-        InitializeComponent();
-        _addButton.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22));
-        _editButton.Image = UiIconFactory.CreateToolbarIcon("\u270E", Color.FromArgb(0x33, 0x66, 0x99));
-        _removeButton.Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33));
-        _ctxAdd.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 16);
-        _ctxEdit.Image = UiIconFactory.CreateToolbarIcon("\u270E", Color.FromArgb(0x33, 0x66, 0x99), 16);
-        _ctxRemove.Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33), 16);
-        _dataGrid.CellDoubleClick += OnCellDoubleClick;
-    }
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public string? AccountSid { get; set; }
 
-    public HandlerAssociationsSection(IExeAssociationRegistryReader reader) : this()
+    public void Initialize(
+        IHandlerAssociationMutationService mutationService,
+        HandlerAssociationsChildDialogCoordinator childDialogCoordinator,
+        IUiIconService iconService,
+        IHandlerAssociationsHost host)
     {
-        _reader = reader;
+        ArgumentNullException.ThrowIfNull(mutationService);
+        ArgumentNullException.ThrowIfNull(childDialogCoordinator);
+        ArgumentNullException.ThrowIfNull(iconService);
+        ArgumentNullException.ThrowIfNull(host);
+
+        _mutationService = mutationService;
+        _childDialogCoordinator = childDialogCoordinator;
+        _iconService = iconService;
+        _host = host;
+        ApplyRuntimeIcons();
+        _isInitialized = true;
+        OnSelectionChanged(this, EventArgs.Empty);
+        _addButton.Enabled = _dataGrid.Enabled;
     }
 
     public void SetAssociations(List<HandlerAssociationItem>? items)
@@ -48,7 +60,7 @@ public partial class HandlerAssociationsSection : UserControl
         foreach (var item in items)
         {
             var idx = _dataGrid.Rows.Add(item.Key, item.ArgumentsTemplate ?? "");
-            _dataGrid.Rows[idx].Tag = new AssociationRowData(item.PathPrefixes?.ToList(), item.ReplacePrefixes);
+            _dataGrid.Rows[idx].Tag = new AssociationRowData(CreatePrefixState(item));
         }
     }
 
@@ -63,17 +75,21 @@ public partial class HandlerAssociationsSection : UserControl
                 var key = row.Cells[0].Value?.ToString() ?? "";
                 var template = row.Cells[1].Value?.ToString();
                 template = string.IsNullOrEmpty(template) ? null : template;
-                var data = row.Tag is AssociationRowData d ? d : default;
-                var prefixes = data.Prefixes;
-                var replace = data.ReplacePrefixes;
+                var state = row.Tag is AssociationRowData data
+                    ? data.PrefixState
+                    : new CombinedPrefixesState(null, null, false);
                 return new HandlerAssociationItem(key, template,
-                    prefixes?.Count > 0 ? (IReadOnlyList<string>)prefixes : null, replace);
+                    state.AssociationPrefixes?.Count > 0 ? state.AssociationPrefixes : null,
+                    state.ReplacePrefixes);
             })
             .ToList();
     }
 
     public void SetEnabled(bool enabled)
     {
+        if (!_isInitialized)
+            return;
+
         _dataGrid.Enabled = enabled;
         _addButton.Enabled = enabled;
         _editButton.Enabled = enabled && _dataGrid.CurrentRow != null;
@@ -82,76 +98,65 @@ public partial class HandlerAssociationsSection : UserControl
 
     private IEnumerable<string> BuildSuggestions()
     {
-        var fromRegistry = _reader?.GetHandledAssociations(ExePath).ToList() ?? [];
+        if (!_isInitialized || _mutationService == null)
+            return [];
+
         var currentKeys = _dataGrid.Rows.Cast<DataGridViewRow>()
             .Select(r => r.Cells[0].Value?.ToString() ?? "")
-            .Where(k => k.Length > 0)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        // Include initially-loaded keys that have since been removed from the grid
-        var removedLoadedKeys = _loadedKeys
-            .Except(fromRegistry, StringComparer.OrdinalIgnoreCase)
-            .Except(currentKeys, StringComparer.OrdinalIgnoreCase)
             .ToList();
-
-        var primary = fromRegistry
-            .Except(currentKeys, StringComparer.OrdinalIgnoreCase)
-            .Concat(removedLoadedKeys)
-            .ToList();
-
-        return primary.Concat(
-            AppHandlerRegistrationService.CommonAssociationSuggestions
-                .Except(primary, StringComparer.OrdinalIgnoreCase)
-                .Except(currentKeys, StringComparer.OrdinalIgnoreCase));
+        var exePath = !string.IsNullOrWhiteSpace(ExePath)
+            ? ExePath
+            : _host?.GetSelectedApp()?.ExePath ?? string.Empty;
+        var mode = _host?.GetCurrentAssociationMode() ?? HandlerAssociationMode.App;
+        return _mutationService.BuildSuggestions(exePath, AccountSid, _loadedKeys, currentKeys, mode);
     }
 
     private void OnAddClick(object? sender, EventArgs e)
     {
-        if (_reader == null)
-            return;
-        using var dlg = new HandlerAssociationEditDialog();
-        dlg.InitializeForAdd(BuildSuggestions(), _reader, ExePath);
-
-        if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
+        if (!_isInitialized || _childDialogCoordinator == null)
             return;
 
-        var key = dlg.SelectedKey;
-        if (string.IsNullOrEmpty(key))
+        var currentKeys = _dataGrid.Rows.Cast<DataGridViewRow>()
+            .Select(row => row.Cells[0].Value?.ToString() ?? string.Empty)
+            .Where(key => key.Length > 0)
+            .ToList();
+        var result = _childDialogCoordinator.ShowAddDialog(
+            FindForm(),
+            BuildSuggestions().ToList(),
+            !string.IsNullOrWhiteSpace(ExePath) ? ExePath : _host?.GetSelectedApp()?.ExePath ?? string.Empty,
+            AccountSid,
+            currentKeys);
+        if (result == null)
             return;
 
-        if (_dataGrid.Rows.Cast<DataGridViewRow>().Any(row =>
-                string.Equals(row.Cells[0].Value?.ToString(), key, StringComparison.OrdinalIgnoreCase)))
-        {
-            MessageBox.Show("This association is already in the list.",
-                "Duplicate", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        var idx = _dataGrid.Rows.Add(key, dlg.NewTemplate ?? "");
-        _dataGrid.Rows[idx].Tag = new AssociationRowData(dlg.NewPrefixes?.ToList(), dlg.NewReplacePrefixes);
-        Changed?.Invoke();
+        AddAssociationRow(result.Value);
+        RaiseChanged();
     }
 
     private void OnEditClick(object? sender, EventArgs e)
     {
+        if (!_isInitialized || _childDialogCoordinator == null)
+            return;
+
         var row = GetActionRow(sender);
         if (row == null)
             return;
 
-        var key = row.Cells[0].Value?.ToString() ?? "";
-        var template = row.Cells[1].Value?.ToString();
-        var data = row.Tag is AssociationRowData d ? d : default;
-        var prefixes = data.Prefixes;
-        var replace = data.ReplacePrefixes;
-
-        using var dlg = new HandlerAssociationEditDialog();
-        dlg.Initialize(key, template, prefixes, replace);
-        if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
+        var state = row.Tag is AssociationRowData data
+            ? data.PrefixState
+            : new CombinedPrefixesState(null, null, false);
+        var existing = new HandlerAssociationItem(
+            row.Cells[0].Value?.ToString() ?? string.Empty,
+            row.Cells[1].Value?.ToString(),
+            state.AssociationPrefixes,
+            state.ReplacePrefixes);
+        var result = _childDialogCoordinator.ShowEditDialog(FindForm(), existing);
+        if (result == null)
             return;
 
-        row.Cells[1].Value = dlg.NewTemplate ?? "";
-        row.Tag = new AssociationRowData(dlg.NewPrefixes?.ToList(), dlg.NewReplacePrefixes);
-        Changed?.Invoke();
+        row.Cells[1].Value = result.Value.ArgumentsTemplate ?? "";
+        row.Tag = new AssociationRowData(CreatePrefixState(result.Value));
+        RaiseChanged();
     }
 
     private void OnRemoveClick(object? sender, EventArgs e)
@@ -160,7 +165,7 @@ public partial class HandlerAssociationsSection : UserControl
         if (row != null)
         {
             _dataGrid.Rows.Remove(row);
-            Changed?.Invoke();
+            RaiseChanged();
         }
     }
 
@@ -184,16 +189,25 @@ public partial class HandlerAssociationsSection : UserControl
 
     private void OnMouseDown(object? sender, MouseEventArgs e)
     {
+        UpdateContextTarget(e);
+    }
+
+    private void OnMouseUp(object? sender, MouseEventArgs e)
+    {
+        UpdateContextTarget(e);
+    }
+
+    private void UpdateContextTarget(MouseEventArgs e)
+    {
         if (e.Button == MouseButtons.Right)
         {
             var hit = _dataGrid.HitTest(e.X, e.Y);
-            if (hit.RowIndex >= 0)
+            if (hit.RowIndex >= 0 && hit.ColumnIndex >= 0 && IsRightClickWithinCellBounds(hit.ColumnIndex, hit.RowIndex, e.Location))
             {
                 _ctxRowIndex = hit.RowIndex;
                 _dataGrid.ClearSelection();
                 _dataGrid.Rows[hit.RowIndex].Selected = true;
-                var cellIndex = hit.ColumnIndex >= 0 ? hit.ColumnIndex : 0;
-                _dataGrid.CurrentCell = _dataGrid.Rows[hit.RowIndex].Cells[cellIndex];
+                _dataGrid.CurrentCell = _dataGrid.Rows[hit.RowIndex].Cells[hit.ColumnIndex];
             }
             else
             {
@@ -204,6 +218,12 @@ public partial class HandlerAssociationsSection : UserControl
         }
     }
 
+    private bool IsRightClickWithinCellBounds(int columnIndex, int rowIndex, Point location)
+    {
+        var cellBounds = _dataGrid.GetCellDisplayRectangle(columnIndex, rowIndex, cutOverflow: false);
+        return cellBounds.Contains(location);
+    }
+
     private void OnContextMenuOpening(object? sender, CancelEventArgs e)
     {
         if (!_dataGrid.Enabled)
@@ -211,6 +231,11 @@ public partial class HandlerAssociationsSection : UserControl
             e.Cancel = true;
             return;
         }
+
+        var cursorLocation = _dataGrid.PointToClient(Cursor.Position);
+        var hit = _dataGrid.HitTest(cursorLocation.X, cursorLocation.Y);
+        if (hit.RowIndex < 0 || hit.ColumnIndex < 0 || !IsRightClickWithinCellBounds(hit.ColumnIndex, hit.RowIndex, cursorLocation))
+            _ctxRowIndex = -1;
 
         if (_ctxRowIndex < 0)
         {
@@ -229,5 +254,36 @@ public partial class HandlerAssociationsSection : UserControl
             return _dataGrid.Rows[_ctxRowIndex];
 
         return _dataGrid.CurrentRow;
+    }
+
+    private void AddAssociationRow(HandlerAssociationItem item)
+    {
+        var index = _dataGrid.Rows.Add(item.Key, item.ArgumentsTemplate ?? "");
+        _dataGrid.Rows[index].Tag = new AssociationRowData(CreatePrefixState(item));
+    }
+
+    private static CombinedPrefixesState CreatePrefixState(HandlerAssociationItem item)
+        => new(
+            AppPrefixes: null,
+            AssociationPrefixes: item.PathPrefixes?.ToList(),
+            ReplacePrefixes: item.ReplacePrefixes);
+
+    private void RaiseChanged()
+    {
+        Changed?.Invoke();
+        _host?.RefreshMappings();
+    }
+
+    private void ApplyRuntimeIcons()
+    {
+        if (_iconService == null)
+            return;
+
+        _addButton.Image = _iconService.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22));
+        _editButton.Image = _iconService.CreateToolbarIcon("\u270E", Color.FromArgb(0x33, 0x66, 0x99));
+        _removeButton.Image = _iconService.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33));
+        _ctxAdd.Image = _iconService.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 16);
+        _ctxEdit.Image = _iconService.CreateToolbarIcon("\u270E", Color.FromArgb(0x33, 0x66, 0x99), 16);
+        _ctxRemove.Image = _iconService.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33), 16);
     }
 }

@@ -15,11 +15,11 @@ public class RunAsPermissionApplierTests
     private const string ContainerSid = "S-1-15-2-1-2-3-4-5-6-7";
     private const string GrantPath = @"C:\Data";
 
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantMutatorService> _grantMutatorService = new();
     private readonly Mock<IQuickAccessPinService> _quickAccessPinService = new();
 
     private RunAsPermissionApplier CreateApplier()
-        => new(_pathGrantService.Object, _quickAccessPinService.Object);
+        => new(_grantMutatorService.Object, _quickAccessPinService.Object);
 
     private static AncestorPermissionResult MakeGrant()
         => new(GrantPath, FileSystemRights.ReadAndExecute);
@@ -32,7 +32,7 @@ public class RunAsPermissionApplierTests
         var result = applier.ApplyContainerGrant(MakeGrant(), "");
 
         Assert.False(result.DatabaseModified);
-        _pathGrantService.Verify(p => p.EnsureAccess(
+        _grantMutatorService.Verify(p => p.EnsureAccess(
             It.IsAny<string>(),
             It.IsAny<string>(),
             It.IsAny<FileSystemRights>(),
@@ -43,7 +43,7 @@ public class RunAsPermissionApplierTests
     [Fact]
     public void ApplyContainerGrant_GrantThrows_PropagatesException()
     {
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(ContainerSid, GrantPath, FileSystemRights.ReadAndExecute,
                 null, false))
             .Throws(CreateGrantFailure(GrantApplyFailureStep.GrantIntentSave, "save failed"));
@@ -57,7 +57,7 @@ public class RunAsPermissionApplierTests
     [Fact]
     public void ApplyCredentialGrant_GrantApplied_PinsFolders()
     {
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(CredentialSid, GrantPath, FileSystemRights.ReadAndExecute,
                 null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
@@ -73,7 +73,7 @@ public class RunAsPermissionApplierTests
     [Fact]
     public void ApplyCredentialGrant_TraverseOnly_DoesNotPinFolders()
     {
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(CredentialSid, GrantPath, FileSystemRights.ReadAndExecute,
                 null, false))
             .Returns(new GrantApplyResult(TraverseApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
@@ -87,7 +87,7 @@ public class RunAsPermissionApplierTests
     [Fact]
     public void ApplyCredentialGrant_GrantThrows_PropagatesExceptionAndDoesNotPin()
     {
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
             .Throws(CreateGrantFailure(GrantApplyFailureStep.GrantAclApply, "Access denied"));

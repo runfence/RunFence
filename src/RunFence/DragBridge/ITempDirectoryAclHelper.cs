@@ -5,6 +5,6 @@ namespace RunFence.DragBridge;
 
 public interface ITempDirectoryAclHelper
 {
-    void ApplyRestrictedAcl(DirectoryInfo dirInfo,
+    DirectorySecurity ApplyRestrictedAcl(DirectoryInfo dirInfo,
         params (IdentityReference identity, FileSystemRights rights)[] additionalRules);
 }

@@ -15,7 +15,7 @@ public class AccountTrayToggleServiceTests : IDisposable
 {
     private const string TestSid = "S-1-5-21-123-456-789-1001";
 
-    private readonly Mock<IConfigRepository> _configRepository = new();
+    private readonly Mock<IMainConfigPersistence> _configRepository = new();
     private readonly Mock<IAssociationAutoSetService> _associationAutoSetService = new();
     private readonly Mock<IInputInjectionBlockerService> _inputInjectionBlocker = new();
     private readonly Mock<ISessionProvider> _sessionProvider = new();
@@ -28,7 +28,7 @@ public class AccountTrayToggleServiceTests : IDisposable
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore { ArgonSalt = [1, 2, 3] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessionProvider.Setup(s => s.GetSession()).Returns(_session);
         _associationAutoSetService.Setup(s => s.AutoSetForUser(It.IsAny<string>()))
             .Returns(AssociationAutoSetResult.Success);
@@ -43,7 +43,7 @@ public class AccountTrayToggleServiceTests : IDisposable
     {
         return new AccountTrayToggleService(
             new SessionPersistenceHelper(
-                Mock.Of<ICredentialRepository>(),
+                Mock.Of<IConfigReencryptionPersistence>(),
                 _configRepository.Object,
                 Mock.Of<ISidNameCacheService>(),
                 () => new InlineUiThreadInvoker(action => action()),

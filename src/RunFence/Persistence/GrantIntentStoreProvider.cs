@@ -22,7 +22,7 @@ public class GrantIntentStoreProvider(
         if (configPath == null)
             return MainStore;
 
-        var normalizedPath = Path.GetFullPath(configPath);
+        var normalizedPath = AppConfigPathHelper.NormalizePath(configPath);
         if (_additionalStores.TryGetValue(normalizedPath, out var store))
             return store;
 
@@ -47,7 +47,7 @@ public class GrantIntentStoreProvider(
 
     public void UnregisterAdditionalStore(string configPath)
     {
-        var normalizedPath = Path.GetFullPath(configPath);
+        var normalizedPath = AppConfigPathHelper.NormalizePath(configPath);
         _additionalStores.Remove(normalizedPath);
         ownershipProjection.UnregisterAdditionalConfig(normalizedPath);
     }

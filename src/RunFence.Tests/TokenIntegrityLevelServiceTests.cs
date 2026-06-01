@@ -37,7 +37,7 @@ public sealed class TokenIntegrityLevelServiceTests
         Assert.Equal(new IntPtr(202), tmlBuffer);
         Assert.Equal(["medium-direct", "medium-direct"], service.Events);
         Assert.Single(runner.PrivilegeRuns);
-        Assert.Equal([TokenPrivilegeHelper.SeRelabelPrivilege], runner.PrivilegeRuns[0]);
+        Assert.Equal([TokenPrivilegeHelper.SeRelabelPrivilege, TokenPrivilegeHelper.SeTcbPrivilege], runner.PrivilegeRuns[0]);
     }
 
     [Fact]
@@ -57,10 +57,29 @@ public sealed class TokenIntegrityLevelServiceTests
         Assert.Empty(runner.PrivilegeRuns);
     }
 
+    [Fact]
+    public void SetHighIntegrity_PrivilegeNotHeld_RetriesUnderSystemImpersonation()
+    {
+        var runner = new RecordingSystemPrivilegeRunner();
+        var service = new TestTokenIntegrityLevelService(runner)
+        {
+            ThrowPrivilegeNotHeldOnFirstHighCall = true,
+        };
+
+        service.SetHighIntegrity(new IntPtr(10), out var pSid, out var tmlBuffer);
+
+        Assert.Equal(new IntPtr(102), pSid);
+        Assert.Equal(new IntPtr(202), tmlBuffer);
+        Assert.Equal(["high-direct", "high-direct"], service.Events);
+        Assert.Single(runner.PrivilegeRuns);
+        Assert.Equal([TokenPrivilegeHelper.SeRelabelPrivilege, TokenPrivilegeHelper.SeTcbPrivilege], runner.PrivilegeRuns[0]);
+    }
+
     private sealed class TestTokenIntegrityLevelService
         : TokenIntegrityLevelService
     {
         private int _mediumCalls;
+        private int _highCalls;
 
         public TestTokenIntegrityLevelService(ISystemPrivilegeRunner systemPrivilegeRunner)
             : base(new Mock<ILoggingService>().Object, systemPrivilegeRunner)
@@ -68,6 +87,8 @@ public sealed class TokenIntegrityLevelServiceTests
         }
 
         public bool ThrowPrivilegeNotHeldOnFirstMediumCall { get; init; }
+
+        public bool ThrowPrivilegeNotHeldOnFirstHighCall { get; init; }
 
         public Exception? LowIntegrityException { get; init; }
 
@@ -92,6 +113,17 @@ public sealed class TokenIntegrityLevelServiceTests
 
             pSid = new IntPtr(100 + _mediumCalls);
             tmlBuffer = new IntPtr(200 + _mediumCalls);
+        }
+
+        protected override void ApplyHighIntegrityDirect(IntPtr hToken, out IntPtr pSid, out IntPtr tmlBuffer)
+        {
+            Events.Add("high-direct");
+            _highCalls++;
+            if (ThrowPrivilegeNotHeldOnFirstHighCall && _highCalls == 1)
+                throw new Win32Exception(1314, "Privilege not held");
+
+            pSid = new IntPtr(100 + _highCalls);
+            tmlBuffer = new IntPtr(200 + _highCalls);
         }
     }
 

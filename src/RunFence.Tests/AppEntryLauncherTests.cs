@@ -8,11 +8,12 @@ using Xunit;
 
 namespace RunFence.Tests;
 
-public class AppEntryLauncherTests : IDisposable
+public sealed class AppEntryLauncherTests : IDisposable
 {
     private readonly Mock<ILaunchFacade> _facade;
     private readonly AppEntryLauncher _launcher;
     private readonly AppDatabase _database;
+    private readonly Mock<ISessionProvider> _sessionProvider;
     private readonly byte[] _pinDerivedKey = new byte[32];
     private readonly SecureSecret _protectedPinKey;
 
@@ -23,7 +24,7 @@ public class AppEntryLauncherTests : IDisposable
     {
         _tempExePath = Path.GetTempFileName();
         _facade = new Mock<ILaunchFacade>();
-        var sessionProvider = new Mock<ISessionProvider>();
+        _sessionProvider = new Mock<ISessionProvider>();
 
         _database = new AppDatabase
         {
@@ -32,16 +33,16 @@ public class AppEntryLauncherTests : IDisposable
         var credentialStore = new CredentialStore();
         _protectedPinKey = TestSecretFactory.FromBytes(_pinDerivedKey);
 
-        sessionProvider.Setup(s => s.GetSession()).Returns(new SessionContext
-{
+        _sessionProvider.Setup(s => s.GetSession()).Returns(new SessionContext
+        {
             Database = _database,
             CredentialStore = credentialStore,
-        }.WithOwnedPinDerivedKey(_protectedPinKey));
+        }.WithClonedPinDerivedKey(_protectedPinKey));
 
         _launcher = new AppEntryLauncher(
             _facade.Object,
             new AppEntryLaunchPlanBuilder(),
-            sessionProvider.Object);
+            _sessionProvider.Object);
     }
 
     public void Dispose()
@@ -56,8 +57,6 @@ public class AppEntryLauncherTests : IDisposable
             warnings.Length == 0 ? LaunchExecutionStatus.ProcessStarted : LaunchExecutionStatus.ProcessStartedWithMaintenanceWarnings,
             null,
             warnings);
-
-    // --- Normal file launch ---
 
     [Fact]
     public void Launch_NormalApp_CallsFacadeLaunchFile()
@@ -122,7 +121,7 @@ public class AppEntryLauncherTests : IDisposable
         Assert.Contains("not found", ex.Message);
     }
 
-    [Fact]
+[Fact]
     public void Launch_FacadeThrowsMissingPasswordException_Propagates()
     {
         var app = new AppEntry { AccountSid = TestSid, ExePath = _tempExePath };
@@ -132,7 +131,7 @@ public class AppEntryLauncherTests : IDisposable
         Assert.Throws<MissingPasswordException>(() => _launcher.Launch(app, null));
     }
 
-    [Fact]
+[Fact]
     public void Launch_FacadeThrowsGrantOperationException_Propagates()
     {
         var app = new AppEntry { AccountSid = TestSid, ExePath = _tempExePath };
@@ -149,8 +148,6 @@ public class AppEntryLauncherTests : IDisposable
         Assert.Same(exception, actual);
     }
 
-    // --- URL scheme launch ---
-
     [Fact]
     public void Launch_UrlSchemeApp_CallsFacadeLaunchUrl()
     {
@@ -162,8 +159,6 @@ public class AppEntryLauncherTests : IDisposable
             It.Is<AccountLaunchIdentity>(a => a.Sid == TestSid)), Times.Once);
         _facade.Verify(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()), Times.Never);
     }
-
-    // --- Folder app launch ---
 
     [Fact]
     public void Launch_FolderApp_CallsFacadeLaunchFolderBrowser()
@@ -210,8 +205,6 @@ public class AppEntryLauncherTests : IDisposable
             null), Times.Once);
     }
 
-    // --- AppContainer launch path ---
-
     [Fact]
     public void Launch_WithAppContainerName_CallsFacadeLaunchFileWithContainerArgs()
     {
@@ -249,11 +242,10 @@ public class AppEntryLauncherTests : IDisposable
         Assert.Contains("ram_missing", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    // --- Null/default privilege level passing ---
-
     [Theory]
     [InlineData(PrivilegeLevel.Isolated)]
     [InlineData(PrivilegeLevel.HighestAllowed)]
+    [InlineData(PrivilegeLevel.HighIntegrity)]
     [InlineData(PrivilegeLevel.LowIntegrity)]
     [InlineData(PrivilegeLevel.Basic)]
     [InlineData(null)]
@@ -271,8 +263,6 @@ public class AppEntryLauncherTests : IDisposable
         _facade.Verify(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(),
             It.Is<AccountLaunchIdentity>(a => a.PrivilegeLevel == privilegeLevel), null), Times.Once);
     }
-
-    // --- permissionPrompt forwarding ---
 
     [Fact]
     public void Launch_NormalApp_ForwardsPermissionPromptToLaunchFile()
@@ -300,13 +290,9 @@ public class AppEntryLauncherTests : IDisposable
             It.IsAny<AppContainerLaunchIdentity>(), prompt), Times.Once);
     }
 
-    // ── TC-30: AllowPassingArguments=false ───────────────────────────────────
-
     [Fact]
     public void Launch_AllowPassingArgumentsFalse_UsesDefaultArgumentsOnly()
     {
-        // Arrange — app has AllowPassingArguments=false and DefaultArguments; launcher passes "--custom-arg".
-        // Expected: the launcher argument is ignored; DefaultArguments is used instead.
         var app = new AppEntry
         {
             AccountSid = TestSid,
@@ -315,10 +301,8 @@ public class AppEntryLauncherTests : IDisposable
             DefaultArguments = "--default-arg"
         };
 
-        // Act
         _launcher.Launch(app, "--custom-arg");
 
-        // Assert — target uses DefaultArguments, not the launcher arguments
         _facade.Verify(f => f.LaunchFile(
             It.Is<ProcessLaunchTarget>(t => t.Arguments == "--default-arg"),
             It.IsAny<AccountLaunchIdentity>(), null), Times.Once);
@@ -327,20 +311,15 @@ public class AppEntryLauncherTests : IDisposable
     [Fact]
     public void Launch_AllowPassingArgumentsFalse_NullDefault_LaunchesWithNullArguments()
     {
-        // Arrange — AllowPassingArguments=false, no DefaultArguments, launcher passes arguments.
-        // Expected: null arguments (launcher args discarded, no default to substitute).
         var app = new AppEntry
         {
             AccountSid = TestSid,
             ExePath = _tempExePath,
             AllowPassingArguments = false
-            // DefaultArguments defaults to string.Empty — DetermineArguments returns null for empty default
         };
 
-        // Act
         _launcher.Launch(app, "--should-be-ignored");
 
-        // Assert — null arguments passed to facade
         _facade.Verify(f => f.LaunchFile(
             It.Is<ProcessLaunchTarget>(t => t.Arguments == null),
             It.IsAny<AccountLaunchIdentity>(), null), Times.Once);
@@ -349,7 +328,6 @@ public class AppEntryLauncherTests : IDisposable
     [Fact]
     public void Launch_AllowPassingArgumentsNotSet_DefaultFalse_UsesDefaultArguments()
     {
-        // Arrange — AllowPassingArguments defaults to false when not explicitly set.
         var app = new AppEntry
         {
             AccountSid = TestSid,
@@ -357,10 +335,8 @@ public class AppEntryLauncherTests : IDisposable
             DefaultArguments = "--default-only"
         };
 
-        // Act — launcher passes arguments, but AllowPassingArguments=false (default)
         _launcher.Launch(app, "--ignored");
 
-        // Assert — DefaultArguments used, not the launcher argument
         _facade.Verify(f => f.LaunchFile(
             It.Is<ProcessLaunchTarget>(t => t.Arguments == "--default-only"),
             It.IsAny<AccountLaunchIdentity>(), null), Times.Once);

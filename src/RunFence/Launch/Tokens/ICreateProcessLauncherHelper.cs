@@ -1,3 +1,5 @@
+using RunFence.Launch;
+
 namespace RunFence.Launch.Tokens;
 
 /// <summary>
@@ -6,6 +8,6 @@ namespace RunFence.Launch.Tokens;
 /// </summary>
 public interface ICreateProcessLauncherHelper
 {
-    ProcessInfo LaunchUsingAcquiredToken(IntPtr hToken, ProcessLaunchTarget psi, AccountLaunchIdentity identity);
+    ProcessInfo? LaunchUsingAcquiredToken(IntPtr hToken, ProcessLaunchTarget psi, AccountLaunchIdentity identity);
     IntPtr AcquireProfileKeeperToken(AccountLaunchIdentity identity);
 }

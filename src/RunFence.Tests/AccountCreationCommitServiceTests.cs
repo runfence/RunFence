@@ -25,7 +25,7 @@ public class AccountCreationCommitServiceTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         var credentialId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var credentialManager = new Mock<IAccountCredentialManager>();
@@ -49,8 +49,8 @@ public class AccountCreationCommitServiceTests : IDisposable
             .Returns(AssociationAutoSetResult.Success);
 
         var persistenceHelper = new SessionPersistenceHelper(
-            Mock.Of<ICredentialRepository>(),
-            Mock.Of<IConfigRepository>(),
+            Mock.Of<IConfigReencryptionPersistence>(),
+            Mock.Of<IMainConfigPersistence>(),
             sidNameCache.Object,
             () => new InlineUiThreadInvoker(action => action()),
             Mock.Of<ILoggingService>());
@@ -120,7 +120,7 @@ public class AccountCreationCommitServiceTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         var credentialManager = new Mock<IAccountCredentialManager>();
         credentialManager.Setup(s => s.StoreCreatedUserCredential(
@@ -142,10 +142,10 @@ public class AccountCreationCommitServiceTests : IDisposable
         associationService.Setup(s => s.AutoSetForUser(sid))
             .Returns(AssociationAutoSetResult.Success);
 
-        var credentialRepository = new Mock<ICredentialRepository>();
+        var credentialRepository = new Mock<IConfigReencryptionPersistence>();
         credentialRepository.Setup(s => s.SaveCredentialStoreAndConfig(session.CredentialStore, database, It.IsAny<ISecureSecretSnapshotSource>()))
             .Throws(new InvalidOperationException("save failed"));
-        var configRepository = new Mock<IConfigRepository>();
+        var configRepository = new Mock<IMainConfigPersistence>();
         var log = new Mock<ILoggingService>();
         var persistenceHelper = new SessionPersistenceHelper(
             credentialRepository.Object,
@@ -234,7 +234,7 @@ public class AccountCreationCommitServiceTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         var credentialManager = new Mock<IAccountCredentialManager>();
         credentialManager.Setup(s => s.StoreCreatedUserCredential(
@@ -256,10 +256,10 @@ public class AccountCreationCommitServiceTests : IDisposable
         associationService.Setup(s => s.AutoSetForUser(sid))
             .Returns(AssociationAutoSetResult.Success);
 
-        var credentialRepository = new Mock<ICredentialRepository>();
+        var credentialRepository = new Mock<IConfigReencryptionPersistence>();
         credentialRepository.Setup(s => s.SaveCredentialStoreAndConfig(session.CredentialStore, database, It.IsAny<ISecureSecretSnapshotSource>()))
             .Throws(new InvalidOperationException("save failed"));
-        var configRepository = new Mock<IConfigRepository>();
+        var configRepository = new Mock<IMainConfigPersistence>();
         var log = new Mock<ILoggingService>();
         var persistenceHelper = new SessionPersistenceHelper(
             credentialRepository.Object,
@@ -343,7 +343,7 @@ public class AccountCreationCommitServiceTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         var credentialId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var credentialManager = new Mock<IAccountCredentialManager>();
@@ -367,8 +367,8 @@ public class AccountCreationCommitServiceTests : IDisposable
             .Throws(new InvalidOperationException("association failed"));
 
         var persistenceHelper = new SessionPersistenceHelper(
-            Mock.Of<ICredentialRepository>(),
-            Mock.Of<IConfigRepository>(),
+            Mock.Of<IConfigReencryptionPersistence>(),
+            Mock.Of<IMainConfigPersistence>(),
             sidNameCache.Object,
             () => new InlineUiThreadInvoker(action => action()),
             Mock.Of<ILoggingService>());

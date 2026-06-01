@@ -34,7 +34,7 @@ public class LaunchFacadeTests : IDisposable
     private readonly IUiThreadInvoker _uiThreadInvoker = new InlineUiThreadInvoker(action => action());
 
     private static ProcessInfo MakeProcessInfo()
-        => new(new ProcessLaunchNative.PROCESS_INFORMATION());
+        => TestProcessInfoFactory.Native(new ProcessLaunchNative.PROCESS_INFORMATION());
 
     private static LaunchTargetResolutionResult WrapForResolution(ProcessLaunchTarget target)
     {
@@ -57,7 +57,7 @@ public class LaunchFacadeTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_protectedPinKey));
+        }.WithClonedPinDerivedKey(_protectedPinKey));
 
         _defaultsResolver
             .Setup(a => a.ResolveDefaults(It.IsAny<LaunchIdentity>(), It.IsAny<AppDatabase>()))
@@ -81,6 +81,13 @@ public class LaunchFacadeTests : IDisposable
         _launchAccessManager
             .Setup(m => m.EnsureAccess(
                 It.IsAny<LaunchIdentity>(),
+                It.IsAny<string>(),
+                It.IsAny<FileSystemRights>(),
+                It.IsAny<Func<string, string, bool>?>()))
+            .Returns(new GrantApplyResult(GrantApplied: true, DurableSaveCompleted: true));
+        _launchAccessManager
+            .Setup(m => m.EnsureAccess(
+                It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(),
                 It.IsAny<Func<string, string, bool>?>(),
@@ -110,7 +117,7 @@ public class LaunchFacadeTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_protectedPinKey);
+        }.WithClonedPinDerivedKey(_protectedPinKey);
         var guardedSessionProvider = new Mock<ISessionProvider>();
         var sessionThreadId = 0;
         guardedSessionProvider.Setup(s => s.GetSession())
@@ -184,8 +191,7 @@ public class LaunchFacadeTests : IDisposable
             identity,
             @"C:\apps",
             FileSystemRights.ReadAndExecute,
-            null,
-            true), Times.Once);
+            null), Times.Once);
     }
 
     [Fact]
@@ -213,13 +219,13 @@ public class LaunchFacadeTests : IDisposable
         using var launch = _facade.LaunchFile(originalTarget, identity, prompt);
 
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, @"C:\docs", FileSystemRights.ReadAndExecute, prompt, true), Times.Once);
+            identity, @"C:\docs", FileSystemRights.ReadAndExecute, prompt), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, @"C:\Program Files\Viewer", FileSystemRights.ReadAndExecute, prompt, true), Times.Once);
+            identity, @"C:\Program Files\Viewer", FileSystemRights.ReadAndExecute, prompt), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, @"C:\Program Files\Viewer", FileSystemRights.ReadAndExecute, null, true), Times.Never);
+            identity, @"C:\Program Files\Viewer", FileSystemRights.ReadAndExecute, null), Times.Never);
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, @"C:\work", FileSystemRights.ReadAndExecute, prompt, true), Times.Never);
+            identity, @"C:\work", FileSystemRights.ReadAndExecute, It.IsAny<Func<string, string, bool>?>()), Times.Never);
     }
 
     [Fact]
@@ -246,11 +252,11 @@ public class LaunchFacadeTests : IDisposable
         using var launch = _facade.LaunchFile(originalTarget, identity, prompt);
 
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, @"C:\docs", FileSystemRights.ReadAndExecute, null, true), Times.Once);
+            identity, @"C:\docs", FileSystemRights.ReadAndExecute, null), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, @"C:\docs", FileSystemRights.ReadAndExecute, prompt, true), Times.Never);
+            identity, @"C:\docs", FileSystemRights.ReadAndExecute, prompt), Times.Never);
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, @"C:\Program Files\Viewer", FileSystemRights.ReadAndExecute, prompt, true), Times.Once);
+            identity, @"C:\Program Files\Viewer", FileSystemRights.ReadAndExecute, prompt), Times.Once);
     }
 
     [Fact]
@@ -278,20 +284,17 @@ public class LaunchFacadeTests : IDisposable
             identity,
             PathHelper.NormalizeComparablePath(AppContext.BaseDirectory),
             FileSystemRights.ReadAndExecute,
-            null,
-            true), Times.Once);
+            null), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
             identity,
             @"C:\docs",
             FileSystemRights.ReadAndExecute,
-            prompt,
-            true), Times.Once);
+            prompt), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
             identity,
             PathHelper.NormalizeComparablePath(AppContext.BaseDirectory),
             FileSystemRights.ReadAndExecute,
-            prompt,
-            true), Times.Never);
+            prompt), Times.Never);
     }
 
     [Fact]
@@ -318,14 +321,12 @@ public class LaunchFacadeTests : IDisposable
             identity,
             @"C:\docs",
             FileSystemRights.ReadAndExecute,
-            prompt,
-            true), Times.Once);
+            prompt), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
             identity,
             Path.GetDirectoryName(resolvedTarget.ExePath)!,
             FileSystemRights.ReadAndExecute,
-            prompt,
-            true), Times.Never);
+            prompt), Times.Never);
     }
 
     [Fact]
@@ -352,14 +353,12 @@ public class LaunchFacadeTests : IDisposable
             identity,
             @"C:\docs",
             FileSystemRights.ReadAndExecute,
-            null,
-            true), Times.Once);
+            null), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
             identity,
             @"C:\docs",
             FileSystemRights.ReadAndExecute,
-            prompt,
-            true), Times.Never);
+            prompt), Times.Never);
     }
 
     [Fact]
@@ -386,14 +385,12 @@ public class LaunchFacadeTests : IDisposable
             identity,
             @"C:\scripts",
             FileSystemRights.ReadAndExecute,
-            null,
-            true), Times.Once);
+            null), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
             identity,
             @"C:\scripts",
             FileSystemRights.ReadAndExecute,
-            prompt,
-            true), Times.Never);
+            prompt), Times.Never);
     }
 
     [Fact]
@@ -426,6 +423,57 @@ public class LaunchFacadeTests : IDisposable
     }
 
     [Fact]
+    public void LaunchFile_WindowsAppsTarget_DoesNotEnsureAccessOnPackageDirectory()
+    {
+        var identity = new AccountLaunchIdentity(TestSid);
+        var target = new ProcessLaunchTarget(
+            @"C:\Program Files\WindowsApps\Contoso.App_1.2.3.4_x64__8wekyb3d8bbwe\Contoso.exe");
+
+        using var launch = _facade.LaunchFile(target, identity, (_, _) => true);
+
+        _launchAccessManager.Verify(m => m.EnsureAccess(
+            identity,
+            @"C:\Program Files\WindowsApps\Contoso.App_1.2.3.4_x64__8wekyb3d8bbwe",
+            FileSystemRights.ReadAndExecute,
+            It.IsAny<Func<string, string, bool>?>()), Times.Never);
+        _processLauncher.Verify(p => p.Launch(identity, It.IsAny<ProcessLaunchTarget>()), Times.Once);
+    }
+
+    [Fact]
+    public void LaunchFile_WindowsAppsResolvedAssociationTarget_StillGrantsOriginalPathOnly()
+    {
+        var originalTarget = new ProcessLaunchTarget(@"C:\docs\report.pdf", IsPathApproved: false);
+        var resolvedTarget = new ProcessLaunchTarget(
+            @"C:\Program Files\WindowsApps\Contoso.App_1.2.3.4_x64__8wekyb3d8bbwe\Viewer.exe",
+            @"""C:\docs\report.pdf""");
+        var identity = new AccountLaunchIdentity(TestSid);
+        Func<string, string, bool> prompt = (_, _) => true;
+
+        _launchTargetResolver
+            .Setup(r => r.ResolveFileHandler(
+                identity,
+                It.Is<ProcessLaunchTarget>(t =>
+                    t.ExePath == originalTarget.ExePath &&
+                    t.IsPathApproved == originalTarget.IsPathApproved),
+                It.IsAny<AppDatabase>(),
+                ".pdf"))
+            .Returns(new LaunchTargetResolutionResult(resolvedTarget, LaunchResolutionKind.Handler, null));
+
+        using var launch = _facade.LaunchFile(originalTarget, identity, prompt);
+
+        _launchAccessManager.Verify(m => m.EnsureAccess(
+            identity,
+            @"C:\docs",
+            FileSystemRights.ReadAndExecute,
+            prompt), Times.Once);
+        _launchAccessManager.Verify(m => m.EnsureAccess(
+            identity,
+            @"C:\Program Files\WindowsApps\Contoso.App_1.2.3.4_x64__8wekyb3d8bbwe",
+            FileSystemRights.ReadAndExecute,
+            It.IsAny<Func<string, string, bool>?>()), Times.Never);
+    }
+
+    [Fact]
     public void LaunchFile_ForwardsExtensionFromTraversal()
     {
         var originalTarget = new ProcessLaunchTarget(@"C:\links\report-link.exe");
@@ -454,7 +502,7 @@ public class LaunchFacadeTests : IDisposable
     }
 
     [Fact]
-    public void LaunchFile_GrantFailureBlocksLaunchAndPropagates()
+    public void LaunchFile_GrantFailure_ReturnsMaintenanceWarningAndStillLaunches()
     {
         var identity = new AccountLaunchIdentity(TestSid);
         var cause = new InvalidOperationException("save failed");
@@ -463,14 +511,104 @@ public class LaunchFacadeTests : IDisposable
                 It.IsAny<LaunchIdentity>(),
                 It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(),
-                It.IsAny<Func<string, string, bool>?>(),
-                It.IsAny<bool>()))
+                It.IsAny<Func<string, string, bool>?>()))
             .Throws(new GrantOperationException(GrantApplyFailureStep.GrantIntentSave, @"C:\apps", null, cause));
 
-        var ex = Assert.Throws<GrantOperationException>(() =>
-            _facade.LaunchFile(new ProcessLaunchTarget(@"C:\apps\myapp.exe"), identity, (_, _) => true));
+        using var launch = _facade.LaunchFile(new ProcessLaunchTarget(@"C:\apps\myapp.exe"), identity, (_, _) => true);
 
-        Assert.Same(cause, ex.Cause);
+        Assert.Equal(LaunchExecutionStatus.ProcessStartedWithMaintenanceWarnings, launch.Status);
+        Assert.Contains(launch.MaintenanceWarnings, warning => warning.Contains("Failed to save the grant intent", StringComparison.Ordinal));
+        _processLauncher.Verify(p => p.Launch(It.IsAny<LaunchIdentity>(), It.IsAny<ProcessLaunchTarget>()), Times.Once);
+    }
+
+    [Fact]
+    public void LaunchFile_EnsureAccessWarning_ReturnsMaintenanceWarningAndStillLaunches()
+    {
+        var identity = new AccountLaunchIdentity(TestSid);
+        var warning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostGrantMutationSave,
+            @"C:\apps",
+            null,
+            new InvalidOperationException("save warning"));
+        _launchAccessManager
+            .Setup(m => m.EnsureAccess(
+                It.IsAny<LaunchIdentity>(),
+                It.IsAny<string>(),
+                It.IsAny<FileSystemRights>(),
+                It.IsAny<Func<string, string, bool>?>()))
+            .Returns(new GrantApplyResult(Warnings: [warning]));
+
+        using var launch = _facade.LaunchFile(new ProcessLaunchTarget(@"C:\apps\myapp.exe"), identity, (_, _) => true);
+
+        Assert.Equal(LaunchExecutionStatus.ProcessStartedWithMaintenanceWarnings, launch.Status);
+        Assert.Contains(launch.MaintenanceWarnings, text => text.Contains("Failed to save state after grant mutation", StringComparison.Ordinal));
+        _processLauncher.Verify(p => p.Launch(It.IsAny<LaunchIdentity>(), It.IsAny<ProcessLaunchTarget>()), Times.Once);
+    }
+
+    [Fact]
+    public void LaunchFile_EnsureAccessNonGrantException_ReturnsMaintenanceWarningAndStillLaunches()
+    {
+        var identity = new AccountLaunchIdentity(TestSid);
+        _launchAccessManager
+            .Setup(m => m.EnsureAccess(
+                It.IsAny<LaunchIdentity>(),
+                It.IsAny<string>(),
+                It.IsAny<FileSystemRights>(),
+                It.IsAny<Func<string, string, bool>?>()))
+            .Throws(new InvalidOperationException("unexpected ensure-access failure"));
+
+        using var launch = _facade.LaunchFile(new ProcessLaunchTarget(@"C:\apps\myapp.exe"), identity, (_, _) => true);
+
+        Assert.Equal(LaunchExecutionStatus.ProcessStartedWithMaintenanceWarnings, launch.Status);
+        Assert.Contains(
+            launch.MaintenanceWarnings,
+            text => text.Contains("could not ensure launch access", StringComparison.Ordinal) &&
+                    text.Contains("unexpected ensure-access failure", StringComparison.Ordinal));
+        _processLauncher.Verify(p => p.Launch(It.IsAny<LaunchIdentity>(), It.IsAny<ProcessLaunchTarget>()), Times.Once);
+    }
+
+    [Fact]
+    public void LaunchFile_LaunchWithoutAccess_ContinuesLaunch()
+    {
+        var identity = new AccountLaunchIdentity(TestSid);
+        Func<string, string, bool> prompt = (_, _) => false;
+        _launchAccessManager
+            .Setup(m => m.EnsureAccess(
+                identity,
+                @"C:\apps",
+                FileSystemRights.ReadAndExecute,
+                prompt))
+            .Throws(new GrantAccessDeclinedException("User declined to grant access."));
+
+        using var launch = _facade.LaunchFile(
+            new ProcessLaunchTarget(@"C:\apps\myapp.exe", IsPathApproved: false),
+            identity,
+            prompt);
+
+        Assert.Equal(LaunchExecutionStatus.ProcessStarted, launch.Status);
+        _processLauncher.Verify(p => p.Launch(It.IsAny<LaunchIdentity>(), It.IsAny<ProcessLaunchTarget>()), Times.Once);
+    }
+
+    [Fact]
+    public void LaunchFile_LaunchAccessCancel_StopsLaunch()
+    {
+        var identity = new AccountLaunchIdentity(TestSid);
+        Func<string, string, bool> prompt = (_, _) => throw new OperationCanceledException("User canceled launch access grant.");
+        _launchAccessManager
+            .Setup(m => m.EnsureAccess(
+                identity,
+                @"C:\apps",
+                FileSystemRights.ReadAndExecute,
+                prompt))
+            .Throws(new OperationCanceledException("User canceled launch access grant."));
+
+        var ex = Assert.Throws<OperationCanceledException>(() =>
+            _facade.LaunchFile(
+                new ProcessLaunchTarget(@"C:\apps\myapp.exe", IsPathApproved: false),
+                identity,
+                prompt));
+
+        Assert.Contains("User canceled launch access grant.", ex.Message, StringComparison.Ordinal);
         _processLauncher.Verify(p => p.Launch(It.IsAny<LaunchIdentity>(), It.IsAny<ProcessLaunchTarget>()), Times.Never);
     }
 
@@ -484,7 +622,24 @@ public class LaunchFacadeTests : IDisposable
         using var launch = _facade.LaunchFolderBrowser(identity, folderPath, prompt);
 
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, folderPath, FileSystemRights.ReadAndExecute, null, true), Times.Once);
+            identity, folderPath, FileSystemRights.ReadAndExecute, null), Times.Once);
+    }
+
+    [Fact]
+    public void LaunchFolderBrowser_BasicAccount_EnsuresFolderBrowserDirectoryAccess()
+    {
+        var identity = new AccountLaunchIdentity(TestSid) { PrivilegeLevel = PrivilegeLevel.Basic };
+
+        using var launch = _facade.LaunchFolderBrowser(identity, @"C:\Users\User\Documents", (_, _) => true);
+
+        _launchAccessManager.Verify(m => m.EnsureAccess(
+            identity, @"C:\tools", FileSystemRights.ReadAndExecute, null), Times.Once);
+        _launchAccessManager.Verify(m => m.EnsureAccess(
+            AclHelper.AllApplicationPackagesSid,
+            @"C:\tools",
+            FileSystemRights.ReadAndExecute,
+            null,
+            true), Times.Never);
     }
 
     [Fact]
@@ -497,7 +652,7 @@ public class LaunchFacadeTests : IDisposable
         using var launch = _facade.LaunchFolderBrowser(identity, folderPath, prompt, isTargetApproved: false);
 
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, folderPath, FileSystemRights.ReadAndExecute, prompt, true), Times.Once);
+            identity, folderPath, FileSystemRights.ReadAndExecute, prompt), Times.Once);
     }
 
     [Fact]
@@ -505,15 +660,39 @@ public class LaunchFacadeTests : IDisposable
     {
         var identity = new AppContainerLaunchIdentity(new AppContainerEntry { Name = "ram_browser", Sid = ContainerSid });
         var folderPath = @"C:\Users\User\Documents";
+        var folderBrowserDirAccessCalls = new List<string>();
+        _launchAccessManager
+            .Setup(m => m.EnsureAccess(
+                AclHelper.AllApplicationPackagesSid,
+                @"C:\tools",
+                FileSystemRights.ReadAndExecute,
+                null,
+                true))
+            .Callback(() => folderBrowserDirAccessCalls.Add(AclHelper.AllApplicationPackagesSid))
+            .Returns(new GrantApplyResult(GrantApplied: true, DurableSaveCompleted: true));
+        _launchAccessManager
+            .Setup(m => m.EnsureAccess(
+                identity,
+                @"C:\tools",
+                FileSystemRights.ReadAndExecute,
+                null))
+            .Callback(() => folderBrowserDirAccessCalls.Add(ContainerSid))
+            .Returns(new GrantApplyResult(GrantApplied: true, DurableSaveCompleted: true));
 
         using var launch = _facade.LaunchFolderBrowser(identity, folderPath, (_, _) => true);
 
+        Assert.Equal([AclHelper.AllApplicationPackagesSid, ContainerSid], folderBrowserDirAccessCalls);
+        _launchAccessManager.Verify(m => m.EnsureAccess(
+            AclHelper.AllApplicationPackagesSid,
+            @"C:\tools",
+            FileSystemRights.ReadAndExecute,
+            null,
+            true), Times.Once);
         _launchAccessManager.Verify(m => m.EnsureAccess(
             identity,
             folderPath,
             FileSystemRights.ReadAndExecute,
-            null,
-            true), Times.Once);
+            null), Times.Once);
     }
 
     [Fact]
@@ -543,7 +722,7 @@ public class LaunchFacadeTests : IDisposable
         using var launch = _facade.LaunchFolderBrowser(identity, @"C:\", prompt);
 
         _launchAccessManager.Verify(m => m.EnsureAccess(
-            identity, @"C:", FileSystemRights.ReadAndExecute, null, true), Times.Once);
+            identity, @"C:", FileSystemRights.ReadAndExecute, null), Times.Once);
         _processLauncher.Verify(p => p.Launch(
             identity,
             It.Is<ProcessLaunchTarget>(t =>
@@ -569,8 +748,7 @@ public class LaunchFacadeTests : IDisposable
             identity,
             @"C:\docs\ActualFolder",
             FileSystemRights.ReadAndExecute,
-            prompt,
-            true), Times.Once);
+            prompt), Times.Once);
     }
 
     [Fact]
@@ -598,8 +776,7 @@ public class LaunchFacadeTests : IDisposable
             identity,
             PathHelper.NormalizeComparablePath(AppContext.BaseDirectory),
             FileSystemRights.ReadAndExecute,
-            null,
-            true), Times.Once);
+            null), Times.Once);
     }
 
     [Fact]
@@ -618,7 +795,7 @@ public class LaunchFacadeTests : IDisposable
     }
 
     [Fact]
-    public void LaunchFile_NonShellWrappedLaunchWithoutProcess_Throws()
+    public void LaunchFile_NonShellWrappedLaunchWithoutProcess_ReturnsProcessStartedWithoutProcess()
     {
         var identity = new AccountLaunchIdentity(TestSid);
         var target = new ProcessLaunchTarget(@"C:\apps\myapp.exe");
@@ -626,9 +803,10 @@ public class LaunchFacadeTests : IDisposable
             .Setup(p => p.Launch(It.IsAny<LaunchIdentity>(), It.IsAny<ProcessLaunchTarget>()))
             .Returns((ProcessInfo?)null);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => _facade.LaunchFile(target, identity));
+        using var launch = _facade.LaunchFile(target, identity);
 
-        Assert.Contains("did not return a process", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(LaunchExecutionStatus.ProcessStarted, launch.Status);
+        Assert.Null(launch.Process);
     }
 
     [Fact]
@@ -643,6 +821,33 @@ public class LaunchFacadeTests : IDisposable
 
         Assert.Equal(LaunchExecutionStatus.ShellWrappedNoProcess, launch.Status);
         Assert.Null(launch.Process);
+    }
+
+    [Fact]
+    public void LaunchFile_NonShellWrappedLaunchWithoutProcessAndMaintenanceWarning_ReturnsProcessStartedWithMaintenanceWarnings()
+    {
+        var identity = new AccountLaunchIdentity(TestSid);
+        var warning = new GrantApplyWarning(
+            GrantApplyFailureStep.PostGrantMutationSave,
+            @"C:\apps",
+            null,
+            new InvalidOperationException("save warning"));
+        _launchAccessManager
+            .Setup(m => m.EnsureAccess(
+                It.IsAny<LaunchIdentity>(),
+                It.IsAny<string>(),
+                It.IsAny<FileSystemRights>(),
+                It.IsAny<Func<string, string, bool>?>()))
+            .Returns(new GrantApplyResult(Warnings: [warning]));
+        _processLauncher
+            .Setup(p => p.Launch(It.IsAny<LaunchIdentity>(), It.IsAny<ProcessLaunchTarget>()))
+            .Returns((ProcessInfo?)null);
+
+        using var launch = _facade.LaunchFile(new ProcessLaunchTarget(@"C:\apps\myapp.exe"), identity, (_, _) => true);
+
+        Assert.Equal(LaunchExecutionStatus.ProcessStartedWithMaintenanceWarnings, launch.Status);
+        Assert.Null(launch.Process);
+        Assert.Contains(launch.MaintenanceWarnings, text => text.Contains("Failed to save state after grant mutation", StringComparison.Ordinal));
     }
 
     [Fact]

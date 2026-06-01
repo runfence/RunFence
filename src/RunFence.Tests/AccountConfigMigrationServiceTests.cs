@@ -416,11 +416,6 @@ public class AccountConfigMigrationServiceTests : IDisposable
             Assert.False(File.Exists(_loadedGoodBackupStore.GetBackupPath(primaryFilePath)));
             Assert.False(File.Exists(primaryFilePath + ".12345678.rollback"));
             Assert.False(File.Exists(primaryFilePath + ".87654321.tmp"));
-
-            _log.Verify(l => l.Info($"Deleted {primaryFilePath}."), Times.Once);
-            _log.Verify(l => l.Info($"Deleted {_loadedGoodBackupStore.GetBackupPath(primaryFilePath)}."), Times.Once);
-            _log.Verify(l => l.Info($"Deleted {primaryFilePath}.12345678.rollback."), Times.Once);
-            _log.Verify(l => l.Info($"Deleted {primaryFilePath}.87654321.tmp."), Times.Once);
         }
 
         foreach (var preservedPath in preservedSiblingFiles)

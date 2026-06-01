@@ -11,29 +11,29 @@ public abstract class FirewallGridHelperBase<TEntry>
     where TEntry : notnull
 {
     protected readonly DataGridView Grid;
-    private readonly Action<bool> _setAddVisible;
-    private readonly Action<bool> _setRemoveVisible;
-    private readonly Action<bool> _setExportVisible;
     private readonly Func<IReadOnlyList<string>, string, bool> _tryExportToFile;
     private readonly Action _exportCombined;
+    private readonly string _addContextMenuItemName;
+    private readonly string _removeContextMenuItemName;
+    private readonly string _exportContextMenuItemName;
     protected readonly Action UpdateApplyButton;
     private int _ctxRowIndex = -1;
 
     protected FirewallGridHelperBase(
         DataGridView grid,
-        Action<bool> setAddVisible,
-        Action<bool> setRemoveVisible,
-        Action<bool> setExportVisible,
         Func<IReadOnlyList<string>, string, bool> tryExportToFile,
         Action exportCombined,
-        Action updateApplyButton)
+        Action updateApplyButton,
+        string addContextMenuItemName,
+        string removeContextMenuItemName,
+        string exportContextMenuItemName)
     {
         Grid = grid;
-        _setAddVisible = setAddVisible;
-        _setRemoveVisible = setRemoveVisible;
-        _setExportVisible = setExportVisible;
         _tryExportToFile = tryExportToFile;
         _exportCombined = exportCombined;
+        _addContextMenuItemName = addContextMenuItemName;
+        _removeContextMenuItemName = removeContextMenuItemName;
+        _exportContextMenuItemName = exportContextMenuItemName;
         UpdateApplyButton = updateApplyButton;
     }
 
@@ -73,9 +73,26 @@ public abstract class FirewallGridHelperBase<TEntry>
     /// </summary>
     public void ConfigureContextMenu()
     {
-        _setAddVisible(_ctxRowIndex < 0);
-        _setRemoveVisible(_ctxRowIndex >= 0);
-        _setExportVisible(_ctxRowIndex >= 0);
+        var contextMenu = Grid.ContextMenuStrip;
+        if (contextMenu == null)
+            return;
+
+        var addItem = contextMenu.Items.Find(_addContextMenuItemName, searchAllChildren: false)
+            .OfType<ToolStripMenuItem>()
+            .SingleOrDefault();
+        var removeItem = contextMenu.Items.Find(_removeContextMenuItemName, searchAllChildren: false)
+            .OfType<ToolStripMenuItem>()
+            .SingleOrDefault();
+        var exportItem = contextMenu.Items.Find(_exportContextMenuItemName, searchAllChildren: false)
+            .OfType<ToolStripMenuItem>()
+            .SingleOrDefault();
+
+        if (addItem == null || removeItem == null || exportItem == null)
+            return;
+
+        addItem.Visible = _ctxRowIndex < 0;
+        removeItem.Visible = _ctxRowIndex >= 0;
+        exportItem.Visible = _ctxRowIndex >= 0;
     }
 
     /// <summary>

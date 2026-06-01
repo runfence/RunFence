@@ -69,7 +69,7 @@ public class ElevatedAppTemplateExecutionTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
 
         _appState.Setup(a => a.Database).Returns(_database);
 
@@ -158,13 +158,11 @@ public class ElevatedAppTemplateExecutionTests : IDisposable
             CreateExecutor(new WizardLicenseChecker(_licenseService.Object, credentialCounter.Object)),
             setupHelperFactory: null!,
             credentialManager: _credentialManager.Object,
-            pickerStepFactory: CreatePickerFactory(),
+            pickerStepService: CreatePickerService(),
             credentialCollector: collector,
             session: _session,
             licenseChecker: new WizardLicenseChecker(_licenseService.Object, credentialCounter.Object),
-            discoveryService: Mock.Of<IShortcutDiscoveryService>(),
-            iconHelper: Mock.Of<IShortcutIconHelper>(),
-            executablePathResolver: CreatePathResolver());
+            stepBuilder: CreateStandardStepBuilder());
     }
 
     private WizardTemplateExecutor CreateExecutor(WizardLicenseChecker licenseChecker)
@@ -192,7 +190,9 @@ public class ElevatedAppTemplateExecutionTests : IDisposable
         var packageInstallService = new PackageInstallService(
             Mock.Of<IPackageInstallLauncher>(),
             Mock.Of<IPackageInstallScriptStore>(),
-            toolResolver);
+            toolResolver,
+            Mock.Of<IWindowsTerminalAccountStateService>(),
+            Mock.Of<IWindowsTerminalDeploymentService>());
         var databaseProvider = new Mock<IDatabaseProvider>();
         databaseProvider.Setup(d => d.GetDatabase()).Returns(_database);
 
@@ -206,23 +206,26 @@ public class ElevatedAppTemplateExecutionTests : IDisposable
             databaseProvider.Object,
             _sessionSaver.Object);
 
-        var enforcementHelper = new AppEntryEnforcementHelper(
-            _aclService.Object,
+        var nonAclEnforcer = AppEntryEnforcementTestFactory.CreateNonAclEnforcer(
             _shortcutService.Object,
             _besideTargetShortcutService.Object,
             _iconService.Object,
             _sidNameCache.Object,
             _desktopProvider.Object,
             new Mock<IInteractiveUserSidResolver>().Object,
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
             _log.Object);
+        var enforcementCoordinator = new AppEntryEnforcementCoordinator(
+            _aclService.Object,
+            AppEntryEnforcementTestFactory.CreateAclEnforcer(_aclService.Object),
+            nonAclEnforcer);
 
         return new WizardTemplateExecutor(
             createHandler,
             setupHelperFactory,
             new AppEntryBuilder(Mock.Of<IAppEntryIdGenerator>()),
-            enforcementHelper,
+            enforcementCoordinator,
             _shortcutDiscovery.Object,
-            _aclService.Object,
             _sessionSaver.Object,
             _session,
             licenseChecker);
@@ -241,9 +244,9 @@ public class ElevatedAppTemplateExecutionTests : IDisposable
             new LambdaSessionProvider(() => _session));
     }
 
-    private static WizardAccountPickerStepFactory CreatePickerFactory()
+    private static WizardAccountPickerService CreatePickerService()
         => new(
-            Mock.Of<ILocalGroupMembershipService>(),
+            Mock.Of<ILocalGroupQueryService>(),
             Mock.Of<ILocalUserProvider>(),
             Mock.Of<ISidResolver>(),
             new CredentialFilterHelper(Mock.Of<ISidResolver>()),
@@ -257,6 +260,15 @@ public class ElevatedAppTemplateExecutionTests : IDisposable
             .Returns<string, ExecutablePathResolutionContext>((path, _) => path);
         return resolver.Object;
     }
+
+    private static StandardAppWizardStepBuilder CreateStandardStepBuilder()
+        => new(
+            Mock.Of<IShortcutDiscoveryService>(),
+            Mock.Of<IShortcutIconHelper>(),
+            Mock.Of<IOpenFileDialogAdapterFactory>(),
+            Mock.Of<IFolderBrowserDialogAdapterFactory>(),
+            Mock.Of<IAppDiscoveryDialogService>(),
+            CreatePathResolver());
 
     private static void SelectExistingAccount(AccountPickerStep step, string sid)
     {

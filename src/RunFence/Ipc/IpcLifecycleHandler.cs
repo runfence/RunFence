@@ -12,9 +12,7 @@ public class IpcLifecycleHandler(
     IAppStateProvider appState,
     IAppLockControl appLock,
     IIpcUiInvoker ipcUiInvoker,
-    IElevatedUnlockRequestHandler elevatedUnlockRequestHandler,
-    IOperationUnlockRequestHandler operationUnlockRequestHandler,
-    IShowWindowRequestHandler showWindowRequestHandler,
+    IpcUnlockRequestFlow unlockRequestFlow,
     ILoggingService log)
 {
     public IpcResponse HandleShutdown(string? callerIdentity, bool isAdmin)
@@ -47,94 +45,12 @@ public class IpcLifecycleHandler(
     }
 
     public IpcResponse HandleUnlockApp(string? callerIdentity, string? callerSid, bool isAdmin)
-    {
-        if (!isAdmin)
-        {
-            log.Warn($"Unlock rejected: caller '{callerIdentity}' is not admin");
-            return new IpcResponse { Success = false, ErrorMessage = "Access denied. Admin required." };
-        }
-
-        var currentUserSid = SidResolutionHelper.GetCurrentUserSid();
-        var allowDirectAdminUnlock = SidComparer.SidEquals(callerSid, currentUserSid);
-        log.Info(allowDirectAdminUnlock
-            ? $"Unlock requested by {callerIdentity}"
-            : $"Unlock requested by {callerIdentity}; using normal unlock flow because caller SID '{callerSid}' does not match current SID '{currentUserSid}'");
-
-        if (ipcUiInvoker.IsShuttingDown(out var shuttingDownResponse))
-            return shuttingDownResponse!;
-
-        try
-        {
-            Task<bool>? unlockTask = null;
-            if (!ipcUiInvoker.TryInvoke(
-                    () =>
-                    {
-                        if (allowDirectAdminUnlock)
-                            unlockTask = elevatedUnlockRequestHandler.HandleElevatedUnlockRequestAsync();
-                        else
-                            showWindowRequestHandler.RequestShowWindow();
-                    },
-                    out var invokeResponse))
-                return invokeResponse!;
-
-            if (!allowDirectAdminUnlock)
-                return new IpcResponse { Success = true };
-
-            var unlocked = unlockTask!.GetAwaiter().GetResult();
-            return unlocked
-                ? new IpcResponse { Success = true }
-                : new IpcResponse { Success = false, ErrorMessage = "Unlock cancelled." };
-        }
-        catch (Exception ex)
-        {
-            log.Error("Unlock failed", ex);
-            return new IpcResponse { Success = false, ErrorMessage = "Unlock failed." };
-        }
-    }
+        => unlockRequestFlow.HandleUnlockApp(
+            new IpcOperationRequest(callerIdentity, callerSid, isAdmin),
+            CancellationToken.None);
 
     public IpcResponse HandleUnlockOperation(string? callerIdentity, string? callerSid, bool isAdmin)
-    {
-        if (!isAdmin)
-        {
-            log.Warn($"Operation unlock rejected: caller '{callerIdentity}' is not admin");
-            return new IpcResponse { Success = false, ErrorMessage = "Access denied. Admin required." };
-        }
-
-        var currentUserSid = SidResolutionHelper.GetCurrentUserSid();
-        var allowDirectOperationUnlock = SidComparer.SidEquals(callerSid, currentUserSid);
-        log.Info(allowDirectOperationUnlock
-            ? $"Operation unlock requested by {callerIdentity}"
-            : $"Operation unlock requested by {callerIdentity}; using normal operation unlock flow because caller SID '{callerSid}' does not match current SID '{currentUserSid}'");
-
-        if (ipcUiInvoker.IsShuttingDown(out var shuttingDownResponse))
-            return shuttingDownResponse!;
-
-        try
-        {
-            Task<bool>? unlockTask = null;
-            if (!ipcUiInvoker.TryInvoke(
-                    () =>
-                    {
-                        if (allowDirectOperationUnlock)
-                            unlockTask = operationUnlockRequestHandler.HandleOperationUnlockRequestAsync();
-                        else
-                            operationUnlockRequestHandler.RequestOperationUnlock();
-                    },
-                    out var invokeResponse))
-                return invokeResponse!;
-
-            if (!allowDirectOperationUnlock)
-                return new IpcResponse { Success = true };
-
-            var unlocked = unlockTask!.GetAwaiter().GetResult();
-            return unlocked
-                ? new IpcResponse { Success = true }
-                : new IpcResponse { Success = false, ErrorMessage = "No pending operation unlock." };
-        }
-        catch (Exception ex)
-        {
-            log.Error("Operation unlock failed", ex);
-            return new IpcResponse { Success = false, ErrorMessage = "Operation unlock failed." };
-        }
-    }
+        => unlockRequestFlow.HandleUnlockOperation(
+            new IpcOperationRequest(callerIdentity, callerSid, isAdmin),
+            CancellationToken.None);
 }

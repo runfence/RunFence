@@ -46,7 +46,7 @@ public class AccountsPanelCredentialHandler : IDisposable
         _operationGuard = operationGuard;
         _windowTracker = windowTracker;
         _editOrchestrator.InstallPackagesRequested += (packages, ar) =>
-            launchService.InstallPackages(packages, new AccountLaunchIdentity(ar.Sid));
+            _ = launchService.InstallPackagesAsync(packages, new AccountLaunchIdentity(ar.Sid));
         _credentialCrudHandler.CreateUserDialogRequested += (username, password) =>
             CreateUserDialogRequested?.Invoke(username, password);
         _editOrchestrator.DeleteUserRequested += (accountRow, selectedIndex) =>

@@ -3,6 +3,15 @@ namespace RunFence.Launching.Resolution;
 public static class WindowsAppsPackagePathParser
 {
     public static bool TryParsePackagePath(string exePath, out WindowsAppsPackagePath packagePath)
+        => TryParsePackagePathCore(exePath, includeMatchedDirectory: false, out packagePath);
+
+    public static bool IsUnderPackageRoot(string path)
+        => TryParsePackagePathCore(path, includeMatchedDirectory: true, out _);
+
+    private static bool TryParsePackagePathCore(
+        string exePath,
+        bool includeMatchedDirectory,
+        out WindowsAppsPackagePath packagePath)
     {
         packagePath = default;
 
@@ -16,7 +25,9 @@ public static class WindowsAppsPackagePathParser
             return false;
         }
 
-        var currentDirectory = Path.GetDirectoryName(fullPath);
+        var currentDirectory = includeMatchedDirectory
+            ? fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            : Path.GetDirectoryName(fullPath);
         while (!string.IsNullOrEmpty(currentDirectory))
         {
             var installRoot = Path.GetDirectoryName(currentDirectory);
@@ -34,7 +45,8 @@ public static class WindowsAppsPackagePathParser
                     out var publisherId))
             {
                 var relativePath = Path.GetRelativePath(currentDirectory, fullPath);
-                if (relativePath == ".."
+                if ((!includeMatchedDirectory && relativePath == ".")
+                    || relativePath == ".."
                     || relativePath.StartsWith(@"..\", StringComparison.Ordinal)
                     || relativePath.StartsWith("../", StringComparison.Ordinal)
                     || Path.IsPathRooted(relativePath))

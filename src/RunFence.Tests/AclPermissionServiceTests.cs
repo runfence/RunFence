@@ -24,12 +24,19 @@ public class AclPermissionServiceTests
     private static readonly string AdministratorsSid =
         new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value;
 
-    private readonly AclPermissionService _service = new(
-        new NTTranslateApi(new Mock<ILoggingService>().Object),
-        new GroupMembershipApi(new Mock<ILoggingService>().Object),
-        new Mock<ILocalGroupQueryService>().Object,
-        AclAccessorFactory.Create(),
-        new DeterministicAclAccessEvaluator());
+    private readonly AclPermissionService _service = CreateService(AclAccessorFactory.Create());
+
+    private static AclPermissionService CreateService(IPathSecurityDescriptorAccessor aclAccessor)
+    {
+        var evaluator = new DeterministicAclAccessEvaluator();
+        var resolver = new AclGroupSidResolver(
+            new NTTranslateApi(new Mock<ILoggingService>().Object),
+            new GroupMembershipApi(new Mock<ILoggingService>().Object),
+            new Mock<ILocalGroupQueryService>().Object);
+        var ancestorPolicy = new GrantableAncestorPolicy(resolver, aclAccessor, evaluator);
+        var adminWriter = new AdminRestrictionAclWriter(aclAccessor);
+        return new AclPermissionService(resolver, ancestorPolicy, adminWriter, evaluator);
+    }
 
     // --- ResolveAccountGroupSids tests ---
 
@@ -212,14 +219,9 @@ public class AclPermissionServiceTests
             new SecurityIdentifier(EveryoneSid),
             FileSystemRights.ReadAndExecute,
             AccessControlType.Allow));
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         aclAccessor.Setup(accessor => accessor.GetSecurity(@"C:\Allowed\App.exe")).Returns(fs);
-        var service = new AclPermissionService(
-            new NTTranslateApi(new Mock<ILoggingService>().Object),
-            new GroupMembershipApi(new Mock<ILoggingService>().Object),
-            new Mock<ILocalGroupQueryService>().Object,
-            aclAccessor.Object,
-            new DeterministicAclAccessEvaluator());
+        var service = CreateService(aclAccessor.Object);
 
         var needsGrant = service.NeedsPermissionGrant(
             @"C:\Allowed\App.exe",
@@ -233,15 +235,10 @@ public class AclPermissionServiceTests
     [Fact]
     public void NeedsPermissionGrant_UnelevatedWhenAclReadFails_ReturnsTrue()
     {
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         aclAccessor.Setup(accessor => accessor.GetSecurity(@"C:\Denied\App.exe"))
             .Throws(new UnauthorizedAccessException("denied"));
-        var service = new AclPermissionService(
-            new NTTranslateApi(new Mock<ILoggingService>().Object),
-            new GroupMembershipApi(new Mock<ILoggingService>().Object),
-            new Mock<ILocalGroupQueryService>().Object,
-            aclAccessor.Object,
-            new DeterministicAclAccessEvaluator());
+        var service = CreateService(aclAccessor.Object);
 
         var needsGrant = service.NeedsPermissionGrant(
             @"C:\Denied\App.exe",

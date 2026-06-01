@@ -13,7 +13,8 @@ namespace RunFence.Persistence.UI;
 /// </summary>
 public class ConfigMismatchKeyResolver(
     ISessionProvider sessionProvider,
-    IDatabaseService databaseService,
+    IConfigSaltReader configSaltReader,
+    IAppConfigPersistence appConfigPersistence,
     ConfigMismatchPinVerifier configMismatchPinVerifier,
     ISecureDesktopRunner secureDesktop,
     OperationGuard enforcementGuard)
@@ -36,20 +37,20 @@ public class ConfigMismatchKeyResolver(
     public SecureSecret? TryDeriveConfigMismatchKey(string configPath)
     {
         var session = sessionProvider.GetSession();
-        var fileSalt = databaseService.TryGetAppConfigSaltFromPath(configPath);
+        var fileSalt = configSaltReader.TryGetAppConfigSaltFromPath(configPath);
         if (fileSalt == null || fileSalt.SequenceEqual(session.CredentialStore.ArgonSalt))
             return null;
         return PromptForMismatchKey(
             pin => configMismatchPinVerifier.VerifyAndReturnKey(
                 pin,
                 fileSalt,
-                candidate => databaseService.LoadAppConfigFromPath(configPath, candidate)));
+                candidate => appConfigPersistence.LoadAppConfigFromPath(configPath, candidate)));
     }
 
     public AppConfigMismatchLoadResult? TryLoadAppConfigWithMismatchKey(string configPath, bool forcePrompt = false)
     {
         var session = sessionProvider.GetSession();
-        var fileSalt = databaseService.TryGetAppConfigSaltFromPath(configPath);
+        var fileSalt = configSaltReader.TryGetAppConfigSaltFromPath(configPath);
         bool shouldPrompt = false;
         if (fileSalt != null)
         {
@@ -67,7 +68,7 @@ public class ConfigMismatchKeyResolver(
                 candidate =>
                 {
                     result = new AppConfigMismatchLoadResult(
-                        databaseService.LoadAppConfigFromPath(configPath, candidate),
+                        appConfigPersistence.LoadAppConfigFromPath(configPath, candidate),
                         UsedMismatchKey: true);
                 }));
         return result;

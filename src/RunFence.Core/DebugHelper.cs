@@ -7,8 +7,9 @@ namespace RunFence.Core;
 public static class DebugHelper
 {
 #if DEBUG
-    public static bool UseAdminOperationMocks { get; } = !new WindowsPrincipal(WindowsIdentity.GetCurrent())
-        .IsInRole(WindowsBuiltInRole.Administrator);
+    public static bool UseAdminOperationMocks =>
+        IsUnitTestAdminOperationMockSwitchEnabled() ||
+        !new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
     public const bool IsDebugBuild = true;
 
     /// <summary>
@@ -23,11 +24,14 @@ public static class DebugHelper
     /// <summary>Underscore-prefixed <see cref="AppId"/> for use in names (e.g. "RunFence_ABC12345"). Empty string when null.</summary>
     public static readonly string AppIdSuffix = "_" + AppId;
 #else
-    public static bool UseAdminOperationMocks => false;
+    public static bool UseAdminOperationMocks => IsUnitTestAdminOperationMockSwitchEnabled();
     public const bool IsDebugBuild = false;
     public static string? AppId => null;
 
     /// <summary>Underscore-prefixed <see cref="AppId"/> for use in names. Empty string in release builds.</summary>
     public static string AppIdSuffix => "";
 #endif
+
+    private static bool IsUnitTestAdminOperationMockSwitchEnabled()
+        => AppContext.TryGetSwitch("RunFence.UnitTests.UseAdminOperationMocks", out var enabled) && enabled;
 }

@@ -56,7 +56,7 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander, IShor
         if (row.Tag is not ProcessRow processRow)
             return;
 
-        var accountColRect = _grid.GetColumnDisplayRectangle(_grid.Columns["Account"]!.Index, false);
+        var accountColRect = _grid.GetColumnDisplayRectangle(_grid.Columns[AccountGridColumns.Account]!.Index, false);
         const int iconSize = 22;
         const int iconGap = 3;
         int iconX = accountColRect.X + 20;
@@ -138,7 +138,7 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander, IShor
     {
         if (e.RowIndex < 0 || e.ColumnIndex < 0)
             return;
-        if (_grid.Columns[e.ColumnIndex].Name != "Account")
+        if (_grid.Columns[e.ColumnIndex].Name != AccountGridColumns.Account)
             return;
 
         var row = _grid.Rows[e.RowIndex];
@@ -175,7 +175,7 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander, IShor
         const int iconGap = 2;
         const int textOffset = toggleWidth + iconSize + iconGap;
 
-        if (row.Cells["Credential"].Value is Image { Width: > 1 } credImage)
+        if (row.Cells[AccountGridColumns.Credential].Value is Image { Width: > 1 } credImage)
         {
             int iconY = bounds.Y + (bounds.Height - iconSize) / 2;
             e.Graphics!.DrawImage(credImage, bounds.X + toggleWidth, iconY, iconSize, iconSize);
@@ -197,7 +197,7 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander, IShor
     {
         if (e.RowIndex < 0 || e.ColumnIndex < 0)
             return;
-        if (_grid.Columns[e.ColumnIndex].Name != "Account")
+        if (_grid.Columns[e.ColumnIndex].Name != AccountGridColumns.Account)
             return;
         if (_grid.Rows[e.RowIndex].Tag is not ProcessRow processRow)
             return;
@@ -221,9 +221,9 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander, IShor
 
     public string? GetProcessRowTooltip(ProcessRow processRow)
     {
-        if (!_grid.Columns.Contains("Account"))
+        if (!_grid.Columns.Contains(AccountGridColumns.Account))
             return null;
-        var accountColRect = _grid.GetColumnDisplayRectangle(_grid.Columns["Account"]!.Index, false);
+        var accountColRect = _grid.GetColumnDisplayRectangle(_grid.Columns[AccountGridColumns.Account]!.Index, false);
         const int iconSize = 22;
         const int iconGap = 3;
         int iconX = accountColRect.X + 20;
@@ -249,7 +249,7 @@ public class AccountProcessRowPainter(AccountGridProcessExpander expander, IShor
     {
         if (e.RowIndex < 0 || e.ColumnIndex < 0)
             return;
-        if (_grid.Columns[e.ColumnIndex].Name == "Account")
+        if (_grid.Columns[e.ColumnIndex].Name == AccountGridColumns.Account)
             return; // handled by PaintProcessTreeLines
         if (_grid.Rows[e.RowIndex].Tag is not ProcessRow)
             return;

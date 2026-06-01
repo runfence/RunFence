@@ -92,23 +92,18 @@ internal sealed class HandlerMappingAppModePresenter
     public string? NormalizedTemplate
         => HandlerAssociationDialogValueHelper.NormalizeTemplate(_templateTextBox.Text);
 
-    /// <summary>Returns the current app-level prefixes from the section.</summary>
-    public IReadOnlyList<string>? AppPrefixes => _combinedPrefixesSection.GetAppPrefixes();
-
-    /// <summary>Returns the current association-level prefixes from the section.</summary>
-    public IReadOnlyList<string>? AssociationPrefixes => _combinedPrefixesSection.GetAssociationPrefixes();
-
-    /// <summary>Returns whether "Replace" is selected in the section.</summary>
-    public bool IsReplace => _combinedPrefixesSection.IsReplace;
+    /// <summary>Returns the current combined prefix state from the section.</summary>
+    public CombinedPrefixesState CapturePrefixesState()
+        => new(
+            _combinedPrefixesSection.GetAppPrefixes(),
+            _combinedPrefixesSection.GetAssociationPrefixes(),
+            _combinedPrefixesSection.IsReplace);
 
     /// <summary>Loads app-level and association prefixes with the given replace flag.</summary>
-    public void LoadPrefixes(
-        IReadOnlyList<string>? appPrefixes,
-        IReadOnlyList<string>? assocPrefixes,
-        bool replacePrefixes)
+    public void LoadPrefixes(CombinedPrefixesState state)
     {
-        _combinedPrefixesSection.SetAppPrefixes(appPrefixes);
-        _combinedPrefixesSection.SetAssociationPrefixes(assocPrefixes, replacePrefixes);
+        _combinedPrefixesSection.SetAppPrefixes(state.AppPrefixes);
+        _combinedPrefixesSection.SetAssociationPrefixes(state.AssociationPrefixes, state.ReplacePrefixes);
     }
 
     /// <summary>
@@ -121,10 +116,11 @@ internal sealed class HandlerMappingAppModePresenter
         var lookupKey = string.Equals(keyText.Trim(), commonOptions[0], StringComparison.OrdinalIgnoreCase)
             ? "http"
             : HandlerAssociationDialogValueHelper.NormalizeKey(keyText);
-        var exePath = (_appCombo.SelectedItem as AppComboItem)?.App.ExePath;
+        var selectedApp = SelectedApp;
+        var exePath = selectedApp?.ExePath;
         _templateTextBox.Text = string.IsNullOrEmpty(exePath)
             ? HandlerAssociationDialogValueHelper.DefaultArgumentsTemplate
-            : _valueHelper.ResolveTemplate(exePath, lookupKey);
+            : _valueHelper.ResolveTemplate(exePath, lookupKey, selectedApp?.AccountSid);
     }
 
     /// <summary>
@@ -137,11 +133,12 @@ internal sealed class HandlerMappingAppModePresenter
         _keyCombo.Items.Clear();
 
         var commonOptions = HandlerAssociationDialogValueHelper.CommonOptions;
-        var exePath = (_appCombo.SelectedItem as AppComboItem)?.App.ExePath;
+        var selectedApp = SelectedApp;
+        var exePath = selectedApp?.ExePath;
         IEnumerable<string> items;
         if (!string.IsNullOrEmpty(exePath))
         {
-            var registryKeys = _reader.GetHandledAssociations(exePath);
+            var registryKeys = _reader.GetHandledAssociations(exePath, selectedApp?.AccountSid);
             items = registryKeys.Concat(
                 commonOptions.Except(registryKeys, StringComparer.OrdinalIgnoreCase));
         }

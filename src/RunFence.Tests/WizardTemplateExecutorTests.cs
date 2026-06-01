@@ -64,7 +64,7 @@ public class WizardTemplateExecutorTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
 
         _appState.Setup(a => a.Database).Returns(_database);
         _uiThreadInvoker.Setup(i => i.Invoke(It.IsAny<Action>())).Callback<Action>(a => a());
@@ -119,7 +119,9 @@ public class WizardTemplateExecutorTests : IDisposable
         var packageInstallService = new PackageInstallService(
             Mock.Of<IPackageInstallLauncher>(),
             Mock.Of<IPackageInstallScriptStore>(),
-            toolResolver);
+            toolResolver,
+            Mock.Of<IWindowsTerminalAccountStateService>(),
+            Mock.Of<IWindowsTerminalDeploymentService>());
         var databaseProvider = new Mock<IDatabaseProvider>();
         databaseProvider.Setup(d => d.GetDatabase()).Returns(_database);
 
@@ -135,15 +137,19 @@ public class WizardTemplateExecutorTests : IDisposable
 
         var appEntryBuilder = new AppEntryBuilder(_idGenerator.Object);
 
-        var enforcementHelper = new AppEntryEnforcementHelper(
-            _aclService.Object,
+        var nonAclEnforcer = AppEntryEnforcementTestFactory.CreateNonAclEnforcer(
             _shortcutService.Object,
             _besideTargetShortcutService.Object,
             _iconService.Object,
             _sidNameCache.Object,
             _desktopProvider.Object,
             new Mock<IInteractiveUserSidResolver>().Object,
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
             _log.Object);
+        var enforcementCoordinator = new AppEntryEnforcementCoordinator(
+            _aclService.Object,
+            AppEntryEnforcementTestFactory.CreateAclEnforcer(_aclService.Object),
+            nonAclEnforcer);
 
         var credentialCounter = new Mock<IEvaluationCredentialCounter>();
         credentialCounter.Setup(c => c.CountCredentialsExcludingCurrent(It.IsAny<IEnumerable<CredentialEntry>>()))
@@ -155,9 +161,8 @@ public class WizardTemplateExecutorTests : IDisposable
             createHandler,
             setupHelperFactory,
             appEntryBuilder,
-            enforcementHelper,
+            enforcementCoordinator,
             _shortcutDiscovery.Object,
-            _aclService.Object,
             _sessionSaver.Object,
             _session,
             licenseChecker);
@@ -422,5 +427,161 @@ public class WizardTemplateExecutorTests : IDisposable
         Assert.Equal("TestApp", _database.Apps[0].Name);
         Assert.Equal(TestSid, _database.Apps[0].AccountSid);
         _sessionSaver.Verify(s => s.SaveAndRefresh(), Times.Once);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_CreateDesktopShortcut_UsesCoordinatorOrderingBeforeAncestorRecompute()
+    {
+        var events = new List<string>();
+        _desktopProvider.Setup(provider => provider.GetDesktopPath()).Returns(@"C:\Users\Test\Desktop");
+        _iconService
+            .Setup(service => service.CreateBadgedIcon(It.IsAny<AppEntry>(), null))
+            .Callback<AppEntry, string?>((app, _) => events.Add($"icon:{app.Name}"))
+            .Returns(@"C:\icons\wizard.ico");
+        _sidNameCache.Setup(cache => cache.GetDisplayName(TestSid)).Returns(TestSid);
+        _shortcutService
+            .Setup(service => service.SaveShortcut(It.IsAny<AppEntry>(), It.IsAny<string>()))
+            .Callback<AppEntry, string>((app, _) => events.Add($"desktop:{app.Name}"));
+        _aclService
+            .Setup(service => service.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Callback<AppEntry, IReadOnlyList<AppEntry>>((app, _) => events.Add($"acl:{app.Name}"));
+        _aclService
+            .Setup(service => service.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Callback(() => events.Add("recompute"));
+
+        var flowParams = new WizardStandardFlowParams(
+            Request: null,
+            SetupOptions: null,
+            AccountSid: TestSid,
+            CreateDesktopShortcut: true,
+            BuildOptionsFactory: sid => [AppEntryBuildOptions.ForWizard(
+                "TestApp",
+                @"C:\Windows\System32\notepad.exe",
+                sid,
+                restrictAcl: true,
+                aclMode: AclMode.Allow,
+                manageShortcuts: false)]);
+        var progress = new TestProgressReporter();
+
+        await CreateExecutor().ExecuteAsync(flowParams, progress);
+
+        Assert.Equal(["acl:TestApp", "icon:TestApp", "desktop:TestApp", "recompute"], events);
+        Assert.Contains("Applying ACLs...", progress.StatusMessages);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ManagedShortcutApps_CapturesSidsBeforeWorkerAndBuildsTraversalCacheInsideEnforcement()
+    {
+        var shortcutEvents = new List<string>();
+        var managedSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { TestSid };
+        var callerThreadId = Environment.CurrentManagedThreadId;
+        var captureThreadId = 0;
+        var traversalThreadId = 0;
+        var enforcementThreadId = 0;
+
+        _shortcutDiscovery.Setup(service => service.CaptureManagedSids())
+            .Callback(() =>
+            {
+                captureThreadId = Environment.CurrentManagedThreadId;
+                shortcutEvents.Add("capture");
+            })
+            .Returns(managedSids);
+        _shortcutDiscovery.Setup(service => service.CreateTraversalCache(It.IsAny<HashSet<string>?>()))
+            .Callback<HashSet<string>?>(capturedSids =>
+            {
+                traversalThreadId = Environment.CurrentManagedThreadId;
+                shortcutEvents.Add("cache");
+                Assert.Same(managedSids, capturedSids);
+            })
+            .Returns(new ShortcutTraversalCache([]));
+        _aclService.Setup(service => service.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()))
+            .Callback(() => enforcementThreadId = Environment.CurrentManagedThreadId);
+
+        var flowParams = new WizardStandardFlowParams(
+            Request: null,
+            SetupOptions: null,
+            AccountSid: TestSid,
+            BuildOptionsFactory: sid => [AppEntryBuildOptions.ForWizard(
+                "ManagedShortcutApp",
+                @"C:\Windows\System32\notepad.exe",
+                sid,
+                restrictAcl: true,
+                aclMode: AclMode.Allow,
+                manageShortcuts: true)]);
+
+        await CreateExecutor().ExecuteAsync(flowParams, new TestProgressReporter());
+
+        Assert.Equal(["capture", "cache"], shortcutEvents);
+        Assert.Equal(callerThreadId, captureThreadId);
+        Assert.NotEqual(0, traversalThreadId);
+        Assert.Equal(traversalThreadId, enforcementThreadId);
+        Assert.NotEqual(captureThreadId, traversalThreadId);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ManagedShortcutSidCaptureFailure_ReportsPerAppFailure_ContinuesOtherApps_AndSaves()
+    {
+        var managedAppPath = @"C:\Windows\System32\notepad.exe";
+        var standardAppPath = @"C:\Windows\System32\calc.exe";
+        _shortcutDiscovery.Setup(service => service.CaptureManagedSids())
+            .Throws(new InvalidOperationException("capture failed"));
+
+        var flowParams = new WizardStandardFlowParams(
+            Request: null,
+            SetupOptions: null,
+            AccountSid: TestSid,
+            BuildOptionsFactory: sid =>
+            [
+                AppEntryBuildOptions.ForWizard(
+                    "ManagedShortcutApp",
+                    managedAppPath,
+                    sid,
+                    restrictAcl: true,
+                    aclMode: AclMode.Allow,
+                    manageShortcuts: true),
+                AppEntryBuildOptions.ForWizard(
+                    "StandardApp",
+                    standardAppPath,
+                    sid,
+                    restrictAcl: true,
+                    aclMode: AclMode.Allow,
+                    manageShortcuts: false)
+            ]);
+        var progress = new TestProgressReporter();
+
+        await CreateExecutor().ExecuteAsync(flowParams, progress);
+
+        Assert.Contains("App entry for ManagedShortcutApp: capture failed", progress.Errors);
+        Assert.DoesNotContain(progress.Errors, error => error.Contains("StandardApp", StringComparison.Ordinal));
+        Assert.Contains("Done.", progress.StatusMessages);
+        _shortcutDiscovery.Verify(service => service.CaptureManagedSids(), Times.Once);
+        _shortcutDiscovery.Verify(service => service.CreateTraversalCache(It.IsAny<HashSet<string>?>()), Times.Never);
+        _aclService.Verify(
+            service => service.ApplyAcl(
+                It.Is<AppEntry>(app => app.Name == "StandardApp" && app.ExePath == standardAppPath),
+                It.IsAny<IReadOnlyList<AppEntry>>()),
+            Times.Once);
+        _sessionSaver.Verify(service => service.SaveAndRefresh(), Times.Once);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_NoManagedShortcutApps_DoesNotCaptureSidsOrBuildTraversalCache()
+    {
+        var flowParams = new WizardStandardFlowParams(
+            Request: null,
+            SetupOptions: null,
+            AccountSid: TestSid,
+            BuildOptionsFactory: sid => [AppEntryBuildOptions.ForWizard(
+                "StandardApp",
+                @"C:\Windows\System32\notepad.exe",
+                sid,
+                restrictAcl: false,
+                aclMode: AclMode.Allow,
+                manageShortcuts: false)]);
+
+        await CreateExecutor().ExecuteAsync(flowParams, new TestProgressReporter());
+
+        _shortcutDiscovery.Verify(service => service.CaptureManagedSids(), Times.Never);
+        _shortcutDiscovery.Verify(service => service.CreateTraversalCache(It.IsAny<HashSet<string>?>()), Times.Never);
     }
 }

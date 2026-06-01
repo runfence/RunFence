@@ -21,31 +21,11 @@ public class MainConfigImportApplyService(
         repairService.ApplyAdditionalAppIdRepairs(repairPlan);
         ReplaceContainers(database, importedDb, preservation.OldContainers);
         ReplaceSidNames(database, importedDb, preservation.OldSidNames, sidResolutions);
-        ReplaceAccountsAndRestoreMainGrants(database, importedDb, preservation);
+        ReplaceAccountsAndRestoreMainGrants(database, importedDb, preservation, repairPlan.OrphanedGrantSids);
         ownershipProjection.ReplaceMainOwnership(database.Accounts);
         RespliceAdditionalConfigGrants(database, preservation.AdditionalGrants);
         ApplyCleanupAndDefaults(database);
-        foreach (var sid in repairPlan.OrphanedGrantSids.Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            if (!preservation.OldMainGrants.TryGetValue(sid, out var grants))
-                continue;
-
-            var account = database.GetOrCreateAccount(sid);
-            foreach (var grant in grants)
-            {
-                var clone = grant.Clone();
-                var identity = GrantIntentEntryIdentity.From(sid, clone);
-                if (account.Grants.Any(existing => GrantIntentEntryIdentity.From(sid, existing) == identity))
-                    continue;
-
-                account.Grants.Add(clone);
-                ownershipProjection.AddOwnership(configPath: null, sid, clone);
-            }
-        }
     }
-
-    public IReadOnlyList<string> ApplyOrphanedGrantRemovals(MainConfigImportRepairPlan repairPlan)
-        => repairService.ApplyOrphanedGrantRemovals(repairPlan);
 
     private void ReplaceAppsAndSettings(
         AppDatabase database,
@@ -113,7 +93,8 @@ public class MainConfigImportApplyService(
     private void ReplaceAccountsAndRestoreMainGrants(
         AppDatabase database,
         AppDatabase importedDb,
-        MainConfigImportPreservationSnapshot preservation)
+        MainConfigImportPreservationSnapshot preservation,
+        IEnumerable<string> orphanedGrantSids)
     {
         database.Accounts.Clear();
         foreach (var importedAccount in importedDb.Accounts ?? [])
@@ -126,15 +107,20 @@ public class MainConfigImportApplyService(
             database.Accounts.Add(stub);
         }
 
-        RestoreMainConfigGrants(database, preservation.OldMainGrants);
+        RestoreMainConfigGrants(database, preservation.OldMainGrants, orphanedGrantSids);
     }
 
     private void RestoreMainConfigGrants(
         AppDatabase database,
-        IReadOnlyDictionary<string, List<GrantedPathEntry>> oldMainGrants)
+        IReadOnlyDictionary<string, List<GrantedPathEntry>> oldMainGrants,
+        IEnumerable<string> orphanedGrantSids)
     {
+        var orphanedGrantSidSet = orphanedGrantSids.ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var (sid, grants) in oldMainGrants)
         {
+            if (orphanedGrantSidSet.Contains(sid))
+                continue;
+
             foreach (var grant in grants)
             {
                 var isDenyForCheck = !grant.IsTraverseOnly && grant.IsDeny;

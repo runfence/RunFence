@@ -3,7 +3,6 @@
 using RunFence.Account.UI;
 using RunFence.Apps.UI;
 using RunFence.Core;
-using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
@@ -25,8 +24,9 @@ public partial class EditAccountDialog : RunFence.UI.Forms.ContextHelpForm, IAcc
     public PrivilegeLevel SelectedPrivilegeLevel => _privilegeLevelComboBox.SelectedIndex switch
     {
         0 => PrivilegeLevel.HighestAllowed,
-        1 => PrivilegeLevel.Basic,
-        3 => PrivilegeLevel.LowIntegrity,
+        1 => PrivilegeLevel.HighIntegrity,
+        2 => PrivilegeLevel.Basic,
+        4 => PrivilegeLevel.LowIntegrity,
         _ => PrivilegeLevel.Isolated,
     };
     public bool DeleteRequested { get; private set; }
@@ -49,12 +49,13 @@ public partial class EditAccountDialog : RunFence.UI.Forms.ContextHelpForm, IAcc
     // Characters invalid in Windows SAM account names
     public static readonly char[] InvalidNameChars = ['\"', '/', '\\', '[', ']', ':', ';', '|', '=', ',', '+', '*', '?', '<', '>'];
 
-    private readonly ILocalGroupMembershipService _groupMembership;
+    private readonly ILocalGroupQueryService _groupMembership;
     private readonly IAccountLoginRestrictionService _loginRestriction;
     private readonly IAccountLsaRestrictionService _lsaRestriction;
     private readonly EditAccountDialogCreateHandler _createHandler;
     private readonly EditAccountDialogSaveHandler _saveHandler;
     private readonly IDatabaseProvider _databaseProvider;
+    private readonly IOpenFileDialogAdapterFactory _openFileDialogFactory;
     private string _sid = "";
     private string _currentUsername = "";
     private HashSet<string> _currentGroupSids = new(StringComparer.OrdinalIgnoreCase);
@@ -78,12 +79,13 @@ public partial class EditAccountDialog : RunFence.UI.Forms.ContextHelpForm, IAcc
     };
 
     public EditAccountDialog(
-        ILocalGroupMembershipService groupMembership,
+        ILocalGroupQueryService groupMembership,
         IAccountLoginRestrictionService loginRestriction,
         IAccountLsaRestrictionService lsaRestriction,
         EditAccountDialogCreateHandler createHandler,
         EditAccountDialogSaveHandler saveHandler,
-        IDatabaseProvider databaseProvider)
+        IDatabaseProvider databaseProvider,
+        IOpenFileDialogAdapterFactory openFileDialogFactory)
     {
         _groupMembership = groupMembership;
         _loginRestriction = loginRestriction;
@@ -91,6 +93,7 @@ public partial class EditAccountDialog : RunFence.UI.Forms.ContextHelpForm, IAcc
         _createHandler = createHandler;
         _saveHandler = saveHandler;
         _databaseProvider = databaseProvider;
+        _openFileDialogFactory = openFileDialogFactory;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
         FormClosed += (_, _) => CleanupOwnedCreateAttemptOutput();
@@ -296,11 +299,11 @@ public partial class EditAccountDialog : RunFence.UI.Forms.ContextHelpForm, IAcc
 
     private void OnBrowseSettingsClick(object? sender, EventArgs e)
     {
-        using var dlg = new OpenFileDialog();
+        using var dlgAdapter = _openFileDialogFactory.Create();
+        var dlg = dlgAdapter.Dialog;
         dlg.Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*";
         dlg.Title = "Select Desktop Settings File";
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-        if (dlg.ShowDialog() == DialogResult.OK)
+        if (dlgAdapter.ShowDialog(owner: null) == DialogResult.OK)
             _settingsPathTextBox.Text = dlg.FileName;
     }
 
@@ -590,9 +593,10 @@ public partial class EditAccountDialog : RunFence.UI.Forms.ContextHelpForm, IAcc
         _privilegeLevelComboBox.SelectedIndex = mode switch
         {
             PrivilegeLevel.HighestAllowed => 0,
-            PrivilegeLevel.Basic => 1,
-            PrivilegeLevel.LowIntegrity => 3,
-            _ => 2,
+            PrivilegeLevel.HighIntegrity => 1,
+            PrivilegeLevel.Basic => 2,
+            PrivilegeLevel.LowIntegrity => 4,
+            _ => 3,
         };
     }
 

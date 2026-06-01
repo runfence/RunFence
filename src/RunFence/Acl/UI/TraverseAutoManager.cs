@@ -42,13 +42,13 @@ public class TraverseAutoManager(
     public void AutoAddTraverseIfMissing(string traversePath)
     {
         // Already pending add? Nothing more to do.
-        if (_pending.IsPendingTraverseAdd(traversePath))
+        if (_pending.Traverse.IsPendingTraverseAdd(traversePath))
             return;
 
         // If it was pending removal, cancel that removal — the allow grant depends on it.
-        if (_pending.IsPendingTraverseRemove(traversePath))
+        if (_pending.Traverse.IsPendingTraverseRemove(traversePath))
         {
-            _pending.PendingTraverseRemoves.Remove(traversePath);
+            _pending.Traverse.CancelTraverseRemoval(traversePath);
             return;
         }
 
@@ -61,11 +61,11 @@ public class TraverseAutoManager(
         if (TraverseRightsHelper.HasEffectiveTraverseForGrantSid(traversePath, _sid, _groupSids, aclPermission, pathInfo))
             return;
 
-        _pending.PendingTraverseAdds[traversePath] = new GrantedPathEntry
+        _pending.Traverse.AddTraverse(new GrantedPathEntry
         {
             Path = traversePath,
             IsTraverseOnly = true
-        };
+        });
     }
 
     /// <summary>
@@ -77,18 +77,18 @@ public class TraverseAutoManager(
     {
         if (!OtherAllowGrantsDependOnPath(traversePath))
         {
-            if (_pending.IsPendingTraverseAdd(traversePath))
+            if (_pending.Traverse.IsPendingTraverseAdd(traversePath))
             {
-                _pending.PendingTraverseAdds.Remove(traversePath);
-                _pending.PendingTraverseConfigMoves.Remove(traversePath);
+                _pending.Traverse.RemoveTraverse(traversePath);
+                _pending.Traverse.RemoveTraverseConfigMove(traversePath, out _);
             }
             else
             {
                 var traverseEntry = FindExistingTraverseEntry(traversePath, includeManualSharedEntries: false);
                 if (traverseEntry != null)
                 {
-                    _pending.PendingTraverseRemoves[traversePath] = traverseEntry;
-                    _pending.PendingTraverseConfigMoves.Remove(traversePath);
+                    _pending.Traverse.MarkTraverseForRemoval(traverseEntry);
+                    _pending.Traverse.RemoveTraverseConfigMove(traversePath, out _);
                 }
             }
         }
@@ -124,10 +124,10 @@ public class TraverseAutoManager(
             {
                 if (e.IsDeny || e.IsTraverseOnly)
                     continue;
-                if (_pending.IsPendingRemove(e.Path, e.IsDeny))
+                if (_pending.Grants.IsPendingRemove(e.Path, e.IsDeny))
                     continue;
                 // An entry pending a mode switch to Deny no longer depends on an allow traverse path.
-                if (_pending.PendingModifications.TryGetValue((e.Path, e.IsDeny), out var mod) && mod.NewIsDeny)
+                if (_pending.Grants.TryGetPendingModification(e.Path, e.IsDeny, out var mod) && mod?.NewIsDeny == true)
                     continue;
                 var effectivePath = GetTraversePath(e.Path);
                 if (string.Equals(effectivePath, path, StringComparison.OrdinalIgnoreCase))
@@ -136,7 +136,7 @@ public class TraverseAutoManager(
         }
 
         // Pending add allow grants.
-        foreach (var (key, e) in _pending.PendingAdds)
+        foreach (var (key, e) in _pending.Grants.GetPendingAddsSnapshot())
         {
             if (key.IsDeny)
                 continue;

@@ -21,7 +21,7 @@ public class AccountPostCreateSetupService(
 {
     /// <summary>
     /// Runs the post-create setup flow. If settings import, firewall changes, or internet-blocked
-    /// package installs are required, shows an <see cref="Forms.AccountCreationProgressForm"/>.
+    /// package installs are required, shows a cancellable progress form.
     /// The <paramref name="saveAndRefresh"/> callback must trigger a save and grid refresh.
     /// </summary>
     public async Task RunPostCreateSetupAsync(PostCreateSetupContext request, Action saveAndRefresh)
@@ -68,9 +68,10 @@ public class AccountPostCreateSetupService(
                             progress.SetStatus($"Installing packages for {request.NewUsername}...");
                             try
                             {
-                                var warning = packageInstallService.InstallPackages(
+                                var warning = await packageInstallService.InstallPackagesAsync(
                                     request.SelectedInstallPackages,
-                                    new AccountLaunchIdentity(request.CreatedSid));
+                                    new AccountLaunchIdentity(request.CreatedSid),
+                                    progress.CancellationToken);
                                 var formattedWarning = LaunchExecutionWarningFormatter.Format("The package installer", warning);
                                 if (formattedWarning != null)
                                     request.Warnings.Add(formattedWarning);

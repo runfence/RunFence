@@ -1,12 +1,11 @@
 using System.ComponentModel;
-using System.Text.Json;
-using RunFence.Account;
 using RunFence.Acl.Permissions;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Persistence.UI;
 using RunFence.UI;
 using RunFence.UI.Forms;
 
@@ -19,48 +18,38 @@ namespace RunFence.Persistence.UI.Forms;
 public partial class ConfigManagerSection : UserControl
 {
     private readonly IAppConfigService _appConfigService;
-    private readonly IAppFilter _appFilter;
     private readonly ILoggingService _log;
     private readonly IAclPermissionService _aclPermission;
-    private readonly ConfigImportHandler _importHandler;
-    private readonly AdditionalConfigImportCoordinator _additionalImportCoordinator;
     private readonly ISessionProvider _sessionProvider;
-    private readonly IAccountSidResolutionService _sidResolutionService;
-    private readonly HandlerSyncHelper _handlerSyncHelper;
+    private readonly IConfigImportExportFilePicker _filePicker;
+    private readonly ConfigExportController _exportController;
+    private readonly MainConfigImportController _mainImportController;
+    private readonly AdditionalConfigImportController _additionalImportController;
     private readonly IMessageBoxService _messageBoxService;
 
-    /// <summary>Fired when a config file should be loaded by the parent.</summary>
     public event Action<string>? ConfigLoadRequested;
-
-    /// <summary>Fired when a config file should be unloaded by the parent.</summary>
     public event Action<string>? ConfigUnloadRequested;
-
-    /// <summary>Fired when config data changes and the parent should refresh.</summary>
     public event Action? DataChanged;
 
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    internal Func<string, string, string?> SaveFilePathSelector { get; set; } = SelectSavePath;
-
-    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
-    internal Func<string, string, string?> OpenFilePathSelector { get; set; } = SelectOpenPath;
-
-    public ConfigManagerSection(IAppConfigService appConfigService,
-        IAppFilter appFilter, ILoggingService log, IAclPermissionService aclPermission,
-        ConfigImportHandler importHandler, AdditionalConfigImportCoordinator additionalImportCoordinator,
+    public ConfigManagerSection(
+        IAppConfigService appConfigService,
+        IAclPermissionService aclPermission,
+        ILoggingService log,
         ISessionProvider sessionProvider,
-        IAccountSidResolutionService sidResolutionService,
-        HandlerSyncHelper handlerSyncHelper,
+        IConfigImportExportFilePicker filePicker,
+        ConfigExportController exportController,
+        MainConfigImportController mainImportController,
+        AdditionalConfigImportController additionalImportController,
         IMessageBoxService messageBoxService)
     {
         _appConfigService = appConfigService;
-        _appFilter = appFilter;
-        _log = log;
         _aclPermission = aclPermission;
-        _importHandler = importHandler;
-        _additionalImportCoordinator = additionalImportCoordinator;
+        _log = log;
         _sessionProvider = sessionProvider;
-        _sidResolutionService = sidResolutionService;
-        _handlerSyncHelper = handlerSyncHelper;
+        _filePicker = filePicker;
+        _exportController = exportController;
+        _mainImportController = mainImportController;
+        _additionalImportController = additionalImportController;
         _messageBoxService = messageBoxService;
         InitializeComponent();
         _configDesc.Text = ContextHelpTextCatalog.ExtraConfig_InlineSummary;
@@ -71,15 +60,13 @@ public partial class ConfigManagerSection : UserControl
         _configImportButton.Image = UiIconFactory.CreateToolbarIcon("\u2193", Color.FromArgb(0x33, 0x66, 0xCC));
     }
 
-    private AppDatabase GetDatabase() => _sessionProvider.GetSession().Database;
     private CredentialStore GetCredentialStore() => _sessionProvider.GetSession().CredentialStore;
-    private ISecureSecretSnapshotSource GetPinDerivedKey()
-        => _sessionProvider.GetSession().PinDerivedKey;
+    private ISecureSecretSnapshotSource GetPinDerivedKey() => _sessionProvider.GetSession().PinDerivedKey;
 
     public void RefreshConfigList()
     {
         _configListBox.Items.Clear();
-        _configListBox.Items.Add(new ConfigComboItem(null)); // "Main Config"
+        _configListBox.Items.Add(new ConfigComboItem(null));
         foreach (var path in _appConfigService.GetLoadedConfigPaths())
             _configListBox.Items.Add(new ConfigComboItem(path));
         if (_configListBox.Items.Count > 0)
@@ -89,8 +76,6 @@ public partial class ConfigManagerSection : UserControl
     public void RegisterContextHelp(ContextHelpForm host)
     {
     }
-
-    // --- Event handlers ---
 
     private void OnConfigDescResize(object? sender, EventArgs e)
     {
@@ -142,7 +127,7 @@ public partial class ConfigManagerSection : UserControl
 
     private void OnNewConfigClick(object? sender, EventArgs e)
     {
-        var fileName = SaveFilePathSelector(
+        var fileName = _filePicker.SelectSavePath(
             "RunFence Config (*.rfn)|*.rfn|All files (*.*)|*.*",
             "Create New App Config");
         if (string.IsNullOrEmpty(fileName))
@@ -185,7 +170,7 @@ public partial class ConfigManagerSection : UserControl
 
     private void OnLoadConfigClick(object? sender, EventArgs e)
     {
-        var fileName = OpenFilePathSelector(
+        var fileName = _filePicker.SelectOpenPath(
             "RunFence Config (*.rfn)|*.rfn|All files (*.*)|*.*",
             "Load App Config");
         if (string.IsNullOrEmpty(fileName))
@@ -211,40 +196,21 @@ public partial class ConfigManagerSection : UserControl
         if (_configListBox.SelectedItem is not ConfigComboItem item)
             return;
 
-        var fileName = SaveFilePathSelector(
+        var fileName = _filePicker.SelectSavePath(
             "JSON files (*.json)|*.json|All files (*.*)|*.*",
             "Export Config");
         if (string.IsNullOrEmpty(fileName))
             return;
 
-        try
+        var result = _exportController.Export(item.Path, fileName);
+        if (result.Succeeded)
         {
-            var database = GetDatabase();
-            var exportConfig = _appConfigService.GetConfigForExport(item.Path, database);
-            string json;
-            if (item.Path == null)
-            {
-                var mainDb = _appFilter.FilterForMainConfig(database);
-                mainDb.Apps = exportConfig.Apps;
-                mainDb.Settings.HandlerMappings = exportConfig.HandlerMappings != null
-                    ? new Dictionary<string, HandlerMappingEntry>(exportConfig.HandlerMappings, StringComparer.OrdinalIgnoreCase)
-                    : null;
-                var exportDb = mainDb;
-                json = JsonSerializer.Serialize(exportDb, JsonDefaults.Options);
-            }
-            else
-            {
-                json = JsonSerializer.Serialize(exportConfig, JsonDefaults.Options);
-            }
-
-            File.WriteAllText(fileName, json);
-            _messageBoxService.Show($"Config exported to {Path.GetFileName(fileName)}.", "Export Complete",
+            _messageBoxService.Show($"Config exported to {result.ExportedFileName}.", "Export Complete",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        catch (Exception ex)
+        else
         {
-            _log.Error("Config export failed", ex);
-            _messageBoxService.Show($"Export failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _messageBoxService.Show($"Export failed: {result.ErrorMessage}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -253,7 +219,7 @@ public partial class ConfigManagerSection : UserControl
         if (_configListBox.SelectedItem is not ConfigComboItem item)
             return;
 
-        var importPath = OpenFilePathSelector(
+        var importPath = _filePicker.SelectOpenPath(
             "JSON files (*.json)|*.json|All files (*.*)|*.*",
             "Import Config");
         if (string.IsNullOrEmpty(importPath))
@@ -269,25 +235,12 @@ public partial class ConfigManagerSection : UserControl
         {
             if (item.Path == null)
             {
-                var session = _sessionProvider.GetSession();
-                var sidResolutions = await _sidResolutionService.ResolveSidsAsync(
-                    session.CredentialStore, session.Database.SidNames);
-                var result = _importHandler.ImportMainConfig(importPath, sidResolutions);
-                var postImportWarnings = new List<string>();
-                DataChanged?.Invoke();
-
-                try
-                {
-                    _handlerSyncHelper.Sync();
-                }
-                catch (Exception ex)
-                {
-                    _log.Error("Main config import handler sync failed", ex);
-                    postImportWarnings.Add($"Handler sync failed: {ex.Message}");
-                }
-
+                var result = await _mainImportController.ImportAsync(
+                    importPath,
+                    () => DataChanged?.Invoke(),
+                    CancellationToken.None);
                 RefreshConfigList();
-                var warnings = result.Warnings.Concat(postImportWarnings).ToList();
+                var warnings = result.Warnings.ToList();
                 if (result.SaveError != null)
                 {
                     var warningText = warnings.Count > 0
@@ -312,8 +265,8 @@ public partial class ConfigManagerSection : UserControl
             }
             else
             {
-                var result = _additionalImportCoordinator.ImportAdditionalConfig(importPath, item.Path);
-                if (result.Status == AdditionalConfigImportStatus.Succeeded)
+                var result = _additionalImportController.Import(importPath, item.Path);
+                if (result.Succeeded)
                 {
                     DataChanged?.Invoke();
                     RefreshConfigList();
@@ -325,8 +278,13 @@ public partial class ConfigManagerSection : UserControl
                     var errorText = result.Errors.Count > 0
                         ? string.Join("\n", result.Errors)
                         : "Unknown import error.";
-                    throw new InvalidOperationException(
-                        $"Additional config import failed ({result.Status}): {errorText}");
+                    var message = $"Additional config import failed ({result.Status}): {errorText}";
+                    _log.Error("Config import failed", new InvalidOperationException(message));
+                    _messageBoxService.Show(
+                        $"Import failed: {message}",
+                        "Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
                 }
             }
         }
@@ -339,27 +297,5 @@ public partial class ConfigManagerSection : UserControl
             _log.Error("Config import failed", ex);
             _messageBoxService.Show($"Import failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
-    }
-
-    private static string? SelectSavePath(string filter, string title)
-    {
-        using var dlg = new SaveFileDialog
-        {
-            Filter = filter,
-            Title = title
-        };
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-        return dlg.ShowDialog() == DialogResult.OK ? dlg.FileName : null;
-    }
-
-    private static string? SelectOpenPath(string filter, string title)
-    {
-        using var dlg = new OpenFileDialog
-        {
-            Filter = filter,
-            Title = title
-        };
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-        return dlg.ShowDialog() == DialogResult.OK ? dlg.FileName : null;
     }
 }

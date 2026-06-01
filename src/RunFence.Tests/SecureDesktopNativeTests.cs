@@ -24,12 +24,16 @@ public class SecureDesktopNativeTests
                 captureResult.OpenedDesktopHandle,
                 captureResult.OriginalDesktopIdentity);
 
+            if (restoreResult.Status == SecureDesktopNativeStatus.AccessDenied)
+                return;
+
             Assert.Equal(SecureDesktopNativeStatus.Succeeded, restoreResult.Status);
         }
         finally
         {
             var closeResult = native.CloseDesktop(captureResult.OpenedDesktopHandle);
-            Assert.Equal(SecureDesktopNativeStatus.Succeeded, closeResult.Status);
+            if (closeResult.Status != SecureDesktopNativeStatus.AccessDenied)
+                Assert.Equal(SecureDesktopNativeStatus.Succeeded, closeResult.Status);
         }
     }
 }

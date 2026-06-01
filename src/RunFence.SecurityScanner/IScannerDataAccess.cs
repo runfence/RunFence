@@ -19,11 +19,6 @@ public interface IEnvironmentDataAccess
     /// </summary>
     Dictionary<string, HashSet<string>?> BulkLookupGroupMemberSids(IReadOnlyList<string> sids);
     string ResolveDisplayName(string sidString);
-    int? GetAccountLockoutThreshold();
-    bool? GetAdminAccountLockoutEnabled();
-    bool? GetBlankPasswordRestrictionEnabled();
-    List<(string ProfileName, bool Enabled)>? GetFirewallProfileStates();
-    (bool IsDisabled, bool IsStopped)? GetWindowsFirewallServiceState();
 }
 
 public interface IFileSystemDataAccess
@@ -33,9 +28,20 @@ public interface IFileSystemDataAccess
     DirectorySecurity GetDirectorySecurity(string path);
     FileSecurity GetFileSecurity(string path);
     string[] GetFilesInFolder(string folderPath);
-    IEnumerable<string> GetDriveRoots();
     ShortcutTargetInfo? ResolveShortcutTarget(string lnkPath);
-    void LogError(string message);
+}
+
+public interface IFirewallPolicyDataAccess
+{
+    List<(string ProfileName, bool Enabled)>? GetFirewallProfileStates();
+    (bool IsDisabled, bool IsStopped)? GetWindowsFirewallServiceState();
+}
+
+public interface IAccountPolicyDataAccess
+{
+    int? GetAccountLockoutThreshold();
+    bool? GetAdminAccountLockoutEnabled();
+    bool? GetBlankPasswordRestrictionEnabled();
 }
 
 /// <summary>
@@ -100,19 +106,3 @@ public interface IGroupPolicyDataAccess
     string GetSharedWrapperScriptsDir();
     List<string> GetLogonScriptPaths(string userSid);
 }
-
-/// <summary>
-/// Composed data access interface used by <see cref="SecurityScanner"/> and its sub-scanners.
-/// <see cref="DefaultScannerDataAccess"/> implements all focused sub-interfaces.
-/// Individual scanners accept only the focused interface(s) they require.
-/// </summary>
-public interface IScannerDataAccess :
-    IEnvironmentDataAccess,
-    IFileSystemDataAccess,
-    IAutorunRegistryAccess,
-    IWinlogonRegistryAccess,
-    IServiceRegistryAccess,
-    IIfeoRegistryAccess,
-    IWindowsComponentRegistryAccess,
-    ITaskSchedulerDataAccess,
-    IGroupPolicyDataAccess;

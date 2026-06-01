@@ -15,11 +15,11 @@ internal sealed class HandlerAssociationDialogValueHelper(IExeAssociationRegistr
     public static string? NormalizeTemplate(string? rawTemplate)
         => HandlerAssociationValueNormalization.NormalizeTemplate(rawTemplate);
 
-    public string ResolveTemplate(string exePath, string key)
+    public string ResolveTemplate(string exePath, string key, string? accountSid = null)
     {
         if (string.IsNullOrEmpty(exePath) || string.IsNullOrEmpty(key) || !AppHandlerRegistrationService.IsValidKey(key))
             return DefaultArgumentsTemplate;
 
-        return reader.GetNonDefaultArguments(exePath, key) ?? DefaultArgumentsTemplate;
+        return reader.GetNonDefaultArguments(exePath, key, accountSid) ?? DefaultArgumentsTemplate;
     }
 }

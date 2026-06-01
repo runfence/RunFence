@@ -11,8 +11,12 @@ public sealed class AssociationExecutablePathResolver(
         if (!Path.IsPathRooted(exePath))
             return AssociationExecutablePathResolution.Valid(exePath);
 
-        if (fileSystem.FileExists(exePath))
+        var state = fileSystem.GetFileState(exePath);
+        if (state == BackupIntentPathState.Exists)
             return AssociationExecutablePathResolution.Valid(exePath);
+
+        if (state == BackupIntentPathState.Unknown)
+            return AssociationExecutablePathResolution.Invalid(exePath, "rooted executable path is inaccessible or unreadable");
 
         var repairedPath = packagePathRepairer.TryRepair(exePath);
         if (repairedPath != null)

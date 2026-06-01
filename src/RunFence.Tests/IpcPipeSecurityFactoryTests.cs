@@ -10,25 +10,6 @@ namespace RunFence.Tests;
 public class IpcPipeSecurityFactoryTests
 {
     [Fact]
-    public void ServerAccountCanCreateNextPipeInstance()
-    {
-        string pipeName = $"RunFence_Test_{Guid.NewGuid():N}";
-        var securityFactory = new IpcPipeSecurityFactory(new CurrentProcessSidProvider());
-
-        using var firstPipe = CreatePipe(
-            pipeName,
-            securityFactory.Create(),
-            PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance);
-        using var secondPipe = CreatePipe(
-            pipeName,
-            securityFactory.Create(),
-            PipeOptions.Asynchronous);
-
-        Assert.NotNull(firstPipe);
-        Assert.NotNull(secondPipe);
-    }
-
-    [Fact]
     public void CallerRulesAllowRestrictedTokensWithoutCreateInstanceRights()
     {
         var securityFactory = new IpcPipeSecurityFactory(new CurrentProcessSidProvider());
@@ -55,6 +36,23 @@ public class IpcPipeSecurityFactoryTests
         var denyRule = Assert.Single(rules, r =>
             r.IdentityReference.Equals(networkSid) && r.AccessControlType == AccessControlType.Deny);
         Assert.True(denyRule.PipeAccessRights.HasFlag(PipeAccessRights.FullControl));
+    }
+
+    [Fact]
+    public void ServerAccountCanCreateNextPipeInstance()
+    {
+        var securityFactory = new IpcPipeSecurityFactory(new CurrentProcessSidProvider());
+        var pipeSecurity = securityFactory.Create();
+        var pipeName = $"RunFence_IpcPipeSecurity_{Guid.NewGuid():N}";
+
+        using var firstPipe = CreatePipe(
+            pipeName,
+            pipeSecurity,
+            PipeOptions.Asynchronous | PipeOptions.FirstPipeInstance);
+        using var secondPipe = CreatePipe(
+            pipeName,
+            pipeSecurity,
+            PipeOptions.Asynchronous);
     }
 
     private static void AssertCallerRule(List<PipeAccessRule> rules, WellKnownSidType sidType)

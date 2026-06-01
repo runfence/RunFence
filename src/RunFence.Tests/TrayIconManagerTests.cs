@@ -6,6 +6,7 @@ using RunFence.Infrastructure;
 using RunFence.Persistence;
 using RunFence.Security;
 using RunFence.TrayIcon;
+using System.Drawing;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -21,16 +22,6 @@ public class TrayIconManagerTests
         Assert.Equal("Show", menu.Items[0].Text);
         Assert.Equal("Lock", menu.Items[1].Text);
         Assert.Equal("Block Input Injection", menu.Items[2].Text);
-    }
-
-    [Fact]
-    public void RebuildContextMenu_LockItemHasImage()
-    {
-        using var context = CreateManagerContext();
-
-        var lockItem = context.NotifyIcon.ContextMenuStrip!.Items[1] as ToolStripMenuItem;
-        Assert.NotNull(lockItem);
-        Assert.NotNull(lockItem!.Image);
     }
 
     [Fact]
@@ -132,6 +123,127 @@ public class TrayIconManagerTests
     }
 
     [Fact]
+    public void SetForegroundMarkerOverlay_AppliesBadgeAndRestoresBase()
+    {
+        using var baseIcon = CreateTestIcon(Color.SlateGray);
+        using var context = CreateManagerContext(baseIcon: baseIcon);
+        var badgeCenter = GetBadgeCenter(baseIcon);
+        var baseColor = GetPixel(baseIcon, badgeCenter);
+
+        context.Manager.SetForegroundMarkerOverlay(Color.Red);
+        using (var markerBitmap = new Bitmap(context.NotifyIcon.Icon!.ToBitmap()))
+        {
+            var markerColor = markerBitmap.GetPixel(badgeCenter.X, badgeCenter.Y);
+            Assert.NotEqual(baseColor, markerColor);
+            Assert.Equal(Color.Red.ToArgb(), markerColor.ToArgb());
+        }
+
+        context.Manager.SetForegroundMarkerOverlay(null);
+        using var restoredBitmap = new Bitmap(context.NotifyIcon.Icon.ToBitmap());
+        var restoredColor = restoredBitmap.GetPixel(badgeCenter.X, badgeCenter.Y);
+        Assert.Equal(baseColor, restoredColor);
+    }
+
+    [Fact]
+    public void SetForegroundMarkerOverlay_IsIdempotentForSameColor()
+    {
+        using var context = CreateManagerContext(baseIcon: CreateTestIcon(Color.LightBlue));
+        context.Manager.SetForegroundMarkerOverlay(Color.MediumSeaGreen);
+
+        var firstHandle = context.NotifyIcon.Icon!.Handle;
+        context.Manager.SetForegroundMarkerOverlay(Color.MediumSeaGreen);
+        var secondHandle = context.NotifyIcon.Icon!.Handle;
+
+        Assert.Equal(firstHandle, secondHandle);
+    }
+
+    [Fact]
+    public void SetForegroundMarkerOverlay_ReplacesGeneratedOverlayOnColorChange()
+    {
+        using var baseIcon = CreateTestIcon(Color.Black);
+        using var context = CreateManagerContext(baseIcon: baseIcon);
+        var badgeCenter = GetBadgeCenter(baseIcon);
+
+        context.Manager.SetForegroundMarkerOverlay(Color.Red);
+        using (var redBitmap = new Bitmap(context.NotifyIcon.Icon!.ToBitmap()))
+        {
+            Assert.Equal(Color.Red.ToArgb(), redBitmap.GetPixel(badgeCenter.X, badgeCenter.Y).ToArgb());
+        }
+
+        context.Manager.SetForegroundMarkerOverlay(Color.Blue);
+        using (var blueBitmap = new Bitmap(context.NotifyIcon.Icon!.ToBitmap()))
+        {
+            Assert.Equal(Color.Blue.ToArgb(), blueBitmap.GetPixel(badgeCenter.X, badgeCenter.Y).ToArgb());
+        }
+    }
+
+    [Fact]
+    public void Dispose_DoesNotDisposeProviderOwnedBaseIcon()
+    {
+        using var baseIcon = CreateTestIcon(Color.Gold);
+        var context = CreateManagerContext(baseIcon: baseIcon);
+        context.Manager.SetForegroundMarkerOverlay(Color.Red);
+
+        context.Manager.Dispose();
+
+        using var baseBitmap = new Bitmap(baseIcon.ToBitmap());
+        Assert.NotNull(baseBitmap);
+        context.Dispose();
+    }
+
+    [Fact]
+    public void Dispose_WhenOverlayActive_IsIdempotentAndKeepsProviderBaseIconUsable()
+    {
+        using var baseIcon = CreateTestIcon(Color.MediumPurple);
+        using var context = CreateManagerContext(baseIcon: baseIcon);
+        context.Manager.SetForegroundMarkerOverlay(Color.OrangeRed);
+
+        context.Manager.Dispose();
+        context.Manager.Dispose();
+
+        using var baseBitmap = new Bitmap(baseIcon.ToBitmap());
+        Assert.NotNull(baseBitmap);
+    }
+
+    [Fact]
+    public void RestoreIconVisibility_RestoresActiveOverlayOrBase()
+    {
+        using var baseIcon = CreateTestIcon(Color.CornflowerBlue);
+        using var context = CreateManagerContext(baseIcon: baseIcon);
+        var badgeCenter = GetBadgeCenter(baseIcon);
+        var baseColor = GetPixel(baseIcon, badgeCenter);
+
+        context.Manager.SetForegroundMarkerOverlay(Color.DarkOrange);
+        context.Manager.RestoreIconVisibility();
+        using (var overlayBitmap = new Bitmap(context.NotifyIcon.Icon!.ToBitmap()))
+        {
+            Assert.NotEqual(baseColor, overlayBitmap.GetPixel(badgeCenter.X, badgeCenter.Y));
+        }
+
+        context.Manager.SetForegroundMarkerOverlay(null);
+        context.Manager.RestoreIconVisibility();
+        using (var restoredBitmap = new Bitmap(context.NotifyIcon.Icon!.ToBitmap()))
+        {
+            Assert.Equal(baseColor, restoredBitmap.GetPixel(badgeCenter.X, badgeCenter.Y));
+        }
+    }
+
+    [Fact]
+    public void Dispose_RevertsOverlayToBaseBeforeDisposingGeneratedIcon()
+    {
+        using var baseIcon = CreateTestIcon(Color.DarkSeaGreen);
+        using var context = CreateManagerContext(baseIcon: baseIcon);
+        var badgeCenter = GetBadgeCenter(baseIcon);
+        var baseColor = GetPixel(baseIcon, badgeCenter);
+
+        context.Manager.SetForegroundMarkerOverlay(Color.Crimson);
+
+        context.Manager.Dispose();
+        using var finalBitmap = new Bitmap(context.NotifyIcon.Icon!.ToBitmap());
+        Assert.Equal(baseColor, finalBitmap.GetPixel(badgeCenter.X, badgeCenter.Y));
+    }
+
+    [Fact]
     public void UpdateDatabase_BeforeInitialize_DefersMenuBuildUntilInitialized()
     {
         var notifyIcon = new NotifyIcon();
@@ -146,7 +258,8 @@ public class TrayIconManagerTests
                 new SidDisplayNameResolver(new Mock<ISidResolver>().Object, new Mock<IProfilePathResolver>().Object),
                 new Mock<IIconService>().Object,
                 new TrayMenuDiscoveryBuilder(new Mock<IShortcutIconHelper>().Object)),
-            new Mock<IInputInjectionBlockerService>().Object);
+            new Mock<IInputInjectionBlockerService>().Object,
+            new TrayIconOverlayRenderer());
         using var _ = manager;
 
         manager.UpdateDatabase(new CredentialStore());
@@ -174,7 +287,8 @@ public class TrayIconManagerTests
                 new SidDisplayNameResolver(new Mock<ISidResolver>().Object, new Mock<IProfilePathResolver>().Object),
                 new Mock<IIconService>().Object,
                 new TrayMenuDiscoveryBuilder(new Mock<IShortcutIconHelper>().Object)),
-            new Mock<IInputInjectionBlockerService>().Object);
+            new Mock<IInputInjectionBlockerService>().Object,
+            new TrayIconOverlayRenderer());
         using var _ = manager;
 
         manager.UpdateDiscoveredApps([new StartMenuEntry("Notepad", @"C:\Windows\Notepad.exe", "S-1-5-21-test", null)]);
@@ -191,14 +305,13 @@ public class TrayIconManagerTests
         bool lockVisible = true,
         bool lockEnabled = true,
         bool isLocked = false,
-        ITrayOwner? trayOwner = null)
+        ITrayOwner? trayOwner = null,
+        Icon? baseIcon = null)
     {
         var owner = trayOwner as RecordingTrayOwner
                     ?? new RecordingTrayOwner(lockVisible, lockEnabled, isLocked);
 
         var notifyIcon = new NotifyIcon();
-        var mockAppIconProvider = new Mock<IAppIconProvider>();
-        mockAppIconProvider.Setup(p => p.GetAppIcon()).Returns(SystemIcons.Application);
         var mockDbProvider = new Mock<IDatabaseProvider>();
         mockDbProvider.Setup(p => p.GetDatabase()).Returns(new AppDatabase());
         var mockSidResolver = new Mock<ISidResolver>();
@@ -209,18 +322,53 @@ public class TrayIconManagerTests
             new Mock<IIconService>().Object,
             new TrayMenuDiscoveryBuilder(new Mock<IShortcutIconHelper>().Object));
         var actionHandler = new RecordingActionHandler();
+        var resolvedBaseIcon = baseIcon ?? SystemIcons.Application;
+        var mockAppIconProvider = new Mock<IAppIconProvider>();
+        mockAppIconProvider.Setup(p => p.GetAppIcon()).Returns(resolvedBaseIcon);
 
         var manager = new TrayIconManager(
             notifyIcon,
             mockAppIconProvider.Object,
             mockDbProvider.Object,
             trayMenuBuilder,
-            mockInjectionBlocker.Object)
+            mockInjectionBlocker.Object,
+            new TrayIconOverlayRenderer())
         { };
 
         manager.Initialize(owner, actionHandler);
 
         return new ManagerContext(manager, notifyIcon, owner, actionHandler);
+    }
+
+    private static Color GetPixel(Icon icon, Point point)
+    {
+        using var bitmap = new Bitmap(icon.ToBitmap());
+        return bitmap.GetPixel(point.X, point.Y);
+    }
+
+    private static Point GetBadgeCenter(Icon icon)
+    {
+        var bounds = TrayIconOverlayRenderer.CalculateBadgeBounds(icon.Size);
+        return new Point(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
+    }
+
+    private static Icon CreateTestIcon(Color fillColor)
+    {
+        using var bitmap = new Bitmap(32, 32);
+        using (var g = Graphics.FromImage(bitmap))
+        {
+            g.Clear(fillColor);
+        }
+
+        var hIcon = bitmap.GetHicon();
+        try
+        {
+            return (Icon)Icon.FromHandle(hIcon).Clone();
+        }
+        finally
+        {
+            TrayIconOverlayNative.DestroyIcon(hIcon);
+        }
     }
 
     private sealed class RecordingTrayOwner : ITrayOwner

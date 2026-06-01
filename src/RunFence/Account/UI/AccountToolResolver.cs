@@ -7,12 +7,6 @@ namespace RunFence.Account.UI;
 /// </summary>
 public class AccountToolResolver(IProfilePathResolver profilePathResolver)
 {
-    /// <summary>
-    /// Returns wt.exe from the account's WindowsApps directory if installed, otherwise falls back to cmd.exe.
-    /// </summary>
-    public string ResolveTerminalExe(string sid)
-        => ResolveWindowsAppsExe(sid, "wt.exe") ?? "cmd.exe";
-
     public string? GetProfileRoot(string sid)
     {
         if (SidResolutionHelper.IsSystemSid(sid))

@@ -1,5 +1,3 @@
-using RunFence.Persistence;
-
 namespace RunFence.Acl;
 
 public interface IGrantIntentSnapshotService

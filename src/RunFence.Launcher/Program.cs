@@ -10,13 +10,12 @@ public static class Program
     {
         LauncherNative.AllowSetForegroundWindow(LauncherNative.ASFW_ANY);
 
+        var notifier = new LauncherUserNotifier();
         var launcherIpcHelper = new LauncherIpcHelper(
             new LauncherIpcClient(),
             new LauncherGuiController(),
             new LauncherWaitDelay(),
-            new LauncherUserNotifier());
-        var commandSender = new LauncherIpcCommandSender(launcherIpcHelper);
-        var notifier = new LauncherUserNotifier();
+            notifier);
         var launcherFallbackRegistry = new LauncherAssociationFallbackRegistry();
         var fallbackRestoreService = new AssociationFallbackRestoreService(launcherFallbackRegistry);
         var fallbackResolver = new LauncherAssociationFallbackCommandResolver(launcherFallbackRegistry);
@@ -26,13 +25,13 @@ public static class Program
             fallbackResolver,
             processStarter,
             notifier);
-        var associationHandler = new AssociationHandler(commandSender, fallbackService, notifier);
-        var openFolderHandler = new OpenFolderHandler(commandSender, processStarter);
+        var associationHandler = new AssociationHandler(launcherIpcHelper, fallbackService, notifier);
+        var openFolderHandler = new OpenFolderHandler(launcherIpcHelper, processStarter, notifier);
 
         var command = LauncherCommandRouter.Route(args, Environment.CommandLine);
         if (command.CommandKind == LauncherCommandKind.Invalid)
         {
-            LauncherIpcHelper.ShowError(command.Warning ?? "Invalid command.");
+            notifier.ShowError(command.Warning ?? "Invalid command.");
             return command.ExitCode;
         }
 
@@ -58,19 +57,19 @@ public static class Program
             }
             case LauncherCommandKind.LaunchApp:
             {
-                var response = commandSender.SendWithAutoStart(command.IpcMessage!);
+                var response = launcherIpcHelper.SendWithAutoStart(command.IpcMessage!);
                 if (response == null)
                     return 1;
                 if (!response.Success)
                 {
-                    LauncherIpcHelper.ShowError(response.ErrorMessage ?? "Unknown error.");
+                    notifier.ShowError(response.ErrorMessage ?? "Unknown error.");
                     return 1;
                 }
 
                 return 0;
             }
             default:
-                LauncherIpcHelper.ShowError("Invalid command.");
+                notifier.ShowError("Invalid command.");
                 return 1;
         }
     }

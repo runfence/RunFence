@@ -68,74 +68,94 @@ public class AccountGridRefreshHandler(
         catch (Exception ex)
         {
             log.Error("Async stale name detection failed, falling back to synchronous refresh", ex);
-            RefreshGrid();
+            await RefreshGridAsync();
         }
     }
 
-    public async void RefreshGrid(Action? afterPopulate = null)
-        => await RefreshGridCoreAsync(beforePopulate: null, afterPopulate);
+    public Task RefreshGridAsync(Action? afterPopulate = null, CancellationToken cancellationToken = default)
+        => RefreshGridCoreAsync(beforePopulate: null, afterPopulate, cancellationToken);
 
-    public async void RefreshGridWithPreFetch(Func<Task> beforePopulate, Action? afterPopulate = null)
-        => await RefreshGridCoreAsync(beforePopulate, afterPopulate);
+    public Task RefreshGridWithPreFetchAsync(
+        Func<CancellationToken, Task> beforePopulate,
+        Action? afterPopulate = null,
+        CancellationToken cancellationToken = default)
+        => RefreshGridCoreAsync(beforePopulate, afterPopulate, cancellationToken);
 
-    private async Task RefreshGridCoreAsync(Func<Task>? beforePopulate, Action? afterPopulate)
+    private async Task RefreshGridCoreAsync(
+        Func<CancellationToken, Task>? beforePopulate,
+        Action? afterPopulate,
+        CancellationToken cancellationToken)
     {
         // Cancel any previous in-flight refresh and start a new one.
         _refreshCts?.Cancel();
         _refreshCts?.Dispose();
         var cts = new CancellationTokenSource();
         _refreshCts = cts;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, cancellationToken);
+        var refreshToken = linkedCts.Token;
 
-        // Reconcile group membership changes before populating the grid.
-        // If the timer is already reconciling, skip to avoid concurrent reconciliation.
-        // If the timer already reconciled, ReconcileIfGroupsChanged is a no-op (snapshot already updated).
-        var session = sessionProvider.GetSession();
-        var db = session.Database;
-        if (!reconciliationGuard.IsInProgress)
-        {
-            reconciliationGuard.IsInProgress = true;
-            try
-            {
-                await reconciler.ReconcileIfGroupsChanged();
-            }
-            finally
-            {
-                reconciliationGuard.IsInProgress = false;
-            }
-        }
-
-        Dictionary<string, string?> sidResolutions;
         try
         {
-            sidResolutions = await ResolveSidsAsync();
-        }
-        catch (Exception ex)
-        {
-            log.Error("Async SID resolution in RefreshGrid failed, using empty resolutions", ex);
-            sidResolutions = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        }
+            // Reconcile group membership changes before populating the grid.
+            // If the timer is already reconciling, skip to avoid concurrent reconciliation.
+            // If the timer already reconciled, ReconcileIfGroupsChanged is a no-op (snapshot already updated).
+            var session = sessionProvider.GetSession();
+            var db = session.Database;
+            if (!reconciliationGuard.IsInProgress)
+            {
+                reconciliationGuard.IsInProgress = true;
+                try
+                {
+                    await reconciler.ReconcileIfGroupsChanged();
+                }
+                finally
+                {
+                    reconciliationGuard.IsInProgress = false;
+                }
+            }
 
-        // If a newer refresh was requested while we were awaiting, discard this result.
-        if (cts.IsCancellationRequested || _grid.IsDisposed)
-            return;
+            refreshToken.ThrowIfCancellationRequested();
 
-        // Pre-fetch any data needed before clearing the grid (e.g. process lists).
-        if (beforePopulate != null)
-        {
-            await beforePopulate();
+            Dictionary<string, string?> sidResolutions;
+            try
+            {
+                sidResolutions = await ResolveSidsAsync();
+            }
+            catch (Exception ex)
+            {
+                log.Error("Async SID resolution in RefreshGrid failed, using empty resolutions", ex);
+                sidResolutions = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            refreshToken.ThrowIfCancellationRequested();
+
+            // If a newer refresh was requested while we were awaiting, discard this result.
             if (cts.IsCancellationRequested || _grid.IsDisposed)
                 return;
+
+            // Pre-fetch any data needed before clearing the grid (e.g. process lists).
+            if (beforePopulate != null)
+            {
+                await beforePopulate(refreshToken);
+                refreshToken.ThrowIfCancellationRequested();
+                if (cts.IsCancellationRequested || _grid.IsDisposed)
+                    return;
+            }
+
+            persistenceHelper.ApplyStaleNameUpdates(
+                sidResolutions,
+                db,
+                session.PinDerivedKey,
+                session.CredentialStore.ArgonSalt);
+
+            var displayNameCache = BuildDisplayNameCache(sidResolutions);
+            PopulateGrid(displayNameCache, sidResolutions);
+            afterPopulate?.Invoke();
         }
-
-        persistenceHelper.ApplyStaleNameUpdates(
-            sidResolutions,
-            db,
-            session.PinDerivedKey,
-            session.CredentialStore.ArgonSalt);
-
-        var displayNameCache = BuildDisplayNameCache(sidResolutions);
-        PopulateGrid(displayNameCache, sidResolutions);
-        afterPopulate?.Invoke();
+        catch (OperationCanceledException) when (cts.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
     }
 
     private void PopulateGrid(Dictionary<Guid, string> displayNameCache, Dictionary<string, string?>? sidResolutions = null)
@@ -190,7 +210,7 @@ public class AccountGridRefreshHandler(
                 if (match)
                 {
                     row.Selected = true;
-                    _grid.CurrentCell = row.Cells["Account"];
+                    _grid.CurrentCell = row.Cells[AccountGridColumns.Account];
                     selectionRestored = true;
                     break;
                 }

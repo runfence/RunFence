@@ -141,6 +141,8 @@ public static class ProcessNative
 
     /// <summary>Desired access for process handle to query tokens.</summary>
     public const uint ProcessQueryLimitedInformation = 0x1000;
+    public const uint ProcessTerminate = 0x0001;
+    public const uint ProcessDuplicateHandle = 0x0040;
 
     public const uint PROCESS_CREATE_THREAD     = 0x0002u;
     public const uint PROCESS_VM_OPERATION      = 0x0008u;

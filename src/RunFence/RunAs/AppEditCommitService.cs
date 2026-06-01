@@ -2,6 +2,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Apps;
 
 namespace RunFence.RunAs;
 
@@ -18,29 +19,31 @@ public class AppEditCommitService(
     AppEntryPersistenceOrchestrator persistenceOrchestrator,
     IAppStateProvider appState) : IAppEditCommitService
 {
-    public RunAsAppEntryPersistenceResult Commit(AppEntry newApp, AppEntry? previousApp, string? configPath)
+    public RunAsAppEntryPersistenceResult Commit(RunAsAppEditCommitRequest request)
     {
         try
         {
-            if (previousApp != null)
+            if (request.PreviousApp != null)
             {
-                return CommitExistingApp(newApp, previousApp, configPath);
+                return CommitExistingApp(request);
             }
 
-            return persistenceOrchestrator.PersistNewAppEntry(newApp, configPath);
+            return persistenceOrchestrator.PersistNewAppEntry(request.NewApp, request.ConfigPath);
         }
         catch (Exception ex)
         {
             log.Error("AppEditCommitService: commit failed", ex);
             return new RunAsAppEntryPersistenceResult(
                 RunAsAppEntryPersistenceStatus.SaveFailed,
-                newApp,
+                request.NewApp,
                 ex.Message);
         }
     }
 
-    private RunAsAppEntryPersistenceResult CommitExistingApp(AppEntry newApp, AppEntry previousApp, string? configPath)
+    private RunAsAppEntryPersistenceResult CommitExistingApp(RunAsAppEditCommitRequest request)
     {
+        var newApp = request.NewApp;
+        var previousApp = request.PreviousApp!;
         if (!string.Equals(newApp.Id, previousApp.Id, StringComparison.Ordinal))
         {
             return new RunAsAppEntryPersistenceResult(
@@ -58,19 +61,18 @@ public class AppEditCommitService(
                 "The application no longer exists.");
         }
 
-        var originalConfigPath = appConfigService.GetConfigPath(previousApp.Id);
-        var cleanupResult = appEntryManager.RevertAppChanges(previousApp);
+        var originalConfigPath = request.PreviousConfigPath;
+        var changeSet = request.ChangeSet;
+        var cleanupResult = appEntryManager.RevertAppChanges(previousApp, changeSet);
         if (cleanupResult.Status != RunAsAppEntryPersistenceStatus.Succeeded)
             return cleanupResult;
 
         try
         {
+            AppEntryShortcutProtectionStateHelper.ApplyExistingEditState(previousApp, newApp, changeSet);
             appState.Database.Apps[index] = newApp;
-            appConfigService.AssignApp(newApp.Id, configPath);
-            appConfigService.SaveAllConfigs(
-                appState.Database,
-                session.PinDerivedKey,
-                session.CredentialStore.ArgonSalt);
+            appConfigService.AssignApp(newApp.Id, request.ConfigPath);
+            SaveForScope(changeSet.ConfigSaveScope, newApp.Id);
         }
         catch (Exception mutationOrSaveEx)
         {
@@ -82,10 +84,7 @@ public class AppEditCommitService(
                 appConfigService.AssignApp(previousApp.Id, originalConfigPath);
                 try
                 {
-                    appConfigService.SaveAllConfigs(
-                        appState.Database,
-                        session.PinDerivedKey,
-                        session.CredentialStore.ArgonSalt);
+                    SaveForScope(changeSet.ConfigSaveScope, previousApp.Id);
                 }
                 catch (Exception restoreSaveException)
                 {
@@ -94,7 +93,7 @@ public class AppEditCommitService(
                     restoreFailures.Add(restoreSaveException.Message);
                 }
 
-                var restoreResult = appEntryManager.ApplyAppChanges(previousApp);
+                var restoreResult = appEntryManager.ApplyAppChanges(previousApp, changeSet);
                 if (restoreResult.Status != RunAsAppEntryPersistenceStatus.Succeeded)
                 {
                     log.Error("AppEditCommitService: failed to restore previous app state after save failure",
@@ -127,7 +126,7 @@ public class AppEditCommitService(
             }
         }
 
-        var applyResult = appEntryManager.ApplyAppChanges(newApp);
+        var applyResult = appEntryManager.ApplyAppChanges(newApp, changeSet);
         if (applyResult.Status != RunAsAppEntryPersistenceStatus.Succeeded)
         {
             NotifyDataChangedBestEffort();
@@ -151,5 +150,23 @@ public class AppEditCommitService(
         {
             log.Warn($"AppEditCommitService: failed to refresh UI: {ex.Message}");
         }
+    }
+
+    private void SaveForScope(AppEditConfigSaveScope configSaveScope, string appId)
+    {
+        if (configSaveScope == AppEditConfigSaveScope.AllConfigs)
+        {
+            appConfigService.SaveAllConfigs(
+                appState.Database,
+                session.PinDerivedKey,
+                session.CredentialStore.ArgonSalt);
+            return;
+        }
+
+        appConfigService.SaveConfigForApp(
+            appId,
+            appState.Database,
+            session.PinDerivedKey,
+            session.CredentialStore.ArgonSalt);
     }
 }

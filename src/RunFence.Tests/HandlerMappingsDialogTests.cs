@@ -18,55 +18,6 @@ public class HandlerMappingsDialogTests
     private const string AppId = "app01";
 
     [Fact]
-    public void Initialize_RegistersOnlyGridForHandlerMappingsContextHelp()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var context = CreateContext();
-            StaTestHelper.CreateControlTree(context.Dialog);
-
-            var grid = FindGrid(context.Dialog);
-            var toolbar = FindToolStrip(context.Dialog);
-            var warningLabel = FindControls<Label>(context.Dialog)
-                .Single(label => label.Text.Contains("Many common associations", StringComparison.Ordinal));
-
-            Assert.True(context.Dialog.TryGetContextHelp(grid, out var gridHelpText));
-            Assert.Equal(ContextHelpTextCatalog.App_HandlerMappings, gridHelpText);
-            Assert.False(context.Dialog.TryGetContextHelp(toolbar, out _));
-            Assert.False(context.Dialog.TryGetContextHelp(warningLabel, out _));
-            Assert.Empty(context.Dialog.GetExplicitContextHelpToolStripItems());
-            Assert.Empty(context.Dialog.GetExplicitContextHelpToolStripDropDowns());
-        });
-    }
-
-    [Fact]
-    public void Initialize_PlacesContextHelpButtonInTopRowWithoutOverlappingReapply()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var context = CreateContext();
-            StaTestHelper.CreateControlTree(context.Dialog);
-
-            var helpButton = FindControls<ContextHelpButton>(context.Dialog).Single();
-            var helpHost = Assert.IsType<Panel>(helpButton.Parent);
-            var toolbar = FindToolStrip(context.Dialog);
-            var topRowHost = Assert.IsType<Panel>(toolbar.Parent);
-            var reapplyButton = FindToolStripButtonByText(context.Dialog, "Reapply");
-            var helpButtonBounds = helpButton.RectangleToScreen(helpButton.ClientRectangle);
-            var reapplyBounds = toolbar.RectangleToScreen(reapplyButton.Bounds);
-
-            Assert.Equal(DockStyle.Right, helpButton.Dock);
-            Assert.Equal(DockStyle.Right, helpHost.Dock);
-            Assert.Equal(DockStyle.Fill, toolbar.Dock);
-            Assert.Equal(DockStyle.Top, topRowHost.Dock);
-            Assert.Equal(topRowHost, helpHost.Parent);
-            Assert.False(helpButtonBounds.IntersectsWith(reapplyBounds));
-            Assert.True(context.Dialog.TryGetContextHelp(helpButton, out var helpText));
-            Assert.Equal(ContextHelpTextResolver.InstructionText, helpText);
-        });
-    }
-
-    [Fact]
     public void AddClick_UnresolvedFailureRefreshesOnlyAfterChildDialogCloses()
     {
         StaTestHelper.RunOnSta(() =>
@@ -127,80 +78,7 @@ public class HandlerMappingsDialogTests
     }
 
     [Fact]
-    public void EditClick_PassesCurrentAppSubmissionContextToChildDialog()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var childDialog = new FakeHandlerMappingAddDialog();
-            var saveCalls = 0;
-            var context = CreateContext(
-                createAddDialog: () => childDialog,
-                seed: (database, app) =>
-                {
-                    app.PathPrefixes = [@"C:\Apps\"];
-                    database.Settings.HandlerMappings = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
-                    {
-                        [".txt"] = new HandlerMappingEntry(app.Id, "\"old %1\"", [@"C:\Docs\"], ReplacePrefixes: true)
-                    };
-                },
-                saveDatabase: () => saveCalls++);
-
-            StaTestHelper.CreateControlTree(context.Dialog);
-            var grid = FindGrid(context.Dialog);
-            grid.Rows[0].Selected = true;
-            grid.CurrentCell = grid.Rows[0].Cells[0];
-
-            FindToolStripButton(context.Dialog, "Edit selected association").PerformClick();
-
-            Assert.Equal(".txt", childDialog.EditKey);
-            Assert.Equal(AppId, childDialog.CurrentAppId);
-            Assert.Equal("\"old %1\"", childDialog.CurrentTemplate);
-            Assert.Equal([@"C:\Apps\"], childDialog.CurrentAppPrefixes);
-            Assert.Equal([@"C:\Docs\"], childDialog.CurrentAssociationPrefixes);
-            Assert.True(childDialog.CurrentReplacePrefixes);
-            Assert.Same(context.Persistence, childDialog.Persistence);
-            childDialog.Persistence!.SaveDatabase();
-            Assert.Equal(1, saveCalls);
-        });
-    }
-
-    [Fact]
-    public void DirectEditClick_PassesCurrentDirectSubmissionContextToChildDialog()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            var childDialog = new FakeHandlerMappingAddDialog();
-            var saveCalls = 0;
-            var context = CreateContext(
-                createAddDialog: () => childDialog,
-                seed: (database, _) =>
-                {
-                    database.Settings.DirectHandlerMappings = new Dictionary<string, DirectHandlerEntry>(StringComparer.OrdinalIgnoreCase)
-                    {
-                        [".txt"] = new DirectHandlerEntry { ClassName = "txtfile" }
-                    };
-                },
-                saveDatabase: () => saveCalls++);
-
-            StaTestHelper.CreateControlTree(context.Dialog);
-            var grid = FindGrid(context.Dialog);
-            grid.Rows[0].Selected = true;
-            grid.CurrentCell = grid.Rows[0].Cells[0];
-
-            FindToolStripButton(context.Dialog, "Edit selected association").PerformClick();
-
-            Assert.Equal(".txt", childDialog.DirectEditKey);
-            Assert.Equal("txtfile", childDialog.CurrentDirectValue);
-            Assert.NotNull(childDialog.CurrentDirectEntry);
-            Assert.Equal("txtfile", childDialog.CurrentDirectEntry.Value.ClassName);
-            Assert.Same(context.Persistence, childDialog.Persistence);
-            childDialog.Persistence!.SaveDatabase();
-            Assert.Equal(1, saveCalls);
-        });
-    }
-
-    [Fact]
-    public void ImportClick_PassesFilteredExistingKeysAndSaveCallbackToChildDialog()
+    public void ImportClick_PassesFilteredExistingKeysToChildDialog()
     {
         StaTestHelper.RunOnSta(() =>
         {
@@ -230,6 +108,69 @@ public class HandlerMappingsDialogTests
             Assert.Same(context.Persistence, importDialog.Persistence);
             importDialog.Persistence!.SaveDatabase();
             Assert.Equal(1, saveCalls);
+        });
+    }
+
+    [Fact]
+    public void EditClick_AppMapping_PassesEditContextToChildDialog()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            var childDialog = new FakeHandlerMappingAddDialog();
+            var context = CreateContext(
+                createAddDialog: () => childDialog,
+                seed: (database, app) =>
+                {
+                    app.PathPrefixes = [@"C:\apps", @"D:\shared"];
+                    database.Settings.HandlerMappings = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        [".txt"] = new HandlerMappingEntry(
+                            app.Id,
+                            "--open \"%1\"",
+                            [@"C:\assoc", @"D:\assoc"],
+                            true)
+                    };
+                });
+
+            StaTestHelper.CreateControlTree(context.Dialog);
+            SelectSingleGridRow(context.Dialog, 0);
+            FindToolStripButton(context.Dialog, "Edit selected association").PerformClick();
+
+            Assert.Equal(".txt", childDialog.EditKey);
+            Assert.Equal(context.App.Id, childDialog.CurrentAppId);
+            Assert.Equal("--open \"%1\"", childDialog.CurrentTemplate);
+            Assert.Equal(new[] { @"C:\apps", @"D:\shared" }, childDialog.CurrentAppPrefixes);
+            Assert.Equal(new[] { @"C:\assoc", @"D:\assoc" }, childDialog.CurrentAssociationPrefixes);
+            Assert.True(childDialog.CurrentReplacePrefixes);
+            Assert.Same(context.Persistence, childDialog.Persistence);
+        });
+    }
+
+    [Fact]
+    public void EditClick_DirectMapping_PassesDirectEditContextToChildDialog()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            var childDialog = new FakeHandlerMappingAddDialog();
+            var directEntry = new DirectHandlerEntry { Command = @"""C:\Tools\handler.exe"" ""%1""" };
+            var context = CreateContext(
+                createAddDialog: () => childDialog,
+                seed: (database, _) =>
+                {
+                    database.Settings.DirectHandlerMappings = new Dictionary<string, DirectHandlerEntry>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        [".txt"] = directEntry
+                    };
+                });
+
+            StaTestHelper.CreateControlTree(context.Dialog);
+            SelectSingleGridRow(context.Dialog, 0);
+            FindToolStripButton(context.Dialog, "Edit selected association").PerformClick();
+
+            Assert.Equal(".txt", childDialog.DirectEditKey);
+            Assert.Equal(@"""C:\Tools\handler.exe"" ""%1""", childDialog.CurrentDirectValue);
+            Assert.Equal(directEntry, childDialog.CurrentDirectEntry);
+            Assert.Same(context.Persistence, childDialog.Persistence);
         });
     }
 
@@ -335,8 +276,8 @@ public class HandlerMappingsDialogTests
             .Returns(DialogResult.OK);
 
         var exeReader = new Mock<IExeAssociationRegistryReader>();
-        exeReader.Setup(reader => reader.GetHandledAssociations(It.IsAny<string>())).Returns([]);
-        exeReader.Setup(reader => reader.GetNonDefaultArguments(It.IsAny<string>(), It.IsAny<string>())).Returns((string?)null);
+        exeReader.Setup(reader => reader.GetHandledAssociations(It.IsAny<string>(), It.IsAny<string?>())).Returns([]);
+        exeReader.Setup(reader => reader.GetNonDefaultArguments(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>())).Returns((string?)null);
         exeReader.Setup(reader => reader.IsRegisteredProgId(It.IsAny<string>(), It.IsAny<string>())).Returns(false);
 
         var dialogHelper = new HandlerMappingDialogHelper(exeReader.Object, handlerMappingService.Object);
@@ -397,6 +338,14 @@ public class HandlerMappingsDialogTests
     private static ToolStrip FindToolStrip(Control root) => FindControls<ToolStrip>(root).Single();
 
     private static DataGridView FindGrid(Control root) => FindControls<DataGridView>(root).Single();
+
+    private static void SelectSingleGridRow(Control root, int rowIndex)
+    {
+        var grid = FindGrid(root);
+        grid.ClearSelection();
+        grid.CurrentCell = grid.Rows[rowIndex].Cells[0];
+        grid.Rows[rowIndex].Selected = true;
+    }
 
     private static IEnumerable<T> FindControls<T>(Control root) where T : Control
     {

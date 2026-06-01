@@ -18,7 +18,9 @@ public class SidReconciler(
     Func<AncestorTraverseGranter> ancestorTraverseGranterFactory,
     ILoggingService log,
     IInteractiveUserResolver interactiveUserResolver,
-    IFileSystemPathInfo pathInfo)
+    IFileSystemPathInfo pathInfo,
+    IProgramDataDirectoryProvisioningService programDataDirectoryProvisioningService,
+    IProgramDataKnownPathResolver programDataKnownPathResolver)
 {
     public readonly record struct SidReconciliationResult(
         string Sid,
@@ -27,6 +29,9 @@ public class SidReconciler(
         List<(string Path, List<string> AppliedPaths)> NewTraverseEntries,
         HashSet<string> RemovedTraversePaths,
         string? ErrorMessage);
+
+    private readonly IProgramDataDirectoryProvisioningService _programDataDirectoryProvisioningService = programDataDirectoryProvisioningService;
+    private readonly IProgramDataKnownPathResolver _programDataKnownPathResolver = programDataKnownPathResolver;
 
     /// <summary>
     /// Reconciles traverse grants for a single SID given its new group memberships.
@@ -77,8 +82,14 @@ public class SidReconciler(
         HashSet<string> removedTraversePaths,
         IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants)
     {
-        var scriptsDir = Path.Combine(PathConstants.ProgramDataDir, "scripts");
+        var scriptsDir = _programDataKnownPathResolver.GetDirectoryPath(ProgramDataPolicies.Scripts);
         var scriptFile = Path.Combine(scriptsDir, $"{sid}_block_login.cmd");
+        if (!pathInfo.DirectoryExists(scriptsDir) || !pathInfo.FileExists(scriptFile))
+            return;
+
+            _programDataDirectoryProvisioningService.EnsureKnownDirectory(
+                ProgramDataPolicies.Scripts);
+
         ReconcileTraverseLocation(identity, groupSids, scriptsDir, scriptFile,
             newTraverseEntries, removedTraversePaths, accountGrants, sid);
     }
@@ -100,7 +111,13 @@ public class SidReconciler(
         HashSet<string> removedTraversePaths,
         IReadOnlyDictionary<string, IReadOnlyList<GrantedPathEntry>>? accountGrants)
     {
-        var tempRoot = Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir);
+        var tempRoot = _programDataKnownPathResolver.GetDirectoryPath(ProgramDataPolicies.DragBridge);
+        if (pathInfo.DirectoryExists(tempRoot))
+        {
+            _programDataDirectoryProvisioningService.EnsureKnownDirectory(
+                ProgramDataPolicies.DragBridge);
+        }
+
         ReconcileTraverseLocation(identity, groupSids, tempRoot, null,
             newTraverseEntries, removedTraversePaths, accountGrants, sid);
     }
@@ -148,6 +165,7 @@ public class SidReconciler(
             return;
 
         var traverseRights = TraverseRightsHelper.TraverseRights;
+        var effectiveGroupSids = AclComputeHelper.ExcludeAdministratorsGroup(groupSids);
         var normalizedPath = Path.GetFullPath(path);
 
         foreach (var entry in entries)
@@ -185,7 +203,7 @@ public class SidReconciler(
                     }
 
                     var modifiedSecurity = RemoveManagedTraverseAce(dirSecurity, sid);
-                    if (!aclPermission.HasEffectiveRights(modifiedSecurity, sid, groupSids, traverseRights))
+                    if (!aclPermission.HasEffectiveRights(modifiedSecurity, sid, effectiveGroupSids, traverseRights))
                     {
                         stillEffectiveWithoutDirectAce = false;
                         break;
@@ -227,13 +245,15 @@ public class SidReconciler(
         IReadOnlyList<string> groupSids,
         IEnumerable<string> appliedPaths)
     {
+        var effectiveGroupSids = AclComputeHelper.ExcludeAdministratorsGroup(groupSids);
+
         foreach (var appliedPath in appliedPaths)
         {
             if (!pathInfo.DirectoryExists(appliedPath))
                 continue;
 
             var security = pathInfo.GetDirectorySecurity(appliedPath);
-            if (!aclPermission.HasEffectiveRights(security, sid, groupSids, TraverseRightsHelper.TraverseRights))
+            if (!aclPermission.HasEffectiveRights(security, sid, effectiveGroupSids, TraverseRightsHelper.TraverseRights))
             {
                 throw new InvalidOperationException(
                     $"Traverse reconciliation failed to make '{appliedPath}' effective for '{sid}'.");
@@ -290,4 +310,5 @@ public class SidReconciler(
 
         return clone;
     }
+
 }

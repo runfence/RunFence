@@ -13,7 +13,7 @@ public class LauncherIpcHelper(
     ILauncherIpcClient ipcClient,
     ILauncherGuiController guiController,
     ILauncherWaitDelay waitDelay,
-    ILauncherUserNotifier notifier)
+    ILauncherUserNotifier notifier) : ILauncherIpcCommandSender
 {
     /// <summary>
     /// Ensures the RunFence GUI is running, waits for IPC readiness, sends
@@ -102,14 +102,4 @@ public class LauncherIpcHelper(
     private static bool IsRunAsStartupRequest(IpcMessage message) =>
         message.Command == IpcCommands.Launch
         && message.AppId?.IndexOfAny(['\\', '/']) >= 0;
-
-    public static void ShowError(string message)
-    {
-        MessageBox.Show(message, "RunFence Launcher", MessageBoxButtons.OK, MessageBoxIcon.Error);
-    }
-
-    public static void ShowWarning(string message)
-    {
-        MessageBox.Show(message, "RunFence Launcher", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-    }
 }

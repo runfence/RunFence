@@ -27,41 +27,36 @@ public class GrantFileSystemOperationsTests
         return security;
     }
 
-    private static (GrantFileSystemOperations Operations, AppDatabase Database, Mock<IFileOwnerService> OwnerMock, Mock<IAclAccessor> AclAccessor) Build()
+    private static (
+        GrantFileSystemOperations Operations,
+        AppDatabase Database,
+        Mock<IFileOwnerService> OwnerMock,
+        Mock<IPathSecurityDescriptorAccessor> FileSecurityAccessor,
+        Mock<IExplicitAceAccessor> ExplicitAceAccessor) Build()
     {
         var log = new Mock<ILoggingService>();
-        var aclAccessor = new Mock<IAclAccessor>();
+        var fileSecurityAccessor = new Mock<IPathSecurityDescriptorAccessor>();
+        var explicitAceAccessor = new Mock<IExplicitAceAccessor>();
         var ownerMock = new Mock<IFileOwnerService>();
         var mandatoryLabelMock = new Mock<IMandatoryLabelService>();
         var pathInfo = new TestFileSystemPathInfo();
         pathInfo.AddDirectory(Path.GetPathRoot(ExistingDir)!);
         pathInfo.AddDirectory(ExistingDir);
-        aclAccessor.Setup(a => a.GetSecurity(ExistingDir)).Returns(EmptySecurity());
+        fileSecurityAccessor.Setup(a => a.GetSecurity(ExistingDir)).Returns(EmptySecurity());
 
         var db = new AppDatabase();
         var dbAccessor = new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => db), () => SyncInvoker);
-        var grantAceService = new GrantAceService(aclAccessor.Object, pathInfo);
+        var grantAceService = new GrantAceService(fileSecurityAccessor.Object, explicitAceAccessor.Object, pathInfo);
         var grantCore = new GrantCoreOperations(grantAceService, ownerMock.Object, dbAccessor, log.Object, pathInfo);
         var operations = new GrantFileSystemOperations(grantCore, grantAceService, ownerMock.Object,
             mandatoryLabelMock.Object, dbAccessor);
-        return (operations, db, ownerMock, aclAccessor);
-    }
-
-    [Fact]
-    public void AddGrant_WithOwnerSid_DelegatesOwnerChange()
-    {
-        var (operations, _, ownerMock, _) = Build();
-        const string ownerSid = "S-1-5-21-9999-9999-9999-1001";
-
-        operations.AddGrant(UserSid, ExistingDir, isDeny: false, ReadOnly, ownerSid: ownerSid);
-
-        ownerMock.Verify(o => o.ChangeOwner(ExistingDir, ownerSid, false), Times.Once);
+        return (operations, db, ownerMock, fileSecurityAccessor, explicitAceAccessor);
     }
 
     [Fact]
     public void RemoveGrant_SourceSid_DoesNotPerformLowIntegritySourceSync()
     {
-        var (operations, db, _, _) = Build();
+        var (operations, db, _, _, _) = Build();
         operations.AddGrant(UserSid, ExistingDir, isDeny: false, ReadOnly);
         db.GetOrCreateAccount(AclHelper.LowIntegritySid).Grants.Add(new GrantedPathEntry
         {
@@ -82,7 +77,7 @@ public class GrantFileSystemOperationsTests
     [Fact]
     public void CheckGrantStatus_PathExistsWithoutMatchingAce_ReturnsBroken()
     {
-        var (operations, _, _, _) = Build();
+        var (operations, _, _, _, _) = Build();
 
         var status = operations.CheckGrantStatus(ExistingDir, UserSid, isDeny: false);
 

@@ -23,7 +23,7 @@ public class DragBridgeLauncher(
         );
         try
         {
-            using var launch = facade.LaunchFile(target, AccountLaunchIdentity.CurrentAccountBasic with { PrivilegeLevel = privilegeLevel });
+            using var launch = facade.LaunchFile(target, AccountLaunchIdentity.CurrentAccountIsolated with { PrivilegeLevel = privilegeLevel });
             LogMaintenanceWarnings("direct", exePath, launch);
             return launch.DetachProcess();
         }

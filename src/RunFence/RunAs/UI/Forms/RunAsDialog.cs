@@ -7,7 +7,6 @@ using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.UI.Forms;
 
@@ -47,11 +46,13 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
     private IReadOnlyDictionary<string, string>? _sidNames;
     private IReadOnlyDictionary<string, PrivilegeLevel>? _accountPrivilegeLevels;
     private readonly ISidResolver _sidResolver;
-    private readonly IAccountPasswordService _accountPasswordService;
     private readonly RunAsCredentialListPopulator _populator;
     private readonly RunAsCredentialListRenderer _renderer;
     private readonly IAclPermissionService _aclPermission;
-    private readonly IExecutableKindService _executableKindService;
+    private readonly RunAsAccountOptionCatalog _optionCatalog;
+    private readonly RunAsSelectionPolicy _selectionPolicy;
+    private readonly IRunAsAdHocPasswordPromptService _adHocPasswordPromptService;
+    private readonly IRunAsAncestorPermissionPrompter _permissionPrompter;
     private readonly ToolTip _toolTip = new();
 
     public RunAsDialog(
@@ -59,20 +60,24 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
         IAclPermissionService aclPermission,
         RunAsCredentialListPopulator populator,
         RunAsCredentialListRenderer renderer,
-        IAccountPasswordService accountPasswordService,
-        IExecutableKindService executableKindService)
+        RunAsAccountOptionCatalog optionCatalog,
+        RunAsSelectionPolicy selectionPolicy,
+        IRunAsAdHocPasswordPromptService adHocPasswordPromptService,
+        IRunAsAncestorPermissionPrompter permissionPrompter)
     {
         _sidResolver = sidResolver;
         _aclPermission = aclPermission;
         _populator = populator;
         _renderer = renderer;
-        _accountPasswordService = accountPasswordService;
-        _executableKindService = executableKindService;
+        _optionCatalog = optionCatalog;
+        _selectionPolicy = selectionPolicy;
+        _adHocPasswordPromptService = adHocPasswordPromptService;
+        _permissionPrompter = permissionPrompter;
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
     }
 
-    private static readonly PrivilegeLevel[] PrivilegeLevelMapping = [PrivilegeLevel.HighestAllowed, PrivilegeLevel.Basic, PrivilegeLevel.Isolated, PrivilegeLevel.LowIntegrity];
+    private static readonly PrivilegeLevel[] PrivilegeLevelMapping = [PrivilegeLevel.HighestAllowed, PrivilegeLevel.HighIntegrity, PrivilegeLevel.Basic, PrivilegeLevel.Isolated, PrivilegeLevel.LowIntegrity];
 
     /// <summary>
     /// Initializes per-use dialog data. Must be called before <see cref="Form.ShowDialog()"/>.
@@ -91,7 +96,7 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
         _shortcutContext = options.ShortcutContext;
         _appContainers = options.AppContainers;
         _accountPrivilegeLevels = options.AccountPrivilegeLevels;
-        _dialogState = new RunAsDialogState(_filePath, options.SidsNeedingPermission, _aclPermission);
+        _dialogState = new RunAsDialogState(_filePath, options.SidsNeedingPermission, _aclPermission, _permissionPrompter);
 
         _populator.Initialize(
             _credentialListBox, _credentials, _sidNames, _showAllAccountsCheckBox,
@@ -189,10 +194,6 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
         _addAppButton.Location = new Point(addAppLeft, y);
         _cancelButton.Location = new Point(cancelLeft, y);
 
-        // Enable/disable "Add App..." based on credential selection
-        _credentialListBox.SelectedIndexChanged += (_, _) =>
-            _addAppButton.Enabled = _credentialListBox.SelectedItem is CredentialDisplayItem or CreateAccountItem or AppContainerDisplayItem;
-
         ClientSize = ClientSize with { Height = y + _launchButton.Height + 17 };
 
         // Set anchors after ClientSize is finalized so anchor distances are computed correctly.
@@ -202,13 +203,7 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
         _addAppButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
         _cancelButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
 
-        // Pre-select: managed app's account/container takes priority; otherwise last used or first non-current
-        int initialSelection = _shortcutContext?.IsAlreadyManaged == true
-            ? FindManagedAppSelection()
-            : FindPreferredSelectionForNewApp();
-
-        if (_credentialListBox.Items.Count > 0)
-            _credentialListBox.SelectedIndex = initialSelection;
+        ApplyInitialSelection();
 
         RegisterContextHelp();
     }
@@ -219,64 +214,26 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
         SetContextHelp(_privilegeLevelComboBox, ContextHelpTextCatalog.Launch_PrivilegeLevel);
     }
 
-    private int FindManagedAppSelection()
+    private void ApplyInitialSelection()
     {
-        var preferSid = _shortcutContext!.ManagedApp?.AccountSid;
-        if (preferSid != null)
+        var options = BuildAccountOptions();
+        if (options.Count == 0)
         {
-            var idx = _populator.FindItemIndex(item => item is CredentialDisplayItem di &&
-                                            string.Equals(di.Credential.Sid, preferSid, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0)
-                return idx;
+            ApplySelectionState(null);
+            return;
         }
 
-        var containerName = _shortcutContext.ManagedApp?.AppContainerName;
-        if (containerName != null)
-        {
-            var idx = _populator.FindItemIndex(item => item is AppContainerDisplayItem acdi &&
-                                            string.Equals(acdi.Container.Name, containerName, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0)
-                return idx;
-        }
-
-        return 0;
-    }
-
-    private int FindPreferredSelectionForNewApp()
-    {
-        if (_initialAccountSid != null)
-        {
-            var idx = _populator.FindItemIndex(item => item is CredentialDisplayItem di &&
-                                            string.Equals(di.Credential.Sid, _initialAccountSid, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0)
-                return idx;
-        }
-
-        // Try last used account (skip if it's the current elevated user)
-        if (_lastUsedAccountSid != null &&
-            !string.Equals(_lastUsedAccountSid, _currentUserSid, StringComparison.OrdinalIgnoreCase))
-        {
-            var idx = _populator.FindItemIndex(item => item is CredentialDisplayItem di &&
-                                            string.Equals(di.Credential.Sid, _lastUsedAccountSid, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0)
-                return idx;
-        }
-
-        // Try last used container
-        if (_lastUsedContainerName != null)
-        {
-            var idx = _populator.FindItemIndex(item => item is AppContainerDisplayItem acdi &&
-                                            string.Equals(acdi.Container.Name, _lastUsedContainerName, StringComparison.OrdinalIgnoreCase));
-            if (idx >= 0)
-                return idx;
-        }
-
-        // Fall back to first non-current-user selectable item
-        var fallback = _populator.FindItemIndex(item =>
-            item is AppContainerDisplayItem ||
-            (item is CredentialDisplayItem di2 &&
-             !string.Equals(di2.Credential.Sid, _currentUserSid, StringComparison.OrdinalIgnoreCase)));
-        return fallback >= 0 ? fallback : 0;
+        var selection = _selectionPolicy.ResolveSelection(
+            options.Select(o => o.Option).ToList(),
+            _initialAccountSid,
+            _lastUsedAccountSid,
+            _lastUsedContainerName,
+            _currentUserSid,
+            _shortcutContext,
+            app: null);
+        _credentialListBox.SelectedIndex = selection.SelectedIndex >= 0
+            ? options[selection.SelectedIndex].ListIndex
+            : -1;
     }
 
     private void OnRevertClick(object? sender, EventArgs e)
@@ -315,77 +272,54 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
 
     private void OnCredentialSelectionChanged(object? sender, EventArgs e)
     {
-        if (SeparatorSkipHelper.HandleSeparatorSkip(
-                _credentialListBox.SelectedItem,
-                _credentialListBox.SelectedIndex,
-                _credentialListBox.Items.Count,
-                i => _credentialListBox.SelectedIndex = i,
-                ref _lastCredentialListIndex))
-            return;
-
-        switch (_credentialListBox.SelectedItem)
+        var selectedListItem = GetSelectedListItem();
+        if (selectedListItem?.IsSeparator == true)
         {
-            case CreateAccountItem:
-                _currentExistingApp = null;
-                SetPrivilegeLevel(SuggestPrivilegeLevel(PrivilegeLevel.Isolated), enabled: true);
-                UpdateLaunchButtonState();
-                _addAppButton.Text = "Add app entry\u2026";
-                return;
-            case CreateContainerItem:
-                _currentExistingApp = null;
-                SetPrivilegeLevel(PrivilegeLevel.LowIntegrity, enabled: false);
-                _addAppButton.Enabled = false;
-                UpdateLaunchButtonState();
-                return;
-            case AppContainerDisplayItem containerItem:
+            var current = _credentialListBox.SelectedIndex;
+            var navigatingDown = current > _lastCredentialListIndex;
+            if (navigatingDown)
             {
-                // Check for existing app entry with this container + path
-                var existingApp = _existingApps.FirstOrDefault(a =>
-                    string.Equals(a.AppContainerName, containerItem.Container.Name, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(a.ExePath, _filePath, StringComparison.OrdinalIgnoreCase));
-
-                _currentExistingApp = existingApp;
-                SetPrivilegeLevel(PrivilegeLevel.LowIntegrity, enabled: false);
-                _addAppButton.Text = existingApp != null ? "Edit app entry\u2026" : "Add app entry\u2026";
-                UpdateLaunchButtonState();
-                return;
+                var next = current + 1;
+                if (next < _credentialListBox.Items.Count)
+                    _credentialListBox.SelectedIndex = next;
             }
-            case CredentialDisplayItem item:
+            else
             {
-                var existingApp = _existingApps.FirstOrDefault(a =>
-                    string.Equals(a.AccountSid, item.Credential.Sid, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(a.ExePath, _filePath, StringComparison.OrdinalIgnoreCase));
-
-                _currentExistingApp = existingApp;
-                var accountMode = _accountPrivilegeLevels?.GetValueOrDefault(item.Credential.Sid, PrivilegeLevel.Isolated)
-                    ?? PrivilegeLevel.Isolated;
-                bool isSystem = SidResolutionHelper.IsSystemSid(item.Credential.Sid);
-
-                if (existingApp != null && !isSystem)
-                {
-                    var resolvedMode = existingApp.PrivilegeLevel ?? accountMode;
-                    SetPrivilegeLevel(resolvedMode, enabled: false);
-                }
-                else
-                {
-                    SetPrivilegeLevel(SuggestPrivilegeLevel(accountMode), enabled: !isSystem);
-                }
-
-                break;
+                var previous = current - 1;
+                if (previous >= 0)
+                    _credentialListBox.SelectedIndex = previous;
             }
-            default:
-                _currentExistingApp = null;
-                SetPrivilegeLevel(PrivilegeLevel.Isolated, enabled: false);
-                break;
+            return;
         }
 
-        _addAppButton.Text = _currentExistingApp != null ? "Edit app entry\u2026" : "Add app entry\u2026";
+        _lastCredentialListIndex = _credentialListBox.SelectedIndex;
+
+        ApplySelectionState(GetSelectedOption());
+    }
+
+    private void ApplySelectionState(RunAsAccountOptionListEntry? selection)
+    {
+        if (selection == null)
+        {
+            _currentExistingApp = null;
+            SetPrivilegeLevel(PrivilegeLevel.Isolated, enabled: false);
+            _addAppButton.Enabled = false;
+            UpdateLaunchButtonState();
+            return;
+        }
+
+        var result = _selectionPolicy.ResolveSelection(selection.Option);
+        _currentExistingApp = result.ExistingAppForSelection;
+        SetPrivilegeLevel(result.PrivilegeLevel, result.PrivilegeSelectionEnabled);
+        if (selection.Option is not CreateContainerRunAsOption)
+            _addAppButton.Text = result.AddAppButtonText;
+        _addAppButton.Enabled = result.AddAppButtonEnabled;
         UpdateLaunchButtonState();
     }
 
     private void UpdateLaunchButtonState()
     {
-        var hasCredential = _credentialListBox.SelectedItem is CredentialDisplayItem or CreateAccountItem or AppContainerDisplayItem or CreateContainerItem;
+        var hasCredential = GetSelectedOption() != null;
         var shortcutBlocked = _updateShortcutCheckBox.Visible && _updateShortcutCheckBox.Checked && _currentExistingApp == null;
         _launchButton.Enabled = hasCredential && !shortcutBlocked;
         _toolTip.SetToolTip(_launchButton, shortcutBlocked
@@ -396,7 +330,7 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
     private bool CaptureSelectionState()
     {
         bool ok = _dialogState.ResolveSelectionState(
-            _credentialListBox.SelectedItem,
+            GetSelectedOption()?.Option,
             this,
             _currentExistingApp,
             GetCurrentPrivilegeLevel(),
@@ -419,11 +353,6 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
         _privilegeLevelComboBox.Enabled = enabled;
     }
 
-    private PrivilegeLevel SuggestPrivilegeLevel(PrivilegeLevel accountMode)
-        => accountMode == PrivilegeLevel.Isolated && _executableKindService.SuggestsBasicPrivilegeLevel(_filePath)
-            ? PrivilegeLevel.Basic
-            : accountMode;
-
     private void OnLaunchClick(object? sender, EventArgs e)
     {
         if (!CaptureSelectionState())
@@ -436,13 +365,18 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
         Close();
     }
 
-    private void RepopulateCredentialList() => _populator.Repopulate();
+    private void RepopulateCredentialList()
+    {
+        _populator.Repopulate();
+        ApplySelectionState(GetSelectedOption());
+    }
 
     private void OnShowAllAccountsChanged(object? sender, EventArgs e) => RepopulateCredentialList();
 
     private bool TryPromptAdHocPassword()
     {
-        if (_credentialListBox.SelectedItem is not CredentialDisplayItem item)
+        var item = GetSelectedListItem()?.DisplayItem as CredentialDisplayItem;
+        if (item == null)
             return true;
         if (item.HasStoredCredential)
             return true;
@@ -451,13 +385,41 @@ public partial class RunAsDialog : RunFence.UI.Forms.ContextHelpForm
 
         var displayName = item.ToString();
         var usernameFallback = SidNameResolver.ResolveUsername(item.Credential.Sid, _sidResolver, _sidNames) ?? displayName;
-
-        using var dlg = new RunAsPasswordDialog(displayName, _accountPasswordService, item.Credential.Sid, usernameFallback);
-        if (dlg.ShowDialog(this) != DialogResult.OK)
+        var result = _adHocPasswordPromptService.Prompt(
+            this,
+            item.Credential.Sid,
+            usernameFallback,
+            displayName,
+            allowRememberPassword: true);
+        if (!result.Accepted)
             return false;
 
-        AdHocPassword = dlg.Password;
-        RememberPassword = dlg.RememberPassword;
+        AdHocPassword = result.Password;
+        RememberPassword = result.RememberPassword;
         return true;
     }
+
+    private IReadOnlyList<RunAsAccountOptionListEntry> BuildAccountOptions()
+        => _optionCatalog.Build(
+            _credentialListBox.Items
+                .Cast<object>()
+                .OfType<RunAsAccountListItem>()
+                .Select(item => item.OptionSource)
+                .OfType<RunAsAccountOptionSource>()
+                .ToList(),
+            _existingApps,
+            _filePath,
+            _currentUserSid,
+            _accountPrivilegeLevels);
+
+    private RunAsAccountOptionListEntry? GetSelectedOption()
+        => _optionCatalog.GetSelected(
+            GetSelectedListItem()?.OptionSource,
+            _credentialListBox.SelectedIndex,
+            _existingApps,
+            _filePath,
+            _currentUserSid,
+            _accountPrivilegeLevels);
+
+    private RunAsAccountListItem? GetSelectedListItem() => _credentialListBox.SelectedItem as RunAsAccountListItem;
 }

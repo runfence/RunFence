@@ -85,6 +85,9 @@ public class AppSettings
     // Drag Bridge
     public bool EnableDragBridge { get; set; }
 
+    public bool ShowForegroundPrivilegeMarker { get; set; } = true;
+    public bool ShowForegroundPrivilegeMarkerWhenFullscreen { get; set; } = true;
+
     // Keys.Control | Keys.Alt | Keys.Q  (0x20000 | 0x40000 | 0x51 = 0x60051)
     public int DragBridgeCopyHotkey { get; set; } = 0x60051;
 
@@ -93,6 +96,8 @@ public class AppSettings
 
     // Input injection blocking
     public bool BlockInputInjection { get; set; } = true;
+
+    public DateTime? LastWindowsTerminalLaunchRefreshAttemptUtc { get; set; }
 
     /// <summary>
     /// Returns a settings snapshot. Primitive and string properties are copied, and
@@ -121,9 +126,12 @@ public class AppSettings
         LastInteractiveUserSid = LastInteractiveUserSid,
         NagEligible = NagEligible,
         EnableDragBridge = EnableDragBridge,
+        ShowForegroundPrivilegeMarker = ShowForegroundPrivilegeMarker,
+        ShowForegroundPrivilegeMarkerWhenFullscreen = ShowForegroundPrivilegeMarkerWhenFullscreen,
         DragBridgeCopyHotkey = DragBridgeCopyHotkey,
         BlockIcmpWhenInternetBlocked = BlockIcmpWhenInternetBlocked,
         BlockInputInjection = BlockInputInjection,
+        LastWindowsTerminalLaunchRefreshAttemptUtc = LastWindowsTerminalLaunchRefreshAttemptUtc,
         HandlerMappings = HandlerMappings != null
             ? HandlerMappings.ToDictionary(
                 kv => kv.Key,

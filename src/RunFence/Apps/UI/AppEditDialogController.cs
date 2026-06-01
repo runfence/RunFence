@@ -13,7 +13,6 @@ public class AppEditDialogController
     private readonly IExecutablePathResolver _executablePathResolver;
     private readonly AppEditDialogInputValidator _inputValidator;
     private readonly AppEditDialogAclConfigBuilder _aclConfigBuilder;
-    private AppEditAccountSwitchHandler _switchHandler = null!;
 
     public AppEditDialogController(
         AppEntryBuilder entryBuilder,
@@ -28,27 +27,15 @@ public class AppEditDialogController
     }
 
     /// <summary>
-    /// Binds the controller to the per-dialog switch handler. Must be called before any operations.
-    /// </summary>
-    public void Initialize(AppEditAccountSwitchHandler switchHandler)
-    {
-        _switchHandler = switchHandler;
-    }
-
-    /// <summary>
     /// Validates a captured dialog snapshot and builds the result AppEntry.
     /// </summary>
     public AppEditDialogBuildResult ValidateAndBuild(AppEditDialogInputSnapshot snapshot)
     {
         _inputValidator.EnsureConsistent(snapshot);
 
-        var filePath = snapshot.FilePathText.Trim();
-        var isFolder = snapshot.IsFolder;
-        if (snapshot.ExistingApp == null && !PathHelper.IsUrlScheme(filePath) && !isFolder
-            && Directory.Exists(filePath) && !File.Exists(filePath))
-        {
-            isFolder = true;
-        }
+        var normalizedPath = _entryBuilder.NormalizePathKind(snapshot.FilePathText, snapshot.IsFolder);
+        var filePath = normalizedPath.ExePath;
+        var isFolder = normalizedPath.IsFolder;
 
         if (!isFolder && !PathHelper.IsUrlScheme(filePath))
         {
@@ -88,9 +75,6 @@ public class AppEditDialogController
 
         List<string>? ipcCallers = snapshot.OverrideIpcCallers ? snapshot.IpcCallers : null;
         var accountSid = snapshot.SelectedAppContainerName != null ? "" : selectedAccount!.Sid;
-        var privilegeLevel = snapshot.SelectedAppContainerName != null
-            ? _switchHandler.PriorPrivilegeLevel
-            : snapshot.SelectedPrivilegeLevel;
 
         return new AppEditDialogBuildResult(
             _entryBuilder.Build(new AppEntryBuildOptions(
@@ -113,12 +97,13 @@ public class AppEditDialogController
                 ExistingId: snapshot.ExistingApp?.Id,
                 LastKnownExeTimestamp: snapshot.ExistingApp?.LastKnownExeTimestamp,
                 PreGeneratedId: snapshot.PreGeneratedId,
-                PrivilegeLevel: privilegeLevel,
+                PrivilegeLevel: snapshot.PersistedPrivilegeLevel,
                 AppContainerName: snapshot.SelectedAppContainerName,
                 EnvironmentVariables: snapshot.EnvironmentVariables,
                 ArgumentsTemplate: snapshot.ArgumentsTemplateText,
                 PathPrefixes: snapshot.AppPathPrefixes?.ToList(),
-                ExistingApps: snapshot.ExistingApps.ToList())),
+                ExistingApps: snapshot.ExistingApps.ToList(),
+                PreviousApp: snapshot.ExistingApp)),
             statusText);
     }
 }

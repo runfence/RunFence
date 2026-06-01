@@ -1,3 +1,4 @@
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -13,8 +14,10 @@ public class MainFormFirstRunExporter(
     OptionsDesktopSettingsHandler desktopSettingsHandler,
     ILaunchFacade launchFacade,
     ILaunchFeedbackPresenter launchFeedbackPresenter,
+    IProgramDataDirectoryProvisioningService programDataDirectoryProvisioningService,
     ISessionSaver sessionSaver,
     SessionContext session)
+    : IMainFormFirstRunExporter
 {
     /// <summary>
     /// If no default desktop settings file exists yet, exports it to ProgramData, saves the path,
@@ -29,7 +32,7 @@ public class MainFormFirstRunExporter(
         var path = Path.Combine(PathConstants.ProgramDataDir, "settings.json");
         try
         {
-            Directory.CreateDirectory(PathConstants.ProgramDataDir);
+            programDataDirectoryProvisioningService.EnsureRoot();
             await desktopSettingsHandler.ExportAsync(path);
         }
         catch (Exception ex)

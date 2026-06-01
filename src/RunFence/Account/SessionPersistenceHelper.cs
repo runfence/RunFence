@@ -11,8 +11,8 @@ namespace RunFence.Account;
 /// from credential CRUD operations.
 /// </summary>
 public class SessionPersistenceHelper(
-    ICredentialRepository credentialRepository,
-    IConfigRepository configRepository,
+    IConfigReencryptionPersistence configReencryptionPersistence,
+    IMainConfigPersistence mainConfigPersistence,
     ISidNameCacheService sidNameCache,
     Func<IUiThreadInvoker> uiThreadInvokerFactory,
     ILoggingService log)
@@ -20,7 +20,7 @@ public class SessionPersistenceHelper(
     public void SaveCredentialStoreAndConfig(
         CredentialStore credStore, AppDatabase database, ISecureSecretSnapshotSource pinKey)
         => uiThreadInvokerFactory().Invoke(() =>
-            credentialRepository.SaveCredentialStoreAndConfig(credStore, database, pinKey));
+            configReencryptionPersistence.SaveCredentialStoreAndConfig(credStore, database, pinKey));
 
     public void SaveConfig(AppDatabase database, ISecureSecretSnapshotSource pinKey, byte[] argonSalt)
         => uiThreadInvokerFactory().Invoke(() => SaveConfigCore(database, pinKey, argonSalt));
@@ -57,5 +57,5 @@ public class SessionPersistenceHelper(
         });
 
     private void SaveConfigCore(AppDatabase database, ISecureSecretSnapshotSource pinKey, byte[] argonSalt)
-        => configRepository.SaveConfig(database, pinKey, argonSalt);
+        => mainConfigPersistence.SaveConfig(database, pinKey, argonSalt);
 }

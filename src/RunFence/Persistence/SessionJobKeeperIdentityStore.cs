@@ -9,7 +9,7 @@ namespace RunFence.Persistence;
 public sealed class SessionJobKeeperIdentityStore(
     ISessionProvider sessionProvider,
     Func<IUiThreadInvoker> uiThreadInvokerFactory,
-    Func<IConfigRepository> configRepositoryFactory) : IJobKeeperIdentityStore
+    Func<IMainConfigPersistence> mainConfigPersistenceFactory) : IJobKeeperIdentityStore
 {
     public JobKeeperInstanceIdentity? Get(string sid, bool isLow)
         => uiThreadInvokerFactory().Invoke(() =>
@@ -25,8 +25,7 @@ public sealed class SessionJobKeeperIdentityStore(
             var expectedMode = JobKeeperInstanceIdentity.GetMode(isLow);
             if (string.Equals(identity.TargetSid, sid, StringComparison.OrdinalIgnoreCase)
                 && identity.ExpectedMode == expectedMode
-                && !string.IsNullOrWhiteSpace(identity.PipeName)
-                && !string.IsNullOrWhiteSpace(identity.JobName))
+                && !string.IsNullOrWhiteSpace(identity.PipeName))
             {
                 return identity;
             }
@@ -34,6 +33,15 @@ public sealed class SessionJobKeeperIdentityStore(
             RemoveCore(sid, isLow);
             return null;
         });
+
+    public IReadOnlyList<JobKeeperInstanceIdentity> GetAll()
+        => uiThreadInvokerFactory().Invoke(() =>
+            sessionProvider.GetSession().Database.JobKeeperInstances?
+                .Values
+                .Where(IsValid)
+                .Select(identity => identity with { })
+                .ToList()
+            ?? []);
 
     public JobKeeperInstanceIdentity CreateFresh(string sid, bool isLow)
         => uiThreadInvokerFactory().Invoke(() =>
@@ -47,7 +55,6 @@ public sealed class SessionJobKeeperIdentityStore(
                 ExpectedMode = mode,
                 InstanceId = instanceId,
                 PipeName = $"RunFence-JK-{nameKey}-{instanceId}",
-                JobName = $@"Global\RunFence_JK_{nameKey}_{instanceId}",
             };
 
             var database = sessionProvider.GetSession().Database;
@@ -82,7 +89,7 @@ public sealed class SessionJobKeeperIdentityStore(
     {
         var session = sessionProvider.GetSession();
         var pinKeySource = session.PinDerivedKey;
-        configRepositoryFactory().SaveConfig(session.Database, pinKeySource, session.CredentialStore.ArgonSalt);
+        mainConfigPersistenceFactory().SaveConfig(session.Database, pinKeySource, session.CredentialStore.ArgonSalt);
     }
 
     private static string CreateNameKey(string sid, JobKeeperIntegrityMode mode)
@@ -91,4 +98,9 @@ public sealed class SessionJobKeeperIdentityStore(
         var hash = SHA256.HashData(input);
         return $"{(mode == JobKeeperIntegrityMode.LowIntegrity ? "L" : "R")}-{Convert.ToHexString(hash, 0, 12)}";
     }
+
+    private static bool IsValid(JobKeeperInstanceIdentity identity) =>
+        !string.IsNullOrWhiteSpace(identity.TargetSid)
+        && !string.IsNullOrWhiteSpace(identity.PipeName)
+        && Enum.IsDefined(typeof(JobKeeperIntegrityMode), identity.ExpectedMode);
 }

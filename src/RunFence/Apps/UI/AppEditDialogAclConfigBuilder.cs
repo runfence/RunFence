@@ -12,35 +12,21 @@ public class AppEditDialogAclConfigBuilder(AclConfigValidator validator)
         bool isFolder)
     {
         var aclSnapshot = snapshot.AclConfig;
-        var aclTarget = isFolder ? AclTarget.Folder : aclSnapshot.SelectedAclTarget;
-        var depth = aclTarget == AclTarget.Folder ? aclSnapshot.FolderAclDepth : 0;
-        var existingApps = snapshot.ExistingApps.ToList();
-        var isAllowMode = aclSnapshot.AclMode == AclMode.Allow;
-
-        string? CheckPathConflict() => validator.CheckPathConflict(
-            exePath,
-            isFolder,
-            isAllowMode,
-            aclTarget,
-            depth,
-            existingApps,
-            snapshot.ExistingApp?.Id);
-
-        var error = validator.Validate(
+        var validationState = validator.ValidateState(
             exePath,
             isFolder,
             aclSnapshot.RestrictAcl,
-            isAllowMode,
-            aclTarget,
-            depth,
+            aclSnapshot.AclMode == AclMode.Allow,
+            aclSnapshot.SelectedAclTarget,
+            aclSnapshot.FolderAclDepth,
             aclSnapshot.AllowedEntries.Count,
-            CheckPathConflict);
-        if (error != null)
-            return new AppEditDialogAclBuildResult(null, error);
+            snapshot.ExistingApps.ToList(),
+            snapshot.ExistingApp?.Id);
+        if (!validationState.IsValid)
+            return new AppEditDialogAclBuildResult(null, validationState.ConflictMessage);
 
-        var restrictAcl = aclSnapshot.RestrictAcl && !PathHelper.IsUrlScheme(exePath);
         List<AllowAclEntry>? allowedEntries = null;
-        if (restrictAcl && isAllowMode)
+        if (validationState.RestrictAcl && validationState.IsAllowMode)
         {
             allowedEntries = aclSnapshot.AllowedEntries
                 .Select(entry => new AllowAclEntry
@@ -54,10 +40,10 @@ public class AppEditDialogAclConfigBuilder(AclConfigValidator validator)
 
         return new AppEditDialogAclBuildResult(
             new AclConfigResult(
-                restrictAcl,
-                aclSnapshot.AclMode,
-                aclTarget,
-                depth,
+                validationState.RestrictAcl,
+                validationState.AclMode,
+                validationState.SelectedAclTarget,
+                validationState.FolderAclDepth,
                 aclSnapshot.DeniedRights,
                 allowedEntries),
             null);

@@ -15,7 +15,8 @@ public class RunAsCredentialPersister(
     IAppStateProvider appState,
     SessionContext session,
     ICredentialEncryptionSpanService encryptionService,
-    IDatabaseService databaseService,
+    IMainConfigPersistence mainConfigPersistence,
+    ICredentialStorePersistence credentialStorePersistence,
     ILoggingService log)
 {
     public string? LastUsedRunAsAccountSid { get; private set; } = appState.Database.Settings.LastUsedRunAsAccountSid;
@@ -46,7 +47,7 @@ public class RunAsCredentialPersister(
         settings.LastUsedRunAsContainerName = LastUsedRunAsContainerName;
         try
         {
-            databaseService.SaveConfig(
+            mainConfigPersistence.SaveConfig(
                 appState.Database,
                 session.PinDerivedKey,
                 session.CredentialStore.ArgonSalt);
@@ -80,7 +81,7 @@ public class RunAsCredentialPersister(
                     Sid = result.Credential.Sid,
                     EncryptedPassword = encryptedPassword
                 });
-            databaseService.SaveCredentialStore(session.CredentialStore);
+            credentialStorePersistence.SaveCredentialStore(session.CredentialStore);
         }
         catch (Exception ex)
         {

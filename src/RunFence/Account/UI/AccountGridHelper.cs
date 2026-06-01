@@ -16,9 +16,6 @@ public static class AccountGridHelper
     public static AccountRow? GetSelectedAccountRow(DataGridView grid)
         => grid.SelectedRows.Count > 0 ? grid.SelectedRows[0].Tag as AccountRow : null;
 
-    private static Font? _boldFont;
-    private static Font? _boldFontBase;
-
     public static Image CreateKeyIcon()
     {
         return UiIconFactory.CreateToolbarIcon("\U0001F511", Color.FromArgb(0xB8, 0x8A, 0x00), 16);
@@ -78,7 +75,7 @@ public static class AccountGridHelper
         return bmp;
     }
     
-    public static void PaintSidCell(DataGridView grid, DataGridViewCellPaintingEventArgs e, string columnName = "SID")
+    public static void PaintSidCell(DataGridView grid, DataGridViewCellPaintingEventArgs e, string columnName = AccountGridColumns.Sid)
     {
         if (e.RowIndex < 0 || e.ColumnIndex < 0)
             return;
@@ -126,67 +123,4 @@ public static class AccountGridHelper
         e.Handled = true;
     }
 
-    private static Font GetOrCreateBoldFont(Font baseFont)
-    {
-        if (_boldFont != null && ReferenceEquals(_boldFontBase, baseFont))
-            return _boldFont;
-        _boldFont?.Dispose();
-        _boldFont = new Font(baseFont, FontStyle.Bold);
-        _boldFontBase = baseFont;
-        return _boldFont;
-    }
-
-    /// <summary>
-    /// Adds an account row to the grid and returns the created <see cref="DataGridViewRow"/>.
-    /// Sets <see cref="DataGridViewRow.Tag"/> to <paramref name="accountRow"/> and the SID cell tooltip.
-    /// Callers are responsible for further per-section cell configuration (tooltips, ReadOnly, etc.).
-    /// </summary>
-    public static DataGridViewRow AddAccountGridRow(
-        DataGridView grid,
-        AccountGridIconLifetimeManager? iconLifetimeManager,
-        AccountRow accountRow,
-        Image icon,
-        string displayName,
-        bool logonValue,
-        bool allowInternet,
-        string appsText,
-        string profilePath)
-    {
-        var idx = grid.Rows.Add(false, icon, displayName, logonValue, allowInternet, appsText, profilePath, accountRow.Sid);
-        var row = grid.Rows[idx];
-        iconLifetimeManager?.TrackOwned(row, icon);
-        row.Tag = accountRow;
-        row.Cells["SID"].ToolTipText = accountRow.Sid;
-        return row;
-    }
-
-    public static void AddGroupHeaderRow(DataGridView grid, AccountGridIconLifetimeManager? iconLifetimeManager, string title)
-    {
-        var colCount = grid.Columns.Count;
-        var values = new object[colCount];
-        values[grid.Columns["Import"]!.Index] = false;
-        values[grid.Columns["Credential"]!.Index] = EmptyIcon;
-        values[grid.Columns["Account"]!.Index] = title;
-        values[grid.Columns["Logon"]!.Index] = false;
-        values[grid.Columns["Apps"]!.Index] = "";
-        values[grid.Columns["ProfilePath"]!.Index] = "";
-        values[grid.Columns["SID"]!.Index] = "";
-        var idx = grid.Rows.Add(values);
-        var row = grid.Rows[idx];
-        iconLifetimeManager?.TrackOwned(row, EmptyIcon);
-        row.Tag = new AccountGroupHeader();
-        row.DefaultCellStyle.BackColor = Color.FromArgb(0xE4, 0xEA, 0xF4);
-        row.DefaultCellStyle.Font = GetOrCreateBoldFont(grid.Font);
-        row.DefaultCellStyle.SelectionBackColor = Color.FromArgb(0xE4, 0xEA, 0xF4);
-        row.DefaultCellStyle.SelectionForeColor = Color.Black;
-        row.Height = 22;
-        foreach (DataGridViewCell cell in row.Cells)
-            cell.ReadOnly = true;
-        foreach (var colName in new[] { "Import", "Logon", "colAllowInternet" })
-        {
-            var colIndex = grid.Columns[colName]?.Index;
-            if (colIndex.HasValue)
-                row.Cells[colIndex.Value] = new DataGridViewTextBoxCell { Value = "" };
-        }
-    }
 }

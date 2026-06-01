@@ -1,3 +1,4 @@
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
@@ -19,6 +20,7 @@ public class OptionsFolderBrowserSection
     private readonly ILaunchFeedbackPresenter _launchFeedbackPresenter;
     private readonly ILoggingService _log;
     private readonly IModalCoordinator _modalCoordinator;
+    private readonly IProgramDataDirectoryProvisioningService _programDataDirectoryProvisioningService;
 
     private TextBox _folderBrowserExeTextBox = null!;
     private TextBox _defaultSettingsPathTextBox = null!;
@@ -37,6 +39,7 @@ public class OptionsFolderBrowserSection
         OptionsDesktopSettingsHandler desktopSettingsHandler,
         ILaunchFacade launchFacade,
         ILaunchFeedbackPresenter launchFeedbackPresenter,
+        IProgramDataDirectoryProvisioningService programDataDirectoryProvisioningService,
         ILoggingService log)
     {
         _modalCoordinator = modalCoordinator;
@@ -44,6 +47,7 @@ public class OptionsFolderBrowserSection
         _desktopSettingsHandler = desktopSettingsHandler;
         _launchFacade = launchFacade;
         _launchFeedbackPresenter = launchFeedbackPresenter;
+        _programDataDirectoryProvisioningService = programDataDirectoryProvisioningService;
         _log = log;
     }
 
@@ -131,8 +135,7 @@ public class OptionsFolderBrowserSection
         dlg.Title = "Export Desktop Settings";
         try
         {
-            Directory.CreateDirectory(PathConstants.ProgramDataDir);
-            dlg.InitialDirectory = PathConstants.ProgramDataDir;
+            dlg.InitialDirectory = _programDataDirectoryProvisioningService.EnsureRoot();
         }
         catch
         {

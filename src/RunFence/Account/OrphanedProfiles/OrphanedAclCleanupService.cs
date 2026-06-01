@@ -201,6 +201,7 @@ public class OrphanedAclCleanupService(ILoggingService log) : IOrphanedAclCleanu
                     new FileInfo(path).SetAccessControl((FileSecurity)security);
 
                 objectsFixed++;
+                log.Info($"Filesystem ACL cleanup updated '{path}': {string.Join("; ", actions)}");
                 report.Add((path, string.Join("; ", actions), null));
             }
         }

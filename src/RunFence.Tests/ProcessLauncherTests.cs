@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Moq;
+using RunFence.Acl;
 using RunFence.Account;
 using RunFence.Apps;
 using RunFence.Core;
@@ -32,7 +33,8 @@ public class ProcessLauncherTests : IDisposable
     private readonly Mock<IAppContainerProcessLauncher> _containerLauncher = new();
     private readonly Mock<IWindowsAppsAliasPathResolver> _windowsAppsAliasPathResolver = new();
     private readonly Mock<IExecutableKindService> _executableKindService = new();
-    private readonly Mock<IWindowsAppsRegistrationRepairRunner> _windowsAppsRegistrationRepairRunner = new();
+    private readonly Mock<IWindowsAppsActivationLauncher> _windowsAppsActivationLauncher = new();
+    private readonly ILaunchCredentialsLookup _credentialsLookup;
 
     private readonly AppDatabase _database = new();
     private readonly CredentialStore _credentialStore = new();
@@ -42,7 +44,10 @@ public class ProcessLauncherTests : IDisposable
     private readonly ProcessLauncher _processLauncher;
 
     private static LaunchProcessInfo MakeProcessInfo()
-        => new(new ProcessLaunchNative.PROCESS_INFORMATION());
+        => TestProcessInfoFactory.Native(new ProcessLaunchNative.PROCESS_INFORMATION());
+
+    private static LaunchProcessInfo MakeLaunchResult()
+        => MakeProcessInfo();
 
     public ProcessLauncherTests()
     {
@@ -52,13 +57,13 @@ public class ProcessLauncherTests : IDisposable
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_protectedPinKey));
+        }.WithClonedPinDerivedKey(_protectedPinKey));
 
         var credentialDecryption = new CredentialDecryptionService(
             new ByteArrayCredentialEncryptionSpanAdapter(_encryptionService.Object),
             _sidResolver.Object,
             _interactiveUserSidResolver.Object);
-        var credentialsLookup = new LaunchCredentialsLookup(
+        _credentialsLookup = new LaunchCredentialsLookup(
             _sessionProvider.Object,
             credentialDecryption,
             () => new InlineUiThreadInvoker(action => action()));
@@ -69,16 +74,16 @@ public class ProcessLauncherTests : IDisposable
 
         _accountLauncher
             .Setup(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()))
-            .Returns(MakeProcessInfo);
+            .Returns(MakeLaunchResult);
 
         _processLauncher = new ProcessLauncher(
             _accountLauncher.Object,
-            credentialsLookup,
+            _credentialsLookup,
             _profileRepair.Object,
             _containerLauncher.Object,
             _windowsAppsAliasPathResolver.Object,
             _executableKindService.Object,
-            _windowsAppsRegistrationRepairRunner.Object,
+            _windowsAppsActivationLauncher.Object,
             _log.Object);
     }
 
@@ -193,7 +198,7 @@ public class ProcessLauncherTests : IDisposable
 
         var result = _processLauncher.Launch(identity, target);
 
-        Assert.Equal(expectedInfo, result);
+        Assert.Same(expectedInfo, result);
         _containerLauncher.Verify(c => c.LaunchFile(target, identity), Times.Once);
         _accountLauncher.Verify(a => a.Launch(It.IsAny<ProcessLaunchTarget>(),
             It.IsAny<AccountLaunchIdentity>()), Times.Never);
@@ -210,7 +215,7 @@ public class ProcessLauncherTests : IDisposable
 
         var result = _processLauncher.Launch(identity, target);
 
-        Assert.Equal(expectedInfo, result);
+        Assert.Same(expectedInfo, result);
         _containerLauncher.Verify(c => c.LaunchFile(target, identity), Times.Once);
     }
 
@@ -225,7 +230,7 @@ public class ProcessLauncherTests : IDisposable
 
         var result = _processLauncher.Launch(identity, target);
 
-        Assert.Equal(expectedInfo, result);
+        Assert.Same(expectedInfo, result);
         _containerLauncher.Verify(c => c.LaunchFile(target, identity), Times.Once);
     }
 
@@ -249,7 +254,7 @@ public class ProcessLauncherTests : IDisposable
     }
 
     [Fact]
-    public void Accept_WindowsAppsPackagePath_SuppressesStartupFeedbackOnLaunchedTarget()
+    public void Accept_WindowsAppsPackagePath_UsesActivationLauncherWithStartupFeedbackSuppressed()
     {
         var identity = new AccountLaunchIdentity(TestSid)
         {
@@ -258,19 +263,30 @@ public class ProcessLauncherTests : IDisposable
         };
         var target = new ProcessLaunchTarget(
             @"C:\Program Files\WindowsApps\Microsoft.WindowsNotepad_11.2512.29.0_x64__8wekyb3d8bbwe\Notepad\Notepad.exe");
+        var launchedTarget = target with { SuppressStartupFeedback = true };
+        _windowsAppsActivationLauncher
+            .Setup(l => l.TryLaunch(
+                launchedTarget,
+                target.ExePath,
+                identity,
+                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)))
+            .Returns((LaunchProcessInfo?)null);
 
-        _processLauncher.Accept(identity, target);
+        var result = _processLauncher.Accept(identity, target);
 
-        _accountLauncher.Verify(a => a.Launch(
-            It.Is<ProcessLaunchTarget>(t =>
-                t.ExePath == target.ExePath
-                && t.Arguments == target.Arguments
-                && t.SuppressStartupFeedback),
-            It.IsAny<AccountLaunchIdentity>()), Times.Once);
+        Assert.Null(result);
+        _windowsAppsActivationLauncher.Verify(
+            l => l.TryLaunch(
+                launchedTarget,
+                target.ExePath,
+                identity,
+                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
+            Times.Once);
+        _accountLauncher.Verify(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()), Times.Never);
     }
 
     [Fact]
-    public void Accept_WindowsAppsAliasForTargetUser_SuppressesStartupFeedbackOnLaunchedTarget()
+    public void Accept_WindowsAppsAliasForTargetUser_UsesActivationLauncherWithStartupFeedbackSuppressed()
     {
         var identity = new AccountLaunchIdentity(TestSid)
         {
@@ -278,22 +294,34 @@ public class ProcessLauncherTests : IDisposable
             PrivilegeLevel = PrivilegeLevel.Isolated
         };
         var target = new ProcessLaunchTarget("notepad.exe");
+        const string resolvedAliasPath = @"C:\Users\Test\AppData\Local\Microsoft\WindowsApps\notepad.exe";
+        var launchedTarget = target with { SuppressStartupFeedback = true };
         _windowsAppsAliasPathResolver
             .Setup(r => r.TryResolveForUserSid(target.ExePath, identity.Sid))
-            .Returns(@"C:\Users\Test\AppData\Local\Microsoft\WindowsApps\notepad.exe");
+            .Returns(resolvedAliasPath);
+        _windowsAppsActivationLauncher
+            .Setup(l => l.TryLaunch(
+                launchedTarget,
+                resolvedAliasPath,
+                identity,
+                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)))
+            .Returns((LaunchProcessInfo?)null);
 
-        _processLauncher.Accept(identity, target);
+        var result = _processLauncher.Accept(identity, target);
 
-        _accountLauncher.Verify(a => a.Launch(
-            It.Is<ProcessLaunchTarget>(t =>
-                t.ExePath == target.ExePath
-                && t.Arguments == target.Arguments
-                && t.SuppressStartupFeedback),
-            It.IsAny<AccountLaunchIdentity>()), Times.Once);
+        Assert.Null(result);
+        _windowsAppsActivationLauncher.Verify(
+            l => l.TryLaunch(
+                launchedTarget,
+                resolvedAliasPath,
+                identity,
+                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
+            Times.Once);
+        _accountLauncher.Verify(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()), Times.Never);
     }
 
     [Fact]
-    public void Accept_WindowsShimUwpTarget_SuppressesStartupFeedbackOnLaunchedTarget()
+    public void Accept_WindowsShimUwpTarget_UsesActivationLauncherWithStartupFeedbackSuppressed()
     {
         var identity = new AccountLaunchIdentity(TestSid)
         {
@@ -301,18 +329,29 @@ public class ProcessLauncherTests : IDisposable
             PrivilegeLevel = PrivilegeLevel.Isolated
         };
         var target = new ProcessLaunchTarget(@"C:\Windows\notepad.exe");
+        var launchedTarget = target with { SuppressStartupFeedback = true };
         _executableKindService
             .Setup(s => s.IsUwpExeFile(target.ExePath))
             .Returns(true);
+        _windowsAppsActivationLauncher
+            .Setup(l => l.TryLaunch(
+                launchedTarget,
+                target.ExePath,
+                identity,
+                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)))
+            .Returns((LaunchProcessInfo?)null);
 
-        _processLauncher.Accept(identity, target);
+        var result = _processLauncher.Accept(identity, target);
 
-        _accountLauncher.Verify(a => a.Launch(
-            It.Is<ProcessLaunchTarget>(t =>
-                t.ExePath == target.ExePath
-                && t.Arguments == target.Arguments
-                && t.SuppressStartupFeedback),
-            It.IsAny<AccountLaunchIdentity>()), Times.Once);
+        Assert.Null(result);
+        _windowsAppsActivationLauncher.Verify(
+            l => l.TryLaunch(
+                launchedTarget,
+                target.ExePath,
+                identity,
+                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
+            Times.Once);
+        _accountLauncher.Verify(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()), Times.Never);
     }
 
     [Fact]
@@ -339,131 +378,144 @@ public class ProcessLauncherTests : IDisposable
     }
 
     [Fact]
-    public void Accept_WindowsAppsAccessDenied_RunnerRepairsAndRetries()
+    public void Accept_WindowsAppsPackagePath_UsesActivationLauncherWithoutDirectLaunch()
     {
         var identity = new AccountLaunchIdentity(TestSid)
         {
             Credentials = new LaunchCredentials(null, null, null, LaunchTokenSource.InteractiveUser),
             PrivilegeLevel = PrivilegeLevel.Isolated
         };
-        var target = new ProcessLaunchTarget(NotepadPackageExe(), @"C:\Users\a\AppData\Local\RunFence\runfence.log");
+        var target = new ProcessLaunchTarget(NotepadPackageExe(), "--resume abc");
         var launchedTarget = target with { SuppressStartupFeedback = true };
-        var processInfo = MakeProcessInfo();
-        _accountLauncher
-            .SetupSequence(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()))
-            .Throws(new Win32Exception(5))
-            .Returns(processInfo);
-        _windowsAppsRegistrationRepairRunner
-            .Setup(r => r.TryRepair(
+        _windowsAppsActivationLauncher
+            .Setup(l => l.TryLaunch(
                 launchedTarget,
-                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials == identity.Credentials),
+                target.ExePath,
+                identity,
                 It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)))
-            .Returns(true);
+            .Returns((LaunchProcessInfo?)null);
 
         var result = _processLauncher.Accept(identity, target);
 
-        Assert.Same(processInfo, result);
-        _windowsAppsRegistrationRepairRunner.Verify(r => r.TryRepair(
-            launchedTarget,
-            It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials == identity.Credentials),
-            It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
+        Assert.Null(result);
+        _windowsAppsActivationLauncher.Verify(
+            l => l.TryLaunch(
+                launchedTarget,
+                target.ExePath,
+                identity,
+                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
             Times.Once);
-        _accountLauncher.Verify(a => a.Launch(launchedTarget, It.IsAny<AccountLaunchIdentity>()), Times.Exactly(2));
+        _accountLauncher.Verify(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()), Times.Never);
     }
 
     [Fact]
-    public void Accept_JobKeeperAccessDenied_RunnerRepairsAndRetries()
+    public void Accept_WindowsAppsAliasForTargetUser_UsesActivationLauncherWithOriginalAliasTarget()
     {
         var identity = new AccountLaunchIdentity(TestSid)
         {
             Credentials = new LaunchCredentials(null, null, null, LaunchTokenSource.InteractiveUser),
             PrivilegeLevel = PrivilegeLevel.Isolated
         };
-        var target = new ProcessLaunchTarget(NotepadPackageExe(), @"C:\Users\a\AppData\Local\RunFence\runfence.log");
+        var target = new ProcessLaunchTarget("notepad.exe", "--resume abc");
+        const string resolvedAliasPath = @"C:\Users\Test\AppData\Local\Microsoft\WindowsApps\notepad.exe";
         var launchedTarget = target with { SuppressStartupFeedback = true };
-        var processInfo = MakeProcessInfo();
-        _accountLauncher
-            .SetupSequence(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()))
-            .Throws(new JobKeeperChildLaunchException("access denied", 5))
-            .Returns(processInfo);
-        _windowsAppsRegistrationRepairRunner
-            .Setup(r => r.TryRepair(
+        _windowsAppsAliasPathResolver
+            .Setup(r => r.TryResolveForUserSid(target.ExePath, identity.Sid))
+            .Returns(resolvedAliasPath);
+        _windowsAppsActivationLauncher
+            .Setup(l => l.TryLaunch(
                 launchedTarget,
-                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials == identity.Credentials),
+                resolvedAliasPath,
+                identity,
                 It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)))
-            .Returns(true);
+            .Returns((LaunchProcessInfo?)null);
 
         var result = _processLauncher.Accept(identity, target);
 
-        Assert.Same(processInfo, result);
-        _windowsAppsRegistrationRepairRunner.Verify(r => r.TryRepair(
-            launchedTarget,
-            It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials == identity.Credentials),
-            It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
+        Assert.Null(result);
+        _windowsAppsActivationLauncher.Verify(
+            l => l.TryLaunch(
+                launchedTarget,
+                resolvedAliasPath,
+                identity,
+                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
             Times.Once);
-        _accountLauncher.Verify(a => a.Launch(launchedTarget, It.IsAny<AccountLaunchIdentity>()), Times.Exactly(2));
+        _accountLauncher.Verify(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()), Times.Never);
     }
 
     [Fact]
-    public void Accept_AppAliasAccessDenied_RunnerRepairsAndRetriesOriginalAliasTarget()
+    public void Accept_BareWindowsAppsAlias_ActivationFactoryReceivesResolvedAliasPath()
     {
         var identity = new AccountLaunchIdentity(TestSid)
         {
             Credentials = new LaunchCredentials(null, null, null, LaunchTokenSource.InteractiveUser),
             PrivilegeLevel = PrivilegeLevel.Isolated
         };
-        var target = new ProcessLaunchTarget("notepad.exe", @"C:\Users\a\AppData\Local\RunFence\runfence.log");
-        var processInfo = MakeProcessInfo();
-        _accountLauncher
-            .SetupSequence(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()))
-            .Throws(new Win32Exception(5))
-            .Returns(processInfo);
-        _windowsAppsRegistrationRepairRunner
-            .Setup(r => r.TryRepair(
-                target,
-                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials == identity.Credentials),
+        var target = new ProcessLaunchTarget("wt.exe", "--new-tab");
+        const string resolvedAliasPath = @"C:\Users\Test\AppData\Local\Microsoft\WindowsApps\wt.exe";
+        var targetFactory = new Mock<IWindowsAppsActivationTargetFactory>();
+        var helperLauncher = new Mock<IWindowsAppsActivationHelperLauncher>(MockBehavior.Strict);
+        var mandatoryLabelService = new Mock<IMandatoryLabelService>(MockBehavior.Strict);
+        var activationLauncher = new WindowsAppsActivationLauncher(
+            targetFactory.Object,
+            helperLauncher.Object,
+            new Mock<IWindowsAppsActivationResultPoller>(MockBehavior.Strict).Object,
+            mandatoryLabelService.Object);
+        var processLauncher = new ProcessLauncher(
+            _accountLauncher.Object,
+            _credentialsLookup,
+            _profileRepair.Object,
+            _containerLauncher.Object,
+            _windowsAppsAliasPathResolver.Object,
+            _executableKindService.Object,
+            activationLauncher,
+            _log.Object);
+        _windowsAppsAliasPathResolver
+            .Setup(r => r.TryResolveForUserSid(target.ExePath, identity.Sid))
+            .Returns(resolvedAliasPath);
+        targetFactory
+            .Setup(f => f.TryCreate(
+                It.Is<ProcessLaunchTarget>(t => t.ExePath == target.ExePath && t.Arguments == target.Arguments),
+                resolvedAliasPath,
+                identity.Sid))
+            .Returns((WindowsAppsActivationTarget?)null);
+
+        Assert.Throws<InvalidOperationException>(() => processLauncher.Accept(identity, target));
+
+        targetFactory.Verify(f => f.TryCreate(
+            It.Is<ProcessLaunchTarget>(t =>
+                t.ExePath == target.ExePath
+                && t.Arguments == target.Arguments
+                && t.SuppressStartupFeedback),
+            resolvedAliasPath,
+            identity.Sid), Times.Once);
+        helperLauncher.Verify(
+            l => l.Launch(It.IsAny<WindowsAppsActivationTarget>(), It.IsAny<AccountLaunchIdentity>(), It.IsAny<AccountLaunchIdentity>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public void Accept_WindowsAppsTargetWithNoProcessResult_DoesNotDirectLaunch()
+    {
+        var identity = new AccountLaunchIdentity(TestSid)
+        {
+            Credentials = new LaunchCredentials(null, null, null, LaunchTokenSource.InteractiveUser),
+            PrivilegeLevel = PrivilegeLevel.Isolated
+        };
+        var target = new ProcessLaunchTarget(NotepadPackageExe(), "--resume abc");
+        var launchedTarget = target with { SuppressStartupFeedback = true };
+        _windowsAppsActivationLauncher
+            .Setup(l => l.TryLaunch(
+                launchedTarget,
+                target.ExePath,
+                identity,
                 It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)))
-            .Returns(true);
+            .Returns((LaunchProcessInfo?)null);
 
         var result = _processLauncher.Accept(identity, target);
 
-        Assert.Same(processInfo, result);
-        _windowsAppsRegistrationRepairRunner.Verify(r => r.TryRepair(
-            target,
-            It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials == identity.Credentials),
-            It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
-            Times.Once);
-        _accountLauncher.Verify(a => a.Launch(target, It.IsAny<AccountLaunchIdentity>()), Times.Exactly(2));
-    }
-
-    [Fact]
-    public void Accept_AccessDeniedRepairRunnerReturnsFalse_PropagatesOriginalError()
-    {
-        var identity = new AccountLaunchIdentity(TestSid)
-        {
-            Credentials = new LaunchCredentials(null, null, null, LaunchTokenSource.InteractiveUser),
-            PrivilegeLevel = PrivilegeLevel.Isolated
-        };
-        var target = new ProcessLaunchTarget(NotepadPackageExe());
-        var launchedTarget = target with { SuppressStartupFeedback = true };
-        _accountLauncher
-            .SetupSequence(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()))
-            .Throws(new Win32Exception(5));
-        _windowsAppsRegistrationRepairRunner
-            .Setup(r => r.TryRepair(
-                launchedTarget,
-                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials == identity.Credentials),
-                It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)))
-            .Returns(false);
-
-        Assert.Throws<Win32Exception>(() => _processLauncher.Accept(identity, target));
-
-        _windowsAppsRegistrationRepairRunner.Verify(r => r.TryRepair(
-            launchedTarget,
-            It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials == identity.Credentials),
-            It.Is<AccountLaunchIdentity>(id => id.Sid == identity.Sid && id.Credentials != null)),
-            Times.Once);
-        _accountLauncher.Verify(a => a.Launch(launchedTarget, It.IsAny<AccountLaunchIdentity>()), Times.Once);
+        Assert.Null(result);
+        _accountLauncher.Verify(a => a.Launch(It.IsAny<ProcessLaunchTarget>(), It.IsAny<AccountLaunchIdentity>()), Times.Never);
     }
 
     private static string NotepadPackageExe() =>

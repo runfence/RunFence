@@ -54,6 +54,13 @@ public interface IStartupIpcHost
     void SetStartupComplete();
 }
 
+public interface IDeferredStartupMainForm
+{
+    bool IsDisposed { get; }
+    void BeginInvokeOnUiThread(Action action);
+    void ShowTrayBalloon(string text);
+}
+
 public interface ILockUiEventSource
 {
     event Action? ShowWindowRequested;

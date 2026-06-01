@@ -6,7 +6,9 @@ namespace RunFence.Apps.Shortcuts;
 
 internal class ShortcutDiscoveryService(
     IShortcutTraversalScanner scanner,
-    IDatabaseProvider databaseProvider)
+    IDatabaseProvider databaseProvider,
+    IExecutableIconCountReader iconCountReader,
+    IWindowsAppsAppDiscoveryService windowsAppsAppDiscoveryService)
     : IShortcutDiscoveryService
 {
     public List<DiscoveredApp> DiscoverApps()
@@ -26,9 +28,15 @@ internal class ShortcutDiscoveryService(
             }
         }
 
+        foreach (var app in windowsAppsAppDiscoveryService.DiscoverApps())
+        {
+            if (!seen.ContainsKey(app.TargetPath))
+                seen[app.TargetPath] = app;
+        }
+
         var windowsDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-        AddExesFromDirectory(seen, windowsDir, searchOption: SearchOption.TopDirectoryOnly);
-        AddExesFromDirectory(seen, Path.Combine(windowsDir, "System32"), searchOption: SearchOption.TopDirectoryOnly);
+        AddExesFromDirectory(seen, windowsDir, searchOption: SearchOption.TopDirectoryOnly, hasEmbeddedIcon: HasEmbeddedIcon);
+        AddExesFromDirectory(seen, Path.Combine(windowsDir, "System32"), searchOption: SearchOption.TopDirectoryOnly, hasEmbeddedIcon: HasEmbeddedIcon);
 
         return seen.Values
             .OrderBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
@@ -76,7 +84,7 @@ internal class ShortcutDiscoveryService(
     private IEnumerable<ShortcutTraversalEntry> TraverseShortcuts()
         => scanner.ScanShortcuts(CaptureManagedSids());
 
-    private static void AddExesFromDirectory(Dictionary<string, DiscoveredApp> seen, string dir, SearchOption searchOption)
+    private void AddExesFromDirectory(Dictionary<string, DiscoveredApp> seen, string dir, SearchOption searchOption, Func<string, bool> hasEmbeddedIcon)
     {
         if (!Directory.Exists(dir))
             return;
@@ -92,20 +100,13 @@ internal class ShortcutDiscoveryService(
 
         foreach (var file in files)
         {
-            if (!seen.ContainsKey(file) && HasEmbeddedIcon(file))
+            if (!seen.ContainsKey(file) && hasEmbeddedIcon(file))
                 seen[file] = new DiscoveredApp(Path.GetFileNameWithoutExtension(file), file);
         }
     }
 
-    private static bool HasEmbeddedIcon(string exePath)
+    private bool HasEmbeddedIcon(string exePath)
     {
-        try
-        {
-            return ShortcutDiscoveryNative.ExtractIconEx(exePath, -1, null, null, 0) > 0;
-        }
-        catch
-        {
-            return false;
-        }
+        return iconCountReader.TryGetIconCount(exePath, out var iconCount) && iconCount > 0;
     }
 }

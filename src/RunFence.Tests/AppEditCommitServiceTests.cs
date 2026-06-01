@@ -56,10 +56,10 @@ public class AppEditCommitServiceTests : IDisposable
         var newApp = previousApp.Clone();
         newApp.Name = "Updated App";
         _database.Apps.Add(previousApp);
-        _aclService.Setup(s => s.RevertAcl(previousApp, It.IsAny<IReadOnlyList<AppEntry>>()))
+        _besideTargetShortcutService.Setup(s => s.RemoveBesideTargetShortcut(previousApp))
             .Throws(new InvalidOperationException("cleanup failed"));
 
-        var result = CreateSut().Commit(newApp, previousApp, @"C:\Configs\new.rfn");
+        var result = Commit(CreateSut(), newApp, previousApp, @"C:\Configs\new.rfn");
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
         Assert.Equal("cleanup failed", result.ErrorMessage);
@@ -71,7 +71,8 @@ public class AppEditCommitServiceTests : IDisposable
                 It.IsAny<ISecureSecretSnapshotSource>(),
                 It.IsAny<byte[]>()),
             Times.Never);
-        _aclService.Verify(s => s.ApplyAcl(newApp, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
+        _iconService.Verify(s => s.CreateBadgedIcon(previousApp, null), Times.Once);
+        _aclService.Verify(s => s.ApplyAcl(previousApp, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
         _dataChangeNotifier.Verify(s => s.NotifyDataChanged(), Times.Never);
     }
 
@@ -83,7 +84,12 @@ public class AppEditCommitServiceTests : IDisposable
         newApp.Id = "new-app";
         _database.Apps.Add(previousApp);
 
-        var result = CreateSut().Commit(newApp, previousApp, @"C:\Configs\new.rfn");
+        var result = Commit(
+            CreateSut(),
+            newApp,
+            previousApp,
+            @"C:\Configs\new.rfn",
+            previousConfigPath: @"C:\Configs\old.rfn");
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
         Assert.Equal("Existing application edits must preserve the application ID.", result.ErrorMessage);
@@ -97,7 +103,12 @@ public class AppEditCommitServiceTests : IDisposable
         var previousApp = CreateApp("old-app");
         var newApp = previousApp.Clone();
 
-        var result = CreateSut().Commit(newApp, previousApp, @"C:\Configs\new.rfn");
+        var result = Commit(
+            CreateSut(),
+            newApp,
+            previousApp,
+            @"C:\Configs\new.rfn",
+            previousConfigPath: @"C:\Configs\old.rfn");
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
         Assert.Equal("The application no longer exists.", result.ErrorMessage);
@@ -116,15 +127,11 @@ public class AppEditCommitServiceTests : IDisposable
         _appConfigService.Setup(s => s.GetConfigPath(previousApp.Id)).Returns(@"C:\Configs\old.rfn");
 
         var events = new List<string>();
-        _aclService.Setup(s => s.RevertAcl(previousApp, It.IsAny<IReadOnlyList<AppEntry>>()))
-            .Callback(() => events.Add("cleanup-revert"));
-        int recomputeCall = 0;
-        _aclService.Setup(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()))
-            .Callback(() => events.Add(++recomputeCall == 1 ? "cleanup-recompute" : "restore-recompute"));
-        _aclService.Setup(s => s.ApplyAcl(previousApp, It.IsAny<IReadOnlyList<AppEntry>>()))
-            .Callback(() => events.Add("restore-apply"));
-        _aclService.Setup(s => s.ApplyAcl(newApp, It.IsAny<IReadOnlyList<AppEntry>>()))
-            .Callback(() => events.Add("new-apply"));
+        _besideTargetShortcutService.Setup(s => s.RemoveBesideTargetShortcut(previousApp))
+            .Callback(() => events.Add("cleanup-beside-remove"));
+        _iconService.Setup(s => s.CreateBadgedIcon(previousApp))
+            .Callback(() => events.Add("restore-icon"))
+            .Returns(string.Empty);
         _appConfigService.Setup(s => s.AssignApp(previousApp.Id, It.IsAny<string?>()))
             .Callback<string, string?>((_, path) => events.Add($"assign:{path ?? "<main>"}"));
         int saveAttempt = 0;
@@ -139,15 +146,22 @@ public class AppEditCommitServiceTests : IDisposable
                     throw new IOException("disk full");
             });
 
-        var result = CreateSut().Commit(newApp, previousApp, @"C:\Configs\new.rfn");
+        var result = Commit(
+            CreateSut(),
+            newApp,
+            previousApp,
+            @"C:\Configs\new.rfn",
+            previousConfigPath: @"C:\Configs\old.rfn");
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
         Assert.Equal("disk full", result.ErrorMessage);
         Assert.Same(previousApp, _database.Apps.Single());
         Assert.Equal(
-            ["cleanup-revert", "cleanup-recompute", "assign:C:\\Configs\\new.rfn", "save-new", "assign:C:\\Configs\\old.rfn", "save-restore", "restore-apply", "restore-recompute"],
+            ["cleanup-beside-remove", "assign:C:\\Configs\\new.rfn", "save-new", "assign:C:\\Configs\\old.rfn", "save-restore", "restore-icon"],
             events);
         _aclService.Verify(s => s.ApplyAcl(newApp, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
+        _aclService.Verify(s => s.RevertAcl(previousApp, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
+        _aclService.Verify(s => s.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()), Times.Never);
         _dataChangeNotifier.Verify(s => s.NotifyDataChanged(), Times.Never);
     }
 
@@ -170,10 +184,15 @@ public class AppEditCommitServiceTests : IDisposable
                 if (saveAttempt == 1)
                     throw new IOException("disk full");
             });
-        _aclService.Setup(s => s.ApplyAcl(previousApp, It.IsAny<IReadOnlyList<AppEntry>>()))
+        _iconService.Setup(s => s.CreateBadgedIcon(previousApp))
             .Throws(new InvalidOperationException("restore enforcement failed"));
 
-        var result = CreateSut().Commit(newApp, previousApp, @"C:\Configs\new.rfn");
+        var result = Commit(
+            CreateSut(),
+            newApp,
+            previousApp,
+            @"C:\Configs\new.rfn",
+            previousConfigPath: @"C:\Configs\old.rfn");
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
         Assert.Contains("disk full", result.ErrorMessage);
@@ -208,13 +227,13 @@ public class AppEditCommitServiceTests : IDisposable
                 throw new IOException(saveAttempt == 1 ? "disk full" : "restore save failed");
             });
 
-        var result = CreateSut().Commit(newApp, previousApp, @"C:\Configs\new.rfn");
+        var result = Commit(CreateSut(), newApp, previousApp, @"C:\Configs\new.rfn");
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.SaveFailed, result.Status);
         Assert.Contains("disk full", result.ErrorMessage);
         Assert.Contains("restore save failed", result.ErrorMessage);
         Assert.Same(previousApp, _database.Apps.Single());
-        _aclService.Verify(s => s.ApplyAcl(previousApp, It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
+        _iconService.Verify(s => s.CreateBadgedIcon(previousApp), Times.Once);
         _appConfigService.Verify(s => s.SaveAllConfigs(
                 It.IsAny<AppDatabase>(),
                 It.IsAny<ISecureSecretSnapshotSource>(),
@@ -241,9 +260,164 @@ public class AppEditCommitServiceTests : IDisposable
                 keySource.UseSnapshot(_ => { });
             });
 
-        var result = CreateSut().Commit(newApp, previousApp, @"C:\Configs\new.rfn");
+        var result = Commit(CreateSut(), newApp, previousApp, @"C:\Configs\new.rfn");
 
         Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+    }
+
+    [Fact]
+    public void Commit_ConfigOwnershipMovesBetweenMainAndAdditionalConfig_SavesAllConfigs()
+    {
+        var previousApp = CreateApp("old-app");
+        var newApp = previousApp.Clone();
+        newApp.Name = "Updated App";
+        _database.Apps.Add(previousApp);
+        _appConfigService.Setup(s => s.GetConfigPath(previousApp.Id)).Returns(null as string);
+
+        var result = Commit(CreateSut(), newApp, previousApp, @"C:\Configs\extra.rfn");
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        _appConfigService.Verify(s => s.AssignApp(previousApp.Id, @"C:\Configs\extra.rfn"), Times.Once);
+        _appConfigService.Verify(s => s.SaveAllConfigs(
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()),
+            Times.Once);
+        _appConfigService.Verify(s => s.SaveConfigForApp(
+                It.IsAny<string>(),
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public void Commit_PreclassifiedConfigMove_UsesOriginalConfigPathFromDialogContext()
+    {
+        var previousApp = CreateApp("old-app");
+        var newApp = previousApp.Clone();
+        newApp.Name = "Updated App";
+        _database.Apps.Add(previousApp);
+        _appConfigService.Setup(s => s.GetConfigPath(previousApp.Id)).Returns(@"C:\Configs\extra.rfn");
+
+        var changeSet = CreateChangeSet(AppEditConfigSaveScope.AllConfigs);
+
+        var result = CreateSut().Commit(new RunAsAppEditCommitRequest(
+            newApp,
+            previousApp,
+            PreviousConfigPath: null,
+            ConfigPath: @"C:\Configs\extra.rfn",
+            ChangeSet: changeSet));
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        _appConfigService.Verify(s => s.SaveAllConfigs(
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()),
+            Times.Once);
+        _appConfigService.Verify(s => s.SaveConfigForApp(
+                It.IsAny<string>(),
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public void Commit_SameConfigExistingEdit_SavesCurrentAppConfigOnly()
+    {
+        var previousApp = CreateApp("old-app");
+        var newApp = previousApp.Clone();
+        newApp.Name = "Updated App";
+        _database.Apps.Add(previousApp);
+        _appConfigService.Setup(s => s.GetConfigPath(previousApp.Id)).Returns(@"C:\Configs\same.rfn");
+
+        var result = Commit(
+            CreateSut(),
+            newApp,
+            previousApp,
+            @"C:\Configs\same.rfn",
+            previousConfigPath: @"C:\Configs\same.rfn");
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        _appConfigService.Verify(s => s.AssignApp(previousApp.Id, @"C:\Configs\same.rfn"), Times.Once);
+        _appConfigService.Verify(s => s.SaveConfigForApp(
+                previousApp.Id,
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()),
+            Times.Once);
+        _appConfigService.Verify(s => s.SaveAllConfigs(
+                It.IsAny<AppDatabase>(),
+                It.IsAny<ISecureSecretSnapshotSource>(),
+                It.IsAny<byte[]>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public void Commit_ExistingEditWithoutShortcutRefresh_CopiesShortcutProtectionStates()
+    {
+        var previousApp = CreateApp("old-app");
+        previousApp.ShortcutProtectionStates =
+        [
+            new ShortcutProtectionState(@"C:\Links\App.lnk", true, false, true)
+        ];
+        var newApp = previousApp.Clone();
+        newApp.Name = previousApp.Name;
+        _database.Apps.Add(previousApp);
+        _appConfigService.Setup(s => s.GetConfigPath(previousApp.Id)).Returns(@"C:\Configs\same.rfn");
+
+        var request = new RunAsAppEditCommitRequest(
+            newApp,
+            previousApp,
+            PreviousConfigPath: @"C:\Configs\same.rfn",
+            ConfigPath: @"C:\Configs\same.rfn",
+            ChangeSet: new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: false,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly));
+
+        var result = CreateSut().Commit(request);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        Assert.NotNull(newApp.ShortcutProtectionStates);
+        var copiedState = Assert.Single(newApp.ShortcutProtectionStates);
+        Assert.Equal(@"C:\Links\App.lnk", copiedState.ShortcutPath);
+        Assert.NotSame(previousApp.ShortcutProtectionStates, newApp.ShortcutProtectionStates);
+    }
+
+    [Fact]
+    public void Commit_ExistingEditWithShortcutRefresh_ClearsShortcutProtectionStates()
+    {
+        var previousApp = CreateApp("old-app");
+        previousApp.ShortcutProtectionStates =
+        [
+            new ShortcutProtectionState(@"C:\Links\App.lnk", true, false, true)
+        ];
+        var newApp = previousApp.Clone();
+        _database.Apps.Add(previousApp);
+        _appConfigService.Setup(s => s.GetConfigPath(previousApp.Id)).Returns(@"C:\Configs\same.rfn");
+
+        var request = new RunAsAppEditCommitRequest(
+            newApp,
+            previousApp,
+            PreviousConfigPath: @"C:\Configs\same.rfn",
+            ConfigPath: @"C:\Configs\same.rfn",
+            ChangeSet: new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: true,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: false,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly));
+
+        var result = CreateSut().Commit(request);
+
+        Assert.Equal(RunAsAppEntryPersistenceStatus.Succeeded, result.Status);
+        Assert.Null(newApp.ShortcutProtectionStates);
     }
 
     private AppEditCommitService CreateSut()
@@ -252,8 +426,7 @@ public class AppEditCommitServiceTests : IDisposable
         var appEntryManager = new RunAsAppEntryManager(
             _appState.Object,
             _log.Object,
-            _aclService.Object,
-            new AppEntryEnforcementHelper(
+            AppEntryEnforcementTestFactory.CreateCoordinator(
                 _aclService.Object,
                 _shortcutService.Object,
                 _besideTargetShortcutService.Object,
@@ -261,6 +434,7 @@ public class AppEditCommitServiceTests : IDisposable
                 _sidNameCache.Object,
                 new Mock<IInteractiveUserDesktopProvider>().Object,
                 new Mock<IInteractiveUserSidResolver>().Object,
+                new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
                 _log.Object),
             _shortcutDiscovery.Object);
         var persistenceOrchestrator = new AppEntryPersistenceOrchestrator(
@@ -291,13 +465,37 @@ public class AppEditCommitServiceTests : IDisposable
             _appState.Object);
     }
 
+    private static RunAsAppEntryPersistenceResult Commit(
+        AppEditCommitService service,
+        AppEntry newApp,
+        AppEntry? previousApp,
+        string? configPath,
+        string? previousConfigPath = null)
+        => service.Commit(new RunAsAppEditCommitRequest(
+            newApp,
+            previousApp,
+            previousConfigPath,
+            configPath,
+            CreateChangeSet(string.Equals(previousConfigPath, configPath, StringComparison.OrdinalIgnoreCase)
+                ? AppEditConfigSaveScope.CurrentAppConfigOnly
+                : AppEditConfigSaveScope.AllConfigs)));
+
+    private static AppEntryChangeSet CreateChangeSet(AppEditConfigSaveScope configSaveScope)
+        => new(
+            RequiresAclReapply: false,
+            RequiresBesideTargetRefresh: true,
+            RequiresHandlerSync: false,
+            RequiresManagedShortcutRefresh: false,
+            RequiresIconRefresh: true,
+            ConfigSaveScope: configSaveScope);
+
     private SessionContext CreateSession()
     {
         var session = new SessionContext
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }

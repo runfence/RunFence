@@ -11,7 +11,8 @@ namespace RunFence.Startup;
 
 public class StartupCredentialLoader(
     IStartupUI ui,
-    IDatabaseService databaseService,
+    ICredentialStorePersistence credentialStorePersistence,
+    IConfigSaltReader configSaltReader,
     ILoadedGoodBackupStore loadedGoodBackupStore,
     IConfigPaths configPaths,
     IRememberPinService rememberPinService,
@@ -37,13 +38,13 @@ public class StartupCredentialLoader(
         bool usingBackupSource)
     {
         log.Info("StartupCredentialLoader: loading credentials.");
-        var configSalt = databaseService.TryGetConfigSaltFromPath(selectedConfigPath);
+        var configSalt = configSaltReader.TryGetConfigSaltFromPath(selectedConfigPath);
 
         try
         {
             var credentialStore = usingBackupSource
-                ? databaseService.LoadCredentialStoreFromPath(credentialStorePath)
-                : databaseService.LoadCredentialStore();
+                ? credentialStorePersistence.LoadCredentialStoreFromPath(credentialStorePath)
+                : credentialStorePersistence.LoadCredentialStore();
 
             var configSaltMatchesCredentialStore = configSalt != null &&
                                                    configSalt.SequenceEqual(credentialStore.ArgonSalt);
@@ -252,7 +253,7 @@ public class StartupCredentialLoader(
             }
 
             if (usingBackupSource)
-                databaseService.SaveCredentialStore(credentialStore);
+                credentialStorePersistence.SaveCredentialStore(credentialStore);
 
             success = true;
             log.Info("StartupCredentialLoader: credentials loaded and verified.");

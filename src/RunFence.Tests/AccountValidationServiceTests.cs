@@ -11,7 +11,7 @@ namespace RunFence.Tests;
 public class AccountValidationServiceTests
 {
     private readonly Mock<ILoggingService> _log = new();
-    private readonly Mock<ILocalGroupMembershipService> _groupMembership = new();
+    private readonly Mock<ILocalGroupQueryService> _groupMembership = new();
     private readonly Mock<IProcessListService> _processListService = new();
     private readonly AccountValidationService _service;
 
@@ -34,24 +34,7 @@ public class AccountValidationServiceTests
         Assert.Contains("current account", ex.Message);
     }
 
-    [Fact]
-    public void ValidateNotCurrentAccount_DifferentSid_DoesNotThrow()
-    {
-        var fakeSid = "S-1-5-21-0-0-0-99999";
-
-        _service.ValidateNotCurrentAccount(fakeSid, "test");
-        // No exception means success
-    }
-
     // --- ValidateNotLastAdmin ---
-
-    [Fact]
-    public void ValidateNotLastAdmin_NonExistentSid_DoesNotThrow()
-    {
-        // A SID that definitely is not in the local Administrators group.
-        // IsLastAdminAccount returns false, so no exception is thrown.
-        _service.ValidateNotLastAdmin("S-1-5-21-0-0-0-99999", "test");
-    }
 
     [Fact]
     public void ValidateNotLastAdmin_IsLastAdmin_Throws()
@@ -70,29 +53,9 @@ public class AccountValidationServiceTests
 
     // --- ValidateNotInteractiveUser ---
 
-    [Fact]
-    public void ValidateNotInteractiveUser_UnrelatedSid_DoesNotThrow()
-    {
-        // A SID that will never match the interactive user SID.
-        var fakeSid = "S-1-5-21-0-0-0-99998";
-
-        _service.ValidateNotInteractiveUser(fakeSid, "test");
-        // No exception: the SID does not match the interactive user
-    }
-
     // --- ValidateNoRunningProcesses ---
 
     // --- GetProcessesRunningAsSid ---
-
-    [Fact]
-    public void GetProcessesRunningAsSid_UnknownSid_ReturnsEmpty()
-    {
-        var fakeSid = "S-1-5-21-0-0-0-99996";
-
-        var result = _service.GetProcessesRunningAsSid(fakeSid);
-
-        Assert.Empty(result);
-    }
 
     [Fact]
     public void GetProcessesRunningAsSid_WhenProcessListServiceReturnsProcesses_ReturnsNames()

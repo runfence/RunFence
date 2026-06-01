@@ -7,7 +7,7 @@ namespace RunFence.Acl.UI;
 /// Renders individual grant rows in the ACL Manager grants grid, handling status coloring,
 /// checkbox state display, and NTFS drift detection. Extracted from <see cref="AclManagerGrantsHelper"/>.
 /// </summary>
-public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAclPathIconProvider iconProvider, ILoggingService log)
+public class AclManagerGrantRowRenderer(IGrantInspectionService grantInspectionService, IAclPathIconProvider iconProvider, ILoggingService log)
 {
     private readonly SavedRightsComparer _comparer = SavedRightsComparer.Instance;
 
@@ -33,12 +33,15 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
 
     public void AddGrantRow(GrantedPathEntry entry)
     {
-        bool isPendingChange = _pending.IsPendingGrantChange(entry.Path, entry.IsDeny);
+        bool isPendingChange = _pending.Grants.IsPendingAdd(entry.Path, entry.IsDeny) ||
+                               _pending.Grants.IsPendingGrantFix(entry.Path, entry.IsDeny) ||
+                               _pending.Grants.IsPendingModification(entry.Path, entry.IsDeny) ||
+                               _pending.Grants.IsPendingConfigMove(entry.Path, entry.IsDeny);
 
         // For pending-modification rows, use effective IsDeny/Rights from the pending mod rather
         // than the (unmodified) DB entry, so the display reflects what will be applied.
-        bool effectiveIsDeny = _pending.GetEffectiveIsDeny(entry);
-        SavedRightsState? effectiveRights = _pending.GetEffectiveRights(entry);
+        bool effectiveIsDeny = _pending.Grants.GetEffectiveIsDeny(entry);
+        SavedRightsState? effectiveRights = _pending.Grants.GetEffectiveRights(entry);
 
         GrantRightsState state;
         PathAclStatus status;
@@ -94,8 +97,8 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
         {
             // For pending-modification rows, use effective IsDeny/Rights from the pending mod rather
             // than the (unmodified) DB entry, so the display reflects what will be applied.
-            bool effectiveIsDeny = _pending.GetEffectiveIsDeny(entry);
-            SavedRightsState? effectiveRights = _pending.GetEffectiveRights(entry);
+            bool effectiveIsDeny = _pending.Grants.GetEffectiveIsDeny(entry);
+            SavedRightsState? effectiveRights = _pending.Grants.GetEffectiveRights(entry);
 
             GrantRightsState state;
             PathAclStatus status;
@@ -167,7 +170,10 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
     /// </summary>
     public void RefreshRowBackground(DataGridViewRow row, GrantedPathEntry entry)
     {
-        bool isPending = _pending.IsPendingGrantChange(entry.Path, entry.IsDeny);
+        bool isPending = _pending.Grants.IsPendingAdd(entry.Path, entry.IsDeny) ||
+                         _pending.Grants.IsPendingGrantFix(entry.Path, entry.IsDeny) ||
+                         _pending.Grants.IsPendingModification(entry.Path, entry.IsDeny) ||
+                         _pending.Grants.IsPendingConfigMove(entry.Path, entry.IsDeny);
 
         if (isPending)
         {
@@ -184,8 +190,8 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
     public void FixBrokenGrant(GrantedPathEntry entry, DataGridViewRow row)
     {
         var key = (entry.Path, entry.IsDeny);
-        if (!_pending.PendingAdds.ContainsKey(key))
-            _pending.PendingGrantFixes[key] = entry;
+        if (!_pending.Grants.IsPendingAdd(key.Path, key.IsDeny))
+            _pending.Grants.AddGrantFix(entry);
 
         SetPendingRowColor(row);
         FixableEntries.Remove(entry);
@@ -206,7 +212,7 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
     /// </summary>
     private PathAclStatus DetermineStatus(GrantedPathEntry entry, GrantRightsState state)
     {
-        var rawStatus = pathGrantService.CheckGrantStatus(entry.Path, _sid, entry.IsDeny);
+        var rawStatus = grantInspectionService.CheckGrantStatus(entry.Path, _sid, entry.IsDeny);
         if (rawStatus == PathAclStatus.Unavailable)
             return PathAclStatus.Unavailable;
 
@@ -221,7 +227,7 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
     {
         try
         {
-            return pathGrantService.ReadGrantState(entry.Path, _sid, _groupSids);
+            return grantInspectionService.ReadGrantState(entry.Path, _sid, _groupSids);
         }
         catch (Exception ex)
         {
@@ -241,7 +247,7 @@ public class AclManagerGrantRowRenderer(IPathGrantService pathGrantService, IAcl
     {
         try
         {
-            return pathGrantService.ReadGrantState(entry.Path, _sid, _groupSids);
+            return grantInspectionService.ReadGrantState(entry.Path, _sid, _groupSids);
         }
         catch (Exception ex)
         {

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Drawing;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -12,8 +13,9 @@ public class TrayIconManager(
     IAppIconProvider appIconProvider,
     IDatabaseProvider databaseProvider,
     TrayMenuBuilder trayMenuBuilder,
-    IInputInjectionBlockerService injectionBlocker)
-    : IDisposable, IInputInjectionTraySink
+    IInputInjectionBlockerService injectionBlocker,
+    TrayIconOverlayRenderer overlayRenderer)
+    : IDisposable, IInputInjectionTraySink, ITrayForegroundMarkerOverlaySink
 {
     private ITrayOwner _trayOwner = null!;
     private ITrayMenuActionHandler _actionHandler = null!;
@@ -23,7 +25,11 @@ public class TrayIconManager(
     private ToolStripMenuItem? _lockMenuItem;
     private readonly Dictionary<string, Image?> _discoveredIconCache = new(StringComparer.OrdinalIgnoreCase);
     private Bitmap? _appIconBitmap;
+    private Icon? _baseAppIcon;
+    private Icon? _foregroundMarkerOverlayIcon;
+    private int? _foregroundMarkerArgb;
     private bool _initialized;
+    private bool _disposed;
 
     public event Action? InputInjectionToggleRequested;
 
@@ -32,12 +38,18 @@ public class TrayIconManager(
         _trayOwner = trayOwner;
         _actionHandler = actionHandler;
         _initialized = true;
+        _baseAppIcon = appIconProvider.GetAppIcon();
 
-        notifyIcon.Icon = appIconProvider.GetAppIcon();
+        if (_baseAppIcon != null)
+        {
+            notifyIcon.Icon = _baseAppIcon;
+            GetOrCreateOwnedAppIconBitmap();
+        }
         notifyIcon.Visible = true;
         notifyIcon.MouseClick += OnTrayClick;
         notifyIcon.BalloonTipClicked += OnBalloonTipClicked;
         RebuildContextMenu();
+        ApplyForegroundMarkerOverlay();
     }
 
     /// <summary>
@@ -48,6 +60,7 @@ public class TrayIconManager(
     {
         notifyIcon.Visible = false;
         notifyIcon.Visible = true;
+        ApplyForegroundMarkerOverlay();
     }
 
     public void ShowBalloonTip(string text) =>
@@ -91,7 +104,7 @@ public class TrayIconManager(
             _discoveredEntries,
             _discoveredIconCache,
             database,
-            _appIconBitmap ??= appIconProvider.GetAppIcon().ToBitmap(),
+            GetOrCreateOwnedAppIconBitmap(),
             _actionHandler));
         var menu = buildResult.Menu;
         menu.Opening += OnContextMenuOpening;
@@ -131,6 +144,10 @@ public class TrayIconManager(
 
     public void Dispose()
     {
+        if (_disposed)
+            return;
+
+        _disposed = true;
         notifyIcon.MouseClick -= OnTrayClick;
         notifyIcon.BalloonTipClicked -= OnBalloonTipClicked;
 
@@ -149,7 +166,82 @@ public class TrayIconManager(
             icon?.Dispose();
         _discoveredIconCache.Clear();
 
+        if (_foregroundMarkerOverlayIcon is not null)
+        {
+            if (_baseAppIcon != null)
+            {
+                try
+                {
+                    notifyIcon.Icon = _baseAppIcon;
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+            }
+
+            _foregroundMarkerOverlayIcon.Dispose();
+            _foregroundMarkerOverlayIcon = null;
+        }
+
         _appIconBitmap?.Dispose();
         _appIconBitmap = null;
+    }
+
+    public void SetForegroundMarkerOverlay(Color? color)
+    {
+        if (_disposed)
+            return;
+
+        var requestedArgb = color?.ToArgb();
+        if (_foregroundMarkerArgb == requestedArgb)
+            return;
+
+        _foregroundMarkerArgb = requestedArgb;
+        ApplyForegroundMarkerOverlay();
+    }
+
+    private void ApplyForegroundMarkerOverlay()
+    {
+        if (_disposed || !_initialized)
+            return;
+
+        if (_foregroundMarkerArgb is null)
+        {
+            ClearForegroundMarkerOverlay();
+            return;
+        }
+
+        var overlayColor = Color.FromArgb(_foregroundMarkerArgb.Value);
+        var overlayIcon = overlayRenderer.CreateOverlayIcon(_baseAppIcon ?? appIconProvider.GetAppIcon(), overlayColor);
+        var previousIcon = _foregroundMarkerOverlayIcon;
+        notifyIcon.Icon = overlayIcon;
+        _foregroundMarkerOverlayIcon = overlayIcon;
+        previousIcon?.Dispose();
+    }
+
+    private void ClearForegroundMarkerOverlay()
+    {
+        if (_disposed)
+            return;
+
+        if (_baseAppIcon != null)
+            notifyIcon.Icon = _baseAppIcon;
+
+        if (_foregroundMarkerOverlayIcon is null)
+            return;
+
+        var overlayIcon = _foregroundMarkerOverlayIcon;
+        _foregroundMarkerOverlayIcon = null;
+        overlayIcon.Dispose();
+    }
+
+    private Bitmap GetOrCreateOwnedAppIconBitmap()
+    {
+        if (_appIconBitmap is not null)
+            return _appIconBitmap;
+
+        var icon = _baseAppIcon ?? appIconProvider.GetAppIcon();
+        _appIconBitmap = icon.ToBitmap();
+        return _appIconBitmap;
     }
 }

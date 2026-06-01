@@ -9,6 +9,9 @@ using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.UI.Forms;
+using RunFence.Acl.UI.ImportExport;
+using RunFence.Apps.UI;
 
 namespace RunFence.Acl.UI;
 
@@ -17,12 +20,16 @@ namespace RunFence.Acl.UI;
 /// Export produces account-agnostic JSON (no SID). Import delegates to <see cref="AclImportProcessor"/>.
 /// </summary>
 public class AclManagerExportImport(
-    IPathGrantService pathGrantService,
+    IGrantInspectionService grantInspectionService,
     IAclPermissionService aclPermission,
     ILoggingService log,
     IDatabaseProvider databaseProvider,
     ITraverseGrantOwnerResolver traverseGrantOwnerResolver,
-    AclImportProcessor importProcessor)
+    IAclImportProcessor importProcessor,
+    IFileContentService fileContentService,
+    IOpenFileDialogAdapterFactory openFileDialogFactory,
+    ISaveFileDialogAdapterFactory saveFileDialogFactory,
+    IMessageBoxService messageBoxService)
 {
     private AclManagerPendingChanges _pending = null!;
     private string _sid = null!;
@@ -60,7 +67,8 @@ public class AclManagerExportImport(
     {
         if (_pending.HasPendingChanges && _applyAsync != null)
         {
-            var result = MessageBox.Show(
+            var result = messageBoxService.Show(
+                _owner,
                 "There are unapplied changes. Apply them before exporting?\n\nClick OK to apply first, or Cancel to abort.",
                 "Export",
                 MessageBoxButtons.OKCancel,
@@ -75,7 +83,7 @@ public class AclManagerExportImport(
         bool traverseSelected = !grantsTabActive && traverseGrid.SelectedRows.Count > 0
                                                  && traverseGrid.SelectedRows.Cast<DataGridViewRow>().Any(r => r.Tag is GrantedPathEntry);
 
-        ExportData exportData;
+        AclExportData exportData;
 
         if (grantsSelected)
         {
@@ -99,28 +107,28 @@ public class AclManagerExportImport(
 
         if (!HasExportEntries(exportData))
         {
-            MessageBox.Show("Nothing to export.", "Export Grants",
+            messageBoxService.Show(_owner, "Nothing to export.", "Export Grants",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        using var sfd = new SaveFileDialog();
+        using var saveDialogAdapter = saveFileDialogFactory.Create();
+        var sfd = saveDialogAdapter.Dialog;
         sfd.Title = "Export Grants";
         sfd.Filter = "RunFence Grants (*.rfg)|*.rfg|JSON files (*.json)|*.json";
         sfd.DefaultExt = "rfg";
-        FileDialogHelper.AddInteractiveUserCustomPlaces(sfd);
-        if (sfd.ShowDialog(_owner) != DialogResult.OK)
+        if (saveDialogAdapter.ShowDialog(_owner) != DialogResult.OK)
             return;
 
         try
         {
             var json = JsonSerializer.Serialize(exportData, JsonOptions);
-            File.WriteAllText(sfd.FileName, json, Encoding.UTF8);
+            fileContentService.WriteAllText(sfd.FileName, json, Encoding.UTF8);
         }
         catch (Exception ex)
         {
             log.Error($"Failed to export grants to '{sfd.FileName}'", ex);
-            MessageBox.Show($"Export failed: {ex.Message}", "Export Grants",
+            messageBoxService.Show(_owner, $"Export failed: {ex.Message}", "Export Grants",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
@@ -131,31 +139,31 @@ public class AclManagerExportImport(
     /// </summary>
     public void Import(Action refreshGrids)
     {
-        using var ofd = new OpenFileDialog();
+        using var openDialogAdapter = openFileDialogFactory.Create();
+        var ofd = openDialogAdapter.Dialog;
         ofd.Title = "Import Grants";
         ofd.Filter = "RunFence Grants (*.rfg;*.json)|*.rfg;*.json|All files (*.*)|*.*";
-        FileDialogHelper.AddInteractiveUserCustomPlaces(ofd);
-        if (ofd.ShowDialog(_owner) != DialogResult.OK)
+        if (openDialogAdapter.ShowDialog(_owner) != DialogResult.OK)
             return;
 
-        ExportData exportData;
+        AclExportData exportData;
         try
         {
-            var json = File.ReadAllText(ofd.FileName, Encoding.UTF8);
-            exportData = JsonSerializer.Deserialize<ExportData>(json, JsonOptions)
+            var json = fileContentService.ReadAllText(ofd.FileName, Encoding.UTF8);
+            exportData = JsonSerializer.Deserialize<AclExportData>(json, JsonOptions)
                          ?? throw new InvalidDataException("File is empty or not a valid grants export.");
         }
         catch (Exception ex)
         {
             log.Error($"Failed to read grants file '{ofd.FileName}'", ex);
-            MessageBox.Show($"Import failed: {ex.Message}", "Import Grants",
+            messageBoxService.Show(_owner, $"Import failed: {ex.Message}", "Import Grants",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
         if (exportData.Version != 1)
         {
-            MessageBox.Show($"Unsupported grants file version: {exportData.Version}",
+            messageBoxService.Show(_owner, $"Unsupported grants file version: {exportData.Version}",
                 "Import Grants", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
@@ -163,12 +171,12 @@ public class AclManagerExportImport(
         AclImportResult importResult;
         try
         {
-            importResult = importProcessor.ProcessImport(exportData, _pending, _sid, _isContainer);
+            importResult = importProcessor.ProcessImport(new AclImportRequest(exportData, _pending, _sid, _isContainer));
         }
         catch (Exception ex)
         {
             log.Error($"Failed to process import data from '{ofd.FileName}'", ex);
-            MessageBox.Show($"Import failed while processing entries: {ex.Message}", "Import Grants",
+            messageBoxService.Show(_owner, $"Import failed while processing entries: {ex.Message}", "Import Grants",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
@@ -177,7 +185,8 @@ public class AclManagerExportImport(
             refreshGrids();
         if (importResult.Warnings.Count > 0)
         {
-            MessageBox.Show(
+            messageBoxService.Show(
+                _owner,
                 BuildImportWarningMessage(importResult.Warnings),
                 "Import Grants",
                 MessageBoxButtons.OK,
@@ -185,7 +194,7 @@ public class AclManagerExportImport(
         }
         else if (!importResult.AnyAdded)
         {
-            MessageBox.Show("No new entries to import (all paths already exist).", "Import Grants",
+            messageBoxService.Show(_owner, "No new entries to import (all paths already exist).", "Import Grants",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
@@ -219,37 +228,37 @@ public class AclManagerExportImport(
         return result;
     }
 
-    public ExportData BuildFullExportData()
+    public AclExportData BuildFullExportData()
         => new(
             Version: 1,
             Grants: BuildAllGrants(),
             Traverse: _isContainer ? [] : BuildAllTraverse());
 
-    public ExportData BuildGrantSelectionExportData(IEnumerable<GrantedPathEntry> selectedEntries)
+    public AclExportData BuildGrantSelectionExportData(IEnumerable<GrantedPathEntry> selectedEntries)
         => new(
             Version: 1,
             Grants: BuildGrantsFromEntries(selectedEntries),
             Traverse: []);
 
-    public ExportData BuildTraverseSelectionExportData(IEnumerable<GrantedPathEntry> selectedEntries)
+    public AclExportData BuildTraverseSelectionExportData(IEnumerable<GrantedPathEntry> selectedEntries)
         => new(
             Version: 1,
             Grants: [],
             Traverse: _isContainer ? [] : BuildTraverseFromEntries(selectedEntries));
 
-    private List<ExportGrantEntry> BuildAllGrants()
+    private List<AclExportGrantEntry> BuildAllGrants()
     {
         var dbGrants = databaseProvider.GetDatabase().GetAccount(_sid)?.Grants;
         return ScanPaths(
             dbGrants,
             dbFilter: e => !e.IsTraverseOnly &&
-                           !_pending.IsPendingRemove(e.Path, e.IsDeny) &&
-                           !_pending.IsUntrackGrant(e.Path, e.IsDeny),
+                           !_pending.Grants.IsPendingRemove(e.Path, e.IsDeny) &&
+                           !_pending.Grants.IsUntrackGrant(e.Path, e.IsDeny),
             selector: GetExportRights,
-            pendingEntries: _pending.PendingAdds.Values);
+            pendingEntries: _pending.Grants.GetPendingAddsSnapshot().Values);
     }
 
-    private List<ExportTraverseEntry> BuildAllTraverse()
+    private List<AclExportTraverseEntry> BuildAllTraverse()
     {
         var database = databaseProvider.GetDatabase();
         var dbGrants = database.GetAccount(GetTraverseLookupSid())?.Grants;
@@ -261,21 +270,15 @@ public class AclManagerExportImport(
                                e,
                                _sid,
                                includeManualSharedEntries: true) &&
-                           !_pending.IsPendingTraverseRemove(e.Path) &&
-                           !_pending.IsUntrackTraverse(e.Path),
-            selector: e => new ExportTraverseEntry(e.Path),
-            pendingEntries: _pending.PendingTraverseAdds.Values);
+                           !_pending.Traverse.IsPendingTraverseRemove(e.Path) &&
+                           !_pending.Traverse.IsUntrackTraverse(e.Path),
+            selector: e => new AclExportTraverseEntry(e.Path),
+            pendingEntries: _pending.Traverse.GetPendingAddsSnapshot().Values);
     }
 
-    private List<ExportGrantEntry> BuildGrantsFromSelection(DataGridView grantsGrid)
-        => BuildGrantsFromEntries(
-            grantsGrid.SelectedRows.Cast<DataGridViewRow>()
-                .Select(row => row.Tag)
-                .OfType<GrantedPathEntry>());
-
-    private List<ExportGrantEntry> BuildGrantsFromEntries(IEnumerable<GrantedPathEntry> entries)
+    private List<AclExportGrantEntry> BuildGrantsFromEntries(IEnumerable<GrantedPathEntry> entries)
     {
-        var result = new List<ExportGrantEntry>();
+        var result = new List<AclExportGrantEntry>();
         foreach (var entry in entries)
         {
             if (entry.IsTraverseOnly)
@@ -289,26 +292,20 @@ public class AclManagerExportImport(
         return result;
     }
 
-    private List<ExportTraverseEntry> BuildTraverseFromSelection(DataGridView traverseGrid)
-        => BuildTraverseFromEntries(
-            traverseGrid.SelectedRows.Cast<DataGridViewRow>()
-                .Select(row => row.Tag)
-                .OfType<GrantedPathEntry>());
-
-    private List<ExportTraverseEntry> BuildTraverseFromEntries(IEnumerable<GrantedPathEntry> entries)
+    private List<AclExportTraverseEntry> BuildTraverseFromEntries(IEnumerable<GrantedPathEntry> entries)
     {
-        var result = new List<ExportTraverseEntry>();
+        var result = new List<AclExportTraverseEntry>();
         foreach (var entry in entries)
         {
             if (!entry.IsTraverseOnly)
                 continue;
-            result.Add(new ExportTraverseEntry(entry.Path));
+            result.Add(new AclExportTraverseEntry(entry.Path));
         }
 
         return result;
     }
 
-    private ExportGrantEntry? GetExportRights(GrantedPathEntry entry)
+    private AclExportGrantEntry? GetExportRights(GrantedPathEntry entry)
     {
         var saved = entry.SavedRights;
         if (saved == null)
@@ -317,7 +314,7 @@ public class AclManagerExportImport(
             try
             {
                 var groupSids = aclPermission.ResolveAccountGroupSids(_sid);
-                var state = pathGrantService.ReadGrantState(entry.Path, _sid, groupSids);
+                var state = grantInspectionService.ReadGrantState(entry.Path, _sid, groupSids);
                 // Use comparer to build the saved rights using the same rules as auto-populate.
                 _ = SavedRightsComparer.Instance.AutoPopulateMissingSavedRights(
                     [entry], _ => state, _isContainer);
@@ -335,53 +332,14 @@ public class AclManagerExportImport(
             }
         }
 
-        return new ExportGrantEntry(entry.Path, entry.IsDeny,
+        return new AclExportGrantEntry(entry.Path, entry.IsDeny,
             saved.Execute, saved.Write, saved.Read, saved.Special, saved.Own);
-    }
-
-    // --- Export/Import data model (account-agnostic, no SID) ---
-
-    public record ExportData(
-        [property: JsonPropertyName("version")]
-        int Version,
-        [property: JsonPropertyName("grants")] List<ExportGrantEntry>? Grants,
-        [property: JsonPropertyName("traverse")]
-        List<ExportTraverseEntry>? Traverse);
-
-    public record ExportGrantEntry(
-        [property: JsonPropertyName("path")] string Path,
-        [property: JsonPropertyName("isDeny")] bool IsDeny,
-        [property: JsonPropertyName("execute")]
-        bool Execute,
-        [property: JsonPropertyName("write")] bool Write,
-        [property: JsonPropertyName("read")] bool Read,
-        [property: JsonPropertyName("special")]
-        bool Special,
-        [property: JsonPropertyName("owner")] bool Owner);
-
-    public record ExportTraverseEntry(
-        [property: JsonPropertyName("path")] string Path);
-
-    /// <summary>
-    /// Processes import from already-deserialized data. Used by unit tests to bypass file dialog.
-    /// </summary>
-    public void ProcessImport(ExportData exportData, Action refreshGrids)
-    {
-        if (exportData.Version != 1)
-        {
-            log.Info($"Skipping ACL import: unsupported export version {exportData.Version}");
-            return;
-        }
-
-        var importResult = importProcessor.ProcessImport(exportData, _pending, _sid, _isContainer);
-        if (importResult.AnyAdded)
-            refreshGrids();
     }
 
     private string GetTraverseLookupSid()
         => traverseGrantOwnerResolver.ResolveStorageOwnerSid(_sid);
 
-    private static bool HasExportEntries(ExportData exportData)
+    private static bool HasExportEntries(AclExportData exportData)
         => (exportData.Grants?.Count ?? 0) > 0 || (exportData.Traverse?.Count ?? 0) > 0;
 
     private static string BuildImportWarningMessage(IReadOnlyList<AclImportWarning> warnings)

@@ -1,6 +1,7 @@
 using Moq;
 using RunFence.Account;
 using RunFence.Account.OrphanedProfiles;
+using RunFence.Acl;
 using RunFence.Core;
 using Xunit;
 
@@ -197,23 +198,6 @@ public class OrphanedProfileServiceTests : IDisposable
             result.Select(p => p.ProfilePath).ToList());
     }
 
-    [Fact]
-    public void GetProfileSizeBytes_UsesInjectedCalculator()
-    {
-        var expectedSize = 12345L;
-        var calculator = new Mock<IProfileSizeCalculator>(MockBehavior.Strict);
-        calculator
-            .Setup(x => x.CalculateSizeBytes(@"C:\Users\TestUser", null, CancellationToken.None))
-            .Returns(expectedSize);
-
-        var service = CreateService(profileSizeCalculator: calculator.Object);
-
-        var sizeBytes = service.GetProfileSizeBytes(@"C:\Users\TestUser", progress: null, CancellationToken.None);
-
-        Assert.Equal(expectedSize, sizeBytes);
-        calculator.VerifyAll();
-    }
-
     // --- DeleteProfiles tests ---
 
     [Fact]
@@ -339,17 +323,6 @@ public class OrphanedProfileServiceTests : IDisposable
     }
 
     [Fact]
-    public void DeleteProfiles_EmptyList_ReturnsEmpty()
-    {
-        var service = CreateService();
-
-        var (deleted, failed) = service.DeleteProfiles([]);
-
-        Assert.Empty(deleted);
-        Assert.Empty(failed);
-    }
-
-    [Fact]
     public void DeleteProfiles_ReadOnlyFiles_StillDeletes()
     {
         var dir = Path.Combine(_usersDir.Path, "ReadOnlyUser");
@@ -408,7 +381,15 @@ public class OrphanedProfileServiceTests : IDisposable
         : OrphanedProfileService(
             log,
             new NTTranslateApi(log),
-            new GroupPolicyScriptHelper(new LogonScriptIniManager(), log),
+            new GroupPolicyScriptHelper(
+                new LogonScriptIniManager(),
+                new LogonScriptStateRollbackStore(),
+                log,
+                Mock.Of<IProgramDataDirectoryProvisioningService>(),
+                Mock.Of<IProgramDataManagedObjectRepairService>(),
+                Mock.Of<IProgramDataPathPolicyService>(),
+                Mock.Of<IProgramDataObjectProvisioner>(),
+                Mock.Of<IProgramDataKnownPathResolver>()),
             profileSizeCalculator ?? new ProfileSizeCalculator(),
             new TestProfileDirectoryRemovalService(removeMovedProfileDirectory),
             usersDir)

@@ -13,6 +13,7 @@ public class AclManagerApplyOrchestrator(
     AclApplyPlanBuilder planBuilder,
     AclApplyExecutor applyExecutor,
     AclApplyPostProcessor postProcessor,
+    AclApplyPhaseCatalog phaseCatalog,
     ISessionSaver sessionSaver,
     ILoggingService log)
 {
@@ -42,13 +43,13 @@ public class AclManagerApplyOrchestrator(
             return new AclApplyOutcome(false, [], []);
 
         var plan = planBuilder.Build(_pending);
-        if (!plan.HasWork)
+        if (!phaseCatalog.HasWork(plan))
             return new AclApplyOutcome(true, [], []);
 
         IsApplyInProgress = true;
         setDialogEnabled(false);
         setApplyEnabled(false);
-        progress.Report((0, plan.TotalOperations));
+        progress.Report((0, phaseCatalog.GetTotalOperations(plan)));
         AclApplyOutcome outcome;
 
         try

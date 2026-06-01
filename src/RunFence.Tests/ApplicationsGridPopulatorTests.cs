@@ -17,10 +17,10 @@ public class ApplicationsGridPopulatorTests
         StaTestHelper.RunOnSta(() =>
         {
             var iconService = new Mock<IIconService>();
-            var appConfigService = new Mock<IAppConfigService>();
             var sidNameCache = new Mock<ISidNameCacheService>();
+            var appConfig = new AppConfigTestContext();
 
-            var populator = new ApplicationsGridPopulator(iconService.Object, appConfigService.Object, sidNameCache.Object);
+            var populator = new ApplicationsGridPopulator(iconService.Object, appConfig.Service, sidNameCache.Object);
 
             using var grid = new DataGridView();
             grid.Columns.Add(new DataGridViewImageColumn { Name = "Icon" });
@@ -39,9 +39,6 @@ public class ApplicationsGridPopulatorTests
 
             populator.Initialize(grid, state.Object, (apps, key) => apps.OrderBy(key));
 
-            appConfigService.Setup(s => s.HasLoadedConfigs).Returns(false);
-            appConfigService.Setup(s => s.GetConfigPath(It.IsAny<string>())).Returns((string?)null);
-            appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(Array.Empty<string>());
             sidNameCache.Setup(s => s.GetDisplayName(It.IsAny<string>())).Returns("TestUser");
 
             var testIcon = new Bitmap(16, 16);
@@ -57,7 +54,7 @@ public class ApplicationsGridPopulatorTests
 
             iconService.Setup(i => i.GetOriginalAppIcon(It.IsAny<AppEntry>(), It.IsAny<int>())).Returns(testIcon);
 
-            var dragDrop = new AppGridDragDropHandler(appConfigService.Object);
+            var dragDrop = new AppGridDragDropHandler(appConfig.Service);
             populator.PopulateGrid(dragDrop, _ => { }, () => { });
 
             app1.ExePath = @"C:\app1_v2.exe";

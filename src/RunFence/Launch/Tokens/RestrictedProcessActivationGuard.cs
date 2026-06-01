@@ -2,7 +2,7 @@ using RunFence.Infrastructure;
 
 namespace RunFence.Launch.Tokens;
 
-public sealed class RestrictedProcessActivationGuard(IRestrictedProcessControl processControl)
+public sealed class RestrictedProcessActivationGuard(IProcessControl processControl)
 {
     public void ThrowIfAssignmentFailed(
         ref ProcessLaunchNative.PROCESS_INFORMATION processInfo,
@@ -40,7 +40,7 @@ public sealed class RestrictedProcessActivationGuard(IRestrictedProcessControl p
     public void TerminateAndClose(ref ProcessLaunchNative.PROCESS_INFORMATION processInfo)
     {
         if (processInfo.hProcess != IntPtr.Zero)
-            processControl.TerminateProcess(processInfo.hProcess);
+            processControl.TerminateProcessBestEffort(processInfo.hProcess, 1);
         CloseHandles(ref processInfo);
     }
 

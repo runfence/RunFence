@@ -74,6 +74,7 @@ public sealed class PreparedTokenProcessLauncherTests
         Assert.Equal((uint)55, result.dwProcessId);
         Assert.Equal(1, launcher.DisablePrivilegesCallCount);
         Assert.Contains(TokenPrivilegeHelper.SeRelabelPrivilege, launcher.DisabledPrivileges.Single());
+        Assert.Contains(TokenPrivilegeHelper.SeTcbPrivilege, launcher.DisabledPrivileges.Single());
         Assert.Equal(3, launcher.Invocations.Count);
         Assert.True(launcher.Invocations[0].Suspended);
         Assert.True(launcher.Invocations[0].BreakawayFromJob);
@@ -84,7 +85,7 @@ public sealed class PreparedTokenProcessLauncherTests
     }
 
     [Fact]
-    public void LaunchWithPreparedToken_CurrentProcessToken_DisablesSeRelabelPrivilege()
+    public void LaunchWithPreparedToken_CurrentProcessToken_DisablesStartupPrivileges()
     {
         var resolver = new Mock<IExecutablePathResolver>();
         resolver.Setup(r => r.TryResolvePath(It.IsAny<string>(), It.IsAny<ExecutablePathResolutionContext>()))
@@ -103,6 +104,7 @@ public sealed class PreparedTokenProcessLauncherTests
 
         Assert.Single(launcher.DisabledPrivileges);
         Assert.Contains(TokenPrivilegeHelper.SeRelabelPrivilege, launcher.DisabledPrivileges[0]);
+        Assert.Contains(TokenPrivilegeHelper.SeTcbPrivilege, launcher.DisabledPrivileges[0]);
     }
 
     [Fact]
@@ -219,6 +221,7 @@ public sealed class PreparedTokenProcessLauncherTests
         Assert.Equal((uint)88, result.dwProcessId);
         Assert.Equal(2, launcher.Invocations.Count);
         Assert.Equal("RunAsInvoker", launcher.Invocations[1].EnvironmentVariables["__COMPAT_LAYER"]);
+        Assert.Equal(@"C:\Base", launcher.Invocations[1].EnvironmentVariables["PATH"]);
         Assert.Equal("1", launcher.Invocations[1].EnvironmentVariables["RF_TEST_OVERRIDE"]);
     }
 

@@ -1,8 +1,9 @@
 using Microsoft.Win32;
+using RunFence.Core;
 
 namespace RunFence.Launch.Container;
 
 public class AppContainerUserRegistryRoot : IAppContainerUserRegistryRoot
 {
-    public RegistryKey UsersRoot => Registry.Users;
+    public IRegistryKey UsersRoot => new WindowsRegistryKey(Registry.Users);
 }

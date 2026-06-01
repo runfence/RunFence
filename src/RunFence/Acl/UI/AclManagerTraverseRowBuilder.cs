@@ -16,13 +16,13 @@ public class AclManagerTraverseRowBuilder(
     private SecurityIdentifier _sidIdentity = null!;
     private Font? _boldFont;
     private AclManagerPendingChanges _pending = null!;
-    private Lazy<IReadOnlyList<string>> _groupSids = null!;
+    private IReadOnlyList<string> _groupSids = null!;
 
     public void Initialize(
         DataGridView traverseGrid,
         string sid,
         AclManagerPendingChanges pending,
-        Lazy<IReadOnlyList<string>> groupSids)
+        IReadOnlyList<string> groupSids)
     {
         _traverseGrid = traverseGrid;
         _sidIdentity = new SecurityIdentifier(sid);
@@ -47,7 +47,7 @@ public class AclManagerTraverseRowBuilder(
     /// </summary>
     public void AddTrackedTraverseRow(GrantedPathEntry entry)
     {
-        var groupSids = _groupSids.Value;
+        var groupSids = _groupSids;
 
         if (!AclHelper.PathExists(entry.Path))
         {
@@ -77,7 +77,7 @@ public class AclManagerTraverseRowBuilder(
     /// </summary>
     public void AddLegacyTraverseRow(GrantedPathEntry entry)
     {
-        var groupSids = _groupSids.Value;
+        var groupSids = _groupSids;
 
         if (!AclHelper.PathExists(entry.Path))
         {
@@ -116,9 +116,9 @@ public class AclManagerTraverseRowBuilder(
         row.Cells[_traverseGrid.Columns["TraversePath"]!.Index].Value = entry.Path;
 
         var normalizedPath = Path.GetFullPath(entry.Path);
-        bool isPendingGreen = _pending.IsPendingTraverseAdd(normalizedPath) ||
-                              _pending.PendingTraverseFixes.ContainsKey(normalizedPath) ||
-                              _pending.IsPendingTraverseConfigMove(normalizedPath);
+        bool isPendingGreen = _pending.Traverse.IsPendingTraverseAdd(normalizedPath) ||
+                              _pending.Traverse.GetPendingFixesSnapshot().ContainsKey(normalizedPath) ||
+                              _pending.Traverse.IsPendingTraverseConfigMove(normalizedPath);
 
         if (isPendingGreen)
         {

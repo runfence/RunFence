@@ -111,18 +111,15 @@ public class AppContainerComAccessServiceTests : IDisposable
         oleKey.SetValue("DefaultLaunchPermission", CreateDescriptor((_systemSid, 11)), RegistryValueKind.Binary);
         oleKey.SetValue("DefaultAccessPermission", CreateDescriptor((_systemSid, 11)), RegistryValueKind.Binary);
 
-        var readOnlyPath = _registry.HkuRoot.Name["HKEY_CURRENT_USER\\".Length..];
-        using var readOnlyRoot = Registry.CurrentUser.OpenSubKey(readOnlyPath, writable: false)!;
-
-        var result = CreateService(appIdRootOverride: readOnlyRoot).GrantComAccess(_containerSid, clsid);
+        var result = CreateService(appIdRootOverride: _registry.HkuRoot.AsReadOnly()).GrantComAccess(_containerSid, clsid);
 
         Assert.False(result.Succeeded);
         Assert.NotNull(result.ErrorMessage);
     }
 
     private AppContainerComAccessService CreateService(
-        RegistryKey? appIdRootOverride = null,
-        RegistryKey? machineRootOverride = null)
+        IRegistryKey? appIdRootOverride = null,
+        IRegistryKey? machineRootOverride = null)
         => new(
             new Mock<ILoggingService>().Object,
             AppContainerProviderTestDoubles.CreateComRegistryRoots(
@@ -154,7 +151,7 @@ public class AppContainerComAccessServiceTests : IDisposable
         return bytes;
     }
 
-    private static void AssertContainsAce(RegistryKey appIdKey, string valueName, string sid, int accessMask)
+    private static void AssertContainsAce(IRegistryKey appIdKey, string valueName, string sid, int accessMask)
     {
         var descriptor = new RawSecurityDescriptor((byte[])appIdKey.GetValue(valueName)!, 0);
         Assert.Contains(
@@ -162,7 +159,7 @@ public class AppContainerComAccessServiceTests : IDisposable
             ace => ace.SecurityIdentifier.Value == sid && ace.AccessMask == accessMask);
     }
 
-    private static void AssertDoesNotContainAce(RegistryKey appIdKey, string valueName, string sid)
+    private static void AssertDoesNotContainAce(IRegistryKey appIdKey, string valueName, string sid)
     {
         var descriptor = new RawSecurityDescriptor((byte[])appIdKey.GetValue(valueName)!, 0);
         Assert.DoesNotContain(

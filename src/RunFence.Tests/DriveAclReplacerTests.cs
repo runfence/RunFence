@@ -15,14 +15,14 @@ public class DriveAclReplacerTests : IDisposable
 {
     private const string TestSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
 
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantSyncService> _grantSyncService = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly DriveAclReplacer _replacer;
     private readonly TempDirectory _tempDir;
 
     public DriveAclReplacerTests()
     {
-        _replacer = new DriveAclReplacer(_pathGrantService.Object, _log.Object);
+        _replacer = new DriveAclReplacer(_grantSyncService.Object, _log.Object, AclAccessorFactory.Create());
         _tempDir = new TempDirectory("DriveAclReplacer");
     }
 
@@ -39,23 +39,15 @@ public class DriveAclReplacerTests : IDisposable
 
         _replacer.ReplaceDriveAcl(_tempDir.Path, TestSid);
 
-        _pathGrantService.Verify(
+        _grantSyncService.Verify(
             p => p.UpdateFromPath(_tempDir.Path, TestSid),
             Times.Once);
-    }
-
-    [Fact]
-    public void ReplaceDriveAcl_AccessibleDirectory_ReturnsNull()
-    {
-        var result = _replacer.ReplaceDriveAcl(_tempDir.Path, TestSid);
-
-        Assert.Null(result);
     }
 
     // --- Error handling ---
 
     [Fact]
-    public void ReplaceDriveAcl_NonExistentPath_ReturnsErrorLogsAndDoesNotCallUpdateFromPath()
+    public void ReplaceDriveAcl_NonExistentPath_ReturnsErrorAndDoesNotCallUpdateFromPath()
     {
         var nonExistent = Path.Combine(_tempDir.Path, "does_not_exist");
 
@@ -63,8 +55,7 @@ public class DriveAclReplacerTests : IDisposable
 
         Assert.NotNull(result);
         Assert.NotEmpty(result);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
-        _pathGrantService.Verify(
+        _grantSyncService.Verify(
             p => p.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()),
             Times.Never);
     }
@@ -120,7 +111,7 @@ public class DriveAclReplacerTests : IDisposable
         var targetRule = GetSingleAceForSid(_tempDir.Path, targetSid);
         Assert.Equal(sourceRule.FileSystemRights & FileSystemRights.FullControl, targetRule.FileSystemRights);
         Assert.Equal(AccessControlType.Allow, targetRule.AccessControlType);
-        _pathGrantService.Verify(p => p.UpdateFromPath(_tempDir.Path, TestSid), Times.Once);
+        _grantSyncService.Verify(p => p.UpdateFromPath(_tempDir.Path, TestSid), Times.Once);
     }
 
     [Fact]
@@ -134,6 +125,7 @@ public class DriveAclReplacerTests : IDisposable
         // Also add an existing ACE for the target SID with the same rights
         var acl = AclAccessorFactory.Create();
         acl.ApplyExplicitAce(_tempDir.Path, TestSid, AccessControlType.Allow, FileSystemRights.ReadAndExecute);
+        var sourceRule = GetSingleAceForSid(_tempDir.Path, everyoneSid);
 
         // Act
         var result = _replacer.ReplaceDriveAcl(_tempDir.Path, TestSid);
@@ -141,12 +133,11 @@ public class DriveAclReplacerTests : IDisposable
         // Assert: success, Everyone removed, target SID has exactly one ACE (no duplicate added)
         Assert.Null(result);
         Assert.False(HasAceForSid(_tempDir.Path, everyoneSid));
-        var security = new DirectoryInfo(_tempDir.Path).GetAccessControl(AccessControlSections.Access);
-        var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
-        var targetRuleCount = rules.Cast<FileSystemAccessRule>()
-            .Count(r => r.IdentityReference.Equals(targetSid));
-        // At most 1 ACE for target SID (no duplicate added when existing one matches)
-        Assert.True(targetRuleCount <= 1, $"Expected at most 1 ACE for target SID, got {targetRuleCount}");
+        var targetRule = GetSingleAceForSid(_tempDir.Path, targetSid);
+        Assert.Equal(sourceRule.FileSystemRights & FileSystemRights.FullControl, targetRule.FileSystemRights);
+        Assert.Equal(AccessControlType.Allow, targetRule.AccessControlType);
+        Assert.Equal(sourceRule.InheritanceFlags, targetRule.InheritanceFlags);
+        Assert.Equal(sourceRule.PropagationFlags, targetRule.PropagationFlags);
     }
 
     [Fact]

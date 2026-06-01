@@ -13,7 +13,7 @@ namespace RunFence.Tests;
 
 public class AccountPickerStepTests
 {
-    private readonly Mock<ILocalGroupMembershipService> _groupMembership = new();
+    private readonly Mock<ILocalGroupQueryService> _groupMembership = new();
     private readonly Mock<ILocalUserProvider> _localUserProvider = new();
     private readonly Mock<ISidResolver> _sidResolver = new();
     private readonly Mock<IProfilePathResolver> _profilePathResolver = new();

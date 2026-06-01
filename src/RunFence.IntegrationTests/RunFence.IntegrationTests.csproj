@@ -20,6 +20,7 @@
 
     <ItemGroup>
         <ProjectReference Include="..\RunFence.Core\RunFence.Core.csproj"/>
+        <ProjectReference Include="..\RunFence.AppxLauncher\RunFence.AppxLauncher.csproj"/>
         <ProjectReference Include="..\RunFence\RunFence.csproj"/>
         <ProjectReference Include="..\RunFence.Tests.Core\RunFence.Tests.Core.csproj"/>
     </ItemGroup>

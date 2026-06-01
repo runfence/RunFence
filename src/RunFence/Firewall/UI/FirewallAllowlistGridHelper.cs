@@ -9,17 +9,22 @@ namespace RunFence.Firewall.UI;
 /// </summary>
 public class FirewallAllowlistGridHelper(
     DataGridView grid,
-    Action<bool> setAddVisible,
-    Action<bool> setRemoveVisible,
-    Action<bool> setExportVisible,
     FirewallAllowlistTabHandler handler,
     Func<IReadOnlyList<string>, string, bool> tryExportToFile,
     Action exportCombined,
     Action updateApplyButton,
-    Action updateToolbar)
+    Action updateToolbar,
+    Action<string, string> showInformation,
+    Action<string, string> showWarning,
+    Action<string, string> showError)
     : FirewallGridHelperBase<FirewallAllowlistEntry>(
-        grid, setAddVisible, setRemoveVisible, setExportVisible,
-        tryExportToFile, exportCombined, updateApplyButton)
+        grid,
+        tryExportToFile,
+        exportCombined,
+        updateApplyButton,
+        FirewallAllowlistContextMenuItemNames.AllowlistAdd,
+        FirewallAllowlistContextMenuItemNames.AllowlistRemove,
+        FirewallAllowlistContextMenuItemNames.AllowlistExport)
 {
     public bool IsResolvingDomains => handler.IsResolvingDomains;
 
@@ -81,17 +86,15 @@ public class FirewallAllowlistGridHelper(
         switch (result.Outcome)
         {
             case AddEntryOutcome.LicenseLimitReached:
-                MessageBox.Show(result.LicenseLimitMessage, "License Limit",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                showInformation("License Limit", result.LicenseLimitMessage!);
                 return;
             case AddEntryOutcome.Invalid:
-                MessageBox.Show(
-                    "Invalid entry. Enter a valid IP address or CIDR range (e.g. 1.2.3.4, 10.0.0.0/8) or domain name (e.g. example.com).",
-                    "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                showWarning(
+                    "Validation Error",
+                    "Invalid entry. Enter a valid IP address or CIDR range (e.g. 1.2.3.4, 10.0.0.0/8) or domain name (e.g. example.com).");
                 return;
             case AddEntryOutcome.Duplicate:
-                MessageBox.Show("This entry is already in the list.", "Duplicate",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                showWarning("Duplicate", "This entry is already in the list.");
                 return;
         }
 
@@ -128,8 +131,9 @@ public class FirewallAllowlistGridHelper(
         return Grid.Rows[idx];
     }
 
-    public async Task ResolveDomainEntriesAsync(bool showError)
+    public async Task ResolveDomainEntriesAsync(bool showErrorToUser, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         SetDomainRowsResolvedText("Resolving...");
         var resolveTask = handler.ResolveAllDomainsAsync();
         // ResolveAllDomainsAsync sets IsResolvingDomains = true synchronously before yielding,
@@ -143,8 +147,8 @@ public class FirewallAllowlistGridHelper(
         }
         catch (Exception ex)
         {
-            if (showError)
-                MessageBox.Show($"Resolution failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (showErrorToUser)
+                showError("Error", $"Resolution failed: {ex.Message}");
             SetDomainRowsResolvedText("(unresolved)");
         }
         finally
@@ -194,14 +198,13 @@ public class FirewallAllowlistGridHelper(
         switch (result.Outcome)
         {
             case EditEntryOutcome.Invalid:
-                MessageBox.Show(
-                    "Invalid entry. Enter a valid IP address or CIDR range (e.g. 1.2.3.4, 10.0.0.0/8) or domain name (e.g. example.com).",
-                    "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                showWarning(
+                    "Validation Error",
+                    "Invalid entry. Enter a valid IP address or CIDR range (e.g. 1.2.3.4, 10.0.0.0/8) or domain name (e.g. example.com).");
                 row.Cells[columnIndex].Value = entry.Value;
                 return;
             case EditEntryOutcome.Duplicate:
-                MessageBox.Show("This value is already in the list.", "Duplicate",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                showWarning("Duplicate", "This value is already in the list.");
                 row.Cells[columnIndex].Value = entry.Value;
                 return;
         }

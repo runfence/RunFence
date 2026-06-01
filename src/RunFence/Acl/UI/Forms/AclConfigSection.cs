@@ -20,6 +20,7 @@ public partial class AclConfigSection : UserControl
 
     // State
     private bool _isFolder;
+    private string _currentExePath = string.Empty;
     private AclConfigContext? _context;
 
     /// <summary>Fired when ACL controls change and the parent should re-layout.</summary>
@@ -42,6 +43,9 @@ public partial class AclConfigSection : UserControl
             _aclModeDenyRadio.Checked = value == AclMode.Deny;
         }
     }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public AclTarget AclTarget => _aclFileRadio.Checked ? AclTarget.File : AclTarget.Folder;
 
     public AclConfigSection(AclAllowListGridHandler allowListHandler, AllowListEntryFactory allowListEntryFactory, AclConfigValidator validator, FolderDepthHelper folderDepthHelper)
     {
@@ -75,11 +79,9 @@ public partial class AclConfigSection : UserControl
         {
             foreach (var entry in model.AllowedAclEntries)
             {
-                var idx = _allowEntriesGrid.Rows.Add(
-                    _allowListEntryFactory.GetDisplayName(entry.Sid, null, _context?.SidNames),
-                    entry.AllowExecute,
-                    entry.AllowWrite);
-                _allowEntriesGrid.Rows[idx].Tag = entry;
+                AddAllowEntry(
+                    entry,
+                    _allowListEntryFactory.GetDisplayName(entry.Sid, null, _context?.SidNames));
             }
         }
 
@@ -92,6 +94,7 @@ public partial class AclConfigSection : UserControl
     /// </summary>
     public void SetExePath(string path, bool isFolder)
     {
+        _currentExePath = path;
         _isFolder = isFolder;
 
         var isUrl = PathHelper.IsUrlScheme(path);
@@ -120,9 +123,8 @@ public partial class AclConfigSection : UserControl
     /// </summary>
     private void UpdateFolderDepthCombo(string? exePath = null)
     {
-        exePath ??= _context?.Provider.GetExePath() ?? "";
+        exePath ??= GetCurrentExePath();
         _folderDepthHelper.UpdateFolderDepthCombo(_folderDepthComboBox, exePath, _isFolder);
-        UpdateAclPathLabel();
     }
 
     /// <summary>
@@ -133,42 +135,19 @@ public partial class AclConfigSection : UserControl
         _folderDepthHelper.SelectFolderDepth(_folderDepthComboBox, folderAclDepth);
     }
 
-    private (AclTarget Target, int Depth) ResolveAclTargetAndDepth(bool isFolder)
+    private AclConfigValidationState CheckPathConflict()
     {
-        var aclTarget = isFolder ? AclTarget.Folder : _aclFileRadio.Checked ? AclTarget.File : AclTarget.Folder;
-        var depth = _aclFolderRadio.Checked
-            ? _folderDepthHelper.GetSelectedDepth(_folderDepthComboBox.SelectedIndex)
-            : 0;
-        return (aclTarget, depth);
-    }
-
-    private string? CheckPathConflict()
-    {
-        _allowConflictLabel.Text = "";
-        if (!_restrictAclCheckBox.Checked || _context == null)
-            return null;
-
-        var exePath = (_context.Provider.GetExePath()).Trim();
-        if (string.IsNullOrEmpty(exePath))
-            return null;
-
-        var (aclTarget, depth) = ResolveAclTargetAndDepth(_isFolder);
-        var isAllowMode = _aclModeAllowRadio.Checked;
-
-        var error = _validator.CheckPathConflict(exePath, _isFolder, isAllowMode,
-            aclTarget, depth, _context.ExistingApps, _context.CurrentAppId);
-
-        var labelText = error ?? _validator.CheckPathOverlapWarning(exePath, _isFolder, isAllowMode,
-            aclTarget, depth, _context.ExistingApps, _context.CurrentAppId);
-
-        if (labelText != null)
-            _allowConflictLabel.Text = labelText;
-
-        _allowConflictLabel.Visible = _restrictAclCheckBox.Checked
-                                      && !string.IsNullOrEmpty(_allowConflictLabel.Text);
-
-        // Return only the blocking error (not warning) so Validate can distinguish
-        return error;
+        var existingApps = _context?.ExistingApps ?? [];
+        return ApplyValidationState(_validator.ValidateState(
+            GetCurrentExePath().Trim(),
+            _isFolder,
+            _restrictAclCheckBox.Checked,
+            _aclModeAllowRadio.Checked,
+            _aclFileRadio.Checked ? AclTarget.File : AclTarget.Folder,
+            _folderDepthHelper.GetSelectedDepth(_folderDepthComboBox.SelectedIndex),
+            _allowEntriesGrid.Rows.Cast<DataGridViewRow>().Count(row => row.Tag is AllowAclEntry),
+            existingApps,
+            _context?.CurrentAppId));
     }
 
     public AclConfigSectionSnapshot CaptureSnapshot()
@@ -213,36 +192,26 @@ public partial class AclConfigSection : UserControl
     private void OnRestrictAclCheckedChanged(object? sender, EventArgs e)
     {
         UpdateAclState();
-        CheckPathConflict();
-        UpdatePanelHeight();
-        LayoutChanged?.Invoke();
+        RefreshValidationLayoutAndParent();
     }
 
     private void OnAclModeDenyRadioCheckedChanged(object? sender, EventArgs e)
     {
         UpdateAclState();
-        CheckPathConflict();
-        UpdatePanelHeight();
-        LayoutChanged?.Invoke();
         if (_aclModeAllowRadio.Checked && _allowEntriesGrid.Rows.Count == 0)
             PrePopulateAllowListWithSelectedAccount();
+        RefreshValidationLayoutAndParent();
     }
 
     private void OnAclFolderRadioCheckedChanged(object? sender, EventArgs e)
     {
         _folderDepthComboBox.Enabled = _aclFolderRadio.Checked;
-        UpdateAclPathLabel();
-        CheckPathConflict();
-        UpdatePanelHeight();
-        LayoutChanged?.Invoke();
+        RefreshValidationLayoutAndParent();
     }
 
     private void OnFolderDepthSelectedIndexChanged(object? sender, EventArgs e)
     {
-        UpdateAclPathLabel();
-        CheckPathConflict();
-        UpdatePanelHeight();
-        LayoutChanged?.Invoke();
+        RefreshValidationLayoutAndParent();
     }
 
     private void OnAllowGridCurrentCellDirtyStateChanged(object? sender, EventArgs e)
@@ -292,6 +261,13 @@ public partial class AclConfigSection : UserControl
         }
     }
 
+    private void RefreshValidationLayoutAndParent()
+    {
+        CheckPathConflict();
+        UpdatePanelHeight();
+        LayoutChanged?.Invoke();
+    }
+
     private void UpdateAclState()
     {
         var enabled = _restrictAclCheckBox.Checked;
@@ -307,13 +283,18 @@ public partial class AclConfigSection : UserControl
         _allowTsRemoveButton.Enabled = allowEnabled && _allowEntriesGrid.SelectedRows.Count > 0;
     }
 
-    private void UpdateAclPathLabel()
+    private AclConfigValidationState ApplyValidationState(AclConfigValidationState state)
     {
-        var selectedPath = _folderDepthHelper.GetSelectedPath(_folderDepthComboBox.SelectedIndex);
-        if (selectedPath != null)
-            _aclPathLabel.Text = $"Target: {selectedPath}";
-        else if (_folderDepthComboBox.SelectedItem != null)
-            _aclPathLabel.Text = $"Target: {_folderDepthComboBox.SelectedItem}";
+        _allowConflictLabel.Text = state.ConflictMessage ?? state.OverlapWarning ?? "";
+        _allowConflictLabel.Visible = state.RestrictAcl && !string.IsNullOrEmpty(_allowConflictLabel.Text);
+        _aclPathLabel.Text = string.IsNullOrEmpty(state.TargetPath) ? string.Empty : $"Target: {state.TargetPath}";
+        return state;
+    }
+
+    private string GetCurrentExePath()
+    {
+        var contextPath = _context?.Provider.GetExePath();
+        return contextPath ?? _currentExePath;
     }
 
     private void PrePopulateAllowListWithSelectedAccount()
@@ -327,11 +308,7 @@ public partial class AclConfigSection : UserControl
 
         foreach (var populated in entries)
         {
-            var idx = _allowEntriesGrid.Rows.Add(
-                populated.DisplayName,
-                populated.Entry.AllowExecute,
-                populated.Entry.AllowWrite);
-            _allowEntriesGrid.Rows[idx].Tag = populated.Entry;
+            AddAllowEntry(populated.Entry, populated.DisplayName);
         }
     }
 
@@ -362,17 +339,17 @@ public partial class AclConfigSection : UserControl
         if (result.ResolvedName != null)
             _context?.Provider.OnSidNameLearned(result.Entry!.Sid, result.ResolvedName);
 
-        var idx = _allowEntriesGrid.Rows.Add(
-            result.DisplayName ?? result.Entry!.Sid,
-            result.Entry!.AllowExecute,
-            result.Entry.AllowWrite);
-        _allowEntriesGrid.Rows[idx].Tag = result.Entry;
+        AddAllowEntry(result.Entry!, result.DisplayName ?? result.Entry!.Sid);
+        RefreshValidationLayoutAndParent();
     }
 
     private void OnAllowRemoveClick(object? sender, EventArgs e)
     {
         if (_allowEntriesGrid.SelectedRows.Count > 0)
+        {
             _allowEntriesGrid.Rows.RemoveAt(_allowEntriesGrid.SelectedRows[0].Index);
+            RefreshValidationLayoutAndParent();
+        }
     }
 
     private void OnAllowSelectionChanged(object? sender, EventArgs e)
@@ -417,5 +394,11 @@ public partial class AclConfigSection : UserControl
         if (e.RowIndex < 0)
             return;
         _allowListHandler.ApplyCellValueToEntry(_allowEntriesGrid.Rows[e.RowIndex]);
+    }
+
+    private void AddAllowEntry(AllowAclEntry entry, string displayName)
+    {
+        var index = _allowEntriesGrid.Rows.Add(displayName, entry.AllowExecute, entry.AllowWrite);
+        _allowEntriesGrid.Rows[index].Tag = entry;
     }
 }

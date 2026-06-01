@@ -13,7 +13,7 @@ public class DatabaseService(
     IPersistenceAtomicFileWriter atomicFileWriter,
     IAppFilter? appFilter,
     bool allowPlaintextConfig)
-    : IDatabaseService
+    : IDatabaseService, IConfigRepository, ICredentialRepository
 {
     private readonly Lock _saveLock = new();
 
@@ -70,6 +70,7 @@ public class DatabaseService(
                 db.AppContainers ??= [];
                 db.Settings ??= new();
                 db.SidNames ??= new(StringComparer.OrdinalIgnoreCase);
+                db.TrackingJobSids = db.TrackingJobSids?.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             }
             finally
             {

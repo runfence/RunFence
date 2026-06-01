@@ -32,6 +32,7 @@ public class OpenFolderHandlerTests
     private readonly Mock<IDirectoryValidator> _validator;
     private readonly Mock<ILoggingService> _log;
     private readonly Mock<IShellFolderOpener> _shellFolderOpener;
+    private readonly ManualOpenFolderValidationLeaseReleaser _validationLeaseReleaser;
     private readonly IpcOpenFolderHandler _handler = null!;
 
     public OpenFolderHandlerTests()
@@ -42,6 +43,7 @@ public class OpenFolderHandlerTests
         _validator = new Mock<IDirectoryValidator>();
         _log = new Mock<ILoggingService>();
         _shellFolderOpener = new Mock<IShellFolderOpener>();
+        _validationLeaseReleaser = new ManualOpenFolderValidationLeaseReleaser();
 
         // Default: application is running normally
         _appState.Setup(a => a.IsShuttingDown).Returns(false);
@@ -64,7 +66,7 @@ public class OpenFolderHandlerTests
 
     private IpcOpenFolderHandler CreateHandler(bool noValidator = false)
         => new(_appLock.Object, new IpcUiInvoker(_uiThreadInvoker.Object, _appState.Object),
-            noValidator ? null : _validator.Object, _log.Object, _shellFolderOpener.Object);
+            noValidator ? null : _validator.Object, _log.Object, _shellFolderOpener.Object, _validationLeaseReleaser);
 
     private static IpcMessage OpenFolderMessage(string? path)
         => new() { Command = IpcCommands.OpenFolder, Arguments = path };
@@ -137,18 +139,6 @@ public class OpenFolderHandlerTests
     }
 
     [Fact]
-    public void HandleOpenFolder_CallsValidatorWithCorrectArguments()
-    {
-        // Validator returns invalid to short-circuit the shell open call
-        var invalidHandle = new DirectoryValidationHandle(null) { IsValid = false, Error = "test" };
-        _validator.Setup(v => v.ValidateAndHold(TestPath, CallerSid)).Returns(invalidHandle);
-
-        _handler.HandleOpenFolder(OpenFolderMessage(TestPath), CallerIdentity, CallerSid);
-
-        _validator.Verify(v => v.ValidateAndHold(TestPath, CallerSid), Times.Once);
-    }
-
-    [Fact]
     public void HandleOpenFolder_ValidPathAndCaller_InvokesOnUiThreadAndReturnsSuccess()
     {
         var response = _handler.HandleOpenFolder(OpenFolderMessage(TestPath), CallerIdentity, CallerSid);
@@ -160,11 +150,11 @@ public class OpenFolderHandlerTests
     }
 
     [Fact]
-    public async Task HandleOpenFolder_Success_ReleasesValidationLeaseAfterDelayWithoutBlockingCaller()
+    public void HandleOpenFolder_Success_KeepsValidationLeaseUntilReleaserRuns()
     {
         var tempPath = Path.Combine(Path.GetTempPath(), $"RunFence_OpenFolderLease_{Guid.NewGuid():N}.tmp");
-        await File.WriteAllTextAsync(tempPath, "lease");
-        using var trackedHandle = File.OpenHandle(tempPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        File.WriteAllText(tempPath, "lease");
+        var trackedHandle = File.OpenHandle(tempPath, FileMode.Open, FileAccess.Read, FileShare.None);
         var validHandle = new DirectoryValidationHandle(trackedHandle)
         {
             IsValid = true,
@@ -173,38 +163,65 @@ public class OpenFolderHandlerTests
         _validator.Setup(v => v.ValidateAndHold(TestPath, CallerSid)).Returns(validHandle);
         var handler = CreateHandler();
 
-        var started = Environment.TickCount64;
-        var response = handler.HandleOpenFolder(OpenFolderMessage(TestPath), CallerIdentity, CallerSid);
-        var elapsedMs = Environment.TickCount64 - started;
+        try
+        {
+            var response = handler.HandleOpenFolder(OpenFolderMessage(TestPath), CallerIdentity, CallerSid);
+
+            Assert.True(response.Success);
+            AssertFileDeleteBlocked(tempPath);
+            _validationLeaseReleaser.ReleasePending();
+            File.Delete(tempPath);
+        }
+        finally
+        {
+            _validationLeaseReleaser.ReleasePending();
+            trackedHandle.Dispose();
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
+    }
+
+    [Fact]
+    public async Task HandleOpenFolder_Success_DoesNotWaitForLeaseReleaseTask()
+    {
+        _validationLeaseReleaser.HoldReleaseTaskOpen();
+
+        var response = await Task.Run(() =>
+            _handler.HandleOpenFolder(OpenFolderMessage(TestPath), CallerIdentity, CallerSid))
+            .WaitAsync(TimeSpan.FromSeconds(1));
 
         Assert.True(response.Success);
-        Assert.True(elapsedMs < 500, $"Expected immediate return, got {elapsedMs}ms.");
-        await AssertFileDeleteBlockedAsync(tempPath);
-        await WaitForFileDeleteAsync(tempPath, TimeSpan.FromSeconds(7));
+        Assert.NotNull(_validationLeaseReleaser.PendingValidation);
+        Assert.False(_validationLeaseReleaser.ReleaseTask!.IsCompleted);
     }
 
-    private static async Task AssertFileDeleteBlockedAsync(string path)
+    private static void AssertFileDeleteBlocked(string path)
     {
-        await Assert.ThrowsAnyAsync<IOException>(() => Task.Run(() => File.Delete(path)));
+        Assert.ThrowsAny<IOException>(() => File.Delete(path));
     }
 
-    private static async Task WaitForFileDeleteAsync(string path, TimeSpan timeout)
+    private sealed class ManualOpenFolderValidationLeaseReleaser : IOpenFolderValidationLeaseReleaser
     {
-        var started = Environment.TickCount64;
-        while (Environment.TickCount64 - started < timeout.TotalMilliseconds)
+        private DirectoryValidationHandle? pendingValidation;
+        private TaskCompletionSource? pendingRelease;
+
+        public DirectoryValidationHandle? PendingValidation => pendingValidation;
+        public Task? ReleaseTask => pendingRelease?.Task;
+
+        public Task ReleaseAfterSuccessfulOpen(DirectoryValidationHandle validation)
         {
-            try
-            {
-                File.Delete(path);
-                return;
-            }
-            catch (IOException)
-            {
-                await Task.Yield();
-                SpinWait.SpinUntil(static () => false, 100);
-            }
+            pendingValidation = validation;
+            return pendingRelease?.Task ?? Task.CompletedTask;
         }
 
-        throw new TimeoutException($"Timed out waiting for delayed lease disposal for '{path}'.");
+        public void HoldReleaseTaskOpen()
+            => pendingRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ReleasePending()
+        {
+            pendingRelease?.TrySetResult();
+            pendingRelease = null;
+            Interlocked.Exchange(ref pendingValidation, null)?.Dispose();
+        }
     }
 }

@@ -23,7 +23,9 @@ public class DragBridgePasteHandlerTests : IDisposable
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IUiThreadInvoker> _uiThreadInvoker = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantMutatorService> _grantMutatorService = new();
+    private readonly Mock<ITraverseService> _traverseService;
+    private readonly Mock<IGrantIntentSnapshotService> _grantIntentSnapshotService;
     private readonly SidDisplayNameResolver _displayNameResolver = new(new Mock<ISidResolver>().Object, new Mock<IProfilePathResolver>().Object);
 
     private readonly List<string> _tempFiles = new();
@@ -34,9 +36,11 @@ public class DragBridgePasteHandlerTests : IDisposable
         // Invoke actions synchronously
         _uiThreadInvoker.Setup(u => u.Invoke(It.IsAny<Action>()))
             .Callback((Action a) => a());
-        _pathGrantService.Setup(g => g.CaptureGrantRestoreSnapshot(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
+        _traverseService = _grantMutatorService.As<ITraverseService>();
+        _grantIntentSnapshotService = _grantMutatorService.As<IGrantIntentSnapshotService>();
+        _grantIntentSnapshotService.Setup(g => g.CaptureGrantRestoreSnapshot(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
             .Returns(new GrantIntentRestoreSnapshot(null, []));
-        _pathGrantService.Setup(g => g.CaptureTraverseRestoreSnapshot(It.IsAny<string>(), It.IsAny<string>()))
+        _grantIntentSnapshotService.Setup(g => g.CaptureTraverseRestoreSnapshot(It.IsAny<string>(), It.IsAny<string>()))
             .Returns(new GrantIntentRestoreSnapshot(null, []));
     }
 
@@ -57,7 +61,9 @@ public class DragBridgePasteHandlerTests : IDisposable
         _log.Object,
         _uiThreadInvoker.Object,
         _aclPermission.Object,
-        _pathGrantService.Object,
+        _grantMutatorService.Object,
+        _traverseService.Object,
+        _grantIntentSnapshotService.Object,
         _displayNameResolver,
         new DragBridgeChoiceCache());
 
@@ -164,7 +170,7 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
         var handler = CreateHandler();
@@ -176,7 +182,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         Assert.NotNull(result);
         Assert.Contains(file, result);
         Assert.Contains(file, granted);
-        _pathGrantService.Verify(g => g.EnsureAccess(TargetSid.Value, file,
+        _grantMutatorService.Verify(g => g.EnsureAccess(TargetSid.Value, file,
             FileSystemRights.Read | FileSystemRights.Synchronize, null, false), Times.Once);
     }
 
@@ -281,7 +287,7 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantFolderAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, dir,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, dir,
                 FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
         var handler = CreateHandler();
@@ -293,7 +299,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         Assert.NotNull(result);
         Assert.Contains(file, result);
         Assert.Contains(dir, granted);
-        _pathGrantService.Verify(g => g.EnsureAccess(TargetSid.Value, dir,
+        _grantMutatorService.Verify(g => g.EnsureAccess(TargetSid.Value, dir,
             FileSystemRights.ReadAndExecute, null, false), Times.Once);
         _tempManager.Verify(t => t.CreateTempFolder(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
     }
@@ -310,7 +316,7 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantFolderAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, dir,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, dir,
                 FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
         var handler = CreateHandler();
@@ -322,7 +328,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         Assert.NotNull(result);
         Assert.Contains(dir, result);
         Assert.Contains(dir, granted);
-        _pathGrantService.Verify(g => g.EnsureAccess(TargetSid.Value, dir,
+        _grantMutatorService.Verify(g => g.EnsureAccess(TargetSid.Value, dir,
             FileSystemRights.ReadAndExecute, null, false), Times.Once);
     }
 
@@ -341,7 +347,7 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantFolderAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
+        _grantMutatorService.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
                 FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
         var handler = CreateHandler();
@@ -466,7 +472,7 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantFolderAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(containerSidValue, dir,
+        _grantMutatorService.Setup(g => g.EnsureAccess(containerSidValue, dir,
                 FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
         var handler = CreateHandler();
@@ -481,9 +487,9 @@ public class DragBridgePasteHandlerTests : IDisposable
             CancellationToken.None);
 
         Assert.NotNull(result.Paths);
-        _pathGrantService.Verify(g => g.EnsureAccess(containerSidValue, dir,
+        _grantMutatorService.Verify(g => g.EnsureAccess(containerSidValue, dir,
             FileSystemRights.ReadAndExecute, null, false), Times.Once);
-        _pathGrantService.Verify(g => g.EnsureAccess(TargetSid.Value, dir,
+        _grantMutatorService.Verify(g => g.EnsureAccess(TargetSid.Value, dir,
             FileSystemRights.ReadAndExecute, null, false), Times.Never);
     }
 
@@ -498,7 +504,7 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
+        _grantMutatorService.Setup(g => g.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
         var handler = CreateHandler();
@@ -526,10 +532,10 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Throws(new UnauthorizedAccessException("denied"));
         var handler = CreateHandler();
@@ -541,7 +547,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         Assert.Null(result);
         Assert.Empty(granted);
         _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Once);
-        _pathGrantService.Verify(g => g.RestoreGrant(TargetSid.Value, file1, false, It.Is<GrantIntentRestoreSnapshot>(snapshot => snapshot.RuntimeEntry == null && snapshot.Locations.Count == 0)), Times.Once);
+        _grantMutatorService.Verify(g => g.RestoreGrant(TargetSid.Value, file1, false, It.Is<GrantIntentRestoreSnapshot>(snapshot => snapshot.RuntimeEntry == null && snapshot.Locations.Count == 0)), Times.Once);
     }
 
     [Fact]
@@ -558,10 +564,10 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: false, DurableSaveCompleted: false));
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Throws(new UnauthorizedAccessException("denied"));
         var handler = CreateHandler();
@@ -578,12 +584,12 @@ public class DragBridgePasteHandlerTests : IDisposable
 
         Assert.Null(result);
         Assert.Empty(granted);
-        _pathGrantService.Verify(g => g.RestoreGrant(
+        _grantMutatorService.Verify(g => g.RestoreGrant(
             It.IsAny<string>(),
             It.IsAny<string>(),
             It.IsAny<bool>(),
             It.IsAny<GrantIntentRestoreSnapshot>()), Times.Never);
-        _pathGrantService.Verify(g => g.RestoreTraverse(
+        _traverseService.Verify(g => g.RestoreTraverse(
             It.IsAny<string>(),
             It.IsAny<string>(),
             It.IsAny<GrantIntentRestoreSnapshot>()), Times.Never);
@@ -603,10 +609,10 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Throws(new UnauthorizedAccessException("denied"));
         var database = new AppDatabase();
@@ -616,7 +622,7 @@ public class DragBridgePasteHandlerTests : IDisposable
             IsDeny = false,
             SavedRights = null
         });
-        _pathGrantService.Setup(g => g.CaptureGrantRestoreSnapshot(TargetSid.Value, file1, false))
+        _grantIntentSnapshotService.Setup(g => g.CaptureGrantRestoreSnapshot(TargetSid.Value, file1, false))
             .Returns(new GrantIntentRestoreSnapshot(
                 new GrantedPathEntry
                 {
@@ -624,7 +630,7 @@ public class DragBridgePasteHandlerTests : IDisposable
                     IsDeny = false,
                     SavedRights = null
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = Path.GetFullPath(file1),
                     IsDeny = false,
@@ -643,7 +649,7 @@ public class DragBridgePasteHandlerTests : IDisposable
 
         Assert.Null(result);
         Assert.Empty(granted);
-        _pathGrantService.Verify(g => g.RestoreGrant(
+        _grantMutatorService.Verify(g => g.RestoreGrant(
             TargetSid.Value,
             file1,
             false,
@@ -670,10 +676,10 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: false, DatabaseModified: true, DurableSaveCompleted: true));
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Throws(new UnauthorizedAccessException("denied"));
         var database = new AppDatabase();
@@ -689,7 +695,7 @@ public class DragBridgePasteHandlerTests : IDisposable
             IsTraverseOnly = true,
             AllAppliedPaths = null
         });
-        _pathGrantService.Setup(g => g.CaptureGrantRestoreSnapshot(TargetSid.Value, file1, false))
+        _grantIntentSnapshotService.Setup(g => g.CaptureGrantRestoreSnapshot(TargetSid.Value, file1, false))
             .Returns(new GrantIntentRestoreSnapshot(
                 new GrantedPathEntry
                 {
@@ -697,13 +703,13 @@ public class DragBridgePasteHandlerTests : IDisposable
                     IsDeny = false,
                     SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = Path.GetFullPath(file1),
                     IsDeny = false,
                     SavedRights = SavedRightsState.DefaultForMode(isDeny: false)
                 })]));
-        _pathGrantService.Setup(g => g.CaptureTraverseRestoreSnapshot(TargetSid.Value, traversePath))
+        _grantIntentSnapshotService.Setup(g => g.CaptureTraverseRestoreSnapshot(TargetSid.Value, traversePath))
             .Returns(new GrantIntentRestoreSnapshot(
                 new GrantedPathEntry
                 {
@@ -711,7 +717,7 @@ public class DragBridgePasteHandlerTests : IDisposable
                     IsTraverseOnly = true,
                     AllAppliedPaths = null
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = traversePath,
                     IsTraverseOnly = true,
@@ -730,7 +736,7 @@ public class DragBridgePasteHandlerTests : IDisposable
 
         Assert.Null(result);
         Assert.Empty(granted);
-        _pathGrantService.Verify(g => g.RestoreTraverse(
+        _traverseService.Verify(g => g.RestoreTraverse(
             TargetSid.Value,
             traversePath,
             It.Is<GrantIntentRestoreSnapshot>(snapshot =>
@@ -763,13 +769,13 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantFolderAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, dir1,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, dir1,
                 FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: false, DatabaseModified: true, DurableSaveCompleted: true));
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, dir2,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, dir2,
                 FileSystemRights.ReadAndExecute, null, false))
             .Throws(new UnauthorizedAccessException("denied"));
-        _pathGrantService.Setup(g => g.CaptureGrantRestoreSnapshot(TargetSid.Value, dir1, false))
+        _grantIntentSnapshotService.Setup(g => g.CaptureGrantRestoreSnapshot(TargetSid.Value, dir1, false))
             .Returns(new GrantIntentRestoreSnapshot(
                 new GrantedPathEntry
                 {
@@ -782,7 +788,7 @@ public class DragBridgePasteHandlerTests : IDisposable
                         Special: false,
                         Own: false)
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = Path.GetFullPath(dir1),
                     IsDeny = false,
@@ -806,7 +812,7 @@ public class DragBridgePasteHandlerTests : IDisposable
 
         Assert.Null(result);
         Assert.Empty(granted);
-        _pathGrantService.Verify(g => g.RestoreGrant(
+        _grantMutatorService.Verify(g => g.RestoreGrant(
             TargetSid.Value,
             dir1,
             false,
@@ -834,10 +840,10 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: false));
         var handler = CreateHandler();
@@ -874,10 +880,10 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(
                 GrantApplied: true,
@@ -958,7 +964,7 @@ public class DragBridgePasteHandlerTests : IDisposable
         _accessPrompt.Verify(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()), Times.Never);
         _tempManager.Verify(t => t.CreateTempFolder(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
         _tempManager.Verify(t => t.CopyFilesToTemp(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()), Times.Never);
-        _pathGrantService.Verify(g => g.EnsureAccess(
+        _grantMutatorService.Verify(g => g.EnsureAccess(
             It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()),
             Times.Never);
@@ -1043,10 +1049,10 @@ public class DragBridgePasteHandlerTests : IDisposable
             .Returns(true);
         _accessPrompt.Setup(p => p.Ask(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<long>()))
             .Returns(DragBridgeAccessAction.GrantAccess);
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file1,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Returns(new GrantApplyResult(GrantApplied: false, TraverseApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
-        _pathGrantService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
+        _grantMutatorService.Setup(g => g.EnsureAccess(TargetSid.Value, file2,
                 FileSystemRights.Read | FileSystemRights.Synchronize, null, false))
             .Throws(new UnauthorizedAccessException("denied"));
         var database = new AppDatabase();
@@ -1062,11 +1068,11 @@ public class DragBridgePasteHandlerTests : IDisposable
 
         Assert.Null(result);
         Assert.Empty(granted);
-        _pathGrantService.Verify(g => g.RestoreTraverse(
+        _traverseService.Verify(g => g.RestoreTraverse(
             TargetSid.Value,
             Path.GetDirectoryName(Path.GetFullPath(file1))!,
             It.Is<GrantIntentRestoreSnapshot>(snapshot => snapshot.RuntimeEntry == null && snapshot.Locations.Count == 0)), Times.Once);
-        _pathGrantService.Verify(g => g.RestoreGrant(
+        _grantMutatorService.Verify(g => g.RestoreGrant(
             It.IsAny<string>(),
             It.IsAny<string>(),
             It.IsAny<bool>(),

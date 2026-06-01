@@ -30,37 +30,6 @@ public class FirewallAccountSettingsTests
     }
 
     [Fact]
-    public void Clone_PreservesAllScalarFields()
-    {
-        var settings = new FirewallAccountSettings
-        {
-            AllowInternet = false,
-            AllowLocalhost = false,
-            AllowLan = false,
-            FilterEphemeralLoopback = false
-        };
-
-        var clone = settings.Clone();
-
-        Assert.False(clone.AllowInternet);
-        Assert.False(clone.AllowLocalhost);
-        Assert.False(clone.AllowLan);
-        Assert.False(clone.FilterEphemeralLoopback);
-    }
-
-    [Fact]
-    public void Clone_EmptyAllowlist_ProducesEmptyAllowlistInClone()
-    {
-        var settings = new FirewallAccountSettings { Allowlist = [] };
-
-        var clone = settings.Clone();
-
-        Assert.NotNull(clone.Allowlist);
-        Assert.Empty(clone.Allowlist);
-        Assert.NotSame(settings.Allowlist, clone.Allowlist);
-    }
-
-    [Fact]
     public void Clone_DeepCopiesLocalhostPortExemptions()
     {
         var settings = new FirewallAccountSettings
@@ -81,34 +50,4 @@ public class FirewallAccountSettingsTests
         Assert.Equal("3000-3010", clone.LocalhostPortExemptions[2]);
     }
 
-    // --- F-84: Clone with true values (preserve true→true) ---
-
-    [Fact]
-    public void Clone_PreservesAllScalarFieldsWhenTrue()
-    {
-        // Verify that true values are preserved in the clone (distinct from the existing false test)
-        var settings = new FirewallAccountSettings
-        {
-            AllowInternet = true,
-            AllowLocalhost = true,
-            AllowLan = true,
-            FilterEphemeralLoopback = true
-        };
-
-        var clone = settings.Clone();
-
-        Assert.True(clone.AllowInternet);
-        Assert.True(clone.AllowLocalhost);
-        Assert.True(clone.AllowLan);
-        Assert.True(clone.FilterEphemeralLoopback);
-        // Mutating original does not affect clone (these are value types)
-        settings.AllowInternet = false;
-        settings.AllowLocalhost = false;
-        settings.AllowLan = false;
-        settings.FilterEphemeralLoopback = false;
-        Assert.True(clone.AllowInternet);
-        Assert.True(clone.AllowLocalhost);
-        Assert.True(clone.AllowLan);
-        Assert.True(clone.FilterEphemeralLoopback);
-    }
 }

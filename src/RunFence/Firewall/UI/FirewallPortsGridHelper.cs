@@ -7,16 +7,20 @@ namespace RunFence.Firewall.UI;
 /// </summary>
 public class FirewallPortsGridHelper(
     DataGridView portsGrid,
-    Action<bool> setAddVisible,
-    Action<bool> setRemoveVisible,
-    Action<bool> setExportVisible,
     FirewallPortsTabHandler handler,
     Func<IReadOnlyList<string>, string, bool> tryExportToFile,
     Action exportCombined,
-    Action updateApplyButton)
+    Action updateApplyButton,
+    Action<string, string> showInformation,
+    Action<string, string> showWarning)
     : FirewallGridHelperBase<string>(
-        portsGrid, setAddVisible, setRemoveVisible, setExportVisible,
-        tryExportToFile, exportCombined, updateApplyButton)
+        portsGrid,
+        tryExportToFile,
+        exportCombined,
+        updateApplyButton,
+        FirewallAllowlistContextMenuItemNames.PortsAdd,
+        FirewallAllowlistContextMenuItemNames.PortsRemove,
+        FirewallAllowlistContextMenuItemNames.PortsExport)
 {
     protected override string GetExportValue(string entry) => $"localhost:{entry}";
 
@@ -42,16 +46,13 @@ public class FirewallPortsGridHelper(
         switch (result.Outcome)
         {
             case AddPortOutcome.LimitReached:
-                MessageBox.Show($"Maximum of {LocalhostPortParser.MaxAllowedPorts} port entries reached.",
-                    "Limit Reached", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                showInformation("Limit Reached", $"Maximum of {LocalhostPortParser.MaxAllowedPorts} port entries reached.");
                 return;
             case AddPortOutcome.Invalid:
-                MessageBox.Show("Invalid port entry. Enter a port (1\u201365535) or range (e.g. 8080-8090).",
-                    "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                showWarning("Validation Error", "Invalid port entry. Enter a port (1\u201365535) or range (e.g. 8080-8090).");
                 return;
             case AddPortOutcome.Duplicate:
-                MessageBox.Show("This entry is already in the list.", "Duplicate",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                showWarning("Duplicate", "This entry is already in the list.");
                 return;
         }
 
@@ -77,13 +78,11 @@ public class FirewallPortsGridHelper(
         switch (result.Outcome)
         {
             case EditPortOutcome.Invalid:
-                MessageBox.Show("Invalid port entry. Enter a port (1\u201365535) or range (e.g. 8080-8090).",
-                    "Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                showWarning("Validation Error", "Invalid port entry. Enter a port (1\u201365535) or range (e.g. 8080-8090).");
                 row.Cells[columnIndex].Value = oldValue;
                 return;
             case EditPortOutcome.Duplicate:
-                MessageBox.Show("This entry is already in the list.", "Duplicate",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                showWarning("Duplicate", "This entry is already in the list.");
                 row.Cells[columnIndex].Value = oldValue;
                 return;
         }

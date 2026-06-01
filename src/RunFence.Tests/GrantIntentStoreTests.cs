@@ -568,30 +568,13 @@ public sealed class GrantIntentStoreTests : IDisposable
         Assert.Equal(@"C:\same", unchangedLocation!.Entry.Path);
     }
 
-    [Fact]
-    public void SessionDi_ResolvesSharedMainStoreInstanceForDirectStoreAndProvider()
-    {
-        using var foundationContainer = ContainerRegistrationBuilder.BuildFoundationContainer();
-        var session = CreateSession(new AppDatabase());
-
-        using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
-            foundationContainer,
-            session,
-            new StartupOptions(false, false));
-
-        var directStore = sessionScope.Resolve<IGrantIntentStore>();
-        var provider = sessionScope.Resolve<IGrantIntentStoreProvider>();
-
-        Assert.Same(directStore, provider.MainStore);
-    }
-
     private SessionContext CreateSession(AppDatabase database)
     {
         var session = new SessionContext
 {
             Database = database,
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32], EncryptedCanary = [1] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }

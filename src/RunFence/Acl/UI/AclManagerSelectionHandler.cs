@@ -140,7 +140,7 @@ public class AclManagerSelectionHandler(
         bool hasFixable = selectedEntryRows.Any(r =>
             r.Tag is GrantedPathEntry ge && grantsHelper.FixableEntries.Contains(ge));
         bool hasDbItem = _controls.GrantsGrid.SelectedRows.Cast<DataGridViewRow>()
-            .Any(r => r.Tag is GrantedPathEntry ge && !_pending.IsPendingAdd(ge.Path, ge.IsDeny));
+            .Any(r => r.Tag is GrantedPathEntry ge && !_pending.Grants.IsPendingAdd(ge.Path, ge.IsDeny));
 
         _controls.CtxAddFile.Visible = !hasItem;
         _controls.CtxAddFolder.Visible = !hasItem;
@@ -164,7 +164,7 @@ public class AclManagerSelectionHandler(
         bool singleItem = _controls.TraverseGrid.SelectedRows.Cast<DataGridViewRow>()
             .Count(r => r.Tag is GrantedPathEntry) == 1;
         bool hasDbItem = _controls.TraverseGrid.SelectedRows.Cast<DataGridViewRow>()
-            .Any(r => r.Tag is GrantedPathEntry te && !_pending.IsPendingTraverseAdd(te.Path));
+            .Any(r => r.Tag is GrantedPathEntry te && !_pending.Traverse.IsPendingTraverseAdd(te.Path));
 
         _controls.CtxTraverseAddFile.Visible = !hasItem;
         _controls.CtxTraverseAddFolder.Visible = !hasItem;

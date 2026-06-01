@@ -1,6 +1,6 @@
 namespace RunFence.Firewall.UI;
 
-using RunFence.Acl.UI;
+using RunFence.UI.DialogApply;
 
 public sealed class FirewallDialogApplyPresenter
 {

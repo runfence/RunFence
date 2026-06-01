@@ -1,9 +1,10 @@
 using System.Security.AccessControl;
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.SecurityScanner;
 
-public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper aclCheck)
+public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper aclCheck, ILoggingService log)
 {
     public void CheckAutorunExecutables(ScanContext ctx, Dictionary<string, string> userProfilePaths)
     {
@@ -75,12 +76,12 @@ public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper acl
                 }
                 catch (Exception ex)
                 {
-                    fileSystem.LogError($"Failed to read ACL for autorun executable '{exePath}': {ex.Message}");
+                    log.Error($"Failed to read ACL for autorun executable '{exePath}'.", ex);
                 }
             }
             catch (Exception ex)
             {
-                fileSystem.LogError($"Failed to check autorun executable '{rawExePath}': {ex.Message}");
+                log.Error($"Failed to check autorun executable '{rawExePath}'.", ex);
             }
         }
     }
@@ -126,7 +127,7 @@ public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper acl
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to check file replaceability for '{exePath}': {ex.Message}");
+            log.Error($"Failed to check file replaceability for '{exePath}'.", ex);
         }
     }
 
@@ -172,7 +173,7 @@ public class AutorunChecker(IFileSystemDataAccess fileSystem, AclCheckHelper acl
                     }
                     catch (Exception ex)
                     {
-                        fileSystem.LogError($"Failed to resolve shortcut target '{filePath}': {ex.Message}");
+                        log.Error($"Failed to resolve shortcut target '{filePath}'.", ex);
                     }
                 }
                 else if (!SecurityScanner.IsInertStartupFile(filePath))

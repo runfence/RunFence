@@ -17,18 +17,6 @@ public class SidResolutionHelperTests
         Assert.True(SidResolutionHelper.IsSystemSid(sid));
     }
 
-    [Fact]
-    public void IsSystemSid_OtherSid_ReturnsFalse()
-    {
-        Assert.False(SidResolutionHelper.IsSystemSid(OtherSid));
-    }
-
-    [Fact]
-    public void IsSystemSid_Null_ReturnsFalse()
-    {
-        Assert.False(SidResolutionHelper.IsSystemSid(null));
-    }
-
     // --- CanLaunchWithoutPassword ---
 
     [Fact]

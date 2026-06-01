@@ -22,6 +22,8 @@ public sealed class SidMigrationWorkflowState
 
     public bool InAppMigrationApplied { get; set; }
 
+    public SidMigrationDiscoveryState DiscoveryState { get; set; }
+
     public void SetCurrentStep(int step)
     {
         CurrentStep = step;

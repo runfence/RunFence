@@ -6,7 +6,6 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Groups.UI;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -23,10 +22,6 @@ public class GroupBulkScanOrchestratorTests
         {
             [GroupSid] = new([new DiscoveredGrant(@"C:\data", false, false, false, true, false, false)], [])
         };
-        var filteredResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [GroupSid] = scanResults[GroupSid]
-        };
         var summary = new AclBulkScanImportSummary(1, 0, [@"C:\conflict"]);
 
         var folderDialog = new Mock<IFolderBrowserDialogAdapter>();
@@ -39,7 +34,7 @@ public class GroupBulkScanOrchestratorTests
         var folderDialogFactory = new Mock<IFolderBrowserDialogAdapterFactory>();
         folderDialogFactory.Setup(factory => factory.Create()).Returns(folderDialog.Object);
 
-        var groupMembership = new Mock<ILocalGroupMembershipService>();
+        var groupMembership = new Mock<ILocalGroupQueryService>();
         groupMembership.Setup(service => service.GetLocalGroups()).Returns(
         [
             new LocalUserAccount("Administrators", GroupSid),
@@ -55,21 +50,16 @@ public class GroupBulkScanOrchestratorTests
             .ReturnsAsync(scanResults);
 
         var processor = new Mock<IAclBulkScanResultProcessor>();
-        processor.Setup(service => service.FilterManagedPaths(
-                scanResults,
-                It.IsAny<IReadOnlyList<AppEntry>>(),
-                It.IsAny<IAclService>()))
-            .Returns(filteredResults);
-        processor.Setup(service => service.ApplyScanResults(filteredResults, It.IsAny<Action>()))
+        processor.Setup(service => service.ApplyScanResults(scanResults, It.IsAny<Action>()))
             .Callback<Dictionary<string, AccountScanResult>, Action>((_, saveDatabase) => saveDatabase())
             .Returns(summary);
 
         var resultDialog = new Mock<IAclBulkScanResultDialog>();
         resultDialog.SetupGet(dialog => dialog.Form).Returns(new Form());
-        resultDialog.SetupGet(dialog => dialog.SelectedResults).Returns(filteredResults);
+        resultDialog.SetupGet(dialog => dialog.SelectedResults).Returns(scanResults);
 
         var resultDialogFactory = new Mock<IAclBulkScanResultDialogFactory>();
-        resultDialogFactory.Setup(factory => factory.Create(filteredResults, It.IsAny<ISidNameCacheService>()))
+        resultDialogFactory.Setup(factory => factory.Create(scanResults, It.IsAny<ISidNameCacheService>()))
             .Returns(resultDialog.Object);
 
         var warningPresenter = new Mock<IAclBulkScanWarningPresenter>();
@@ -81,30 +71,31 @@ public class GroupBulkScanOrchestratorTests
 
         var workflow = new AclBulkScanWorkflow(
             bulkScan.Object,
-            Mock.Of<IAclService>(),
             Mock.Of<ILoggingService>(),
             Mock.Of<ISidNameCacheService>(),
             processor.Object,
             warningPresenter.Object,
             resultDialogFactory.Object,
-            folderDialogFactory.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            folderDialogFactory.Object);
+
+        var sessionSaver = new Mock<ISessionSaver>();
 
         var orchestrator = new GroupBulkScanOrchestrator(
             modalCoordinator.Object,
             groupMembership.Object,
             workflow,
-            messagePresenter.Object);
-
-        var saveCalled = false;
-        var enabledStates = new List<bool>();
+            messagePresenter.Object,
+            sessionSaver.Object);
+        var busyStates = new List<bool>();
         var statuses = new List<string>();
+        var progressPresenter = new Mock<IGroupScanProgressPresenter>();
+        progressPresenter.Setup(p => p.SetScanBusy(It.IsAny<bool>()))
+            .Callback<bool>(busy => busyStates.Add(busy));
+        progressPresenter.Setup(p => p.SetStatusText(It.IsAny<string>()))
+            .Callback<string>(text => statuses.Add(text));
         var owner = Mock.Of<IWin32Window>();
-        await orchestrator.ScanAcls(
-            owner: owner,
-            setScanButtonEnabled: enabled => enabledStates.Add(enabled),
-            setStatusText: text => statuses.Add(text),
-            saveDatabase: () => saveCalled = true);
+
+        await orchestrator.ScanAcls(owner, progressPresenter.Object);
 
         folderDialog.Verify(dialog => dialog.ShowDialog(owner), Times.Once);
         bulkScan.Verify(service => service.ScanAllAccountsAsync(
@@ -112,12 +103,11 @@ public class GroupBulkScanOrchestratorTests
             It.Is<IReadOnlySet<string>>(sids => sids.Count == 1 && sids.Contains(GroupSid)),
             It.IsAny<IProgress<long>>(),
             It.IsAny<CancellationToken>()), Times.Once);
-        processor.Verify(service => service.FilterManagedPaths(scanResults, It.IsAny<IReadOnlyList<AppEntry>>(), It.IsAny<IAclService>()), Times.Once);
-        processor.Verify(service => service.ApplyScanResults(filteredResults, It.IsAny<Action>()), Times.Once);
+        processor.Verify(service => service.ApplyScanResults(scanResults, It.IsAny<Action>()), Times.Once);
         modalCoordinator.Verify(service => service.ShowModal(It.IsAny<Form>(), owner), Times.Once);
         warningPresenter.Verify(service => service.ShowSkippedConflictWarning(summary, "Scan ACLs"), Times.Once);
-        Assert.True(saveCalled);
-        Assert.Equal([false, true], enabledStates);
+        sessionSaver.Verify(s => s.SaveConfig(), Times.Once);
+        Assert.Equal([true, false], busyStates);
         Assert.Contains("Scanning ACLs...", statuses);
         Assert.Equal("Ready", statuses[^1]);
     }
@@ -135,7 +125,7 @@ public class GroupBulkScanOrchestratorTests
         var folderDialogFactory = new Mock<IFolderBrowserDialogAdapterFactory>();
         folderDialogFactory.Setup(factory => factory.Create()).Returns(folderDialog.Object);
 
-        var groupMembership = new Mock<ILocalGroupMembershipService>();
+        var groupMembership = new Mock<ILocalGroupQueryService>();
         groupMembership.Setup(service => service.GetLocalGroups()).Returns(
         [
             new LocalUserAccount("NoSid", string.Empty)
@@ -143,14 +133,12 @@ public class GroupBulkScanOrchestratorTests
 
         var workflow = new AclBulkScanWorkflow(
             new Mock<IAccountAclBulkScanService>(MockBehavior.Strict).Object,
-            Mock.Of<IAclService>(),
             Mock.Of<ILoggingService>(),
             Mock.Of<ISidNameCacheService>(),
             new Mock<IAclBulkScanResultProcessor>(MockBehavior.Strict).Object,
             new Mock<IAclBulkScanWarningPresenter>(MockBehavior.Strict).Object,
             Mock.Of<IAclBulkScanResultDialogFactory>(),
-            folderDialogFactory.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            folderDialogFactory.Object);
 
         var modalCoordinator = new Mock<IModalCoordinator>(MockBehavior.Strict);
         var messagePresenter = new Mock<IAclBulkScanMessagePresenter>();
@@ -158,15 +146,14 @@ public class GroupBulkScanOrchestratorTests
             modalCoordinator.Object,
             groupMembership.Object,
             workflow,
-            messagePresenter.Object);
+            messagePresenter.Object,
+            Mock.Of<ISessionSaver>());
 
         var owner = Mock.Of<IWin32Window>();
 
         await orchestrator.ScanAcls(
             owner,
-            _ => { },
-            _ => { },
-            () => { });
+            Mock.Of<IGroupScanProgressPresenter>());
 
         messagePresenter.Verify(
             presenter => presenter.ShowNoKnownSids(owner, "No local groups to scan for."),
@@ -194,7 +181,7 @@ public class GroupBulkScanOrchestratorTests
         var folderDialogFactory = new Mock<IFolderBrowserDialogAdapterFactory>();
         folderDialogFactory.Setup(factory => factory.Create()).Returns(folderDialog.Object);
 
-        var groupMembership = new Mock<ILocalGroupMembershipService>();
+        var groupMembership = new Mock<ILocalGroupQueryService>();
         groupMembership.Setup(service => service.GetLocalGroups()).Returns(
         [
             new LocalUserAccount("Administrators", GroupSid)
@@ -210,14 +197,12 @@ public class GroupBulkScanOrchestratorTests
 
         var workflow = new AclBulkScanWorkflow(
             bulkScan.Object,
-            Mock.Of<IAclService>(),
             Mock.Of<ILoggingService>(),
             Mock.Of<ISidNameCacheService>(),
             new Mock<IAclBulkScanResultProcessor>(MockBehavior.Strict).Object,
             new Mock<IAclBulkScanWarningPresenter>(MockBehavior.Strict).Object,
             Mock.Of<IAclBulkScanResultDialogFactory>(),
-            folderDialogFactory.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            folderDialogFactory.Object);
 
         var modalCoordinator = new Mock<IModalCoordinator>(MockBehavior.Strict);
         var messagePresenter = new Mock<IAclBulkScanMessagePresenter>();
@@ -225,15 +210,14 @@ public class GroupBulkScanOrchestratorTests
             modalCoordinator.Object,
             groupMembership.Object,
             workflow,
-            messagePresenter.Object);
+            messagePresenter.Object,
+            Mock.Of<ISessionSaver>());
 
         var owner = Mock.Of<IWin32Window>();
 
         await orchestrator.ScanAcls(
             owner,
-            _ => { },
-            _ => { },
-            () => { });
+            Mock.Of<IGroupScanProgressPresenter>());
 
         messagePresenter.Verify(
             presenter => presenter.ShowScanFailed(owner, exception),
@@ -250,10 +234,7 @@ public class GroupBulkScanOrchestratorTests
     [Fact]
     public async Task ScanAcls_WhenNoResults_PresentsExistingNoResultsMessage()
     {
-        var scanResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase)
-        {
-            [GroupSid] = new([new DiscoveredGrant(@"C:\data", false, false, false, true, false, false)], [])
-        };
+        var scanResults = new Dictionary<string, AccountScanResult>(StringComparer.OrdinalIgnoreCase);
 
         var folderDialog = new Mock<IFolderBrowserDialogAdapter>();
         folderDialog.SetupGet(dialog => dialog.Dialog).Returns(new FolderBrowserDialog
@@ -265,7 +246,7 @@ public class GroupBulkScanOrchestratorTests
         var folderDialogFactory = new Mock<IFolderBrowserDialogAdapterFactory>();
         folderDialogFactory.Setup(factory => factory.Create()).Returns(folderDialog.Object);
 
-        var groupMembership = new Mock<ILocalGroupMembershipService>();
+        var groupMembership = new Mock<ILocalGroupQueryService>();
         groupMembership.Setup(service => service.GetLocalGroups()).Returns(
         [
             new LocalUserAccount("Administrators", GroupSid)
@@ -279,23 +260,14 @@ public class GroupBulkScanOrchestratorTests
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync(scanResults);
 
-        var processor = new Mock<IAclBulkScanResultProcessor>();
-        processor.Setup(service => service.FilterManagedPaths(
-                scanResults,
-                It.IsAny<IReadOnlyList<AppEntry>>(),
-                It.IsAny<IAclService>()))
-            .Returns([]);
-
         var workflow = new AclBulkScanWorkflow(
             bulkScan.Object,
-            Mock.Of<IAclService>(),
             Mock.Of<ILoggingService>(),
             Mock.Of<ISidNameCacheService>(),
-            processor.Object,
+            new Mock<IAclBulkScanResultProcessor>(MockBehavior.Strict).Object,
             new Mock<IAclBulkScanWarningPresenter>(MockBehavior.Strict).Object,
             Mock.Of<IAclBulkScanResultDialogFactory>(),
-            folderDialogFactory.Object,
-            new LambdaDatabaseProvider(() => new AppDatabase()));
+            folderDialogFactory.Object);
 
         var modalCoordinator = new Mock<IModalCoordinator>(MockBehavior.Strict);
         var messagePresenter = new Mock<IAclBulkScanMessagePresenter>();
@@ -303,15 +275,14 @@ public class GroupBulkScanOrchestratorTests
             modalCoordinator.Object,
             groupMembership.Object,
             workflow,
-            messagePresenter.Object);
+            messagePresenter.Object,
+            Mock.Of<ISessionSaver>());
 
         var owner = Mock.Of<IWin32Window>();
 
         await orchestrator.ScanAcls(
             owner,
-            _ => { },
-            _ => { },
-            () => { });
+            Mock.Of<IGroupScanProgressPresenter>());
 
         messagePresenter.Verify(
             presenter => presenter.ShowNoResults(owner, "No ACL entries found for the local groups in the selected folder."),

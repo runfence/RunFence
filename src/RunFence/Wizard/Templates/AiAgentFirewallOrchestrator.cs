@@ -19,7 +19,7 @@ public class AiAgentFirewallOrchestrator(
     IDatabaseProvider databaseProvider,
     ILaunchFacade launchFacade,
     ILaunchFeedbackPresenter launchFeedbackPresenter,
-    AccountToolResolver accountToolResolver)
+    ToolLauncher toolLauncher)
 {
     /// <summary>
     /// Updates firewall settings in the database and applies rules via <see cref="FirewallApplyHelper"/>.
@@ -54,7 +54,7 @@ public class AiAgentFirewallOrchestrator(
     /// </list>
     /// Returns <c>null</c> when firewall network info is unavailable (firewall not configured).
     /// </summary>
-    public Action<IWin32Window>? BuildPostWizardAction(
+    public Func<IWin32Window, Task>? BuildPostWizardAction(
         string sid,
         string username,
         bool internetRestrictedInWizard,
@@ -65,7 +65,7 @@ public class AiAgentFirewallOrchestrator(
         if (!dialogFactory.IsAvailable)
             return null;
 
-        return owner =>
+        return async owner =>
         {
             // Launch the tool or terminal first so the agent can start while the user configures firewall.
             try
@@ -81,18 +81,8 @@ public class AiAgentFirewallOrchestrator(
                 }
                 else
                 {
-                    var terminalExe = accountToolResolver.ResolveTerminalExe(sid);
-                    var profilePath = accountToolResolver.GetProfileRoot(sid);
-                    var isWt = !terminalExe.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
-                    using var launch = launchFacade.LaunchFile(
-                        new ProcessLaunchTarget(terminalExe, WorkingDirectory: profilePath),
-                        new AccountLaunchIdentity(sid) { PrivilegeLevel = isWt ? PrivilegeLevel.Basic : null },
-                        permissionPrompt: (_, _) => true);
-                    launchFeedbackPresenter.ShowMaintenanceWarning(launch, new LaunchFeedbackContext("The terminal", LaunchFeedbackSource.InteractiveUi)
-                    {
-                        Owner = owner,
-                        SummaryName = Path.GetFileName(terminalExe)
-                    });
+                    var launchIdentity = new AccountLaunchIdentity(sid);
+                    await toolLauncher.OpenTerminalForAccountAsync(launchIdentity, requestTerminalRefresh: true, owner);
                 }
             }
             catch (OperationCanceledException) { }

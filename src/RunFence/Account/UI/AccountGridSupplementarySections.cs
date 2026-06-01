@@ -12,7 +12,7 @@ public class AccountGridSupplementarySections(
     IWindowsAccountQueryService windowsAccountQueryService,
     IAccountLoginRestrictionService accountRestriction,
     SidDisplayNameResolver displayNameResolver,
-    AccountGridIconLifetimeManager iconLifetimeManager,
+    AccountGridRowComposer rowComposer,
     IAppContainerPathProvider appContainerPathProvider) : IAccountAppsTextProvider
 {
     public void AddEphemeralSection(
@@ -25,7 +25,7 @@ public class AccountGridSupplementarySections(
         if (ephemeralCredRows.Count == 0 && ephemeralLocalRows.Count == 0)
             return;
 
-        AccountGridHelper.AddGroupHeaderRow(grid, iconLifetimeManager, "Ephemeral Accounts");
+        rowComposer.AddGroupHeaderRow(grid, "Ephemeral Accounts");
 
         foreach (var cred in ephemeralCredRows)
         {
@@ -45,16 +45,16 @@ public class AccountGridSupplementarySections(
             var appsText = GetAppsText(data.Database, cred.Sid);
             var profilePath = windowsAccountQueryService.GetProfilePath(cred.Sid).ProfilePath ?? "";
             var ephCredAllowInternet = data.Database.GetAccount(cred.Sid)?.Firewall.AllowInternet ?? true;
-            var row = AccountGridHelper.AddAccountGridRow(grid, iconLifetimeManager, accountRow, credIcon, displayName,
+            var row = rowComposer.AddAccountGridRow(grid, accountRow, credIcon, displayName,
                 state.NoLogonState == false, ephCredAllowInternet, appsText, profilePath);
-            row.Cells["Account"].ToolTipText = expiryTooltip;
-            row.Cells["Credential"].ToolTipText = hasStoredPassword ? "Stored" : "No Password";
-            row.Cells["Import"].ReadOnly = !hasStoredPassword;
+            row.Cells[AccountGridColumns.Account].ToolTipText = expiryTooltip;
+            row.Cells[AccountGridColumns.Credential].ToolTipText = hasStoredPassword ? "Stored" : "No Password";
+            row.Cells[AccountGridColumns.Import].ReadOnly = !hasStoredPassword;
             SetLogonCellState(row, state);
             if (!hasStoredPassword)
-                row.Cells["Import"].ToolTipText = "No password stored for this account";
+                row.Cells[AccountGridColumns.Import].ToolTipText = "No password stored for this account";
             if (state.IsInteractive)
-                row.Cells["Logon"].ToolTipText = "Cannot change Logon for the interactive desktop user";
+                row.Cells[AccountGridColumns.Logon].ToolTipText = "Cannot change Logon for the interactive desktop user";
         }
 
         foreach (var localUser in ephemeralLocalRows)
@@ -70,14 +70,14 @@ public class AccountGridSupplementarySections(
             var appsText = GetAppsText(data.Database, localUser.Sid);
             var profilePath = windowsAccountQueryService.GetProfilePath(localUser.Sid).ProfilePath ?? "";
             var ephLocalAllowInternet = data.Database.GetAccount(localUser.Sid)?.Firewall.AllowInternet ?? true;
-            var row = AccountGridHelper.AddAccountGridRow(grid, iconLifetimeManager, accountRow, AccountGridHelper.EmptyIcon, displayName,
+            var row = rowComposer.AddAccountGridRow(grid, accountRow, AccountGridHelper.EmptyIcon, displayName,
                 state.NoLogonState == false, ephLocalAllowInternet, appsText, profilePath);
-            row.Cells["Account"].ToolTipText = expiryTooltip;
-            row.Cells["Import"].ReadOnly = true;
-            row.Cells["Import"].ToolTipText = "No credentials stored \u2014 use Edit to add";
+            row.Cells[AccountGridColumns.Account].ToolTipText = expiryTooltip;
+            row.Cells[AccountGridColumns.Import].ReadOnly = true;
+            row.Cells[AccountGridColumns.Import].ToolTipText = "No credentials stored \u2014 use Edit to add";
             SetLogonCellState(row, state);
             if (state.IsInteractive)
-                row.Cells["Logon"].ToolTipText = "Cannot change Logon for the interactive desktop user";
+                row.Cells[AccountGridColumns.Logon].ToolTipText = "Cannot change Logon for the interactive desktop user";
         }
     }
 
@@ -141,7 +141,7 @@ public class AccountGridSupplementarySections(
         if (unavailableSids.Count == 0)
             return;
 
-        AccountGridHelper.AddGroupHeaderRow(grid, iconLifetimeManager, "Unavailable Accounts");
+        rowComposer.AddGroupHeaderRow(grid, "Unavailable Accounts");
 
         foreach (var sid in sorter.SortUnavailableSids(data, unavailableSids))
         {
@@ -153,7 +153,7 @@ public class AccountGridSupplementarySections(
             var accountRow = new AccountRow(cred, SidNameResolver.ExtractUsername(mapName), sid, hasStoredPassword, isUnavailable: true);
             Image credIcon = hasStoredPassword ? AccountGridHelper.CreateKeyIcon() : AccountGridHelper.EmptyIcon;
             var unavailableAppsText = GetAppsText(data.Database, sid);
-            var row = AccountGridHelper.AddAccountGridRow(grid, iconLifetimeManager, accountRow, credIcon, displayName,
+            var row = rowComposer.AddAccountGridRow(grid, accountRow, credIcon, displayName,
                 true, true, unavailableAppsText, "");
             row.DefaultCellStyle.ForeColor = SystemColors.GrayText;
             foreach (DataGridViewCell cell in row.Cells)
@@ -166,7 +166,7 @@ public class AccountGridSupplementarySections(
         if (database.AppContainers.Count == 0)
             return;
 
-        AccountGridHelper.AddGroupHeaderRow(grid, iconLifetimeManager, "App Containers");
+        rowComposer.AddGroupHeaderRow(grid, "App Containers");
 
         foreach (var container in database.AppContainers.OrderBy(c => c.DisplayName, StringComparer.OrdinalIgnoreCase))
         {
@@ -177,26 +177,26 @@ public class AccountGridSupplementarySections(
             if (container.IsEphemeral)
                 displayName += " (ephemeral)";
 
-            var containerIcon = AccountGridHelper.CreateContainerIcon();
-            var idx = grid.Rows.Add(false, containerIcon, displayName,
-                true, true, appsText, dataPath, containerSid);
-            var row = grid.Rows[idx];
-            iconLifetimeManager.TrackOwned(row, containerIcon);
-            row.Tag = new ContainerRow(container, containerSid);
-            row.Cells["SID"].ToolTipText = containerSid;
-            row.Cells["Credential"].ToolTipText = "App Container";
+            var row = rowComposer.AddAppContainerGridRow(
+                grid,
+                new ContainerRow(container, containerSid),
+                AccountGridHelper.CreateContainerIcon(),
+                displayName,
+                appsText,
+                dataPath);
+            row.Cells[AccountGridColumns.Credential].ToolTipText = "App Container";
 
             foreach (DataGridViewCell cell in row.Cells)
                 cell.ReadOnly = true;
 
-            foreach (var colName in new[] { "Import", "Logon" })
+            foreach (var colName in new[] { AccountGridColumns.Import, AccountGridColumns.Logon })
             {
                 var colIndex = grid.Columns[colName]?.Index;
                 if (colIndex.HasValue)
                     row.Cells[colIndex.Value] = new DataGridViewTextBoxCell { Value = "" };
             }
 
-            var internetColIndex = grid.Columns["colAllowInternet"]?.Index;
+            var internetColIndex = grid.Columns[AccountGridColumns.AllowInternet]?.Index;
             if (internetColIndex.HasValue)
             {
                 var cell = (DataGridViewCheckBoxCell)row.Cells[internetColIndex.Value];
@@ -221,7 +221,7 @@ public class AccountGridSupplementarySections(
                 var tooltip = container.DeleteAfterUtc.Value > DateTime.UtcNow
                     ? $"Expires: {localExpiry:g}"
                     : "Expired (deletion pending)";
-                row.Cells["Account"].ToolTipText = tooltip;
+                row.Cells[AccountGridColumns.Account].ToolTipText = tooltip;
             }
         }
     }
@@ -239,7 +239,7 @@ public class AccountGridSupplementarySections(
     /// </summary>
     public static void SetLogonCellState(DataGridViewRow row, AccountState state)
     {
-        var cell = (DataGridViewCheckBoxCell)row.Cells["Logon"];
+        var cell = (DataGridViewCheckBoxCell)row.Cells[AccountGridColumns.Logon];
         cell.ReadOnly = state is { IsInteractive: true, NoLogonState: false };
         if (state.NoLogonState == null)
         {

@@ -10,11 +10,16 @@ public class AppDatabaseSnapshotTests
     public void CreateSnapshot_DeepClonesMutableCollections()
     {
         var database = new AppDatabase();
+        database.TrackingJobSids = ["S-1-5-21-1-2-3-1001"];
         database.Apps.Add(new AppEntry
         {
             Id = "app1",
             Name = "App",
             PathPrefixes = ["C:\\Allowed"],
+            ShortcutProtectionStates =
+            [
+                new ShortcutProtectionState(@"C:\Links\App.lnk", true, false, true)
+            ],
             EnvironmentVariables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["K"] = "V"
@@ -33,14 +38,20 @@ public class AppDatabaseSnapshotTests
 
         database.Apps[0].Name = "Changed";
         database.Apps[0].PathPrefixes!.Add("D:\\More");
+        database.Apps[0].ShortcutProtectionStates!.Add(
+            new ShortcutProtectionState(@"C:\Links\Other.lnk", false, true, false));
         database.Apps[0].EnvironmentVariables!["K"] = "Changed";
         database.AppContainers[0].Capabilities!.Add("documentsLibrary");
+        database.TrackingJobSids.Add("S-1-5-21-1-2-3-1002");
 
         Assert.Equal("App", snapshot.Apps[0].Name);
         Assert.Equal(["C:\\Allowed"], snapshot.Apps[0].PathPrefixes);
+        Assert.Single(snapshot.Apps[0].ShortcutProtectionStates!);
+        Assert.Equal(@"C:\Links\App.lnk", snapshot.Apps[0].ShortcutProtectionStates![0].ShortcutPath);
         Assert.Equal("V", snapshot.Apps[0].EnvironmentVariables!["K"]);
         Assert.Equal(["internetClient"], snapshot.AppContainers[0].Capabilities);
         Assert.True(snapshot.Settings.NagEligible);
+        Assert.Equal(["S-1-5-21-1-2-3-1001"], snapshot.TrackingJobSids);
     }
 
     [Fact]
@@ -64,10 +75,10 @@ public class AppDatabaseSnapshotTests
                     ExpectedMode = JobKeeperIntegrityMode.Restricted,
                     InstanceId = "inst-1",
                     PipeName = "pipe-1",
-                    JobName = "job-1",
                     LastVerifiedKeeperPid = 123
                 }
             },
+            TrackingJobSids = ["S-1-5-21-1-2-3-2001"],
             AccountGroupSnapshots = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
             {
                 ["sid"] = ["S-1-5-32-544"]
@@ -108,6 +119,7 @@ public class AppDatabaseSnapshotTests
         Assert.Equal(snapshot.SidNames, changed.SidNames);
         Assert.Equal(snapshot.AccountGroupSnapshots!.Single().Value, changed.AccountGroupSnapshots!.Single().Value);
         Assert.Equal(snapshot.JobKeeperInstances!.Single().Value.InstanceId, changed.JobKeeperInstances!.Single().Value.InstanceId);
+        Assert.Equal(snapshot.TrackingJobSids, changed.TrackingJobSids);
 
         Assert.Equal(snapshot.Apps.Single().Id, changed.Apps.Single().Id);
         Assert.Contains(changed.Accounts, account =>

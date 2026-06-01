@@ -1,3 +1,6 @@
+using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
+
 namespace RunFence.Apps.Shortcuts;
 
 public sealed class ShortcutFilePersistenceService(
@@ -30,13 +33,70 @@ public sealed class ShortcutFilePersistenceService(
         ShortcutMutation mutation,
         ShortcutContentMode contentMode)
     {
-        if (contentMode == ShortcutContentMode.PreserveExisting && File.Exists(sourceShortcutPath))
+        if (contentMode == ShortcutContentMode.PreserveExisting &&
+            TryBuildPreparedShortcutFromExisting(sourceShortcutPath, tempShortcutPath, mutation))
         {
-            File.Copy(sourceShortcutPath, tempShortcutPath, overwrite: true);
-            File.SetAttributes(tempShortcutPath, File.GetAttributes(tempShortcutPath) & ~FileAttributes.ReadOnly);
+            return;
         }
 
-        shortcutHelper.WithShortcut(tempShortcutPath, shortcut =>
+        ApplyShortcutMutation(tempShortcutPath, mutation);
+    }
+
+    private void EnsureTempShortcutDeletedForCanonicalFallback(
+        string tempShortcutPath,
+        Exception cause)
+    {
+        if (TryDeleteTempShortcut(tempShortcutPath))
+            return;
+
+        throw new IOException(
+            $"Failed to delete invalid trusted temp shortcut '{tempShortcutPath}' before canonical rewrite.",
+            cause);
+    }
+
+    private bool TryDeleteTempShortcut(string tempShortcutPath)
+    {
+        try
+        {
+            var attributes = File.GetAttributes(tempShortcutPath);
+            File.SetAttributes(tempShortcutPath, attributes & ~FileAttributes.ReadOnly);
+            File.Delete(tempShortcutPath);
+            return !File.Exists(tempShortcutPath) && !Directory.Exists(tempShortcutPath);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void PublishPreparedShortcut(
+        string shortcutPath,
+        string tempShortcutPath,
+        ShortcutDestinationMetadataMode metadataMode)
+    {
+        var existingMetadata = metadataMode == ShortcutDestinationMetadataMode.PreserveExisting
+            ? native.TryCaptureExistingMetadata(shortcutPath)
+            : null;
+        try
+        {
+            native.DeleteExistingDestination(shortcutPath);
+            native.PublishPreparedShortcut(shortcutPath, tempShortcutPath, existingMetadata);
+        }
+        catch (ShortcutPublishFailureException ex)
+        {
+            TryCleanupFailedDestination(shortcutPath);
+            ExceptionDispatchInfo.Capture(ex.InnerException ?? ex).Throw();
+            throw;
+        }
+    }
+
+    private void ApplyShortcutMutation(string shortcutPath, ShortcutMutation mutation)
+    {
+        shortcutHelper.WithShortcut(shortcutPath, shortcut =>
         {
             dynamic dynamicShortcut = shortcut;
             dynamicShortcut.TargetPath = mutation.TargetPath;
@@ -69,54 +129,43 @@ public sealed class ShortcutFilePersistenceService(
         });
     }
 
-    private static void TryDeleteTempShortcut(string tempShortcutPath)
+    private bool TryBuildPreparedShortcutFromExisting(
+        string sourceShortcutPath,
+        string tempShortcutPath,
+        ShortcutMutation mutation)
     {
-        if (!File.Exists(tempShortcutPath))
-            return;
+        if (!File.Exists(sourceShortcutPath))
+            return false;
 
         try
         {
+            File.Copy(sourceShortcutPath, tempShortcutPath, overwrite: true);
             File.SetAttributes(tempShortcutPath, File.GetAttributes(tempShortcutPath) & ~FileAttributes.ReadOnly);
-            File.Delete(tempShortcutPath);
         }
-        catch
+        catch (Exception ex) when (IsPreserveExistingCopyFailure(ex))
         {
+            EnsureTempShortcutDeletedForCanonicalFallback(tempShortcutPath, ex);
+            return false;
+        }
+
+        try
+        {
+            ApplyShortcutMutation(tempShortcutPath, mutation);
+            return true;
+        }
+        catch (Exception ex) when (IsPreserveExistingShortcutEditFailure(ex))
+        {
+            EnsureTempShortcutDeletedForCanonicalFallback(tempShortcutPath, ex);
+            return false;
         }
     }
 
-    private void PublishPreparedShortcut(
-        string shortcutPath,
-        string tempShortcutPath,
-        ShortcutDestinationMetadataMode metadataMode)
-    {
-        var destinationExisted = File.Exists(shortcutPath);
-        var existingMetadata = metadataMode == ShortcutDestinationMetadataMode.PreserveExisting && destinationExisted
-            ? native.TryCaptureExistingMetadata(shortcutPath)
-            : null;
-        Exception? lastFailure = null;
+    private static bool IsPreserveExistingCopyFailure(Exception ex)
+        => ex is IOException or UnauthorizedAccessException;
 
-        for (var attempt = 0; attempt < 2; attempt++)
-        {
-            try
-            {
-                if (destinationExisted)
-                    native.DeleteExistingDestination(shortcutPath);
+    private static bool IsPreserveExistingShortcutEditFailure(Exception ex)
+        => ex is InvalidDataException or COMException or IOException or UnauthorizedAccessException;
 
-                native.PublishPreparedShortcut(shortcutPath, tempShortcutPath, existingMetadata);
-                return;
-            }
-            catch (ShortcutPublishRetryableException ex) when (attempt == 0)
-            {
-                lastFailure = ex.InnerException ?? ex;
-                TryCleanupFailedDestination(shortcutPath);
-            }
-        }
-
-        if (lastFailure != null)
-            throw lastFailure;
-
-        throw new InvalidOperationException("Shortcut persistence failed without an exception.");
-    }
 
     private void TryCleanupFailedDestination(string shortcutPath)
     {

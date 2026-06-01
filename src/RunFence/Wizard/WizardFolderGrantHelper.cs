@@ -10,7 +10,7 @@ namespace RunFence.Wizard;
 /// the chosen <see cref="SavedRightsState"/> on the resulting grant entry.
 /// </summary>
 public class WizardFolderGrantHelper(
-    IPathGrantService pathGrantService,
+    IGrantMutatorService grantMutatorService,
     IQuickAccessPinService quickAccessPinService)
 {
     /// <summary>
@@ -31,7 +31,7 @@ public class WizardFolderGrantHelper(
             try
             {
                 progress.ReportStatus($"Granting access to {Path.GetFileName(path)}...");
-                var result = await Task.Run(() => pathGrantService.EnsureAccess(
+                var result = await Task.Run(() => grantMutatorService.EnsureAccess(
                     sid,
                     path,
                     savedRights));

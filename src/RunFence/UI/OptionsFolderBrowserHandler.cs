@@ -1,4 +1,3 @@
-using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 
@@ -10,6 +9,13 @@ namespace RunFence.UI;
 /// </summary>
 public class OptionsFolderBrowserHandler
 {
+    private readonly IOpenFileDialogAdapterFactory _openFileDialogFactory;
+
+    public OptionsFolderBrowserHandler(IOpenFileDialogAdapterFactory openFileDialogFactory)
+    {
+        _openFileDialogFactory = openFileDialogFactory;
+    }
+
     /// <summary>
     /// Validates the given exe path and commits it to settings if valid.
     /// Returns an error message if the path is rejected, or null on success.
@@ -37,11 +43,11 @@ public class OptionsFolderBrowserHandler
     /// </summary>
     public string? BrowseExe()
     {
-        using var dlg = new OpenFileDialog();
+        using var dlgAdapter = _openFileDialogFactory.Create();
+        var dlg = dlgAdapter.Dialog;
         dlg.Filter = "Programs (*.exe;*.cmd;*.bat;*.ps1;*.com)|*.exe;*.cmd;*.bat;*.ps1;*.com|All files (*.*)|*.*";
         dlg.Title = "Select Folder Browser Application";
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
 
-        return dlg.ShowDialog() == DialogResult.OK ? dlg.FileName : null;
+        return dlgAdapter.ShowDialog(owner: null) == DialogResult.OK ? dlg.FileName : null;
     }
 }

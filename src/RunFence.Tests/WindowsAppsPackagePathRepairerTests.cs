@@ -1,5 +1,6 @@
 using RunFence.Launch;
 using RunFence.Infrastructure;
+using Moq;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -51,6 +52,32 @@ public sealed class WindowsAppsPackagePathRepairerTests
         Assert.Null(result);
     }
 
+    [Fact]
+    public void TryRepair_FailedPackageDirectoryEnumeration_ReturnsNull()
+    {
+        var stalePath = NotepadPath("11.2510.14.0");
+        var fileSystem = new TestBackupIntentFileSystem([], [], failEnumerationPaths: [@"C:\Program Files\WindowsApps"]);
+
+        var result = new WindowsAppsPackagePathRepairer(fileSystem).TryRepair(stalePath);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void TryRepair_UnknownCandidateExecutableTarget_IsSkipped()
+    {
+        var stalePath = NotepadPath("11.2510.14.0");
+        var candidatePath = NotepadPath("11.2512.1.0");
+        var fileSystem = new TestBackupIntentFileSystem(
+            [PackageDirectory("11.2512.1.0")],
+            [],
+            unknownFiles: [candidatePath]);
+
+        var result = new WindowsAppsPackagePathRepairer(fileSystem).TryRepair(stalePath);
+
+        Assert.Null(result);
+    }
+
     [Theory]
     [InlineData("x86", "8wekyb3d8bbwe")]
     [InlineData("x64", "otherpublisher")]
@@ -81,6 +108,57 @@ public sealed class WindowsAppsPackagePathRepairerTests
     }
 
     [Fact]
+    public void Resolve_UnknownExecutableState_DoesNotCallRepairAndReturnsInvalid()
+    {
+        var packageRepairer = new Mock<IWindowsAppsPackagePathRepairer>(MockBehavior.Strict);
+        var fileSystem = new TestBackupIntentFileSystem([], [], unknownFiles: [@"C:\Program Files\WindowsApps\wt.exe"]);
+        var resolver = new AssociationExecutablePathResolver(fileSystem, packageRepairer.Object);
+
+        var result = resolver.Resolve(@"C:\Program Files\WindowsApps\wt.exe");
+
+        Assert.False(result.IsValid);
+        Assert.Contains("inaccessible", result.RejectionReason, StringComparison.OrdinalIgnoreCase);
+        packageRepairer.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public void Resolve_InvalidRootedExecutablePath_DoesNotCallRepairAndReturnsInvalid()
+    {
+        var packageRepairer = new Mock<IWindowsAppsPackagePathRepairer>(MockBehavior.Strict);
+        var fileSystem = new BackupIntentFileSystem(new BackupIntentNativeFileSystem(), new BackupIntentManagedFileSystemProbe());
+        var resolver = new AssociationExecutablePathResolver(fileSystem, packageRepairer.Object);
+
+        var result = resolver.Resolve("C:\\bad\0tool.exe");
+
+        Assert.False(result.IsValid);
+        Assert.Contains("inaccessible", result.RejectionReason, StringComparison.OrdinalIgnoreCase);
+        packageRepairer.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public void Resolve_MissingExecutable_CallsRepairExactlyOnceAndReturnsRepairedPath()
+    {
+        const string stalePath = @"C:\Missing\tool.exe";
+        const string repairedPath = @"C:\Repaired\tool.exe";
+        var fileSystem = new Mock<IBackupIntentFileSystem>(MockBehavior.Strict);
+        fileSystem.Setup(current => current.GetFileState(stalePath)).Returns(BackupIntentPathState.Missing);
+
+        var packageRepairer = new Mock<IWindowsAppsPackagePathRepairer>(MockBehavior.Strict);
+        packageRepairer.Setup(current => current.TryRepair(stalePath)).Returns(repairedPath);
+
+        var resolver = new AssociationExecutablePathResolver(fileSystem.Object, packageRepairer.Object);
+
+        var result = resolver.Resolve(stalePath);
+
+        Assert.True(result.IsValid);
+        Assert.True(result.WasRepaired);
+        Assert.Equal(repairedPath, result.ExePath);
+        fileSystem.Verify(current => current.GetFileState(stalePath), Times.Once);
+        packageRepairer.Verify(current => current.TryRepair(stalePath), Times.Once);
+        packageRepairer.VerifyNoOtherCalls();
+    }
+
+    [Fact]
     public void Resolve_RootedMissingPackageExecutableWithRepair_ReturnsRepairedPath()
     {
         var stalePath = NotepadPath("11.2510.14.0");
@@ -96,31 +174,6 @@ public sealed class WindowsAppsPackagePathRepairerTests
         Assert.True(result.IsValid);
         Assert.True(result.WasRepaired);
         Assert.Equal(repairedPath, result.ExePath);
-    }
-
-    [Fact]
-    public void BackupIntentFileSystem_UsesNativeOpenForFilesAndDirectoryEnumeration()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "RunFencePackageFsTests", Guid.NewGuid().ToString("N"));
-        var childDirectory = Path.Combine(root, "ChildPackage_1.0.0.0_x64__publisher");
-        var filePath = Path.Combine(root, "tool.exe");
-        Directory.CreateDirectory(childDirectory);
-        File.WriteAllText(filePath, string.Empty);
-        try
-        {
-            var fileSystem = new BackupIntentFileSystem();
-
-            Assert.True(fileSystem.FileExists(filePath));
-            Assert.False(fileSystem.FileExists(Path.Combine(root, "missing.exe")));
-            Assert.Contains(
-                childDirectory,
-                fileSystem.EnumerateDirectories(root),
-                StringComparer.OrdinalIgnoreCase);
-        }
-        finally
-        {
-            Directory.Delete(root, recursive: true);
-        }
     }
 
     private static string NotepadPath(string version) =>
@@ -142,18 +195,44 @@ public sealed class WindowsAppsPackagePathRepairerTests
 
     private sealed class TestBackupIntentFileSystem(
         IEnumerable<string> directories,
-        IEnumerable<string> files) : IBackupIntentFileSystem
+        IEnumerable<string> files,
+        IEnumerable<string>? unknownFiles = null,
+        IEnumerable<string>? failEnumerationPaths = null) : IBackupIntentFileSystem
     {
         private readonly HashSet<string> _directories = new(directories, StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _files = new(files, StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _unknownFiles = new(unknownFiles ?? [], StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _failEnumerationPaths = new(failEnumerationPaths ?? [], StringComparer.OrdinalIgnoreCase);
 
-        public bool FileExists(string path) => _files.Contains(path);
+        public BackupIntentPathState GetFileState(string path)
+        {
+            if (_unknownFiles.Contains(path))
+                return BackupIntentPathState.Unknown;
 
-        public bool DirectoryExists(string path) => _directories.Contains(path);
+            return _files.Contains(path) ? BackupIntentPathState.Exists : BackupIntentPathState.Missing;
+        }
 
-        public IReadOnlyList<string> EnumerateDirectories(string path) =>
-            _directories.Where(directory =>
+        public BackupIntentPathState GetDirectoryState(string path)
+            => _directories.Contains(path) ? BackupIntentPathState.Exists : BackupIntentPathState.Missing;
+
+        public bool TryEnumerateDirectories(string path, out IReadOnlyList<string> directories)
+        {
+            if (_failEnumerationPaths.Contains(path))
+            {
+                directories = [];
+                return false;
+            }
+
+            directories = _directories.Where(directory =>
                     string.Equals(Path.GetDirectoryName(directory), path, StringComparison.OrdinalIgnoreCase))
                 .ToArray();
+            return true;
+        }
+
+        public bool TryGetDirectoryLastWriteTimeUtc(string path, out DateTime lastWriteTimeUtc)
+        {
+            lastWriteTimeUtc = default;
+            return false;
+        }
     }
 }

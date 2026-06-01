@@ -11,12 +11,6 @@ namespace RunFence.Acl.UI;
 public class AclManagerPathActionHelper(
     IShellHelper shellHelper)
 {
-    private void OpenInExplorer(string path)
-    {
-        string folder = Directory.Exists(path) ? path : Path.GetDirectoryName(path) ?? path;
-        shellHelper.OpenInExplorer(folder);
-    }
-
     private IWin32Window _owner = null!;
     private AclManagerDialogControls _controls = null!;
 
@@ -43,23 +37,40 @@ public class AclManagerPathActionHelper(
 
     // --- Shell path actions ---
 
-    public void OpenFolderGrants()
-        => OpenInExplorer(GetSelectedGrantPath()!);
+    public void OpenFolderGrants() => OpenFolder(GetSelectedGrantPath());
 
-    public void CopyPathGrants()
-        => Clipboard.SetText(GetSelectedGrantPath()!);
+    public void CopyPathGrants() => CopyPath(GetSelectedGrantPath());
 
-    public void ShowPropertiesGrants()
-        => shellHelper.ShowProperties(GetSelectedGrantPath()!, _owner);
+    public void ShowPropertiesGrants() => ShowProperties(GetSelectedGrantPath());
 
-    public void OpenFolderTraverse()
-        => OpenInExplorer(GetSelectedTraversePath()!);
+    public void OpenFolderTraverse() => OpenFolder(GetSelectedTraversePath());
 
-    public void CopyPathTraverse()
-        => Clipboard.SetText(GetSelectedTraversePath()!);
+    public void CopyPathTraverse() => CopyPath(GetSelectedTraversePath());
 
-    public void ShowPropertiesTraverse()
-        => shellHelper.ShowProperties(GetSelectedTraversePath()!, _owner);
+    public void ShowPropertiesTraverse() => ShowProperties(GetSelectedTraversePath());
+
+    private void OpenFolder(string? selectedPath)
+    {
+        if (selectedPath == null)
+            return;
+
+        string folder = Directory.Exists(selectedPath)
+            ? selectedPath
+            : Path.GetDirectoryName(selectedPath) ?? selectedPath;
+        shellHelper.OpenInExplorer(folder);
+    }
+
+    private static void CopyPath(string? selectedPath)
+    {
+        if (selectedPath != null)
+            Clipboard.SetText(selectedPath);
+    }
+
+    private void ShowProperties(string? selectedPath)
+    {
+        if (selectedPath != null)
+            shellHelper.ShowProperties(selectedPath, _owner);
+    }
 
     // --- Grid event routing ---
 

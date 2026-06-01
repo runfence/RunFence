@@ -39,7 +39,7 @@ public class ConfigLoadUnloadServiceTests : IDisposable
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessionProvider.SetSession(_session);
 
         _handlerMappingService
@@ -56,6 +56,7 @@ public class ConfigLoadUnloadServiceTests : IDisposable
 
         var mismatchKeyResolver = new ConfigMismatchKeyResolver(
             _sessionProvider,
+            _databaseService.Object,
             _databaseService.Object,
             new ConfigMismatchPinVerifier(_pinService.Object),
             _secureDesktopRunner.Object,
@@ -76,6 +77,7 @@ public class ConfigLoadUnloadServiceTests : IDisposable
             mismatchKeyResolver,
             handlerSyncHelper,
             _handlerMappingService.Object,
+            _databaseService.Object,
             _databaseService.Object);
     }
 
@@ -335,10 +337,29 @@ public class ConfigLoadUnloadServiceTests : IDisposable
 
         Assert.True(result.Succeeded, result.ErrorMessage);
         Assert.Null(result.Warnings);
-        _log.Verify(
-            l => l.Error(
-                It.Is<string>(message => message.Contains("backup preservation failed", StringComparison.Ordinal)),
-                It.IsAny<InvalidOperationException>()),
-            Times.Once);
+    }
+
+    [Fact]
+    public void UnloadAndRevertConfig_UnloadsConfigAndRevertsApps_WithoutSavingConfig()
+    {
+        var removedApp = new AppEntry { Id = "app1", Name = "App", ExePath = @"C:\app.exe" };
+        _appConfigService
+            .Setup(service => service.UnloadConfig(ConfigPath, _session.Database))
+            .Returns([removedApp]);
+
+        _service.UnloadAndRevertConfig(ConfigPath, _session.Database);
+
+        _loadedAppsCleanup.Verify(service => service.RevertApps(
+            It.Is<IEnumerable<AppEntry>>(apps => apps.Single() == removedApp)), Times.Once);
+        _appConfigService.Verify(service => service.SaveConfigForApp(
+            It.IsAny<string>(),
+            It.IsAny<AppDatabase>(),
+            It.IsAny<ISecureSecretSnapshotSource>(),
+            It.IsAny<byte[]>()), Times.Never);
+        _appConfigService.Verify(service => service.SaveConfigAtPath(
+            It.IsAny<string>(),
+            It.IsAny<AppDatabase>(),
+            It.IsAny<ISecureSecretSnapshotSource>(),
+            It.IsAny<byte[]>()), Times.Never);
     }
 }

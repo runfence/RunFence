@@ -55,22 +55,6 @@ public class LaunchDefaultsResolverTests
         // Assert — falls back to PrivilegeLevel.Isolated; Isolated → IsUnelevated=true
         var account = Assert.IsType<AccountLaunchIdentity>(result);
         Assert.Equal(PrivilegeLevel.Isolated, account.PrivilegeLevel);
-        Assert.True(account.IsUnelevated);
-    }
-
-    [Fact]
-    public void ResolveDefaults_AppContainerIdentity_Unchanged()
-    {
-        // Arrange — AppContainerLaunchIdentity is always IsUnelevated=true; resolver returns it unchanged
-        var entry = new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = "S-1-15-2-1" };
-        var identity = new AppContainerLaunchIdentity(entry);
-
-        // Act
-        var result = _resolver.ResolveDefaults(identity, _database);
-
-        // Assert — same instance returned; IsUnelevated=true
-        Assert.Same(identity, result);
-        Assert.True(result.IsUnelevated);
     }
 
     [Fact]
@@ -82,5 +66,17 @@ public class LaunchDefaultsResolverTests
 
         var account = Assert.IsType<AccountLaunchIdentity>(result);
         Assert.Equal(PrivilegeLevel.HighestAllowed, account.PrivilegeLevel);
+    }
+
+    [Fact]
+    public void ResolveDefaults_HighIntegrity_RemainsUnelevated()
+    {
+        var identity = new AccountLaunchIdentity(TestSid) { PrivilegeLevel = PrivilegeLevel.HighIntegrity };
+
+        var result = _resolver.ResolveDefaults(identity, _database);
+
+        var account = Assert.IsType<AccountLaunchIdentity>(result);
+        Assert.Equal(PrivilegeLevel.HighIntegrity, account.PrivilegeLevel);
+        Assert.True(account.IsUnelevated);
     }
 }

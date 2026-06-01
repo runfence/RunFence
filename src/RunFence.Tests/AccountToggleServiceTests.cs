@@ -19,7 +19,9 @@ public class AccountToggleServiceTests
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<ILicenseService> _licenseService = new();
     private readonly Mock<IAccountFirewallToggle> _firewallToggle = new();
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantSyncService> _grantSyncService = new();
+    private readonly Mock<IGrantMutatorService> _grantMutatorService = new();
+    private readonly Mock<ITraverseService> _traverseService = new();
     private readonly AppDatabase _database = new();
 
     private AccountToggleService CreateService()
@@ -37,7 +39,9 @@ public class AccountToggleServiceTests
             _licenseService.Object,
             _firewallToggle.Object,
             new LambdaSessionProvider(() => session),
-            _pathGrantService.Object);
+            _grantSyncService.Object,
+            _grantMutatorService.Object,
+            _traverseService.Object);
     }
 
     // ── SetLogonBlocked ──────────────────────────────────────────────────────
@@ -56,7 +60,7 @@ public class AccountToggleServiceTests
 
         // Assert
         Assert.True(result.Success);
-        _pathGrantService.Verify(g => g.UpdateFromPath(scriptPath, Sid), Times.Once);
+        _grantSyncService.Verify(g => g.UpdateFromPath(scriptPath, Sid), Times.Once);
     }
 
     [Fact]
@@ -93,8 +97,8 @@ public class AccountToggleServiceTests
 
         // Assert
         Assert.True(result.Success);
-        _pathGrantService.Verify(g => g.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
-        _pathGrantService.Verify(g => g.UntrackGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        _grantSyncService.Verify(g => g.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
+        _grantMutatorService.Verify(g => g.UntrackGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
     }
 
     [Fact]
@@ -110,7 +114,7 @@ public class AccountToggleServiceTests
 
         // Assert: tracking is removed without touching NTFS (ACEs already removed by restriction service)
         Assert.True(result.Success);
-        _pathGrantService.Verify(g => g.UntrackGrant(Sid, scriptPath, false), Times.Once);
+        _grantMutatorService.Verify(g => g.UntrackGrant(Sid, scriptPath, false), Times.Once);
     }
 
     [Fact]
@@ -127,9 +131,9 @@ public class AccountToggleServiceTests
         CreateService().SetLogonBlocked(Sid, Username, blocked: false);
 
         // Assert: traverse entry for scriptsDir is untracked (ACEs already reverted)
-        _pathGrantService.Verify(g => g.UntrackTraverse(Sid, scriptsDir), Times.Once);
+        _traverseService.Verify(g => g.UntrackTraverse(Sid, scriptsDir), Times.Once);
         // Assert: orphaned ancestor traverse entries are also cleaned up
-        _pathGrantService.Verify(g => g.CleanupOrphanedTraverse(Sid, scriptsDir), Times.Once);
+        _traverseService.Verify(g => g.CleanupOrphanedTraverse(Sid, scriptsDir), Times.Once);
     }
 
     [Fact]
@@ -144,8 +148,8 @@ public class AccountToggleServiceTests
 
         // Assert
         Assert.True(result.Success);
-        _pathGrantService.Verify(g => g.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
-        _pathGrantService.Verify(g => g.UntrackGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+        _grantSyncService.Verify(g => g.UpdateFromPath(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
+        _grantMutatorService.Verify(g => g.UntrackGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
     }
 
     [Fact]
@@ -187,7 +191,9 @@ public class AccountToggleServiceTests
             _licenseService.Object,
             _firewallToggle.Object,
             new LambdaSessionProvider(() => session),
-            _pathGrantService.Object);
+            _grantSyncService.Object,
+            _grantMutatorService.Object,
+            _traverseService.Object);
 
         // Act
         service.SetLogonBlocked(Sid, Username, blocked: true);
@@ -241,7 +247,7 @@ public class AccountToggleServiceTests
 
         CreateService().RestoreLogonState(Sid, Username, groupPolicyBlocked: true, hiddenBlocked: false);
 
-        _pathGrantService.Verify(g => g.UpdateFromPath(scriptPath, Sid), Times.Once);
+        _grantSyncService.Verify(g => g.UpdateFromPath(scriptPath, Sid), Times.Once);
         _accountRestriction.Verify(r => r.RestoreAccountHiddenState(Username, false), Times.Once);
         Assert.Contains(_database.GetAccount(Sid)!.Grants, g => g.IsTraverseOnly &&
             string.Equals(Path.GetFullPath(g.Path), Path.GetFullPath(scriptsDir), StringComparison.OrdinalIgnoreCase));
@@ -257,9 +263,9 @@ public class AccountToggleServiceTests
 
         CreateService().RestoreLogonState(Sid, Username, groupPolicyBlocked: false, hiddenBlocked: false);
 
-        _pathGrantService.Verify(g => g.UntrackGrant(Sid, scriptPath, false), Times.Once);
-        _pathGrantService.Verify(g => g.UntrackTraverse(Sid, scriptsDir), Times.Once);
-        _pathGrantService.Verify(g => g.CleanupOrphanedTraverse(Sid, scriptsDir), Times.Once);
+        _grantMutatorService.Verify(g => g.UntrackGrant(Sid, scriptPath, false), Times.Once);
+        _traverseService.Verify(g => g.UntrackTraverse(Sid, scriptsDir), Times.Once);
+        _traverseService.Verify(g => g.CleanupOrphanedTraverse(Sid, scriptsDir), Times.Once);
         _accountRestriction.Verify(r => r.RestoreAccountHiddenState(Username, false), Times.Once);
     }
 
@@ -272,7 +278,7 @@ public class AccountToggleServiceTests
         _accountRestriction.Setup(r => r.SetLoginBlockedBySid(Sid, Username, true))
             .Returns(new SetLoginBlockedResult(scriptPath, null));
         _groupPolicyScriptHelper.Setup(g => g.IsLoginBlocked(Sid)).Returns(false);
-        _pathGrantService.Setup(g => g.UpdateFromPath(scriptPath, Sid))
+        _grantSyncService.Setup(g => g.UpdateFromPath(scriptPath, Sid))
             .Throws(new InvalidOperationException("db failed"));
         _groupPolicyScriptHelper.Setup(g => g.SetLoginBlocked(Sid, false))
             .Returns(new SetLoginBlockedResult(scriptPath, null));
@@ -303,12 +309,12 @@ public class AccountToggleServiceTests
             new InvalidOperationException("traverse save failed"));
         _accountRestriction.Setup(r => r.SetLoginBlockedBySid(Sid, Username, false))
             .Returns(new SetLoginBlockedResult(scriptPath, null));
-        _pathGrantService.Setup(g => g.UntrackGrant(Sid, scriptPath, false))
+        _grantMutatorService.Setup(g => g.UntrackGrant(Sid, scriptPath, false))
             .Returns(new GrantApplyResult(
                 DatabaseModified: true,
                 DurableSaveCompleted: false,
                 Warnings: [grantWarning]));
-        _pathGrantService.Setup(g => g.UntrackTraverse(Sid, scriptsDir))
+        _traverseService.Setup(g => g.UntrackTraverse(Sid, scriptsDir))
             .Returns(new GrantApplyResult(
                 DatabaseModified: true,
                 DurableSaveCompleted: false,

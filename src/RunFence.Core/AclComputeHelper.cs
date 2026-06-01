@@ -169,4 +169,17 @@ public static class AclComputeHelper
 
         return excludedSids.Contains(sid.Value);
     }
+
+    public static IReadOnlyList<string> ExcludeAdministratorsGroup(IReadOnlyList<string> groupSids)
+    {
+        if (!groupSids.Any(static groupSid =>
+                string.Equals(groupSid, AdministratorsSid.Value, StringComparison.OrdinalIgnoreCase)))
+        {
+            return groupSids;
+        }
+
+        return groupSids
+            .Where(groupSid => !string.Equals(groupSid, AdministratorsSid.Value, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+    }
 }

@@ -16,11 +16,11 @@ namespace RunFence.Apps;
 public class AppHandlerRegistrationService(
     ILoggingService log,
     ILicenseService licenseService,
-    RegistryKey? hklmOverride = null,
+    IRegistryKey? hklmOverride = null,
     string? launcherPathOverride = null)
     : IAppHandlerRegistrationService
 {
-    private readonly RegistryKey _hklm = hklmOverride ?? Registry.LocalMachine;
+    private readonly IRegistryKey _hklm = hklmOverride ?? new WindowsRegistryKey(Registry.LocalMachine);
 
     /// <summary>
     /// Characters allowed in association keys (alphanumeric, dot, dash, plus).

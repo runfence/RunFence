@@ -1,11 +1,10 @@
 using System.Security;
-using RunFence.Launching.Windows;
-
 namespace RunFence.Launching.Resolution;
 
 public sealed class WindowsAppsAliasPathResolver(
     IExecutableFileSystem fileSystem,
-    IProfilePathReader profilePathReader)
+    IProfilePathReader profilePathReader,
+    IAppExecLinkReader appExecLinkReader)
     : IWindowsAppsAliasPathResolver
 {
     public string? TryResolveForUserSid(string nameOrPath, string targetUserSid)
@@ -40,33 +39,7 @@ public sealed class WindowsAppsAliasPathResolver(
             return false;
         }
 
-        using var handle = LaunchingNative.CreateFile(
-            path,
-            0,
-            LaunchingNative.FileShareRead | LaunchingNative.FileShareWrite,
-            IntPtr.Zero,
-            LaunchingNative.OpenExisting,
-            LaunchingNative.FileFlagOpenReparsePoint | LaunchingNative.FileFlagBackupSemantics,
-            IntPtr.Zero);
-
-        if (handle.IsInvalid)
-            return false;
-
-        var buffer = new byte[LaunchingNative.MaximumReparseDataBufferSize];
-        if (!LaunchingNative.DeviceIoControl(
-                handle,
-                LaunchingNative.FsctlGetReparsePoint,
-                IntPtr.Zero,
-                0,
-                buffer,
-                (uint)buffer.Length,
-                out _,
-                IntPtr.Zero))
-        {
-            return false;
-        }
-
-        return BitConverter.ToUInt32(buffer, 0) == LaunchingNative.IoReparseTagAppExecLink;
+        return appExecLinkReader.IsAppExecLink(path);
     }
 
     private string? TryResolveAliasPath(string windowsAppsExe)

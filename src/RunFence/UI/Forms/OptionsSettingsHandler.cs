@@ -6,9 +6,9 @@ namespace RunFence.UI.Forms;
 
 /// <summary>
 /// Handles saving settings and caller configuration from <see cref="OptionsPanel"/>.
-/// Holds the save infrastructure deps so OptionsPanel does not need IConfigRepository directly.
+/// Holds the save infrastructure deps so OptionsPanel does not need main-config persistence directly.
 /// </summary>
-public class OptionsSettingsHandler(IConfigRepository configRepository, ISessionProvider sessionProvider)
+public class OptionsSettingsHandler(IMainConfigPersistence mainConfigPersistence, ISessionProvider sessionProvider)
 {
     private Timer? _saveDebounceTimer;
 
@@ -34,7 +34,7 @@ public class OptionsSettingsHandler(IConfigRepository configRepository, ISession
     private void Save()
     {
         var session = sessionProvider.GetSession();
-        configRepository.SaveConfig(
+        mainConfigPersistence.SaveConfig(
             session.Database,
             session.PinDerivedKey,
             session.CredentialStore.ArgonSalt);

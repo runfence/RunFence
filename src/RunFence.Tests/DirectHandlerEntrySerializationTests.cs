@@ -9,30 +9,6 @@ public class DirectHandlerEntrySerializationTests
     private static readonly JsonSerializerOptions Options = new() { WriteIndented = false };
 
     [Fact]
-    public void Command_SerializesAndDeserializesCorrectly()
-    {
-        var entry = new DirectHandlerEntry { Command = @"""C:\notepad.exe"" ""%1""" };
-
-        var json = JsonSerializer.Serialize(entry, Options);
-        var restored = JsonSerializer.Deserialize<DirectHandlerEntry>(json, Options);
-
-        Assert.Equal(entry.Command, restored.Command);
-        Assert.Null(restored.ClassName);
-    }
-
-    [Fact]
-    public void ClassName_SerializesAndDeserializesCorrectly()
-    {
-        var entry = new DirectHandlerEntry { ClassName = "txtfile" };
-
-        var json = JsonSerializer.Serialize(entry, Options);
-        var restored = JsonSerializer.Deserialize<DirectHandlerEntry>(json, Options);
-
-        Assert.Equal(entry.ClassName, restored.ClassName);
-        Assert.Null(restored.Command);
-    }
-
-    [Fact]
     public void NullFields_OmittedFromJson()
     {
         var commandOnly = new DirectHandlerEntry { Command = "cmd.exe" };

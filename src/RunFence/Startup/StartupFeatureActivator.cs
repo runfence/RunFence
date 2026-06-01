@@ -7,6 +7,7 @@ using RunFence.Persistence;
 using RunFence.Startup.UI;
 using RunFence.UI.Forms;
 using RunFence.Wizard.UI;
+#pragma warning disable CS0162 // Unreachable code detected
 
 namespace RunFence.Startup;
 

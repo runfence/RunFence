@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+
 // ReSharper disable InconsistentNaming
 
 namespace PrefTrans.Native;
@@ -70,17 +72,17 @@ public static class Constants
     // SHChangeNotify for file association changes
     public const uint SHCNE_ASSOCCHANGED = 0x08000000;
 
-    public static readonly HashSet<string> BlockedEnvVars = new(StringComparer.OrdinalIgnoreCase)
+    public static readonly FrozenSet<string> BlockedEnvVars = new[]
     {
         "TEMP", "TMP", "APPDATA", "LOCALAPPDATA",
         "HOMEDRIVE", "HOMEPATH", "HOMESHARE",
         "OneDrive", "OneDriveConsumer", "OneDriveCommercial",
         "PATH", "PATHEXT",
-    };
+    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 
-    public static readonly List<string> BlockedEnvVarsParts = ["AUTH", "KEY", "PASS", "USERNAME"];
+    public static readonly IReadOnlyList<string> BlockedEnvVarsParts = ["AUTH", "KEY", "PASS", "USERNAME"];
 
-    public static readonly string[] TrackedFileExtensions =
+    public static readonly IReadOnlyList<string> TrackedFileExtensions =
     [
         ".pdf", ".htm", ".html", ".ini", ".txt", ".url", ".cfg", ".log", ".md", ".torrent",
         ".mp3", ".mp4", ".mov", ".avi", ".wmv", ".wav",

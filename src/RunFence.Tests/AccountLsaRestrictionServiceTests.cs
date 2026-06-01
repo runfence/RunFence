@@ -1,6 +1,7 @@
 using System.Security.Principal;
 using Moq;
 using RunFence.Account;
+using RunFence.Acl;
 using RunFence.Core;
 using Xunit;
 
@@ -18,8 +19,20 @@ public class AccountLsaRestrictionServiceTests : IDisposable
     {
         _tempDir = new TempDirectory("RunFence_LsaTest");
         var lsa = CreateLsaMockWithNoRights();
+        var programDataKnownPathResolver = new Mock<IProgramDataKnownPathResolver>();
+        programDataKnownPathResolver.Setup(resolver => resolver.GetDirectoryPath(ProgramDataPolicies.Scripts))
+            .Returns(Path.Combine(_tempDir.Path, ProgramDataPolicies.Scripts.RelativePath));
         _loginService = new AccountLoginRestrictionService(
-            new GroupPolicyScriptHelper(new LogonScriptIniManager(), _log.Object, systemDir: _tempDir.Path),
+            new GroupPolicyScriptHelper(
+                new LogonScriptIniManager(),
+                new LogonScriptStateRollbackStore(),
+                _log.Object,
+                Mock.Of<IProgramDataDirectoryProvisioningService>(),
+                Mock.Of<IProgramDataManagedObjectRepairService>(),
+                Mock.Of<IProgramDataPathPolicyService>(),
+                Mock.Of<IProgramDataObjectProvisioner>(),
+                programDataKnownPathResolver.Object,
+                systemDir: _tempDir.Path),
             _log.Object, _accountValidation.Object);
         _lsaService = new AccountLsaRestrictionService(_log.Object, _accountValidation.Object, lsa.Object);
     }

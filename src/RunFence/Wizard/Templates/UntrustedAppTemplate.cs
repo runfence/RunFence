@@ -1,9 +1,7 @@
 using RunFence.Account.UI;
-using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
 using RunFence.Launch.Container;
-using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -33,9 +31,7 @@ internal class UntrustedAppTemplate(
     IWizardSessionSaver sessionSaver,
     SessionContext session,
     WizardLicenseChecker licenseChecker,
-    IShortcutDiscoveryService discoveryService,
-    IShortcutIconHelper iconHelper,
-    IExecutablePathResolver executablePathResolver)
+    StandardAppWizardStepBuilder stepBuilder)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -43,7 +39,7 @@ internal class UntrustedAppTemplate(
     public string DisplayName => "Untrusted App";
     public string Description => "Run an untrusted or risky app in a sandboxed account or AppContainer";
     public string IconEmoji => "\U0001F512"; // 🔒
-    public Action<IWin32Window>? PostWizardAction => null;
+    public Func<IWin32Window, Task>? PostWizardAction => null;
 
     public void Cleanup()
     {
@@ -70,11 +66,11 @@ internal class UntrustedAppTemplate(
             isContainer
                 ? [
                     new ContainerCapabilitiesStep(caps => _data.ContainerCapabilities = caps),
-                    new AppPathStep((path, name) =>
+                    stepBuilder.CreateAppPathStep((path, name) =>
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
-                    }, discoveryService, iconHelper, executablePathResolver, appPathDesc,
+                    }, appPathDesc,
                         initialPath: _data.AppPath,
                         initialName: _data.AppName)
                 ]
@@ -90,11 +86,11 @@ internal class UntrustedAppTemplate(
                         defaultInternet: _data.AllowInternet,
                         defaultLan: _data.AllowLan,
                         defaultLocalhost: _data.AllowLocalhost),
-                    new AppPathStep((path, name) =>
+                    stepBuilder.CreateAppPathStep((path, name) =>
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
-                    }, discoveryService, iconHelper, executablePathResolver, appPathDesc,
+                    }, appPathDesc,
                         initialPath: _data.AppPath,
                         initialName: _data.AppName)
                 ]);
@@ -113,11 +109,11 @@ internal class UntrustedAppTemplate(
                 defaultInternet: _data.AllowInternet,
                 defaultLan: _data.AllowLan,
                 defaultLocalhost: _data.AllowLocalhost),
-            new AppPathStep((path, name) =>
+            stepBuilder.CreateAppPathStep((path, name) =>
             {
                 _data.AppPath = path;
                 _data.AppName = name;
-            }, discoveryService, iconHelper, executablePathResolver, appPathDesc,
+            }, appPathDesc,
                 initialPath: _data.AppPath,
                 initialName: _data.AppName)
         ];

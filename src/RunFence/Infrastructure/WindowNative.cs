@@ -121,6 +121,8 @@ public static class WindowNative
     public static extern bool UnhookWinEvent(IntPtr hWinEventHook);
 
     public const uint EventSystemForeground = 0x0003u;
+    public const uint EventSystemMoveSizeStart = 0x000Au;
+    public const uint EventSystemMoveSizeEnd = 0x000Bu;
     public const uint WinEventOutOfContext = 0x0000u;
     public const uint WinEventSkipOwnProcess = 0x0002u;
 
@@ -154,6 +156,12 @@ public static class WindowNative
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
 
     [DllImport("user32.dll")]
     public static extern bool GetCursorPos(out POINT lpPoint);
@@ -202,6 +210,8 @@ public static class WindowNative
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
 
+    public const uint GA_ROOT = 2;
+    public const uint GW_HWNDPREV = 3;
     public const int SW_RESTORE = 9;
 
     // ── User32 (keyboard input simulation) ───────────────────────────────────

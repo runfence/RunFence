@@ -11,7 +11,7 @@ namespace RunFence.Persistence.UI;
 /// loading with encryption/mismatch-key handling, enforcement application,
 /// handler registration sync, post-commit warning reporting, and unload with revert.
 /// Extracted from <see cref="ConfigManagementOrchestrator"/> together with
-/// <see cref="IAppConfigService"/> and <see cref="ILoadedAppsCleanup"/> to reduce
+/// focused AppConfig services and <see cref="ILoadedAppsCleanup"/> to reduce
 /// <see cref="ConfigManagementOrchestrator"/>'s dependency count.
 /// </summary>
 public class ConfigLoadUnloadService(
@@ -22,9 +22,10 @@ public class ConfigLoadUnloadService(
     ILoadedGoodBackupStore loadedGoodBackupStore,
     ILoadedAppsCleanup enforcementHandler,
     ConfigMismatchKeyResolver mismatchKeyResolver,
-    HandlerSyncHelper handlerSyncHelper,
+    IHandlerSyncService handlerSyncHelper,
     IHandlerMappingService handlerMappingService,
-    IDatabaseService databaseService)
+    IConfigSaltReader configSaltReader,
+    IAppConfigPersistence appConfigPersistence)
 {
     /// <summary>
     /// Raised when one or more loaded apps had <c>ManageShortcuts</c> disabled due to ExePath
@@ -51,7 +52,7 @@ public class ConfigLoadUnloadService(
     public LoadAppsResult LoadApps(string configPath)
     {
         var session = sessionProvider.GetSession();
-        var normalizedPath = Path.GetFullPath(configPath);
+        var normalizedPath = AppConfigPathHelper.NormalizePath(configPath);
         SecureSecret? mismatchKey = null;
         try
         {
@@ -95,12 +96,12 @@ public class ConfigLoadUnloadService(
     public LoadAppsResult LoadAppConfigBackup(string configPath)
     {
         var session = sessionProvider.GetSession();
-        var normalizedPath = Path.GetFullPath(configPath);
+        var normalizedPath = AppConfigPathHelper.NormalizePath(configPath);
         var backupPath = loadedGoodBackupStore.GetBackupPath(normalizedPath);
         try
         {
             AppConfigMismatchLoadResult loadedBackup;
-            var backupSalt = databaseService.TryGetAppConfigSaltFromPath(backupPath);
+            var backupSalt = configSaltReader.TryGetAppConfigSaltFromPath(backupPath);
             if (backupSalt != null && !backupSalt.SequenceEqual(session.CredentialStore.ArgonSalt))
             {
                 loadedBackup = mismatchKeyResolver.TryLoadAppConfigWithMismatchKey(backupPath)
@@ -111,7 +112,7 @@ public class ConfigLoadUnloadService(
             {
                 try
                 {
-                    var config = databaseService.LoadAppConfigFromPath(
+                    var config = appConfigPersistence.LoadAppConfigFromPath(
                         backupPath,
                         session.PinDerivedKey);
                     loadedBackup = new AppConfigMismatchLoadResult(config, UsedMismatchKey: false);

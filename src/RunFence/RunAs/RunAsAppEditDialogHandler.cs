@@ -63,13 +63,19 @@ public class RunAsAppEditDialogHandler(
 
             var dlg = dialogFactory();
             var commandContext = new AppEditDialogCommandContext(
-                ApplyAsync: () =>
+                ApplyAsync: applyContext =>
                 {
-                    var permissionDecision = permissionPrompter.PromptForGrant(dlg, dlg.Result);
+                    var result = applyContext.Result;
+                    var permissionDecision = permissionPrompter.PromptForGrant(dlg, result);
                     if (permissionDecision.Result == AppEntryPermissionPromptResult.Canceled)
                         throw new OperationCanceledException();
 
-                    var commitResult = commitService.Commit(dlg.Result, existing, dlg.SelectedConfigPath);
+                    var commitResult = commitService.Commit(new RunAsAppEditCommitRequest(
+                        result,
+                        applyContext.PreviousApp,
+                        applyContext.PreviousConfigPath,
+                        applyContext.SelectedConfigPath,
+                        applyContext.ChangeSet));
                     if (commitResult.Status == RunAsAppEntryPersistenceStatus.Canceled)
                         throw new OperationCanceledException(commitResult.ErrorMessage);
 
@@ -94,7 +100,7 @@ public class RunAsAppEditDialogHandler(
                     }
 
                     if (updateOriginalShortcut && originalLnkPath != null)
-                        shortcutCreator.TryUpdateOriginalShortcut(originalLnkPath, dlg.Result.Id);
+                        shortcutCreator.TryUpdateOriginalShortcut(originalLnkPath, result.Id);
 
                     if (permissionDecision.GrantRequest != null)
                     {
@@ -110,7 +116,7 @@ public class RunAsAppEditDialogHandler(
                     }
 
                     if (dlg.LaunchNow && commitResult.Status != RunAsAppEntryPersistenceStatus.RequiredEnforcementFailed)
-                        launchErrorHandler.RunWithErrorHandling(() => entryLauncher.Launch(dlg.Result, null), dlg.Result.ExePath);
+                        launchErrorHandler.RunWithErrorHandling(() => entryLauncher.Launch(result, null), result.ExePath);
                     return Task.CompletedTask;
                 });
             dlg.Initialize(

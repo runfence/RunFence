@@ -2,64 +2,27 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using RunFence.Infrastructure;
+using Microsoft.Win32.SafeHandles;
+
+using System.ComponentModel;
 
 namespace RunFence.Acl;
-
-public interface IAclAccessor
-{
-    FileSystemSecurity GetSecurity(string path);
-    void ApplyExplicitAce(string path, string sid, AccessControlType type, FileSystemRights rights,
-        Func<FileSystemAccessRule, bool>? shouldSkip = null);
-    void RemoveExplicitAces(string path, string sid, AccessControlType type,
-        Func<FileSystemAccessRule, bool>? shouldSkip = null);
-
-    /// <summary>
-    /// Returns true if the path exists. When <see cref="GetFileAttributes"/> fails with an
-    /// access-denied error, falls back to <c>CreateFile</c> with
-    /// <c>FILE_FLAG_BACKUP_SEMANTICS</c> so that paths inaccessible to normal callers but
-    /// reachable via the process's backup/restore privilege are correctly detected.
-    /// Sets <paramref name="isFolder"/> when the path is a directory.
-    /// </summary>
-    bool PathExists(string path, out bool isFolder);
-
-    /// <summary>
-    /// Reads, modifies, and writes the DACL for <paramref name="path"/>.
-    /// Tries the standard <c>GetAccessControl</c>/<c>SetAccessControl</c> path first;
-    /// on <see cref="UnauthorizedAccessException"/>, falls back to
-    /// <c>FILE_FLAG_BACKUP_SEMANTICS</c> via backup/restore privilege.
-    /// Returns true when <paramref name="modify"/> returns true (changes were made).
-    /// </summary>
-    bool ModifyAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify);
-
-    /// <summary>
-    /// Reads, modifies, and writes the owner and DACL for <paramref name="path"/>.
-    /// Tries the standard <c>GetAccessControl</c>/<c>SetAccessControl</c> path first;
-    /// on <see cref="UnauthorizedAccessException"/>, falls back to
-    /// <c>FILE_FLAG_BACKUP_SEMANTICS</c> via backup/restore privilege.
-    /// Returns true when <paramref name="modify"/> returns true (changes were made).
-    /// </summary>
-    bool ModifyOwnerAndAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify);
-
-    /// <summary>
-    /// Replaces the owner and DACL on <paramref name="path"/> with the supplied
-    /// <paramref name="security"/> descriptor.
-    /// Tries the standard <c>SetAccessControl</c> path first; on
-    /// <see cref="UnauthorizedAccessException"/>, falls back to
-    /// <c>FILE_FLAG_BACKUP_SEMANTICS</c> via backup/restore privilege.
-    /// </summary>
-    void SetOwnerAndAclWithFallback(string path, bool isFolder, FileSystemSecurity security);
-}
 
 /// <summary>
 /// Low-level ACL access for NTFS paths. Backup-privilege descriptor I/O is delegated to
 /// <see cref="BackupPrivilegeSecurityDescriptorAccessor"/>.
 /// </summary>
-public class AclAccessor : IAclAccessor
+public class AclAccessor : IPathSecurityDescriptorAccessor, IExplicitAceAccessor
 {
+    private const uint DaclSecurityInformation = 0x00000004;
+    private readonly IAclAccessorNative native;
     private readonly BackupPrivilegeSecurityDescriptorAccessor backupPrivilegeSecurityDescriptorAccessor;
 
-    public AclAccessor(BackupPrivilegeSecurityDescriptorAccessor backupPrivilegeSecurityDescriptorAccessor)
+    public AclAccessor(
+        IAclAccessorNative native,
+        BackupPrivilegeSecurityDescriptorAccessor backupPrivilegeSecurityDescriptorAccessor)
     {
+        this.native = native;
         this.backupPrivilegeSecurityDescriptorAccessor = backupPrivilegeSecurityDescriptorAccessor;
     }
 
@@ -87,6 +50,9 @@ public class AclAccessor : IAclAccessor
             return backupPrivilegeSecurityDescriptorAccessor.ReadOwnerAndDacl(path, isDirectory: false);
         }
     }
+
+    public string? GetOwnerSid(string path)
+        => (GetSecurity(path).GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier)?.Value;
 
     /// <summary>
     /// Removes the existing explicit ACE for this SID+type (passing <paramref name="shouldSkip"/>
@@ -185,8 +151,9 @@ public class AclAccessor : IAclAccessor
         }
     }
 
-    public bool ModifyAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify)
+    public bool ModifyAclWithFallback(string path, Func<FileSystemSecurity, bool> modify)
     {
+        bool isFolder = ResolvePathIsDirectory(path);
         try
         {
             if (isFolder)
@@ -216,14 +183,13 @@ public class AclAccessor : IAclAccessor
         }
         catch (UnauthorizedAccessException)
         {
-            bool changed = false;
-            backupPrivilegeSecurityDescriptorAccessor.ModifyDacl(path, isFolder, security => changed = modify(security));
-            return changed;
+            return backupPrivilegeSecurityDescriptorAccessor.ModifyDacl(path, isFolder, modify);
         }
     }
 
-    public bool ModifyOwnerAndAclWithFallback(string path, bool isFolder, Func<FileSystemSecurity, bool> modify)
+    public bool ModifyOwnerAndAclWithFallback(string path, Func<FileSystemSecurity, bool> modify)
     {
+        bool isFolder = ResolvePathIsDirectory(path);
         try
         {
             if (isFolder)
@@ -262,24 +228,70 @@ public class AclAccessor : IAclAccessor
         }
     }
 
-    public void SetOwnerAndAclWithFallback(string path, bool isFolder, FileSystemSecurity security)
+    public void SetOwnerAndAclWithFallback(string path, FileSystemSecurity security)
     {
+        bool isFolder = security switch
+        {
+            DirectorySecurity => true,
+            FileSecurity => false,
+            _ => throw new InvalidOperationException(
+                $"Unsupported filesystem security type '{security.GetType().FullName}'.")
+        };
         try
         {
-            if (isFolder)
+            if (security is DirectorySecurity directorySecurity)
             {
                 var dirInfo = new DirectoryInfo(path);
-                dirInfo.SetAccessControl((DirectorySecurity)security);
+                dirInfo.SetAccessControl(directorySecurity);
+            }
+            else if (security is FileSecurity fileSecurity)
+            {
+                var fileInfo = new FileInfo(path);
+                fileInfo.SetAccessControl(fileSecurity);
             }
             else
             {
-                var fileInfo = new FileInfo(path);
-                fileInfo.SetAccessControl((FileSecurity)security);
+                throw new InvalidOperationException(
+                    $"Unsupported filesystem security type '{security.GetType().FullName}'.");
             }
         }
         catch (UnauthorizedAccessException)
         {
             backupPrivilegeSecurityDescriptorAccessor.WriteOwnerAndDacl(path, isFolder, security);
+        }
+    }
+
+    public void SetOwnerWithFallback(string path, SecurityIdentifier ownerSid)
+    {
+        _ = PathExists(path, out bool isDirectory);
+        backupPrivilegeSecurityDescriptorAccessor.SetOwner(path, isDirectory, ownerSid);
+    }
+
+    public void ApplyNonPropagatingAcl(string path, FileSystemSecurity security)
+    {
+        var sdBytes = security.GetSecurityDescriptorBinaryForm();
+        var sdHandle = GCHandle.Alloc(sdBytes, GCHandleType.Pinned);
+        try
+        {
+            if (native.SetFileSecurity(path, DaclSecurityInformation, sdHandle.AddrOfPinnedObject()))
+            {
+                return;
+            }
+
+            int error = Marshal.GetLastWin32Error();
+            if (error == 5)
+            {
+                backupPrivilegeSecurityDescriptorAccessor.WriteDaclNonPropagating(path, security);
+                return;
+            }
+
+            throw new Win32Exception(
+                error,
+                $"SetFileSecurity failed on '{path}'");
+        }
+        finally
+        {
+            sdHandle.Free();
         }
     }
 

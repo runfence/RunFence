@@ -37,6 +37,32 @@ public class StaTestHelperTests
     }
 
     [Fact]
+    public void RunOnSta_WhenVisibleFormCleanupThrows_StillFailsForVisibleForm()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StaTestHelper.RunOnSta(() =>
+            {
+                var form = new ThrowingDisposeForm { Text = "Visible cleanup failure form" };
+                form.Show();
+                StaTestHelper.PumpUntil(() => form.Visible);
+            }));
+
+        Assert.Contains("Unexpected visible WinForms window in test", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Cleanup of the visible form also failed", ex.Message, StringComparison.Ordinal);
+        Assert.IsType<AggregateException>(ex.InnerException);
+    }
+
+    private sealed class ThrowingDisposeForm : Form
+    {
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+                throw new InvalidOperationException("Dispose failed");
+        }
+    }
+
+    [Fact]
     public void RunOnSta_WhenNativeDialogIsDetected_FailsCurrentTest()
     {
         var ex = Assert.Throws<InvalidOperationException>(() =>

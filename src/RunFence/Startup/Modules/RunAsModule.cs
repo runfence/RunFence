@@ -59,10 +59,6 @@ public class RunAsModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<RunFenceLauncherPathProvider>()
-            .As<IRunFenceLauncherPathProvider>()
-            .SingleInstance();
-
         builder.RegisterType<AppEntryPersistenceOrchestrator>()
             .AsSelf()
             .SingleInstance();
@@ -126,6 +122,26 @@ public class RunAsModule : Module
 
         builder.RegisterType<RunAsCredentialListRenderer>()
             .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<RunAsAccountOptionCatalog>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<RunAsSelectionPolicy>()
+            .AsSelf()
+            .InstancePerDependency();
+
+        builder.RegisterType<RunAsPasswordDialogAdapterFactory>()
+            .As<IRunAsPasswordDialogAdapterFactory>()
+            .InstancePerDependency();
+
+        builder.RegisterType<RunAsAdHocPasswordPromptService>()
+            .As<IRunAsAdHocPasswordPromptService>()
+            .InstancePerDependency();
+
+        builder.RegisterType<RunAsAncestorPermissionPrompter>()
+            .As<IRunAsAncestorPermissionPrompter>()
             .InstancePerDependency();
 
         builder.RegisterType<RunAsDialog>()

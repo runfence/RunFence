@@ -49,7 +49,7 @@ public class RunAsDosProtectionTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
 
         var appState = new Mock<IAppStateProvider>();
@@ -62,6 +62,7 @@ public class RunAsDosProtectionTests : IDisposable
                 appState.Object,
                 session,
                 new ByteArrayCredentialEncryptionSpanAdapter(new Mock<IByteArrayCredentialEncryptionService>().Object),
+                new Mock<IDatabaseService>().Object,
                 new Mock<IDatabaseService>().Object,
                 new Mock<ILoggingService>().Object),
             appState.Object,

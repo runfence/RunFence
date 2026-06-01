@@ -64,8 +64,9 @@ partial class AclManagerDialog
         {
             components?.Dispose();
             _traverseHelper?.DisposeBoldFont();
+            _sectionHeaderFactory?.Dispose();
             _formIcon?.Dispose();
-            _modificationHandler?.CancelScanCts?.Dispose();
+            _scanCancellation?.CompleteScan();
             _grantsDropInterceptor?.Dispose();
             _traverseDropInterceptor?.Dispose();
         }

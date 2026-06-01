@@ -37,7 +37,7 @@ public class RunAsResultProcessorTests : IDisposable
     private readonly Mock<IShortcutService> _shortcutService = new();
     private readonly Mock<IIconService> _iconService = new();
     private readonly Mock<IAppEntryLauncher> _launchOrchestrator = new();
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantMutatorService> _grantMutatorService = new();
 
     private readonly Mock<IByteArrayCredentialEncryptionService> _encryptionService = new();
     private readonly Mock<ISidResolver> _sidResolver = new();
@@ -76,7 +76,7 @@ public class RunAsResultProcessorTests : IDisposable
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }
@@ -102,6 +102,7 @@ public class RunAsResultProcessorTests : IDisposable
             CreateSession(),
             new ByteArrayCredentialEncryptionSpanAdapter(_encryptionService.Object),
             _databaseService.Object,
+            _databaseService.Object,
             _log.Object);
 
     private RunAsDosProtection CreateDosProtection()
@@ -120,7 +121,7 @@ public class RunAsResultProcessorTests : IDisposable
 
     private RunAsPermissionApplier CreatePermissionApplier()
         => new(
-            _pathGrantService.Object,
+            _grantMutatorService.Object,
             new Mock<IQuickAccessPinService>().Object);
 
     private RunAsLaunchDispatcher CreateLaunchDispatcher(RunAsDirectLauncher directLauncher)
@@ -190,7 +191,7 @@ public class RunAsResultProcessorTests : IDisposable
 
         processor.ProcessCredentialResult(result, FilePath, null, null, false, null);
 
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             p => p.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()),
             Times.Never);
@@ -203,7 +204,7 @@ public class RunAsResultProcessorTests : IDisposable
     {
         var credential = new CredentialEntry { Sid = UserSid };
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(UserSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
@@ -212,7 +213,7 @@ public class RunAsResultProcessorTests : IDisposable
 
         processor.ProcessCredentialResult(result, FilePath, null, null, false, null);
 
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             p => p.EnsureAccess(UserSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false),
             Times.Once);
     }
@@ -225,7 +226,7 @@ public class RunAsResultProcessorTests : IDisposable
         _database.Settings.LastUsedRunAsAccountSid = UserSid;
         var credential = new CredentialEntry { Sid = UserSid };
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<FileSystemRights>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
             .Returns(default(GrantApplyResult));
@@ -246,7 +247,7 @@ public class RunAsResultProcessorTests : IDisposable
         _database.Settings.LastUsedRunAsAccountSid = UserSid;
         var credential = new CredentialEntry { Sid = UserSid };
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(UserSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
             .Throws(new GrantOperationException(
                 GrantApplyFailureStep.GrantIntentSave,
@@ -270,7 +271,7 @@ public class RunAsResultProcessorTests : IDisposable
     {
         var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(ContainerSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
             .Throws(new GrantOperationException(
                 GrantApplyFailureStep.GrantAclApply,
@@ -357,7 +358,7 @@ public class RunAsResultProcessorTests : IDisposable
     {
         var container = new AppContainerEntry { Name = ContainerName, Sid = ContainerSid };
         var permissionGrant = new AncestorPermissionResult(@"C:\Data", FileSystemRights.ReadAndExecute);
-        _pathGrantService
+        _grantMutatorService
             .Setup(p => p.EnsureAccess(ContainerSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
@@ -366,7 +367,7 @@ public class RunAsResultProcessorTests : IDisposable
 
         processor.ProcessContainerResult(result, FilePath, null, null, false, null);
 
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             p => p.EnsureAccess(ContainerSid, @"C:\Data", FileSystemRights.ReadAndExecute, null, false),
             Times.Once);
     }

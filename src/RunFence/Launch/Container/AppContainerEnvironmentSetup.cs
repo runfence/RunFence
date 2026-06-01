@@ -15,14 +15,14 @@ namespace RunFence.Launch.Container;
 /// </summary>
 public class AppContainerEnvironmentSetup(
     ILoggingService log,
-    IShortcutComHelper shortcutHelper,
+    IShortcutGateway shortcutGateway,
     IAppContainerSidProvider sidProvider,
     IAppContainerPathProvider pathProvider,
     IAppContainerUserRegistryRoot userRegistryRoot)
     : IAppContainerEnvironmentSetup
 {
     private readonly IAppContainerPathProvider _pathProvider = pathProvider;
-    private readonly RegistryKey _usersRoot = userRegistryRoot.UsersRoot;
+    private readonly IRegistryKey _usersRoot = userRegistryRoot.UsersRoot;
 
     public EnvironmentBlock CreateLaunchEnvironment(
         IntPtr explorerToken,
@@ -208,12 +208,15 @@ public class AppContainerEnvironmentSetup(
                 _pathProvider.GetContainerDataPath(containerName),
                 $"{dirName} - VirtualStore.lnk");
 
-            shortcutHelper.WithShortcut(shortcutPath, lnk =>
-            {
-                lnk.TargetPath = virtualStorePath;
-                lnk.Description = $"VirtualStore folder for {dirName} (UAC write virtualization)";
-                lnk.Save();
-            });
+            shortcutGateway.Write(shortcutPath, new ShortcutData(
+                virtualStorePath,
+                null,
+                null,
+                null,
+                0,
+                $"VirtualStore folder for {dirName} (UAC write virtualization)",
+                0,
+                1));
         }
         catch (Exception ex)
         {
@@ -242,7 +245,7 @@ public class AppContainerEnvironmentSetup(
             var dataPath = _pathProvider.GetContainerDataPath(containerName);
 
             var keyPath = $@"{interactiveUserSid}\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppContainer\Storage\{sidStr}\User Shell Folders";
-            using RegistryKey key = _usersRoot.CreateSubKey(keyPath)
+            using IRegistryKey key = _usersRoot.CreateSubKey(keyPath)
                 ?? throw new InvalidOperationException($"Unable to create registry key '{keyPath}'.");
             key.SetValue("AppData", Path.Combine(dataPath, "Roaming"), RegistryValueKind.ExpandString);
             key.SetValue("Local AppData", Path.Combine(dataPath, "Local"), RegistryValueKind.ExpandString);

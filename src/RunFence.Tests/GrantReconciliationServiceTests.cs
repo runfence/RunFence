@@ -16,6 +16,8 @@ public class GrantReconciliationServiceTests
 {
     private const string UserSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
     private const string ContainerSid = "S-1-15-2-99";
+    private static readonly string AdministratorsSid =
+        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value;
 
     private static readonly List<string> DefaultGroups = ["S-1-1-0", "S-1-5-11"];
     private static readonly List<string> GroupsWithUsers = ["S-1-1-0", "S-1-5-11", "S-1-5-32-545"];
@@ -23,6 +25,8 @@ public class GrantReconciliationServiceTests
     private readonly Mock<IAclPermissionService> _aclPermission = new();
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<ISessionSaver> _sessionSaver = new();
+    private readonly Mock<IProgramDataDirectoryProvisioningService> _programDataDirectoryProvisioningService = new();
+    private readonly Mock<IProgramDataKnownPathResolver> _programDataKnownPathResolver = new();
     private readonly TestFileSystemPathInfo _pathInfo = new();
 
     public GrantReconciliationServiceTests()
@@ -36,16 +40,27 @@ public class GrantReconciliationServiceTests
                 It.IsAny<IReadOnlyList<string>>(), It.IsAny<FileSystemRights>()))
             .Returns(true);
 
+        _programDataDirectoryProvisioningService.Setup(
+            s => s.EnsureKnownDirectory(It.IsAny<ProgramDataDirectoryPolicy>()))
+            .Returns<ProgramDataDirectoryPolicy>(policy => Path.Combine(PathConstants.ProgramDataDir, policy.RelativePath));
+        _programDataKnownPathResolver
+            .Setup(resolver => resolver.GetDirectoryPath(ProgramDataPolicies.Scripts))
+            .Returns(Path.Combine(PathConstants.ProgramDataDir, ProgramDataPolicies.Scripts.RelativePath));
+        _programDataKnownPathResolver
+            .Setup(resolver => resolver.GetDirectoryPath(ProgramDataPolicies.DragBridge))
+            .Returns(Path.Combine(PathConstants.ProgramDataDir, ProgramDataPolicies.DragBridge.RelativePath));
+
         _service = BuildService(new AppDatabase());
     }
 
     private GrantReconciliationService BuildService(AppDatabase db, IInteractiveUserResolver? iuResolver = null)
-        => BuildService(db, iuResolver, null);
+        => BuildService(db, iuResolver, null, null);
 
     private GrantReconciliationService BuildService(
         AppDatabase db,
         IInteractiveUserResolver? iuResolver,
-        ITraverseAcl? traverseAcl)
+        ITraverseAcl? traverseAcl,
+        IProgramDataDirectoryProvisioningService? programDataDirectoryProvisioningService)
     {
         var sidReconciler = new SidReconciler(
             _aclPermission.Object,
@@ -53,12 +68,20 @@ public class GrantReconciliationServiceTests
                 _pathInfo),
             _log.Object,
             iuResolver ?? new Mock<IInteractiveUserResolver>().Object,
-            _pathInfo);
+            _pathInfo,
+            programDataDirectoryProvisioningService ?? _programDataDirectoryProvisioningService.Object,
+            _programDataKnownPathResolver.Object);
         return new GrantReconciliationService(
-            _aclPermission.Object, new Mock<ILocalGroupMembershipService>().Object, _log.Object, _sessionSaver.Object,
+            _aclPermission.Object, new Mock<ILocalGroupQueryService>().Object, _log.Object, _sessionSaver.Object,
             new LambdaDatabaseProvider(() => db),
             sidReconciler);
     }
+
+    private GrantReconciliationService BuildService(
+        AppDatabase db,
+        IInteractiveUserResolver? iuResolver,
+        ITraverseAcl traverseAcl)
+        => BuildService(db, iuResolver, traverseAcl, null);
 
     // _service uses an empty database; suitable for tests that don't depend on database state.
     // Stored as a readonly field so the same instance is reused throughout a single test.
@@ -528,6 +551,71 @@ public class GrantReconciliationServiceTests
     }
 
     [Fact]
+    public void ReconcileChangedSids_LogonScript_ReconcilerHardensExistingScriptsDirectoryBeforeTraverse()
+    {
+        var scriptsDir = Path.Combine(PathConstants.ProgramDataDir, ProgramDataPolicies.Scripts.RelativePath);
+        var scriptFile = Path.Combine(scriptsDir, $"{UserSid}_block_login.cmd");
+        _pathInfo.AddDirectory(scriptsDir);
+        _pathInfo.AddFile(scriptFile);
+
+        var changedSids = new List<(string Sid, List<string> NewGroups)>
+        {
+            (UserSid, DefaultGroups)
+        };
+
+        var result = _service.ReconcileChangedSids(
+            changedSids,
+            new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase));
+
+        _programDataDirectoryProvisioningService.Verify(
+            s => s.EnsureKnownDirectory(ProgramDataPolicies.Scripts),
+            Times.Once);
+
+        var sidResult = FindSidResult(result, UserSid);
+        Assert.True(sidResult.Succeeded);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_LogonScriptMissing_DoesNotCreateOrHardenScriptsDirectory()
+    {
+        var changedSids = new List<(string Sid, List<string> NewGroups)>
+        {
+            (UserSid, DefaultGroups)
+        };
+
+        var result = _service.ReconcileChangedSids(
+            changedSids,
+            new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase));
+
+        _programDataDirectoryProvisioningService.Verify(
+            s => s.EnsureKnownDirectory(It.IsAny<ProgramDataDirectoryPolicy>()),
+            Times.Never);
+
+        var sidResult = FindSidResult(result, UserSid);
+        Assert.True(sidResult.Succeeded);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_DragBridgeTempRootExists_HardensTrustedOnlyBeforeTraverse()
+    {
+        var tempRoot = Path.Combine(PathConstants.ProgramDataDir, ProgramDataPolicies.DragBridge.RelativePath);
+        _pathInfo.AddDirectory(tempRoot);
+
+        var result = _service.ReconcileChangedSids(
+            [(UserSid, GroupsWithUsers)],
+            new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase));
+
+        _programDataDirectoryProvisioningService.Verify(
+            service => service.EnsureKnownDirectory(ProgramDataPolicies.DragBridge),
+            Times.Once);
+
+        var sidResult = FindSidResult(result, UserSid);
+        Assert.True(sidResult.Succeeded);
+        Assert.Empty(sidResult.NewTraverseEntries);
+        Assert.Empty(sidResult.RemovedTraversePaths);
+    }
+
+    [Fact]
     public void ReconcileChangedSids_InvalidSidString_LogsWarningAndContinues()
     {
         // When ReconcileTraverseForSid throws because new SecurityIdentifier(sid) rejects the
@@ -658,6 +746,54 @@ public class GrantReconciliationServiceTests
         var changedSids = new List<(string Sid, List<string> NewGroups)>
         {
             (UserSid, GroupsWithUsers)
+        };
+
+        var result = _service.ReconcileChangedSids(changedSids, accountGrants);
+
+        Assert.Empty(FindSidResult(result, UserSid).RemovedTraversePaths);
+    }
+
+    [Fact]
+    public void ReconcileChangedSids_AdministratorsOnlyTraverse_DoesNotRemoveTraverse()
+    {
+        var dragBridgeTempRoot = Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir);
+        var security = CreateDirectorySecurity(
+            allowSids:
+            [
+                (UserSid, TraverseRightsHelper.TraverseRights),
+                (AdministratorsSid, TraverseRightsHelper.TraverseRights)
+            ]);
+        _pathInfo.AddDirectory(dragBridgeTempRoot, security);
+
+        var accountGrants = new Dictionary<string, IReadOnlyList<GrantedPathEntry>>(StringComparer.OrdinalIgnoreCase)
+        {
+            [UserSid] =
+            [
+                new GrantedPathEntry
+                {
+                    Path = dragBridgeTempRoot,
+                    IsTraverseOnly = true,
+                    AllAppliedPaths = [dragBridgeTempRoot]
+                }
+            ]
+        };
+        var evaluator = new DeterministicAclAccessEvaluator();
+        _aclPermission.Setup(a => a.HasEffectiveRights(
+                It.IsAny<FileSystemSecurity>(),
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<FileSystemRights>()))
+            .Returns<FileSystemSecurity, string, IReadOnlyList<string>, FileSystemRights>((fs, sid, groups, rights) =>
+            {
+                var evaluation = evaluator.Evaluate(fs, sid, groups, rights);
+                return evaluation.Status != AclAccessEvaluationStatus.Failed &&
+                       (evaluation.GrantedRights & rights) == rights &&
+                       (evaluation.DeniedRights & rights) == 0;
+            });
+
+        var changedSids = new List<(string Sid, List<string> NewGroups)>
+        {
+            (UserSid, [..GroupsWithUsers, AdministratorsSid])
         };
 
         var result = _service.ReconcileChangedSids(changedSids, accountGrants);

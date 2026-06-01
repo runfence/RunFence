@@ -196,21 +196,6 @@ public class SessionAcquisitionHandlerTests : IDisposable
     }
 
     [Fact]
-    public void AcquireMutexOrTakeover_StartKeyExists_SameSid_IpcSucceeds_LogsInfoMessage()
-    {
-        File.WriteAllBytes(_startKeyPath, []);
-        _sidProvider.Setup(p => p.GetRunningInstanceInfo()).Returns(new RunningInstanceInfo(CurrentSid, CurrentSessionId));
-        _ipcClient.Setup(c => c.SendMessage(It.Is<IpcMessage>(m => m.Command == IpcCommands.Unlock)))
-            .Returns(new IpcResponse { Success = true });
-
-        var handler = BuildHandler();
-
-        handler.AcquireMutexOrTakeover(_singleInstance.Object, false, _log.Object);
-
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("unlock") && s.Contains("running instance"))), Times.Once);
-    }
-
-    [Fact]
     public void UnlockExistingInstance_OperationCommand_SendsUnlockOperation()
     {
         _sidProvider.Setup(p => p.GetRunningInstanceInfo()).Returns(new RunningInstanceInfo(CurrentSid, CurrentSessionId));
@@ -226,19 +211,4 @@ public class SessionAcquisitionHandlerTests : IDisposable
         _ipcClient.Verify(c => c.SendMessage(It.Is<IpcMessage>(m => m.Command == IpcCommands.Unlock)), Times.Never);
     }
 
-    [Fact]
-    public void AcquireMutexOrTakeover_StartKeyExists_SameSid_IpcFails_LogsWarning()
-    {
-        File.WriteAllBytes(_startKeyPath, []);
-        _sidProvider.Setup(p => p.GetRunningInstanceInfo()).Returns(new RunningInstanceInfo(CurrentSid, CurrentSessionId));
-        _ipcClient.Setup(c => c.SendMessage(It.Is<IpcMessage>(m => m.Command == IpcCommands.Unlock)))
-            .Throws(new InvalidOperationException("pipe not available"));
-        _ui.Setup(u => u.ConfirmTakeover(It.IsAny<bool>(), It.IsAny<bool>())).Returns(false);
-
-        var handler = BuildHandler();
-
-        handler.AcquireMutexOrTakeover(_singleInstance.Object, false, _log.Object);
-
-        _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Once);
-    }
 }

@@ -22,13 +22,17 @@ public class MainFormTrayHandler(
     TrayLaunchHandler trayLaunchHandler,
     NotifyIcon notifyIcon,
     TrayIconManager trayIconManager,
+    ApplicationCaptionTextBuilder applicationCaptionTextBuilder,
+    ForegroundMarkerTrayStatusController foregroundMarkerTrayStatusController,
     IIdleMonitorService idleMonitor,
     DiscoveryRefreshManager discoveryRefreshManager,
     SessionContext session,
     ILicenseService licenseService,
+    FullModeAccountLaunchIdentityFactory fullModeIdentityFactory,
     IGlobalHotkeyService hotkeyService,
     MainFormWindowRequestHandler windowRequestHandler,
-    MainFormBackgroundAutoLockCoordinator autoLockCoordinator)
+    MainFormBackgroundAutoLockCoordinator autoLockCoordinator,
+    TrayIdleMonitorCoordinator idleMonitorCoordinator)
     : IDisposable, ITrayBalloonService, ITrayMenuActionHandler
 {
     private const int AltEscapeHotkeyId = 0xAE01;
@@ -59,16 +63,14 @@ public class MainFormTrayHandler(
         windowRequestHandler.Initialize(form);
         windowRequestHandler.TitleUpdateNeeded += UpdateTitleAndTooltip;
         autoLockCoordinator.Initialize(form);
+        idleMonitorCoordinator.Initialize(form);
 
         trayIconManager.Initialize((ITrayOwner)form, this);
+        foregroundMarkerTrayStatusController.Initialize(form);
         trayIconManager.UpdateDatabase(session.CredentialStore);
         discoveryRefreshManager.SetHost(trayIconManager, formAsControl);
 
-        idleMonitor.IdleTimeoutReached += () =>
-        {
-            if (!_form.IsDisposed && licenseService.IsLicensed)
-                Application.Exit();
-        };
+        idleMonitor.IdleTimeoutReached += idleMonitorCoordinator.HandleIdleTimeout;
 
         licenseService.LicenseStatusChanged += OnLicenseStatusChanged;
         UpdateTitleAndTooltip();
@@ -87,17 +89,15 @@ public class MainFormTrayHandler(
 
     public void UpdateTitleAndTooltip()
     {
-        var title = licenseService.IsLicensed ? "RunFence" : "RunFence (Evaluation)";
-        if (DebugHelper.UseAdminOperationMocks)
-            title += " [NON-ELEVATED]";
-        if (!string.IsNullOrEmpty(DebugHelper.AppId))
-            title += $" [{DebugHelper.AppId}]";
-        _form.Title = title;
-        notifyIcon.Text = title;
+        _form.Title = applicationCaptionTextBuilder.BuildMainFormTitle(licenseService.IsLicensed);
+        foregroundMarkerTrayStatusController.UpdateTrayTooltip();
     }
 
     public void UpdateTray()
-        => trayIconManager.UpdateDatabase(session.CredentialStore);
+    {
+        trayIconManager.UpdateDatabase(session.CredentialStore);
+        foregroundMarkerTrayStatusController.UpdateTray();
+    }
 
     public void ScheduleDiscoveryRefresh()
         => discoveryRefreshManager.Schedule();
@@ -107,11 +107,11 @@ public class MainFormTrayHandler(
 
     public void ConfigureIdleMonitor()
     {
-        idleMonitor.Configure(session.Database.Settings.IdleTimeoutMinutes);
+        idleMonitorCoordinator.Configure();
         if (session.Database.Settings.IdleTimeoutMinutes > 0)
-            idleMonitor.Start();
+            idleMonitorCoordinator.Start();
         else
-            idleMonitor.Stop();
+            idleMonitorCoordinator.Stop();
     }
 
     public void ResetIdleTimer() => idleMonitor.ResetIdleTimer();
@@ -127,7 +127,7 @@ public class MainFormTrayHandler(
         => trayLaunchHandler.LaunchFolderBrowser(CreateTrayLaunchIdentity(accountSid, shift));
 
     public void LaunchTerminal(string accountSid, bool shift)
-        => trayLaunchHandler.LaunchTerminal(CreateTrayLaunchIdentity(accountSid, shift));
+        => _ = trayLaunchHandler.LaunchTerminalAsync(CreateTrayLaunchIdentity(accountSid, shift));
 
     public void LaunchDiscoveredApp(string exePath, string accountSid)
         => trayLaunchHandler.LaunchDiscoveredApp(exePath, new AccountLaunchIdentity(accountSid));
@@ -176,12 +176,13 @@ public class MainFormTrayHandler(
         licenseService.LicenseStatusChanged -= OnLicenseStatusChanged;
         hotkeyService.HotkeyPressed -= OnAltEscapeHotkey;
         hotkeyService.Unregister(AltEscapeHotkeyId);
+        foregroundMarkerTrayStatusController.Dispose();
         trayIconManager.Dispose();
         notifyIcon.Visible = false;
         notifyIcon.Dispose();
         discoveryRefreshManager.Dispose();
     }
 
-    private static AccountLaunchIdentity CreateTrayLaunchIdentity(string accountSid, bool shift)
-        => new(accountSid) { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null };
+    private AccountLaunchIdentity CreateTrayLaunchIdentity(string accountSid, bool shift)
+        => fullModeIdentityFactory.Create(accountSid, fullMode: shift);
 }

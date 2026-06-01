@@ -43,7 +43,7 @@ public class AclManagerTraverseRowBuilderTests
             resolver);
         using var grid = CreateTraverseGrid();
         var pending = new AclManagerPendingChanges();
-        rowBuilder.Initialize(grid, ContainerSid, pending, new Lazy<IReadOnlyList<string>>(() => []));
+        rowBuilder.Initialize(grid, ContainerSid, pending, []);
         var entry = new GrantedPathEntry
         {
             Path = TraversePath,

@@ -21,7 +21,6 @@ public class AccountPasswordHandlerTests : IDisposable
     private readonly Mock<ISecureClipboardService> _secureClipboard = new();
 
     private readonly AppDatabase _database = new();
-    private readonly SecureSecret _pinKey;
     private readonly SessionContext _session;
     private readonly CredentialStore _store;
     private readonly OperationGuard _guard = new();
@@ -31,13 +30,12 @@ public class AccountPasswordHandlerTests : IDisposable
 
     public AccountPasswordHandlerTests()
     {
-        _pinKey = TestSecretFactory.Create(32);
         _store = new CredentialStore();
         _session = new SessionContext
-{
+        {
             Database = _database,
             CredentialStore = _store,
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         _database.Settings.UnlockMode = UnlockMode.WindowsHello;
 
         _sessionProvider.Setup(s => s.GetSession()).Returns(_session);
@@ -59,7 +57,7 @@ public class AccountPasswordHandlerTests : IDisposable
 
     public void Dispose()
     {
-        _pinKey.Dispose();
+        _session.Dispose();
         _decryptedPwd.Dispose();
         _parent.Dispose();
     }
@@ -156,7 +154,7 @@ public class AccountPasswordHandlerTests : IDisposable
     [InlineData(CredentialLookupStatus.MissingPassword)]
     public async Task TypePassword_NonSuccessCredentialStatus_DoesNotTypePasswordAndSetsStatus(CredentialLookupStatus status)
     {
-        // Arrange: PIN already verified → EnsurePinVerifiedAsync bypassed.
+        // Arrange: PIN already verified. EnsurePinVerifiedAsync bypassed.
         // DecryptCredential returns a non-success status (no stored password found).
         _session.LastPinVerifiedAt = DateTime.UtcNow;
 

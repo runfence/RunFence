@@ -14,14 +14,14 @@ public class HandlerMappingDialogSubmissionCoordinator(
     private const string SaveFailurePrefix =
         "RunFence could not save handler associations:";
 
-    public Task<HandlerMappingDialogSubmitResult> SubmitAddAsync(
+    public HandlerMappingDialogSubmitResult SubmitAdd(
         HandlerMappingAddDialogSubmitRequest request,
         IHandlerMappingDialogPersistence persistence)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(persistence);
 
-        return ExecuteRetryableAsync(async () =>
+        return ExecuteRetryable(() =>
         {
             if (request.IsDirectMode)
             {
@@ -29,7 +29,7 @@ public class HandlerMappingDialogSubmissionCoordinator(
                 if (!validation.IsValid || validation.DirectHandlerEntries == null)
                     return ValidationFailure(validation.ErrorMessage);
 
-                var result = await submitTransaction.SubmitAsync(
+                var result = submitTransaction.Submit(
                     persistence,
                     validation.ValidKeys,
                     [],
@@ -47,7 +47,7 @@ public class HandlerMappingDialogSubmissionCoordinator(
             if (!appValidation.IsValid || request.SelectedApp is not { } app)
                 return ValidationFailure(appValidation.ErrorMessage);
 
-            var appResult = await submitTransaction.SubmitAsync(
+            var appResult = submitTransaction.Submit(
                 persistence,
                 appValidation.ValidKeys,
                 [app.Id],
@@ -68,14 +68,14 @@ public class HandlerMappingDialogSubmissionCoordinator(
         });
     }
 
-    public Task<HandlerMappingDialogSubmitResult> SubmitEditAppAsync(
+    public HandlerMappingDialogSubmitResult SubmitEditApp(
         EditAppHandlerMappingSubmitRequest request,
         IHandlerMappingDialogPersistence persistence)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(persistence);
 
-        return ExecuteRetryableAsync(async () =>
+        return ExecuteRetryable(() =>
         {
             var validation = dialogHelper.ValidateAppMapping(
                 [request.Key],
@@ -90,7 +90,7 @@ public class HandlerMappingDialogSubmissionCoordinator(
             if (!HasEditAppMutation(request, selectedApp, validation))
                 return Close();
 
-            var result = await submitTransaction.SubmitAsync(
+            var result = submitTransaction.Submit(
                 persistence,
                 [request.Key],
                 [selectedApp.Id],
@@ -115,14 +115,14 @@ public class HandlerMappingDialogSubmissionCoordinator(
         });
     }
 
-    public Task<HandlerMappingDialogSubmitResult> SubmitEditDirectAsync(
+    public HandlerMappingDialogSubmitResult SubmitEditDirect(
         EditDirectHandlerMappingSubmitRequest request,
         IHandlerMappingDialogPersistence persistence)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(persistence);
 
-        return ExecuteRetryableAsync(async () =>
+        return ExecuteRetryable(() =>
         {
             var normalizedNewValue = string.IsNullOrWhiteSpace(request.NewValue)
                 ? null
@@ -138,7 +138,7 @@ public class HandlerMappingDialogSubmissionCoordinator(
                 return ValidationFailure(validation.ErrorMessage);
 
             var newEntry = validation.DirectHandlerEntries[0];
-            var result = await submitTransaction.SubmitAsync(
+            var result = submitTransaction.Submit(
                 persistence,
                 [request.Key],
                 [],
@@ -147,14 +147,14 @@ public class HandlerMappingDialogSubmissionCoordinator(
         });
     }
 
-    public Task<HandlerMappingDialogSubmitResult> SubmitImportAsync(
+    public HandlerMappingDialogSubmitResult SubmitImport(
         ImportAssociationsDialogSubmitRequest request,
         IHandlerMappingDialogPersistence persistence)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(persistence);
 
-        return ExecuteRetryableAsync(async () =>
+        return ExecuteRetryable(() =>
         {
             if (request.SelectedEntries.Count == 0)
                 return Close();
@@ -166,7 +166,7 @@ public class HandlerMappingDialogSubmissionCoordinator(
                     $"Invalid keys: {string.Join(", ", validation.Invalid)}. Use file extensions (.pdf) or protocols (http).");
             }
 
-            var result = await submitTransaction.SubmitAsync(
+            var result = submitTransaction.Submit(
                 persistence,
                 request.SelectedEntries.Select(entry => entry.Key).ToArray(),
                 [],
@@ -179,8 +179,8 @@ public class HandlerMappingDialogSubmissionCoordinator(
         });
     }
 
-    internal static async Task<HandlerMappingDialogSubmitResult> ExecuteRetryableAsync(
-        Func<Task<HandlerMappingDialogSubmitResult>>? submitRequested,
+    internal static HandlerMappingDialogSubmitResult ExecuteRetryable(
+        Func<HandlerMappingDialogSubmitResult>? submitRequested,
         Action<Exception>? reportUnexpectedFailure = null)
     {
         if (submitRequested == null)
@@ -188,7 +188,7 @@ public class HandlerMappingDialogSubmissionCoordinator(
 
         try
         {
-            return await submitRequested.Invoke();
+            return submitRequested.Invoke();
         }
         catch (Exception ex)
         {

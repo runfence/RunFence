@@ -24,6 +24,7 @@ public class HandlerAssociationEditDialog : RunFence.UI.Forms.ContextHelpForm
 
     private HandlerAssociationDialogValueHelper? _valueHelper;
     private string _exePath = "";
+    private string? _accountSid;
     private bool _addMode;
     private Timer? _debounceTimer;
 
@@ -158,11 +159,13 @@ public class HandlerAssociationEditDialog : RunFence.UI.Forms.ContextHelpForm
     public void InitializeForAdd(
         IEnumerable<string> suggestions,
         IExeAssociationRegistryReader reader,
-        string exePath)
+        string exePath,
+        string? accountSid)
     {
         _addMode = true;
         _valueHelper = new HandlerAssociationDialogValueHelper(reader);
         _exePath = exePath;
+        _accountSid = accountSid;
 
         Text = "Add Association";
         _keyLabel.Text = "Association:";
@@ -245,7 +248,7 @@ public class HandlerAssociationEditDialog : RunFence.UI.Forms.ContextHelpForm
         if (string.IsNullOrEmpty(key))
             return;
 
-        _templateTextBox.Text = _valueHelper.ResolveTemplate(_exePath, key);
+        _templateTextBox.Text = _valueHelper.ResolveTemplate(_exePath, key, _accountSid);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)

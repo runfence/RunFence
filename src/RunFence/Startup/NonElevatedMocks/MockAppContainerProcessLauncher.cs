@@ -6,7 +6,8 @@ using RunFence.Launch.Tokens;
 
 namespace RunFence.Startup.NonElevatedMocks;
 
-public sealed class MockAppContainerProcessLauncher(IAppContainerProcessLauncher real) : IAppContainerProcessLauncher
+public sealed class MockAppContainerProcessLauncher(
+    IAppContainerProcessLauncher real) : IAppContainerProcessLauncher
 {
     // real is injected but unused — RegisterDecorator constructs the real implementation
     // to keep DI validation working; launches as current user (no AppContainer isolation) in non-elevated debug mode

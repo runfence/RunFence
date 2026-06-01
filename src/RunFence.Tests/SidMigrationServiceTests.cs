@@ -15,6 +15,7 @@ public class SidMigrationServiceTests
     private readonly Mock<ISidNameCacheService> _sidNameCache;
     private readonly Mock<ISidAclScanService> _aclScan;
     private readonly Mock<IInteractiveUserSidResolver> _interactiveUserSidResolver;
+    private readonly Mock<ITrackingJobStateStore> _trackingJobStateStore;
     private AppDatabase _testDatabase = new();
 
     private const string OldSid1 = "S-1-5-21-9999999999-9999999999-9999999999-1001";
@@ -28,13 +29,58 @@ public class SidMigrationServiceTests
         _aclScan = new Mock<ISidAclScanService>();
         _sidNameCache = new Mock<ISidNameCacheService>();
         _interactiveUserSidResolver = new Mock<IInteractiveUserSidResolver>();
+        _trackingJobStateStore = CreateTrackingJobStateStore();
         var sidCleanupHelper = new Mock<ISidCleanupHelper>();
         var dbProvider = new LambdaDatabaseProvider(() => _testDatabase);
-        var realCleanupHelper = new SidCleanupHelper(dbProvider);
+        var realCleanupHelper = new SidCleanupHelper(dbProvider, _trackingJobStateStore.Object);
         sidCleanupHelper
             .Setup(h => h.CleanupSidFromAppData(It.IsAny<string>(), It.IsAny<bool>()))
             .Returns((string sid, bool removeApps) => realCleanupHelper.CleanupSidFromAppData(sid, removeApps));
-        _service = new SidMigrationService(sidResolver.Object, new Mock<IProfilePathResolver>().Object, sidCleanupHelper.Object, _aclScan.Object, _sidNameCache.Object, _interactiveUserSidResolver.Object, dbProvider);
+        _service = new SidMigrationService(
+            sidResolver.Object,
+            new Mock<IProfilePathResolver>().Object,
+            sidCleanupHelper.Object,
+            _aclScan.Object,
+            _sidNameCache.Object,
+            _interactiveUserSidResolver.Object,
+            dbProvider,
+            new SidMigrationCoreMutationService(),
+            _trackingJobStateStore.Object);
+    }
+
+    private Mock<ITrackingJobStateStore> CreateTrackingJobStateStore()
+    {
+        var store = new Mock<ITrackingJobStateStore>();
+        store.Setup(s => s.RemoveTrackingJobSid(It.IsAny<string>(), It.IsAny<bool>()))
+            .Callback<string, bool>((sid, _) =>
+            {
+                if (_testDatabase.TrackingJobSids == null)
+                    return;
+
+                _testDatabase.TrackingJobSids.RemoveAll(existing =>
+                    string.Equals(existing, sid, StringComparison.OrdinalIgnoreCase));
+                if (_testDatabase.TrackingJobSids.Count == 0)
+                    _testDatabase.TrackingJobSids = null;
+            });
+        store.Setup(s => s.MigrateTrackingJobSid(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
+            .Callback<string, string, bool>((oldSid, newSid, _) =>
+            {
+                if (_testDatabase.TrackingJobSids == null)
+                    return;
+
+                var removed = _testDatabase.TrackingJobSids.RemoveAll(existing =>
+                    string.Equals(existing, oldSid, StringComparison.OrdinalIgnoreCase));
+                if (removed > 0
+                    && !_testDatabase.TrackingJobSids.Any(existing =>
+                        string.Equals(existing, newSid, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _testDatabase.TrackingJobSids.Add(newSid);
+                }
+
+                if (_testDatabase.TrackingJobSids.Count == 0)
+                    _testDatabase.TrackingJobSids = null;
+            });
+        return store;
     }
 
     // --- BuildMappings tests ---
@@ -133,7 +179,6 @@ public class SidMigrationServiceTests
                     ExpectedMode = JobKeeperIntegrityMode.Restricted,
                     InstanceId = "old-instance",
                     PipeName = "old-pipe",
-                    JobName = "old-job",
                     LastVerifiedKeeperPid = 1234
                 }
             }
@@ -146,6 +191,26 @@ public class SidMigrationServiceTests
         Assert.True(database.JobKeeperInstances!.ContainsKey(oldKey));
         Assert.False(database.JobKeeperInstances.ContainsKey(JobKeeperInstanceIdentity.CreateKey(NewSid1, isLow: false)));
         Assert.Equal(OldSid1, database.JobKeeperInstances[oldKey].TargetSid);
+    }
+
+    [Fact]
+    public void MigrateAppData_MigratesTrackingJobSids()
+    {
+        var database = new AppDatabase
+        {
+            TrackingJobSids = [OldSid1, OldSid2]
+        };
+
+        _testDatabase = database;
+        _service.MigrateAppData([new SidMigrationMapping(OldSid1, NewSid1, "TestUser")], new CredentialStore());
+
+        _trackingJobStateStore.Verify(s => s.MigrateTrackingJobSid(OldSid1, NewSid1, false), Times.Once);
+        Assert.DoesNotContain(database.TrackingJobSids!, sid =>
+            string.Equals(sid, OldSid1, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(database.TrackingJobSids!, sid =>
+            string.Equals(sid, NewSid1, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(database.TrackingJobSids!, sid =>
+            string.Equals(sid, OldSid2, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -390,16 +455,14 @@ public class SidMigrationServiceTests
             TargetSid = OldSid1,
             ExpectedMode = JobKeeperIntegrityMode.Restricted,
             InstanceId = "old-instance",
-            PipeName = "old-pipe",
-            JobName = "old-job"
+            PipeName = "old-pipe"
         };
         var newIdentity = new JobKeeperInstanceIdentity
         {
             TargetSid = NewSid1,
             ExpectedMode = JobKeeperIntegrityMode.Restricted,
             InstanceId = "new-instance",
-            PipeName = "new-pipe",
-            JobName = "new-job"
+            PipeName = "new-pipe"
         };
         var database = new AppDatabase
         {
@@ -415,6 +478,24 @@ public class SidMigrationServiceTests
 
         Assert.Same(oldIdentity, database.JobKeeperInstances![oldKey]);
         Assert.Same(newIdentity, database.JobKeeperInstances[newKey]);
+    }
+
+    [Fact]
+    public void DeleteSidsFromAppData_RemovesTrackingJobSids()
+    {
+        var database = new AppDatabase
+        {
+            TrackingJobSids = [OldSid1, OldSid2]
+        };
+
+        _testDatabase = database;
+        _service.DeleteSidsFromAppData([OldSid1], new CredentialStore());
+
+        _trackingJobStateStore.Verify(s => s.RemoveTrackingJobSid(OldSid1, false), Times.Once);
+        Assert.DoesNotContain(database.TrackingJobSids!, sid =>
+            string.Equals(sid, OldSid1, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(database.TrackingJobSids!, sid =>
+            string.Equals(sid, OldSid2, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -812,6 +893,7 @@ public class SidMigrationServiceTests
     [Theory]
     [InlineData(PrivilegeLevel.Isolated)]
     [InlineData(PrivilegeLevel.HighestAllowed)]
+    [InlineData(PrivilegeLevel.HighIntegrity)]
     [InlineData(PrivilegeLevel.LowIntegrity)]
     public void MigrateAppData_UpdatesPrivilegeLevel(PrivilegeLevel privilegeLevel)
     {
@@ -852,6 +934,32 @@ public class SidMigrationServiceTests
         Assert.Equal(PrivilegeLevel.LowIntegrity, database.GetAccount(NewSid1)?.PrivilegeLevel);
         Assert.Equal(1, database.Accounts.Count(a =>
             string.Equals(a.Sid, NewSid1, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Theory]
+    [InlineData(PrivilegeLevel.Isolated, PrivilegeLevel.HighIntegrity, PrivilegeLevel.HighIntegrity)]
+    [InlineData(PrivilegeLevel.LowIntegrity, PrivilegeLevel.HighIntegrity, PrivilegeLevel.HighIntegrity)]
+    [InlineData(PrivilegeLevel.Basic, PrivilegeLevel.HighIntegrity, PrivilegeLevel.HighIntegrity)]
+    [InlineData(PrivilegeLevel.HighIntegrity, PrivilegeLevel.HighestAllowed, PrivilegeLevel.HighestAllowed)]
+    public void MigrateAppData_PrivilegeLevel_UsesExplicitMergePriority(
+        PrivilegeLevel oldSid1Level,
+        PrivilegeLevel oldSid2Level,
+        PrivilegeLevel expectedLevel)
+    {
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(OldSid1).PrivilegeLevel = oldSid1Level;
+        database.GetOrCreateAccount(OldSid2).PrivilegeLevel = oldSid2Level;
+
+        var mappings = new List<SidMigrationMapping>
+        {
+            new(OldSid1, NewSid1, "User1"),
+            new(OldSid2, NewSid1, "User2")
+        };
+
+        _testDatabase = database;
+        _service.MigrateAppData(mappings, new CredentialStore());
+
+        Assert.Equal(expectedLevel, database.GetAccount(NewSid1)?.PrivilegeLevel);
     }
 
     [Fact]
@@ -1121,6 +1229,23 @@ public class SidCleanupHelperTests
     private const string TestSid = "S-1-5-21-9999999999-9999999999-9999999999-1001";
     private const string ContainerSid = "S-1-15-2-1234-5678";
 
+    private static Mock<ITrackingJobStateStore> CreateTrackingJobStateStore(AppDatabase database)
+    {
+        var store = new Mock<ITrackingJobStateStore>();
+        store.Setup(s => s.RemoveTrackingJobSid(It.IsAny<string>(), It.IsAny<bool>()))
+            .Callback<string, bool>((sid, _) =>
+            {
+                if (database.TrackingJobSids == null)
+                    return;
+
+                database.TrackingJobSids.RemoveAll(existing =>
+                    string.Equals(existing, sid, StringComparison.OrdinalIgnoreCase));
+                if (database.TrackingJobSids.Count == 0)
+                    database.TrackingJobSids = null;
+            });
+        return store;
+    }
+
     // --- CleanupContainerFromAppData ---
 
     [Fact]
@@ -1220,10 +1345,30 @@ public class SidCleanupHelperTests
         database.GetOrCreateAccount(TestSid).Grants.Add(new GrantedPathEntry { Path = @"C:\foo" });
         database.GetOrCreateAccount("S-1-5-21-other").Grants.Add(new GrantedPathEntry { Path = @"C:\bar" });
 
-        new SidCleanupHelper(new LambdaDatabaseProvider(() => database)).CleanupSidFromAppData(TestSid);
+        new SidCleanupHelper(
+            new LambdaDatabaseProvider(() => database),
+            CreateTrackingJobStateStore(database).Object).CleanupSidFromAppData(TestSid);
 
         Assert.Null(database.GetAccount(TestSid));
         Assert.NotNull(database.GetAccount("S-1-5-21-other"));
+    }
+
+    [Fact]
+    public void CleanupSidFromAppData_RemovesTrackingJobSid()
+    {
+        var database = new AppDatabase
+        {
+            TrackingJobSids = [TestSid, "S-1-5-21-other"]
+        };
+
+        new SidCleanupHelper(
+            new LambdaDatabaseProvider(() => database),
+            CreateTrackingJobStateStore(database).Object).CleanupSidFromAppData(TestSid);
+
+        Assert.DoesNotContain(database.TrackingJobSids!, sid =>
+            string.Equals(sid, TestSid, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(database.TrackingJobSids!, sid =>
+            string.Equals(sid, "S-1-5-21-other", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -1234,10 +1379,31 @@ public class SidCleanupHelperTests
         database.GetOrCreateAccount(TestSid).Grants.Add(new GrantedPathEntry { Path = @"C:\qux" });
         database.AppContainers.Add(new AppContainerEntry { Name = "ram_target" });
 
-        new SidCleanupHelper(new LambdaDatabaseProvider(() => database)).CleanupContainerFromAppData("ram_target", ContainerSid);
+        new SidCleanupHelper(
+            new LambdaDatabaseProvider(() => database),
+            CreateTrackingJobStateStore(database).Object).CleanupContainerFromAppData("ram_target", ContainerSid);
 
         Assert.Null(database.GetAccount(ContainerSid));
         Assert.NotNull(database.GetAccount(TestSid));
+    }
+
+    [Fact]
+    public void CleanupContainerFromAppData_RemovesTrackingJobSidForContainerSid()
+    {
+        var database = new AppDatabase
+        {
+            TrackingJobSids = [ContainerSid, TestSid]
+        };
+        database.AppContainers.Add(new AppContainerEntry { Name = "ram_target" });
+
+        new SidCleanupHelper(
+            new LambdaDatabaseProvider(() => database),
+            CreateTrackingJobStateStore(database).Object).CleanupContainerFromAppData("ram_target", ContainerSid);
+
+        Assert.DoesNotContain(database.TrackingJobSids!, sid =>
+            string.Equals(sid, ContainerSid, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(database.TrackingJobSids!, sid =>
+            string.Equals(sid, TestSid, StringComparison.OrdinalIgnoreCase));
     }
 
     // --- FirewallSettings cleanup (via AccountEntry removal) ---

@@ -10,7 +10,7 @@ public interface ITraverseCoreOperations
 {
     IReadOnlyList<string> CollectCoveragePaths(string path);
 
-    IReadOnlyList<string> GetPathsNeedingTraverseAce(string sid, IReadOnlyList<string> coveragePaths);
+    IReadOnlyList<string> GetPathsNeedingTraverseAce(string sid, IReadOnlyList<string> coveragePaths, bool unelevated = true);
 
     bool TrackTraverse(string sid, GrantedPathEntry entry);
 
@@ -18,7 +18,7 @@ public interface ITraverseCoreOperations
 
     void RemoveTraverseAces(string sid, IReadOnlyList<string> paths);
 
-    void VerifyEffectiveTraverse(string sid, IReadOnlyList<string> paths);
+    void VerifyEffectiveTraverse(string sid, IReadOnlyList<string> paths, bool unelevated = true);
 
     /// <summary>
     /// Grants Traverse | ReadAttributes | Synchronize (no inheritance) on <paramref name="path"/>

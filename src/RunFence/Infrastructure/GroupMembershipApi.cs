@@ -11,7 +11,7 @@ public class GroupMembershipApi(ILoggingService log)
 {
     private const int WarnThresholdMs = 100;
 
-    /// <summary>Used by LocalGroupMembershipService.GetLocalGroups — wraps PrincipalSearcher.FindAll.</summary>
+    /// <summary>Used by LocalGroupQueryService.GetLocalGroups — wraps PrincipalSearcher.FindAll.</summary>
     public List<Principal> GetLocalGroups(Func<List<Principal>> call)
     {
         List<Principal>? result = null;
@@ -28,7 +28,7 @@ public class GroupMembershipApi(ILoggingService log)
         }
     }
 
-    /// <summary>Used by LocalGroupMembershipService.GetMembersOfGroup — wraps GroupPrincipal.Members.</summary>
+    /// <summary>Used by LocalGroupQueryService.GetMembersOfGroup — wraps GroupPrincipal.Members.</summary>
     public List<Principal> GetMembersOfGroup(string groupSid, Func<List<Principal>> call)
     {
         List<Principal>? result = null;
@@ -45,7 +45,7 @@ public class GroupMembershipApi(ILoggingService log)
         }
     }
 
-    /// <summary>Used by LocalGroupMembershipService.FetchGroupsForUser and AclPermissionService.TryResolveLocalGroupSids — wraps NetUserGetLocalGroups P/Invoke.</summary>
+    /// <summary>Used by LocalGroupQueryService.FetchGroupsForUser and AclPermissionService.TryResolveLocalGroupSids — wraps NetUserGetLocalGroups P/Invoke.</summary>
     public NetUserGroupsResult NetUserGetLocalGroups(string username, Func<NetUserGroupsResult> call)
     {
         var result = default(NetUserGroupsResult);
@@ -82,7 +82,7 @@ public class GroupMembershipApi(ILoggingService log)
         });
     }
 
-    /// <summary>Used by LocalGroupMembershipService.GetGroupDescription — wraps GroupPrincipal.Description read.</summary>
+    /// <summary>Used by LocalGroupQueryService.GetGroupDescription — wraps GroupPrincipal.Description read.</summary>
     public string? GetGroupDescription(string groupSid, Func<string?> call)
     {
         string? result = null;

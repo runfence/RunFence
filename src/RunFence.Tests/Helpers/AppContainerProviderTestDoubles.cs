@@ -1,29 +1,29 @@
-using Microsoft.Win32;
+using RunFence.Core;
 using RunFence.Launch.Container;
 
 namespace RunFence.Tests.Helpers;
 
 public static class AppContainerProviderTestDoubles
 {
-    public static IAppContainerComRegistryRoots CreateComRegistryRoots(RegistryKey appIdRoot, RegistryKey machineRoot)
+    public static IAppContainerComRegistryRoots CreateComRegistryRoots(IRegistryKey appIdRoot, IRegistryKey machineRoot)
         => new FixedComRegistryRoots(appIdRoot, machineRoot);
 
-    public static IAppContainerUserRegistryRoot CreateUserRegistryRoot(RegistryKey usersRoot)
+    public static IAppContainerUserRegistryRoot CreateUserRegistryRoot(IRegistryKey usersRoot)
         => new FixedUserRegistryRoot(usersRoot);
 
     public static IAppContainerPathProvider CreatePathProvider(string containersRootPath)
         => new FixedPathProvider(containersRootPath);
 
-    private sealed class FixedComRegistryRoots(RegistryKey appIdRoot, RegistryKey machineRoot)
+    private sealed class FixedComRegistryRoots(IRegistryKey appIdRoot, IRegistryKey machineRoot)
         : IAppContainerComRegistryRoots
     {
-        public RegistryKey AppIdRoot { get; } = appIdRoot;
-        public RegistryKey MachineRoot { get; } = machineRoot;
+        public IRegistryKey AppIdRoot { get; } = appIdRoot;
+        public IRegistryKey MachineRoot { get; } = machineRoot;
     }
 
-    private sealed class FixedUserRegistryRoot(RegistryKey usersRoot) : IAppContainerUserRegistryRoot
+    private sealed class FixedUserRegistryRoot(IRegistryKey usersRoot) : IAppContainerUserRegistryRoot
     {
-        public RegistryKey UsersRoot { get; } = usersRoot;
+        public IRegistryKey UsersRoot { get; } = usersRoot;
     }
 
     private sealed class FixedPathProvider(string containersRootPath) : IAppContainerPathProvider

@@ -1,4 +1,5 @@
 using RunFence.Core.Models;
+using RunFence.Infrastructure;
 
 namespace RunFence.Firewall.UI.Forms;
 
@@ -10,12 +11,7 @@ namespace RunFence.Firewall.UI.Forms;
 /// </summary>
 public class FirewallDialogFactory(
     IFirewallNetworkInfo? firewallNetworkInfo,
-    FirewallAllowlistValidator validator,
-    FirewallPortValidator portValidator,
-    FirewallDomainResolver domainResolver,
-    BlockedConnectionsFlowHelper blockedConnectionsFlow,
-    FirewallAllowlistImportExportService importExportService,
-    FirewallDialogApplyPresenter applyPresenter) : IFirewallDialogFactory
+    FirewallAllowlistDialogComponentFactory componentFactory) : IFirewallDialogFactory
 {
     /// <summary>Whether firewall network info is available (i.e. firewall is configured).</summary>
     public bool IsAvailable => firewallNetworkInfo != null;
@@ -37,19 +33,14 @@ public class FirewallDialogFactory(
             return null;
 
         return new FirewallAllowlistDialog(
-            current: current,
-            firewallNetworkInfo: firewallNetworkInfo,
-            validator: validator,
-            portValidator: portValidator,
-            domainResolver: domainResolver,
-            blockedConnectionsFlow: blockedConnectionsFlow,
-            importExportService: importExportService,
-            applyPresenter: applyPresenter,
-            displayName: displayName,
-            allowInternet: allowInternet,
-            allowLan: allowLan,
-            allowLocalhost: allowLocalhost,
-            allowedLocalhostPorts: allowedLocalhostPorts,
-            filterEphemeralLoopback: filterEphemeralLoopback);
+            new FirewallAllowlistInitialState(
+                current,
+                displayName,
+                allowInternet,
+                allowLan,
+                allowLocalhost,
+                allowedLocalhostPorts,
+                filterEphemeralLoopback),
+            componentFactory);
     }
 }

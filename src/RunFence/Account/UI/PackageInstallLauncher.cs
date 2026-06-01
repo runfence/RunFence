@@ -30,7 +30,7 @@ public class PackageInstallLauncher(ILaunchFacade launchFacade) : IPackageInstal
                $"    & {scriptLiteral}\n" +
                "    exit 0\n" +
                "} catch {\n" +
-               "    Write-Error $_\n" +
+               "    [Console]::Error.WriteLine($_)\n" +
                $"    Read-Host -Prompt {closePrompt} | Out-Null\n" +
                "    exit 1\n" +
                "}\n" +

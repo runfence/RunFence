@@ -34,6 +34,7 @@ public static class ProcessLaunchNative
     public const uint SE_GROUP_INTEGRITY = 0x00000020;
     public const int TOKEN_INTEGRITY_LEVEL = 25; // TokenIntegrityLevel
     public const int TOKEN_DEFAULT_DACL = 6; // TokenDefaultDacl
+    public const string HighIntegritySid = "S-1-16-12288";
     public const string MediumIntegritySid = "S-1-16-8192";
     public const string LowIntegritySid = "S-1-16-4096";
 

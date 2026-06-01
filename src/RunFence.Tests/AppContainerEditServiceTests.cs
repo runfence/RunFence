@@ -241,7 +241,7 @@ public class AppContainerEditServiceTests : IDisposable
 {
             Database = db,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinBuffer));
+        }.WithClonedPinDerivedKey(_pinBuffer));
 
         return new AppContainerEditService(
             _containerService.Object,

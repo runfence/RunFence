@@ -41,6 +41,7 @@ public sealed class RestrictedJobLaunchCoordinator(
         for (var attempt = 0; attempt < 3; attempt++)
         {
             var identity = jobKeeperIdentityStore.CreateFresh(sid, isLow);
+            var localJobName = BuildLocalJobName(isLow);
             System.IO.Pipes.NamedPipeServerStream? pipeServer = null;
             ProcessLaunchNative.PROCESS_INFORMATION jobKeeperPi = default;
             var removeIdentityOnFailure = true;
@@ -64,7 +65,7 @@ public sealed class RestrictedJobLaunchCoordinator(
                     sid,
                     allowUnsuspendedRetry: false);
 
-                var assignment = processJobManager.TryAssignToJob(sid, jobKeeperPi.hProcess, jobAssignment, identity.JobName);
+                var assignment = processJobManager.TryAssignToJob(sid, jobKeeperPi.hProcess, jobAssignment, localJobName);
                 if (!assignment.Succeeded)
                 {
                     restrictedProcessGuard.TerminateAndClose(ref jobKeeperPi);
@@ -83,22 +84,31 @@ public sealed class RestrictedJobLaunchCoordinator(
                         ProcessNative.GetCurrentProcess(),
                         assignment.AssignedJobHandle,
                         jobKeeperPi.hProcess,
-                        ProcessJobManager.JobObjectKeepAliveAccess))
+                        ProcessJobManager.JobObjectKeepAliveAccess,
+                        out _))
                 {
                     var error = jobObjectApi.GetLastWin32Error();
-                    restrictedProcessGuard.TerminateAndClose(ref jobKeeperPi);
-                    pipeServer.Dispose();
-                    pipeServer = null;
-                    jobKeeperIdentityStore.Remove(sid, isLow);
                     throw RestrictedProcessActivationGuard.RestrictedJobAssignmentFailed(sid, isLow,
                         $"Failed to duplicate keeper job keep-alive handle: Win32 error {error}.");
+                }
+
+                if (!jobObjectApi.DuplicateHandleToProcess(
+                        ProcessNative.GetCurrentProcess(),
+                        assignment.AssignedJobHandle,
+                        jobKeeperPi.hProcess,
+                        ProcessJobManager.JobObjectReconnectAccess,
+                        out _))
+                {
+                    var error = jobObjectApi.GetLastWin32Error();
+                    throw RestrictedProcessActivationGuard.RestrictedJobAssignmentFailed(sid, isLow,
+                        $"Failed to duplicate keeper reconnect discovery handle: Win32 error {error}.");
                 }
 
                 restrictedProcessGuard.ResumeOrTerminate(ref jobKeeperPi, sid, isLow, "job keeper");
                 var jobKeeperPid = (int)jobKeeperPi.dwProcessId;
                 restrictedProcessGuard.CloseThreadHandle(ref jobKeeperPi);
 
-                int keeperPid = jobKeeperService.WaitAndRegisterJobKeeper(identity, pipeServer, jobKeeperPid, targetSid);
+                int keeperPid = jobKeeperService.WaitAndRegisterJobKeeper(identity, pipeServer, jobKeeperPid, targetSid, jobKeeperPi.hProcess);
                 if (keeperPid > 0)
                 {
                     restrictedProcessGuard.CloseHandles(ref jobKeeperPi);
@@ -106,9 +116,6 @@ public sealed class RestrictedJobLaunchCoordinator(
                     removeIdentityOnFailure = false;
                     return LaunchViaJobKeeperCore(sid, isLow, psi);
                 }
-
-                pipeServer = null;
-                restrictedProcessGuard.CloseHandles(ref jobKeeperPi);
 
                 log.Error($"JobKeeper: seeding failed for {sid} (isLow={isLow}); restricted launch fails closed");
                 throw RestrictedProcessActivationGuard.RestrictedJobAssignmentFailed(
@@ -144,6 +151,8 @@ public sealed class RestrictedJobLaunchCoordinator(
         bool isLow,
         ProcessLaunchTarget psi)
     {
+        log.Info(
+            $"JobKeeper: sending launch request for {sid} (isLow={isLow}), target='{psi.ExePath}', args='{psi.Arguments ?? string.Empty}'");
         launchProcessApi.AllowAnyForegroundWindow();
 
         var request = new JobKeeperLaunchRequest(
@@ -154,17 +163,22 @@ public sealed class RestrictedJobLaunchCoordinator(
             psi.SuppressStartupFeedback,
             psi.EnvironmentVariables);
 
-        int pid = launchIpcClient
+        var launchedProcess = launchIpcClient
             .SendLaunchRequestAsync(sid, isLow, request, JobKeeperLaunchTimeout, CancellationToken.None)
             .GetAwaiter()
             .GetResult();
-        if (pid <= 0)
+        if (launchedProcess == null || launchedProcess.Value.Pid <= 0)
             throw new StaleJobKeeperException(sid);
 
-        var hProcess = launchProcessApi.OpenLaunchedProcess(pid);
-        return new ProcessLaunchNative.PROCESS_INFORMATION { hProcess = hProcess, dwProcessId = (uint)pid };
+        var hProcess = launchedProcess.Value.ProcessHandleValue != 0
+            ? new IntPtr(launchedProcess.Value.ProcessHandleValue)
+            : launchProcessApi.OpenLaunchedProcess(launchedProcess.Value.Pid);
+        return new ProcessLaunchNative.PROCESS_INFORMATION { hProcess = hProcess, dwProcessId = (uint)launchedProcess.Value.Pid };
     }
 
     private static string BuildJobKeeperArguments(JobKeeperInstanceIdentity identity) =>
         $"--pipe \"{identity.PipeName}\"";
+
+    private static string BuildLocalJobName(bool isLow) =>
+        $@"Global\RunFence_JK_{(isLow ? "L" : "R")}_{Guid.NewGuid():N}";
 }

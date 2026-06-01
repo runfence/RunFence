@@ -14,7 +14,7 @@ public class BlockedConnectionsFlowHelper(
     IAuditPolicyService auditPolicyService,
     FirewallEnforcementRetryState retryState,
     IFirewallDomainRefreshRequester refreshRequester,
-    IDnsResolver dnsResolver)
+    IDnsResolver dnsResolver) : IBlockedConnectionsDialogFlow
 {
     /// <summary>
     /// Shows the blocked-connections dialog and returns the user-selected allowlist entries,

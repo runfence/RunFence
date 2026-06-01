@@ -8,7 +8,7 @@ namespace RunFence.Account.UI;
 public class AccountProcessDisplayManager(
     AccountGridProcessExpander processExpander,
     AccountProcessRowPainter processRowPainter,
-    AccountProcessTimerManager? timerManager) : IDisposable
+    AccountProcessTimerManager? timerManager) : IDisposable, IAccountsPanelProcessRefreshController
 {
     private DataGridView _grid = null!;
 
@@ -41,11 +41,12 @@ public class AccountProcessDisplayManager(
     public void TriggerDelayedRefresh(int delayMs)
         => timerManager?.TriggerDelayedRefresh(delayMs);
 
-    public void ToggleExpand(string sid)
+    public Task ToggleExpandAsync(string sid)
     {
         if (timerManager == null)
-            return;
-        processExpander.Toggle(sid);
+            return Task.CompletedTask;
+
+        return processExpander.ToggleAsync(sid);
     }
 
     public string? GetProcessRowTooltip(ProcessRow processRow)
@@ -73,8 +74,10 @@ public class AccountProcessDisplayManager(
         => timerManager?.GetExpandedSidsForRefresh();
 
     /// <summary>Pre-fetches process data for the given SIDs before the grid is cleared.</summary>
-    public Task<Dictionary<string, IReadOnlyList<ProcessInfo>>>? FetchRefreshDataAsync(IReadOnlyList<string> sids)
-        => timerManager?.FetchRefreshDataAsync(sids);
+    public Task<Dictionary<string, IReadOnlyList<ProcessInfo>>>? FetchRefreshDataAsync(
+        IReadOnlyList<string> sids,
+        CancellationToken cancellationToken = default)
+        => timerManager?.FetchRefreshDataAsync(sids, cancellationToken);
 
     public void Dispose() => timerManager?.Dispose();
 }

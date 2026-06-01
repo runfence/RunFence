@@ -17,7 +17,7 @@ namespace RunFence.RunAs.UI;
 public class AppEntryPermissionPrompter(
     ILoggingService log,
     IAclPermissionService aclPermission,
-    IPathGrantService pathGrantService,
+    IGrantMutatorService grantMutatorService,
     IDatabaseProvider databaseProvider,
     IQuickAccessPinService quickAccessPinService)
 {
@@ -70,7 +70,7 @@ public class AppEntryPermissionPrompter(
     {
         try
         {
-            var grantResult = pathGrantService.EnsureAccess(
+            var grantResult = grantMutatorService.EnsureAccess(
                 grantRequest.TargetSid,
                 grantRequest.Path,
                 grantRequest.Rights,

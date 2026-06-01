@@ -1,5 +1,6 @@
 using RunFence.Acl;
 using RunFence.Acl.UI;
+using RunFence.UI.DialogApply;
 using Xunit;
 
 namespace RunFence.Tests;

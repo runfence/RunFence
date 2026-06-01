@@ -22,7 +22,7 @@ public class AssociationLaunchResolver(
         bool identityFromImpersonation)
         => Resolve(
             database,
-            BuildRequest(association, arguments),
+            AssociationLaunchRequest.Build(association, arguments),
             callerIdentity,
             callerSid,
             identityFromImpersonation);
@@ -86,13 +86,7 @@ public class AssociationLaunchResolver(
     }
 
     public static AssociationLaunchRequest BuildRequest(string associationKey, string? rawArgument)
-    {
-        var normalizedTarget = AssociationCommandHelper.ParseAssociationTarget(rawArgument);
-        return new AssociationLaunchRequest(
-            associationKey,
-            rawArgument,
-            normalizedTarget);
-    }
+        => AssociationLaunchRequest.Build(associationKey, rawArgument);
 
     private static bool MatchesEffectivePrefixes(HandlerMappingEntry entry, AppEntry app, string? normalizedTarget)
     {

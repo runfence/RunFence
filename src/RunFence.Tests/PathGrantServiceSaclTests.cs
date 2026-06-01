@@ -62,11 +62,11 @@ public class PathGrantServiceSaclTests
         _iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
     }
 
-    private (PathGrantService service, Mock<IMandatoryLabelService> mandatoryLabelMock, AppDatabase db) BuildService()
+    private (GrantServiceTestBundle service, Mock<IMandatoryLabelService> mandatoryLabelMock, AppDatabase db) BuildService()
     {
         var grantAceMock = new Mock<IGrantAceService>();
         var ownerMock = new Mock<IFileOwnerService>();
-        var aclAccessorMock = new Mock<IAclAccessor>();
+        var aclAccessorMock = new Mock<IPathSecurityDescriptorAccessor>();
         var mandatoryLabelMock = new Mock<IMandatoryLabelService>();
         var db = new AppDatabase();
         var ownershipProjection = new GrantIntentOwnershipProjectionService();
@@ -87,6 +87,12 @@ public class PathGrantServiceSaclTests
         var traverseGrantStateService = new TraverseGrantStateService(dbAccessor, _pathInfo, traverseIntentStoreCoordinator);
         var lowIlSync = new LowIntegrityGrantSync(grantCore, traverseCore,
             mandatoryLabelMock.Object, dbAccessor);
+        var denyModeService = new Mock<IAclDenyModeService>();
+        denyModeService.Setup(service => service.GetDeniedRightsPerSid(
+                It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<AppEntry>>(),
+                It.IsAny<bool>()))
+            .Returns(new Dictionary<string, DeniedRights>(StringComparer.OrdinalIgnoreCase));
         var syncService = new PathGrantSyncService(
             dbAccessor,
             grantAceMock.Object,
@@ -94,27 +100,123 @@ public class PathGrantServiceSaclTests
             () => repository,
             _log.Object,
             _pathInfo,
-            traverseGrantOwnerResolver);
+            traverseGrantOwnerResolver,
+            new LambdaDatabaseProvider(() => db),
+            new AppEntryManagedAclScanFilter(
+                new AppEntryAllowAclRuleProvider(new AppEntryAclTargetResolver()),
+                denyModeService.Object));
         var fsOps = new GrantFileSystemOperations(grantCore, grantAceMock.Object,
             ownerMock.Object, mandatoryLabelMock.Object, dbAccessor);
-        var accessEnsurer = new GrantAccessEnsurer(_aclPermission.Object, dbAccessor,
-            aclAccessorMock.Object, _pathInfo, traverseCore, fsOps, _iuResolver.Object, traverseGrantOwnerResolver, () => repository, () => mainGrantStore, new GrantIntentStoreSaveService());
         var grantIntentStoreSaveService = new GrantIntentStoreSaveService();
-        var traverseRestoreWorkflow = new TraverseRestoreWorkflow(
+        var grantIntentStoreMutationService = new GrantIntentStoreMutationService(
+            traverseGrantStateService,
+            () => storeProvider,
+            () => repository,
+            () => mainGrantStore);
+        var grantRuntimeMutationService = new GrantRuntimeMutationService(
             traverseCore,
             dbAccessor,
             containerIuSync,
+            lowIlSync,
+            mandatoryLabelMock.Object,
+            fsOps,
+            grantAceMock.Object,
             _pathInfo,
-            _traverseAcl.Object,
+            traverseGrantStateService);
+        var grantMutationOrderResolver = new GrantMutationOrderResolver();
+        var grantRuntimeSnapshotService = new GrantRuntimeSnapshotService(dbAccessor, traverseGrantOwnerResolver);
+        var grantIntentMutationStateRestorer = new GrantIntentMutationStateRestorer(grantIntentStoreSaveService);
+        var accessEnsurer = new GrantAccessEnsurer(
+            _aclPermission.Object,
+            dbAccessor,
+            aclAccessorMock.Object,
+            _pathInfo,
+            traverseCore,
+            fsOps,
+            _iuResolver.Object,
             traverseGrantOwnerResolver,
+            () => repository,
+            () => mainGrantStore,
+            grantIntentStoreSaveService,
+            grantIntentMutationStateRestorer,
+            grantRuntimeSnapshotService);
+        var grantAclRollbackService = new GrantAclRollbackService(
+            traverseCore,
+            fsOps,
+            aclAccessorMock.Object,
+            grantRuntimeMutationService,
+            grantRuntimeSnapshotService,
+            traverseGrantStateService);
+        var additiveGrantCompensationService = new AdditiveGrantCompensationService(
+            aclAccessorMock.Object,
+            _pathInfo,
+            () => storeProvider,
+            grantIntentStoreMutationService,
+            grantRuntimeSnapshotService,
+            grantIntentStoreSaveService,
+            grantAclRollbackService);
+        var persistedGrantMutationWorkflow = new PersistedGrantMutationWorkflow(
+            traverseCore,
+            mandatoryLabelMock.Object,
+            fsOps,
+            grantAceMock.Object,
+            _pathInfo,
             traverseIntentStoreCoordinator,
             traverseGrantStateService,
             () => storeProvider,
+            grantMutationOrderResolver,
+            grantIntentMutationStateRestorer,
+            grantAclRollbackService,
+            additiveGrantCompensationService,
+            grantIntentStoreMutationService,
+            grantRuntimeMutationService,
+            grantRuntimeSnapshotService,
             grantIntentStoreSaveService);
-        var service = new PathGrantService(grantCore, traverseCore, dbAccessor,
-            containerIuSync, lowIlSync, syncService, mandatoryLabelMock.Object, fsOps, accessEnsurer, grantAceMock.Object, _pathInfo,
-            aclAccessorMock.Object, traverseGrantOwnerResolver, traverseIntentStoreCoordinator, traverseGrantStateService, () => storeProvider, () => repository, () => mainGrantStore,
-            grantIntentStoreSaveService, traverseRestoreWorkflow);
+        var traverseRestoreWorkflow = new TraverseRestoreWorkflow(
+            traverseCore,
+            containerIuSync,
+            traverseIntentStoreCoordinator,
+            traverseGrantStateService,
+            grantMutationOrderResolver,
+            new TraverseRestoreStateRestorer(
+                grantRuntimeSnapshotService,
+                traverseGrantStateService,
+                grantIntentStoreSaveService),
+            new TraverseRestoreAclRollbackService(
+                _pathInfo,
+                _traverseAcl.Object,
+                traverseCore,
+                traverseIntentStoreCoordinator),
+            () => storeProvider,
+            grantIntentStoreSaveService);
+        var traverseIntentStoreMutationService = new TraverseIntentStoreMutationService(
+            traverseCore,
+            containerIuSync,
+            traverseIntentStoreCoordinator,
+            traverseGrantStateService,
+            grantIntentStoreSaveService);
+        var persistedTraverseMutationWorkflow = new PersistedTraverseMutationWorkflow(
+            traverseCore, containerIuSync, traverseIntentStoreCoordinator, traverseGrantStateService,
+            grantRuntimeSnapshotService, () => mainGrantStore,
+            traverseIntentStoreMutationService, grantIntentStoreSaveService);
+        var grantMutatorService = new GrantMutatorService(accessEnsurer, fsOps, persistedGrantMutationWorkflow);
+        var traverseService = new TraverseService(traverseCore, traverseRestoreWorkflow, persistedTraverseMutationWorkflow);
+        var grantIntentSnapshotService = new GrantIntentSnapshotService(
+            grantRuntimeSnapshotService,
+            traverseIntentStoreCoordinator,
+            () => repository);
+        var grantAccountCleanupService = new GrantAccountCleanupService(
+            persistedGrantMutationWorkflow,
+            persistedTraverseMutationWorkflow,
+            grantIntentStoreSaveService);
+        var service = new GrantServiceTestBundle(
+            grantMutatorService,
+            traverseService,
+            grantAceMock.Object,
+            grantIntentSnapshotService,
+            syncService,
+            grantAccountCleanupService,
+            fsOps);
         return (service, mandatoryLabelMock, db);
     }
 

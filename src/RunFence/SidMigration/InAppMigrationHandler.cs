@@ -12,16 +12,19 @@ public class InAppMigrationHandler(SidMigrationApplicationService appService)
         return overlap.Count > 0 ? "Cannot delete SIDs that are also migration targets." : null;
     }
 
-    public async Task<(List<string> messages, bool success, string? saveError)> ApplyAsync(
+    public async Task<InAppMigrationApplyResult> ApplyAsync(
         IReadOnlyList<SidMigrationMapping> mappings,
         IReadOnlyList<string> sidsToDelete,
         SessionContext session)
     {
-        var (workflow, messages, saveError) = await appService.ApplyAsync(mappings, sidsToDelete, session);
+        var result = await appService.ApplyAsync(mappings, sidsToDelete, session);
+        var workflow = result.Workflow;
         if (workflow.Status is SidMigrationWorkflowStatus.Succeeded or SidMigrationWorkflowStatus.AppliedButSaveFailed)
-            return (messages, true, saveError);
+            return new InAppMigrationApplyResult(result.Messages, true, result.SaveError);
 
-        var failed = workflow.Errors.Count > 0 ? workflow.Errors[0] : "Migration failed.";
-        return ([failed], false, saveError);
+        if (workflow.Errors.Count > 0)
+            return new InAppMigrationApplyResult(workflow.Errors, false, result.SaveError);
+
+        return new InAppMigrationApplyResult(["Migration failed."], false, result.SaveError);
     }
 }

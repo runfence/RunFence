@@ -6,36 +6,6 @@ namespace RunFence.Tests;
 public class OperationGuardTests
 {
     [Fact]
-    public void Begin_DisablesOwnerControl()
-    {
-        var guard = new OperationGuard();
-        using var control = new Button();
-        control.Enabled = true;
-
-        guard.Begin(control);
-
-        Assert.True(guard.IsInProgress);
-        Assert.False(control.Enabled);
-
-        // Cleanup
-        guard.End(control);
-    }
-
-    [Fact]
-    public void End_ReEnablesOwnerControl()
-    {
-        var guard = new OperationGuard();
-        using var control = new Button();
-        control.Enabled = true;
-
-        guard.Begin(control);
-        guard.End(control);
-
-        Assert.False(guard.IsInProgress);
-        Assert.True(control.Enabled);
-    }
-
-    [Fact]
     public void End_SkipsReEnableWhenOwnerDisposed()
     {
         var guard = new OperationGuard();

@@ -22,6 +22,12 @@ public sealed class AclApplyExecutionResult
     public bool WasCompleted(AclPendingOperationKind operationKind, string path, bool? isDeny)
         => _completedOperations.Contains(new CompletedOperation(operationKind, path, isDeny));
 
+    public bool HasError(AclPendingOperationKind operationKind, string path, bool? isDeny)
+        => Errors.Any(error =>
+            error.OperationKind == operationKind &&
+            error.IsDeny == isDeny &&
+            string.Equals(error.Path, path, StringComparison.OrdinalIgnoreCase));
+
     public void SetFatalFailure(AclApplyFatalFailure failure)
     {
         ArgumentNullException.ThrowIfNull(failure);

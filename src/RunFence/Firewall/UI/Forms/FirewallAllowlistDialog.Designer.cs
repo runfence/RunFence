@@ -193,15 +193,18 @@ partial class FirewallAllowlistDialog
         _viewBlockedButton.Click += OnViewBlockedClick;
 
         // _ctxAdd
+        _ctxAdd.Name = RunFence.Firewall.UI.FirewallAllowlistContextMenuItemNames.AllowlistAdd;
         _ctxAdd.Text = "Add...";
         _ctxAdd.Click += OnAddClick;
 
         // _ctxRemoveItem
+        _ctxRemoveItem.Name = RunFence.Firewall.UI.FirewallAllowlistContextMenuItemNames.AllowlistRemove;
         _ctxRemoveItem.Text = "Remove";
         _ctxRemoveItem.Visible = false;
         _ctxRemoveItem.Click += OnRemoveClick;
 
         // _ctxExportItem
+        _ctxExportItem.Name = RunFence.Firewall.UI.FirewallAllowlistContextMenuItemNames.AllowlistExport;
         _ctxExportItem.Text = "Export Selected";
         _ctxExportItem.Visible = false;
         _ctxExportItem.Click += OnExportClick;
@@ -261,15 +264,18 @@ partial class FirewallAllowlistDialog
         _portsGrid.ContextMenuStrip = _portsContextMenu;
 
         // _portsCtxAdd
+        _portsCtxAdd.Name = RunFence.Firewall.UI.FirewallAllowlistContextMenuItemNames.PortsAdd;
         _portsCtxAdd.Text = "Add...";
         _portsCtxAdd.Click += OnPortsAddClick;
 
         // _portsCtxRemove
+        _portsCtxRemove.Name = RunFence.Firewall.UI.FirewallAllowlistContextMenuItemNames.PortsRemove;
         _portsCtxRemove.Text = "Remove";
         _portsCtxRemove.Visible = false;
         _portsCtxRemove.Click += OnPortsRemoveClick;
 
         // _portsCtxExport
+        _portsCtxExport.Name = RunFence.Firewall.UI.FirewallAllowlistContextMenuItemNames.PortsExport;
         _portsCtxExport.Text = "Export Selected";
         _portsCtxExport.Visible = false;
         _portsCtxExport.Click += OnPortsExportClick;

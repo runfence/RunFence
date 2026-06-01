@@ -12,6 +12,11 @@ partial class AppPathBrowseControl
     private Button _browseButton;
     private Button _discoverButton;
 
+    public AppPathBrowseControl()
+    {
+        InitializeComponent();
+    }
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
@@ -33,12 +38,14 @@ partial class AppPathBrowseControl
         _browseButton.Text = "Browse\u2026";
         _browseButton.Width = 72;
         _browseButton.Dock = DockStyle.Right;
+        _browseButton.Enabled = false;
         _browseButton.FlatStyle = FlatStyle.System;
         _browseButton.Click += OnBrowseClick;
 
         _discoverButton.Text = "Discover\u2026";
         _discoverButton.Width = 88;
         _discoverButton.Dock = DockStyle.Right;
+        _discoverButton.Enabled = false;
         _discoverButton.FlatStyle = FlatStyle.System;
         _discoverButton.Click += OnDiscoverClick;
 

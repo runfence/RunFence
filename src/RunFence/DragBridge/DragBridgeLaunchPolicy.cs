@@ -14,7 +14,9 @@ public static class DragBridgeLaunchPolicy
             return PrivilegeLevel.Isolated;
 
         if (ownerInfo.IntegrityLevel >= NativeTokenHelper.MandatoryLevelHigh)
-            return PrivilegeLevel.HighestAllowed;
+            return ownerInfo.IsElevated == false
+                ? PrivilegeLevel.HighIntegrity
+                : PrivilegeLevel.HighestAllowed;
 
         if (ownerInfo.IntegrityLevel >= NativeTokenHelper.MandatoryLevelMedium)
             return PrivilegeLevel.Basic;

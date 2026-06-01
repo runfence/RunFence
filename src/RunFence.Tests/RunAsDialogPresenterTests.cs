@@ -27,7 +27,7 @@ public class RunAsDialogPresenterTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         var modalCoordinator = new Mock<IModalCoordinator>();
         var appState = new Mock<IAppStateProvider>();
@@ -46,6 +46,7 @@ public class RunAsDialogPresenterTests : IDisposable
                 appState.Object,
                 session,
                 new ByteArrayCredentialEncryptionSpanAdapter(new Mock<IByteArrayCredentialEncryptionService>().Object),
+                new Mock<IDatabaseService>().Object,
                 new Mock<IDatabaseService>().Object,
                 new Mock<ILoggingService>().Object),
             appState.Object,

@@ -147,14 +147,14 @@ public class ProcessRowGridUpdater(ProcessCommandLineFormatter commandLineFormat
         if (foreColor != Color.Empty)
             row.DefaultCellStyle.ForeColor = foreColor;
 
-        row.Cells["Account"].Value = "";
-        row.Cells["Credential"].Value = AccountGridHelper.EmptyIcon;
-        row.Cells["Import"] = CreateEmptyCell();
-        row.Cells["Logon"] = CreateEmptyCell();
-        row.Cells["colAllowInternet"] = CreateEmptyCell();
-        row.Cells["Apps"].Value = "";
-        row.Cells["ProfilePath"].Value = "";
-        row.Cells["SID"].Value = "";
+        row.Cells[AccountGridColumns.Account].Value = "";
+        row.Cells[AccountGridColumns.Credential].Value = AccountGridHelper.EmptyIcon;
+        row.Cells[AccountGridColumns.Import] = CreateEmptyCell();
+        row.Cells[AccountGridColumns.Logon] = CreateEmptyCell();
+        row.Cells[AccountGridColumns.AllowInternet] = CreateEmptyCell();
+        row.Cells[AccountGridColumns.Apps].Value = "";
+        row.Cells[AccountGridColumns.ProfilePath].Value = "";
+        row.Cells[AccountGridColumns.Sid].Value = "";
     }
 
     private void UpdateProcessRow(DataGridViewRow row, ProcessInfo process, bool isLast)
@@ -163,7 +163,7 @@ public class ProcessRowGridUpdater(ProcessCommandLineFormatter commandLineFormat
             return;
         var displayLine = FormatDisplayLine(process);
         row.Tag = new ProcessRow(process, pr.OwnerSid, isLast, displayLine, pr.PidColumnChars);
-        row.Cells["Account"].Value = "";
+        row.Cells[AccountGridColumns.Account].Value = "";
     }
 
     private string FormatDisplayLine(ProcessInfo process)

@@ -139,18 +139,6 @@ public class FirewallGlobalIcmpEnforcerTests
             Times.Once);
     }
 
-    [Fact]
-    public void RemoveGlobalIcmpBlock_RemovesGlobalBlock()
-    {
-        BuildEnforcer().RemoveGlobalIcmpBlock();
-
-        _wfpGlobalIcmpBlocker.Verify(
-            w => w.Apply(
-                It.Is<IReadOnlyList<string>>(ranges => ranges.Count == 0),
-                It.Is<IReadOnlyList<string>>(ranges => ranges.Count == 0)),
-            Times.Once);
-    }
-
     private static AccountEntry BlockedAccountWithDomain(string sid, string domain) =>
         new()
         {

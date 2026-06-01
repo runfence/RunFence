@@ -104,9 +104,10 @@ public class WizardAccountSetupHelper(
             progress.ReportStatus("Installing packages...");
             if (session.CredentialStore.Credentials.Any(c => string.Equals(c.Sid, request.Sid, StringComparison.OrdinalIgnoreCase)))
             {
-                var warning = await Task.Run(() => packageInstallService.InstallPackages(
+                var warning = await packageInstallService.InstallPackagesAsync(
                     request.InstallPackages,
-                    new AccountLaunchIdentity(request.Sid)));
+                    new AccountLaunchIdentity(request.Sid),
+                    progress.CancellationToken);
                 var formattedWarning = LaunchExecutionWarningFormatter.Format("The package installer", warning);
                 if (formattedWarning != null)
                     progress.ReportWarning(formattedWarning);
@@ -135,7 +136,10 @@ public class WizardAccountSetupHelper(
         {
             if (session.CredentialStore.Credentials.Any(c => string.Equals(c.Sid, request.Sid, StringComparison.OrdinalIgnoreCase)))
             {
-                var warning = packageInstallService.InstallPackages(request.InstallPackages, new AccountLaunchIdentity(request.Sid));
+                var warning = await packageInstallService.InstallPackagesAsync(
+                    request.InstallPackages,
+                    new AccountLaunchIdentity(request.Sid),
+                    progress.CancellationToken);
                 var formattedWarning = LaunchExecutionWarningFormatter.Format("The package installer", warning);
                 if (formattedWarning != null)
                     progress.ReportWarning(formattedWarning);
@@ -164,7 +168,10 @@ public class WizardAccountSetupHelper(
 
         sessionSaver.SaveConfig();
         progress.ReportStatus("Installing packages (internet will be blocked after setup completes)...");
-        var warning = await Task.Run(() => packageInstallService.InstallPackages(packages, new AccountLaunchIdentity(sid)));
+        var warning = await packageInstallService.InstallPackagesAsync(
+            packages,
+            new AccountLaunchIdentity(sid),
+            progress.CancellationToken);
         var formattedWarning = LaunchExecutionWarningFormatter.Format("The package installer", warning);
         if (formattedWarning != null)
             progress.ReportWarning(formattedWarning);

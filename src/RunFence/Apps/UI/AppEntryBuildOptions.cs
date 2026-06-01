@@ -30,7 +30,8 @@ public record AppEntryBuildOptions(
     Dictionary<string, string>? EnvironmentVariables = null,
     string? ArgumentsTemplate = null,
     List<string>? PathPrefixes = null,
-    List<AppEntry>? ExistingApps = null)
+    List<AppEntry>? ExistingApps = null,
+    AppEntry? PreviousApp = null)
 {
     /// <summary>
     /// Creates an <see cref="AppEntryBuildOptions"/> with sensible defaults for use from wizard templates.

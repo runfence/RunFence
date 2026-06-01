@@ -12,6 +12,7 @@ public sealed record AppEditDialogInputSnapshot(
     string? SelectedAppContainerName,
     bool ManageShortcuts,
     PrivilegeLevel? SelectedPrivilegeLevel,
+    PrivilegeLevel? PersistedPrivilegeLevel,
     bool OverrideIpcCallers,
     string DefaultArgsText,
     bool AllowPassArgs,
@@ -25,4 +26,10 @@ public sealed record AppEditDialogInputSnapshot(
     string? DuplicateEnvironmentVariableName,
     Dictionary<string, string>? EnvironmentVariables,
     List<string>? IpcCallers,
-    AclConfigSectionSnapshot AclConfig);
+    AclConfigSectionSnapshot AclConfig,
+    IReadOnlyList<HandlerAssociationItem>? HandlerMappings,
+    bool IsUrlScheme,
+    AclTarget AclTarget,
+    AclMode AclMode,
+    bool RestrictAppEntryAcl,
+    bool ReplacePrefixes);

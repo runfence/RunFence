@@ -137,4 +137,5 @@ public class LoggingServiceTests : IDisposable
         Assert.Contains("[FATAL]", content);
         Assert.Contains("critical failure", content);
     }
+
 }

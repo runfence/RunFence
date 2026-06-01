@@ -5,6 +5,7 @@ using RunFence.Apps.Shortcuts;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.DragBridge;
+using RunFence.ForegroundMarker;
 using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Licensing;
@@ -43,7 +44,7 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _database.Settings.AutoLockInBackground = true;
         _database.Settings.AutoLockTimeoutMinutes = 5;
         var credentialUnlockService = new Mock<ICredentialUnlockService>();
@@ -466,7 +467,15 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
                 new SidDisplayNameResolver(mockSidResolver.Object, mockProfilePathResolver.Object),
                 new Mock<IIconService>().Object,
                 new TrayMenuDiscoveryBuilder(new Mock<IShortcutIconHelper>().Object)),
-            new Mock<IInputInjectionBlockerService>().Object);
+            new Mock<IInputInjectionBlockerService>().Object,
+            new TrayIconOverlayRenderer());
+        var foregroundMarkerTrayStatusController = new ForegroundMarkerTrayStatusController(
+            notifyIcon,
+            trayIconManager,
+            Mock.Of<IForegroundPrivilegeMarkerStateSource>(
+                source => source.CurrentState == ForegroundPrivilegeMarkerState.Inactive),
+            new Mock<ISidNameCacheService>().Object,
+            new ApplicationCaptionTextBuilder());
 
         var accountToolResolver = new AccountToolResolver(new Mock<IProfilePathResolver>().Object);
         var mockLaunchFacade = new Mock<ILaunchFacade>();
@@ -476,17 +485,27 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
         mockLaunchFacade
             .Setup(f => f.LaunchFolderBrowser(It.IsAny<LaunchIdentity>(), It.IsAny<string?>(), It.IsAny<Func<string, string, bool>?>(), It.IsAny<bool>()))
             .Returns(() => new LaunchExecutionResult(LaunchExecutionStatus.ProcessStarted, null));
+        var windowsTerminalAccountStateService = new Mock<IWindowsTerminalAccountStateService>();
+        windowsTerminalAccountStateService.Setup(service => service.ResolveLaunchTarget(It.IsAny<string>())).Returns("cmd.exe");
+        windowsTerminalAccountStateService.Setup(service => service.ResolveLaunchTarget(It.IsAny<AccountLaunchIdentity>())).Returns("cmd.exe");
         var packageInstallService = new PackageInstallService(
             Mock.Of<IPackageInstallLauncher>(),
             Mock.Of<IPackageInstallScriptStore>(),
-            accountToolResolver);
+            accountToolResolver,
+            windowsTerminalAccountStateService.Object,
+            Mock.Of<IWindowsTerminalDeploymentService>());
+        var windowsTerminalLaunchRefreshService = new Mock<IWindowsTerminalLaunchRefreshService>();
         var trayLaunchHandler = new TrayLaunchHandler(
             new Mock<IAppEntryLauncher>().Object,
             mockLaunchFacade.Object,
             new ToolLauncher(
                 mockLaunchFacade.Object,
                 accountToolResolver,
+                windowsTerminalAccountStateService.Object,
+                new TerminalLaunchIdentitySelector(Mock.Of<IDatabaseProvider>(), new WindowsTerminalDeploymentPaths(new TestProgramDataKnownPathResolver(Path.GetTempPath()))),
                 packageInstallService,
+                Mock.Of<IWindowsTerminalDeploymentProgressRunner>(),
+                windowsTerminalLaunchRefreshService.Object,
                 new Mock<ILaunchFeedbackPresenter>().Object,
                 new Mock<ILoggingService>().Object),
             new Mock<ILaunchFeedbackPresenter>().Object,
@@ -494,7 +513,7 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
             new Mock<ILoggingService>().Object);
 
         var discoveryRefreshManager = new DiscoveryRefreshManager(
-            new StartMenuDiscoveryService(new Mock<IProfilePathResolver>().Object, new Mock<IShortcutComHelper>().Object, new Mock<ILoggingService>().Object),
+            new StartMenuDiscoveryService(new Mock<IProfilePathResolver>().Object, new Mock<IShortcutGateway>().Object, new Mock<ILoggingService>().Object),
             new Mock<ISessionProvider>().Object,
             new Mock<ILoggingService>().Object);
 
@@ -503,13 +522,21 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
             trayLaunchHandler,
             notifyIcon,
             trayIconManager,
+            new ApplicationCaptionTextBuilder(),
+            foregroundMarkerTrayStatusController,
             new Mock<IIdleMonitorService>().Object,
             discoveryRefreshManager,
             _session,
             _licenseService.Object,
+            CreateFullModeIdentityFactory(),
             new Mock<IGlobalHotkeyService>().Object,
             windowRequestHandler,
-            autoLockCoordinator);
+            autoLockCoordinator,
+            new TrayIdleMonitorCoordinator(
+                new Mock<IIdleMonitorService>().Object,
+                _session,
+                _licenseService.Object,
+                Mock.Of<IApplicationExitService>()));
 
         lockManager.ShowWindowRequested += windowRequestHandler.ShowAndActivate;
         lockManager.ShowWindowUnlockedRequested += windowRequestHandler.ShowAndActivateForUnlock;
@@ -519,6 +546,14 @@ public class MainFormTrayHandlerAutoLockTests : IDisposable
         windowRequestHandler.SetStartupComplete();
 
         return new HandlerContext(windowRequestHandler, autoLockCoordinator, handler);
+    }
+
+    private static FullModeAccountLaunchIdentityFactory CreateFullModeIdentityFactory()
+    {
+        var groupQuery = new Mock<ILocalGroupQueryService>();
+        groupQuery.Setup(service => service.GetGroupsForUser(It.IsAny<string>()))
+            .Returns([new LocalUserAccount("Users", "S-1-5-32-545")]);
+        return new FullModeAccountLaunchIdentityFactory(groupQuery.Object);
     }
 
     private sealed class HandlerContext(

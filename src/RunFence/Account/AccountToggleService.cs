@@ -15,7 +15,9 @@ public class AccountToggleService(
     ILicenseService licenseService,
     IAccountFirewallToggle firewallToggle,
     ISessionProvider sessionProvider,
-    IPathGrantService pathGrantService) : IAccountToggleService
+    IGrantSyncService grantSyncService,
+    IGrantMutatorService grantMutatorService,
+    ITraverseService traverseService) : IAccountToggleService
 {
     public SetLogonBlockedResult SetLogonBlocked(string sid, string username, bool blocked)
     {
@@ -122,7 +124,7 @@ public class AccountToggleService(
         if (blocked)
         {
             // ACEs were already applied by the restriction service/helper; track the grant in DB from NTFS state.
-            pathGrantService.UpdateFromPath(result.ScriptPath, sid);
+            grantSyncService.UpdateFromPath(result.ScriptPath, sid);
             if (result.TraversePaths is { Count: > 0 })
             {
                 var scriptsDir = Path.GetDirectoryName(result.ScriptPath)!;
@@ -134,15 +136,15 @@ public class AccountToggleService(
         }
 
         // ACEs were already removed by the restriction service/helper; remove DB tracking only.
-        var untrackGrantResult = pathGrantService.UntrackGrant(sid, result.ScriptPath, isDeny: false);
+        var untrackGrantResult = grantMutatorService.UntrackGrant(sid, result.ScriptPath, isDeny: false);
         LogGrantWarnings($"logon grant untrack for SID '{sid}'", untrackGrantResult.Warnings);
         var trackedScriptsDir = Path.GetDirectoryName(result.ScriptPath);
         if (!string.IsNullOrEmpty(trackedScriptsDir))
         {
             // Remove traverse entry for scriptsDir and clean up orphaned ancestor entries.
-            var untrackTraverseResult = pathGrantService.UntrackTraverse(sid, trackedScriptsDir);
+            var untrackTraverseResult = traverseService.UntrackTraverse(sid, trackedScriptsDir);
             LogGrantWarnings($"logon traverse untrack for SID '{sid}'", untrackTraverseResult.Warnings);
-            pathGrantService.CleanupOrphanedTraverse(sid, trackedScriptsDir);
+            traverseService.CleanupOrphanedTraverse(sid, trackedScriptsDir);
         }
 
         database.RemoveAccountIfEmpty(sid);

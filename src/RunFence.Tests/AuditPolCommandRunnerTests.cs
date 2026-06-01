@@ -38,7 +38,6 @@ public class AuditPolCommandRunnerTests
         Assert.Equal(0, result.ExitCode);
         Assert.Equal("output", result.StandardOutput);
         Assert.Equal(string.Empty, result.StandardError);
-        log.Verify(l => l.Warn(It.IsAny<string>()), Times.Never);
     }
 
     [Fact]

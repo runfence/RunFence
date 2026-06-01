@@ -5,7 +5,6 @@ using RunFence.Startup;
 using RunFence.Wizard;
 using RunFence.Wizard.Templates;
 using RunFence.Wizard.UI;
-using RunFence.Wizard.UI.Forms;
 
 namespace RunFence.Startup.Modules;
 
@@ -62,7 +61,7 @@ public class WizardModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<WizardAccountPickerStepFactory>()
+        builder.RegisterType<WizardAccountPickerService>()
             .AsSelf()
             .SingleInstance();
 
@@ -82,6 +81,10 @@ public class WizardModule : Module
             .AsSelf()
             .SingleInstance();
 
+        builder.RegisterType<WizardTemplateSetupBuilder>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<AiAgentFirewallOrchestrator>()
             .AsSelf()
             .SingleInstance();
@@ -95,20 +98,5 @@ public class WizardModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<WizardCredentialCollector>()
-            .AsSelf()
-            .InstancePerDependency();
-
-        builder.RegisterType<WizardExecutionHandler>()
-            .AsSelf()
-            .InstancePerDependency();
-
-        builder.RegisterType<WizardNavigationHandler>()
-            .AsSelf()
-            .InstancePerDependency();
-
-        builder.RegisterType<WizardDialog>()
-            .AsSelf()
-            .InstancePerDependency();
     }
 }

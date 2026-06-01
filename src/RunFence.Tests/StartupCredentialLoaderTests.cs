@@ -54,7 +54,7 @@ public class StartupCredentialLoaderTests : IDisposable
     }
 
     private StartupCredentialLoader BuildLoader() =>
-        new(_ui.Object, _databaseService.Object, _loadedGoodBackupStore.Object, _configPaths.Object,
+        new(_ui.Object, _databaseService.Object, _databaseService.Object, _loadedGoodBackupStore.Object, _configPaths.Object,
             _rememberPinService.Object, _pinService, _encryptionService, _log.Object);
 
     private static SecureSecret CreateSecret(byte[] bytes)

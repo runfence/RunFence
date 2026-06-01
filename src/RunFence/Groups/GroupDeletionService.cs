@@ -10,7 +10,8 @@ public class GroupDeletionService(
     ILocalGroupMutationService groupMembership,
     ISessionProvider sessionProvider,
     IAclService aclService,
-    IPathGrantService pathGrantService,
+    IGrantMutatorService grantMutatorService,
+    ITraverseService traverseService,
     ISessionSaver? sessionSaver,
     ILoggingService log)
 {
@@ -76,7 +77,7 @@ public class GroupDeletionService(
 
                 if (grant.IsTraverseOnly)
                 {
-                    var removeResult = pathGrantService.RemoveTraverse(sid, grant.Path);
+                    var removeResult = traverseService.RemoveTraverse(sid, grant.Path);
                     AppendGrantCleanupWarnings(warnings, removeResult.Warnings);
                     if (!removeResult.DatabaseModified)
                     {
@@ -86,7 +87,7 @@ public class GroupDeletionService(
                 }
                 else
                 {
-                    var removeResult = pathGrantService.RemoveGrant(sid, grant.Path, grant.IsDeny);
+                    var removeResult = grantMutatorService.RemoveGrant(sid, grant.Path, grant.IsDeny);
                     AppendGrantCleanupWarnings(warnings, removeResult.Warnings);
                     if (!removeResult.DatabaseModified)
                     {
@@ -179,7 +180,12 @@ public class GroupDeletionService(
                 groups.RemoveAll(groupSid => SidComparer.SidEquals(groupSid, sid));
         }
 
-        GroupDatabaseHelper.CleanupDeletedGroupData(sid, database);
+        var groupAccount = database.GetAccount(sid);
+        if (groupAccount != null)
+        {
+            groupAccount.Grants.Clear();
+            database.RemoveAccountIfEmpty(sid);
+        }
 
         database.SidNames.Remove(sid);
     }

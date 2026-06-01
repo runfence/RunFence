@@ -29,12 +29,12 @@ public class AssociationAutoSetService(
     Func<IHandlerMappingService> handlerMappingService,
     IAssociationPolicyService associationPolicyService,
     ILoggingService log,
-    AssociationRegistryWriter registryWriter,
-    RegistryKey? hkuOverride = null,
+    IAssociationRegistryWriter registryWriter,
+    IRegistryKey? hkuOverride = null,
     string? launcherPathOverride = null)
     : IAssociationAutoSetService
 {
-    private readonly RegistryKey _hku = hkuOverride ?? Registry.Users;
+    private readonly IRegistryKey _hku = hkuOverride ?? new WindowsRegistryKey(Registry.Users);
     private IHandlerMappingService HandlerMappingService => handlerMappingService();
 
     private readonly HashSet<string> _cleanedSids = new(StringComparer.OrdinalIgnoreCase);
@@ -237,6 +237,70 @@ public class AssociationAutoSetService(
         {
             log.Warn($"AssociationAutoSetService: could not load hive for SID {sid}, skipping");
             return warnings;
+        }
+
+        string? firstWritableKey = null;
+        if (launcherPath != null)
+        {
+            foreach (var key in mappings.Keys)
+            {
+                if (!AppHandlerRegistrationService.IsValidKey(key))
+                    continue;
+
+                if (key.StartsWith('.')
+                        ? NeedsExtensionAutoSet(sid, key)
+                        : NeedsProtocolAutoSet(sid, key, launcherPath))
+                {
+                    firstWritableKey = key;
+                    break;
+                }
+            }
+        }
+
+        if (firstWritableKey == null)
+        {
+            foreach (var (key, entry) in directMappings)
+            {
+                if (!AppHandlerRegistrationService.IsValidKey(key))
+                    continue;
+
+                if (key.StartsWith('.'))
+                {
+                    if (entry.ClassName != null && NeedsDirectClassExtensionAutoSet(sid, key, entry.ClassName))
+                    {
+                        firstWritableKey = key;
+                        break;
+                    }
+
+                    if (entry.Command != null && NeedsDirectCommandExtensionAutoSet(sid, key, entry.Command))
+                    {
+                        firstWritableKey = key;
+                        break;
+                    }
+                }
+                else if (entry.Command != null && NeedsDirectCommandProtocolAutoSet(sid, key, entry.Command))
+                {
+                    firstWritableKey = key;
+                    break;
+                }
+            }
+        }
+
+        if (firstWritableKey != null)
+        {
+            try
+            {
+                using var _ = _hku.CreateSubKey($@"{sid}\Software\Classes");
+            }
+            catch (Exception ex)
+            {
+                if (!TryCreateExpectedAccessDeniedWarning(sid, firstWritableKey, ex, out var warning))
+                    throw;
+
+                warnings.Add(warning);
+                log.Warn(warning);
+                return warnings;
+            }
         }
 
         if (!_cleanedSids.Contains(sid))

@@ -32,7 +32,9 @@
         <ProjectReference Include="..\RunFence.FolderBrowser\RunFence.FolderBrowser.csproj"/>
         <ProjectReference Include="..\RunFence.SecurityScanner\RunFence.SecurityScanner.csproj"/>
         <ProjectReference Include="..\RunFence.ProfileKeeper\RunFence.ProfileKeeper.csproj"/>
+        <ProjectReference Include="..\RunFence.AppxLauncher\RunFence.AppxLauncher.csproj"/>
         <ProjectReference Include="..\preftrans\preftrans.csproj"/>
+        <ProjectReference Include="..\RunFence.PinHelper\RunFence.PinHelper.csproj"/>
     </ItemGroup>
 
 </Project>

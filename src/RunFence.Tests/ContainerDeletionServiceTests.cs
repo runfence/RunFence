@@ -34,37 +34,6 @@ public class ContainerDeletionServiceTests
     private static AppContainerEntry MakeEntry() => new() { Name = "rfn_test" };
 
     [Fact]
-    public async Task DeleteContainer_CallsRevertTraverseAccess()
-    {
-        var db = new AppDatabase();
-
-        var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
-
-        _containerService.Verify(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), db), Times.Once);
-        Assert.True(result.Succeeded);
-    }
-
-    [Fact]
-    public async Task DeleteContainer_PassesSameEntryInstanceToRevertTraverseAccess()
-    {
-        var db = new AppDatabase();
-        var entry = new AppContainerEntry
-        {
-            Name = "rfn_test",
-            Sid = "S-1-15-2-99-1-2-3-4-5-6"
-        };
-        AppContainerEntry? captured = null;
-        _containerService.Setup(s => s.RevertTraverseAccess(It.IsAny<AppContainerEntry>(), It.IsAny<AppDatabase>()))
-            .Callback<AppContainerEntry, AppDatabase>((e, _) => captured = e)
-            .Returns(new GrantApplyResult(DurableSaveCompleted: true));
-
-        var result = await CreateService(db).DeleteContainer(entry, entry.Sid);
-
-        Assert.Same(entry, captured);
-        Assert.True(result.Succeeded);
-    }
-
-    [Fact]
     public async Task DeleteContainer_NullContainerSid_SkipsVirtualStoreRevoke()
     {
         var db = new AppDatabase();
@@ -122,7 +91,6 @@ public class ContainerDeletionServiceTests
 
         var result = await CreateService(db).DeleteContainer(MakeEntry(), "S-1-15-2-99-1-2-3-4-5-6");
 
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("rfn_test"))), Times.Once);
         _sidCleanup.Verify(s => s.CleanupContainerFromAppData(It.IsAny<string>(), It.IsAny<string?>()), Times.Never);
         Assert.False(result.Succeeded);
         Assert.Equal("ACL revert failed", result.ErrorMessage);

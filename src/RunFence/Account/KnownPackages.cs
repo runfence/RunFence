@@ -1,4 +1,6 @@
 using System.Reflection;
+using RunFence.Acl;
+using RunFence.Core;
 
 namespace RunFence.Account;
 
@@ -20,12 +22,8 @@ public static class KnownPackages
 
     public static readonly InstallablePackage WindowsTerminal = new(
         "Windows Terminal",
-        """
-        Write-Host "> Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.WindowsTerminal_8wekyb3d8bbwe'"
-        Add-AppxPackage -RegisterByFamilyName -MainPackage 'Microsoft.WindowsTerminal_8wekyb3d8bbwe' -ErrorAction Stop
-        """,
-        DetectExeName: "wt.exe",
-        RequiredPackages: [Winget]);
+        BuildWindowsTerminalPathRegistrationCommand(),
+        DetectExeName: null);
 
     // Intentionally uses the embedded upstream package installer source for this known package.
     public static readonly InstallablePackage ClaudeCode = new(
@@ -54,6 +52,35 @@ public static class KnownPackages
             ?? throw new InvalidOperationException($"Embedded resource '{resourceName}' not found");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd();
+    }
+
+    private static string BuildWindowsTerminalPathRegistrationCommand()
+    {
+        var sharedPath = Path.Combine(
+            PathConstants.ProgramDataDir,
+            ProgramDataPolicies.WindowsTerminalShared.RelativePath,
+            "path").Replace("'", "''", StringComparison.Ordinal);
+        return
+            $"$sharedPath = '{sharedPath}'\n" +
+            "$currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')\n" +
+            "$entries = New-Object System.Collections.Generic.List[string]\n" +
+            "$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)\n" +
+            "if (-not [string]::IsNullOrWhiteSpace($currentPath)) {\n" +
+            "    foreach ($entry in ($currentPath -split ';')) {\n" +
+            "        $trimmed = $entry.Trim().Trim('\"')\n" +
+            "        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }\n" +
+            "        $normalized = $trimmed.TrimEnd('\\')\n" +
+            "        if (-not $seen.Add($normalized)) { continue }\n" +
+            "        $entries.Add($trimmed)\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "$alreadyPresent = $seen.Contains($sharedPath.TrimEnd('\\'))\n" +
+            "\n" +
+            "if (-not $alreadyPresent) {\n" +
+            "    $entries.Add($sharedPath)\n" +
+            "}\n" +
+            "[Environment]::SetEnvironmentVariable('Path', [string]::Join(';', $entries), 'User')\n";
     }
 
     private static void AddPackageWithDependencies(

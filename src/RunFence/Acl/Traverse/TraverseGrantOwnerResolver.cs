@@ -8,20 +8,16 @@ public class TraverseGrantOwnerResolver : ITraverseGrantOwnerResolver
         => AclHelper.IsSpecificContainerSid(sid);
 
     public string ResolveStorageOwnerSid(string sid)
-        => UsesSharedContainerTraverse(sid)
-            ? AclHelper.AllApplicationPackagesSid
-            : sid;
+        => TraverseEntryLookup.ResolveStorageOwnerSid(sid);
 
     public string ResolveAclSid(string sid)
-        => UsesSharedContainerTraverse(sid)
-            ? AclHelper.AllApplicationPackagesSid
-            : sid;
+        => TraverseEntryLookup.ResolveAclSid(sid);
 
     public List<GrantedPathEntry> GetOrCreateTraverseStore(AppDatabase database, string sid)
-        => database.GetOrCreateAccount(ResolveStorageOwnerSid(sid)).Grants;
+        => TraverseEntryLookup.GetOrCreateTraverseStore(database, sid);
 
     public List<GrantedPathEntry> GetTraverseStoreOrEmpty(AppDatabase database, string sid)
-        => database.GetAccount(ResolveStorageOwnerSid(sid))?.Grants ?? [];
+        => TraverseEntryLookup.GetTraverseStoreOrEmpty(database, sid);
 
     public IEnumerable<AccountEntry> GetGrantOwnersForTraverseCleanup(AppDatabase database, string sid)
         => UsesSharedContainerTraverse(sid)
@@ -29,38 +25,54 @@ public class TraverseGrantOwnerResolver : ITraverseGrantOwnerResolver
             : database.GetAccount(sid) is { } account ? [account] : [];
 
     public bool EntryAppliesToSid(GrantedPathEntry entry, string sid, bool includeManualSharedEntries)
-    {
-        if (!UsesSharedContainerTraverse(sid))
-            return true;
-
-        if (entry.SourceSids == null)
-            return includeManualSharedEntries;
-
-        return entry.SourceSids.Contains(sid, StringComparer.OrdinalIgnoreCase);
-    }
+        => TraverseEntryLookup.EntryAppliesToSid(entry, sid, includeManualSharedEntries);
 
     public GrantedPathEntry? FindTraverseEntry(
         AppDatabase database,
         string sid,
         string normalizedPath,
         bool includeManualSharedEntries = false)
+        => TraverseEntryLookup.FindTraverseEntryInDb(database, sid, normalizedPath, includeManualSharedEntries);
+
+    public void RestoreTraverseEntry(
+        AppDatabase database,
+        string sid,
+        string normalizedPath,
+        GrantedPathEntry? snapshot)
     {
-        var matches = GetTraverseStoreOrEmpty(database, sid)
-            .Where(entry =>
-                entry.IsTraverseOnly &&
-                string.Equals(entry.Path, normalizedPath, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (!UsesSharedContainerTraverse(sid))
-            return matches.FirstOrDefault();
+        var entries = snapshot != null
+            ? GetOrCreateTraverseStore(database, sid)
+            : GetTraverseStoreOrEmpty(database, sid);
+        var currentEntry = FindTraverseEntry(
+            database,
+            sid,
+            normalizedPath,
+            includeManualSharedEntries: true);
+        if (currentEntry != null)
+            entries.Remove(currentEntry);
 
-        var sourceTrackedEntry = matches.FirstOrDefault(entry =>
-            entry.SourceSids?.Contains(sid, StringComparer.OrdinalIgnoreCase) == true);
-        if (sourceTrackedEntry != null)
-            return sourceTrackedEntry;
+        if (snapshot != null)
+        {
+            var existingSnapshotEntry = entries.FirstOrDefault(entry => SameTraverseIdentity(entry, snapshot));
+            if (existingSnapshotEntry != null)
+                entries.Remove(existingSnapshotEntry);
 
-        if (!includeManualSharedEntries)
-            return null;
+            entries.Add(snapshot.Clone());
+        }
+    }
 
-        return matches.FirstOrDefault(entry => entry.SourceSids == null);
+    private static bool SameTraverseIdentity(GrantedPathEntry entry, GrantedPathEntry snapshot)
+        => entry.IsTraverseOnly &&
+           snapshot.IsTraverseOnly &&
+           string.Equals(entry.Path, snapshot.Path, StringComparison.OrdinalIgnoreCase) &&
+           SameSidSet(entry.SourceSids, snapshot.SourceSids);
+
+    private static bool SameSidSet(IReadOnlyList<string>? left, IReadOnlyList<string>? right)
+    {
+        if (left == null || right == null)
+            return left == right;
+
+        return left.Count == right.Count &&
+               left.All(sid => right.Contains(sid, StringComparer.OrdinalIgnoreCase));
     }
 }

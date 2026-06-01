@@ -1,4 +1,6 @@
 using System.Security.AccessControl;
+using Moq;
+using RunFence.Core;
 using RunFence.SecurityScanner;
 using RunFence.Tests.Helpers;
 using Scanner = RunFence.SecurityScanner.SecurityScanner;
@@ -132,5 +134,47 @@ public sealed class SecurityScannerTestDataBuilder
         return this;
     }
 
-    public Scanner Build() => new(_dataAccess);
+    public Scanner Build()
+    {
+        var log = Mock.Of<ILoggingService>();
+        var aclCheck = new AclCheckHelper(_dataAccess, _dataAccess, log);
+        var autorunChecker = new AutorunChecker(_dataAccess, aclCheck, log);
+        var perUserScanner = new PerUserScanner(
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            aclCheck,
+            autorunChecker,
+            log);
+        var registryScanner = new MachineLevelRegistryScanner(
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            aclCheck,
+            log);
+        var policyScanner = new MachineLevelPolicyScanner(
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            _dataAccess,
+            aclCheck,
+            perUserScanner,
+            log);
+        var diskRootScanner = new DiskRootScanner(_dataAccess, _dataAccess, aclCheck, log);
+
+        return new Scanner(
+            _dataAccess,
+            aclCheck,
+            autorunChecker,
+            perUserScanner,
+            registryScanner,
+            policyScanner,
+            diskRootScanner);
+    }
 }

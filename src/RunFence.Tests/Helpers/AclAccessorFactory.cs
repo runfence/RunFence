@@ -5,5 +5,7 @@ namespace RunFence.Tests;
 internal static class AclAccessorFactory
 {
     public static AclAccessor Create() =>
-        new(new BackupPrivilegeSecurityDescriptorAccessor(new BackupPrivilegeSecurityNative()));
+        new(
+            new AclAccessorNative(),
+            new BackupPrivilegeSecurityDescriptorAccessor(new BackupPrivilegeSecurityNative()));
 }

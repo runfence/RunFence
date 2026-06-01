@@ -39,7 +39,7 @@ public class AccountDeletionOrchestratorTests : IDisposable
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(_pinKey);
+            }.WithClonedPinDerivedKey(_pinKey);
             var sessionProvider = new Mock<ISessionProvider>(MockBehavior.Strict);
             sessionProvider.Setup(s => s.GetSession()).Returns(session);
 

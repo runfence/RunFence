@@ -4,18 +4,18 @@ using RunFence.Infrastructure;
 namespace RunFence.Acl;
 
 /// <summary>
-/// Thin file system enumerator that calls <see cref="IPathGrantService.UpdateFromPath"/>
+/// Thin file system enumerator that calls <see cref="IGrantSyncService.UpdateFromPath"/>
 /// for each discovered path, delegating all ACL reading and DB classification to the service.
 /// Successful scans save tracked changes once at the workflow boundary.
 /// </summary>
 public class AclManagerScanService(
-    IPathGrantService pathGrantService,
+    IGrantSyncService grantSyncService,
     Func<ISessionSaver> sessionSaver,
     ILoggingService log) : IAclManagerScanService
 {
     /// <summary>
     /// Enumerates all entries under <paramref name="rootPath"/> recursively and all ancestor
-    /// directories up to the drive root, calling <see cref="IPathGrantService.UpdateFromPath"/>
+    /// directories up to the drive root, calling <see cref="IGrantSyncService.UpdateFromPath"/>
     /// for each path. Returns the count of DB entries added or updated.
     /// </summary>
     public async Task<int> ScanAsync(
@@ -40,7 +40,7 @@ public class AclManagerScanService(
 
                 try
                 {
-                    if (pathGrantService.UpdateFromPath(dir, sid))
+                    if (grantSyncService.UpdateFromPath(dir, sid))
                         updated++;
                     scanned++;
                     progress.Report(scanned);
@@ -75,7 +75,7 @@ public class AclManagerScanService(
                             }
                             else
                             {
-                                if (pathGrantService.UpdateFromPath(entry, sid))
+                                if (grantSyncService.UpdateFromPath(entry, sid))
                                     updated++;
                                 scanned++;
                                 progress.Report(scanned);
@@ -111,7 +111,7 @@ public class AclManagerScanService(
                 {
                     if (ancestor.Exists)
                     {
-                        if (pathGrantService.UpdateFromPath(ancestor.FullName, sid))
+                        if (grantSyncService.UpdateFromPath(ancestor.FullName, sid))
                             updated++;
                         scanned++;
                         progress.Report(scanned);

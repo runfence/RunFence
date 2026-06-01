@@ -1,8 +1,10 @@
+using RunFence.Acl;
 using System.Security.AccessControl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch.Container;
+using RunFence.Launching.Resolution;
 using RunFence.Apps;
 
 namespace RunFence.Launch;
@@ -102,12 +104,17 @@ public class LaunchFacade(
 
         var target = new ProcessLaunchTarget(folderBrowserExe, resolvedArgs, folderPath);
         using var resolution = launchTargetResolver.ResolveFileHandler(resolved, target, databaseSnapshot);
+        var grantPaths = new List<GrantPath>();
+        if (resolved is AppContainerLaunchIdentity)
+            grantPaths.Add(new GrantPath(folderBrowserExe, false, true, AclHelper.AllApplicationPackagesSid));
+        grantPaths.Add(new GrantPath(folderBrowserExe, false, true));
+        grantPaths.Add(new GrantPath(folderPath, true, isTargetApproved));
+
         return LaunchCore(
             resolution,
             resolved,
             folderPermissionPrompt,
-            new GrantPath(folderBrowserExe, false, true),
-            new GrantPath(folderPath, true, isTargetApproved));
+            grantPaths);
     }
 
     public LaunchExecutionResult LaunchUrl(string url, LaunchIdentity identity)
@@ -120,7 +127,11 @@ public class LaunchFacade(
         return LaunchCore(resolution, resolved, null);
     }
 
-    record struct GrantPath(string Path, bool IsDirectory, bool IsSilent);
+    record struct GrantPath(
+        string Path,
+        bool IsDirectory,
+        bool IsSilent,
+        string? GrantSid = null);
 
     private AppDatabase CaptureDatabaseSnapshot()
         => dbAccessor.CreateSnapshot();
@@ -130,6 +141,13 @@ public class LaunchFacade(
         LaunchIdentity identity,
         Func<string, string, bool>? permissionPrompt,
         params GrantPath[] extraGrantPaths)
+        => LaunchCore(resolution, identity, permissionPrompt, extraGrantPaths.AsEnumerable());
+
+    private LaunchExecutionResult LaunchCore(
+        LaunchTargetResolutionResult resolution,
+        LaunchIdentity identity,
+        Func<string, string, bool>? permissionPrompt,
+        IEnumerable<GrantPath> extraGrantPaths)
     {
         IEnumerable<GrantPath> GetGrantPaths()
         {
@@ -141,7 +159,7 @@ public class LaunchFacade(
                 dir = gp.IsDirectory ? gp.Path : Path.GetDirectoryName(gp.Path);
 
                 if (!string.IsNullOrEmpty(dir))
-                    yield return new GrantPath(dir, true, gp.IsSilent);
+                    yield return gp with { Path = dir, IsDirectory = true };
             }
 
             if (resolution.Kind is not LaunchResolutionKind.Script and not LaunchResolutionKind.ShellWrapped)
@@ -157,41 +175,88 @@ public class LaunchFacade(
         }
 
         var grantPaths = GetGrantPaths()
+            .Where(x => !WindowsAppsPackagePathParser.IsUnderPackageRoot(x.Path))
             .Select(x => x with { Path = PathHelper.NormalizeComparablePath(x.Path) })
+            .GroupBy(x => x.Path, StringComparer.OrdinalIgnoreCase)
+            .SelectMany(pathGroup => pathGroup
+                .GroupBy(x => x.GrantSid ?? identity.Sid, StringComparer.OrdinalIgnoreCase)
+                .Select(sidGroup => new GrantPath(
+                    sidGroup.First().Path,
+                    IsDirectory: true,
+                    IsSilent: sidGroup.Any(path => path.IsSilent),
+                    GrantSid: sidGroup.First().GrantSid)))
             .OrderBy(x => x.IsSilent ? 0 : 1)
-            .DistinctBy(x => x.Path, StringComparer.OrdinalIgnoreCase).ToList();
-        
+            .ToList();
+        var maintenanceWarnings = new List<string>();
+
         foreach (var gp in grantPaths)
         {
-            if (PathHelper.IsOwnDir(gp.Path) || gp.IsSilent)
+            try
             {
-                launchAccessManager.EnsureAccess(
-                    identity,
-                    gp.Path,
-                    FileSystemRights.ReadAndExecute,
-                    null,
-                    identity.IsUnelevated ?? true);
+                GrantApplyResult ensureAccessResult;
+                if (PathHelper.IsOwnDir(gp.Path) || gp.IsSilent)
+                {
+                    ensureAccessResult = gp.GrantSid != null
+                        ? launchAccessManager.EnsureAccess(
+                            gp.GrantSid,
+                            gp.Path,
+                            FileSystemRights.ReadAndExecute,
+                            null,
+                            unelevated: true)
+                        : launchAccessManager.EnsureAccess(
+                            identity,
+                            gp.Path,
+                            FileSystemRights.ReadAndExecute,
+                            null);
+                }
+                else if (permissionPrompt is not null)
+                {
+                    ensureAccessResult = launchAccessManager.EnsureAccess(
+                        identity,
+                        gp.Path,
+                        FileSystemRights.ReadAndExecute,
+                        permissionPrompt);
+                }
+                else
+                {
+                    continue;
+                }
+
+                foreach (var warning in ensureAccessResult.Warnings)
+                {
+                    maintenanceWarnings.Add(GrantApplyFailureFormatter.Format(
+                        warning.Step,
+                        warning.Path,
+                        warning.ConfigPath,
+                        warning.Cause));
+                }
             }
-            else if (permissionPrompt is not null)
+            catch (GrantAccessDeclinedException)
             {
-                launchAccessManager.EnsureAccess(
-                    identity,
-                    gp.Path,
-                    FileSystemRights.ReadAndExecute,
-                    permissionPrompt,
-                    identity.IsUnelevated ?? true);
+                continue;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                log.Error(
+                    $"Launch access ensure failed for '{gp.Path}' " +
+                    $"while launching '{resolution.Target.ExePath}'. Continuing launch.",
+                    ex);
+                maintenanceWarnings.Add(ex is GrantOperationException grantOperationException
+                    ? GrantApplyFailureFormatter.Format(
+                        grantOperationException.Step,
+                        grantOperationException.Path,
+                        grantOperationException.ConfigPath,
+                        grantOperationException.Cause)
+                    : $"RunFence could not ensure launch access on '{gp.Path}': {ex.Message}");
             }
         }
 
         var process = processLauncher.Launch(identity, resolution.Target);
 
-        if (resolution.Kind != LaunchResolutionKind.ShellWrapped && process == null)
-        {
-            throw new InvalidOperationException(
-                $"Launch did not return a process for non-shell-wrapped target '{resolution.Target.ExePath}'.");
-        }
-
-        var maintenanceWarnings = new List<string>();
         log.Info(
             $"Post-launch maintenance started for '{resolution.Target.ExePath}' " +
             $"(kind={resolution.Kind}, sid={identity.Sid}, hasProcess={process != null})");

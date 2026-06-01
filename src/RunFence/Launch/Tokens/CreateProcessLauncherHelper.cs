@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
+using RunFence.Persistence;
 
 namespace RunFence.Launch.Tokens;
 
@@ -10,8 +11,11 @@ public class CreateProcessLauncherHelper(
     ILoggingService log,
     IElevatedLinkedTokenProvider elevatedLinkedTokenProvider,
     ISaferDeElevationHelper saferDeElevationHelper,
+    ITokenPrivilegeStateReader tokenPrivilegeStateReader,
     ITokenIntegrityLevelService tokenIntegrityLevelService,
     IProcessJobManager processJobManager,
+    IProcessControl processControl,
+    Func<ITrackingJobStateStore> trackingJobStateStoreFactory,
     IJobKeeperService jobKeeperService,
     IRestrictedJobLaunchCoordinator restrictedJobLaunchCoordinator,
     IPreparedTokenProcessLauncher preparedTokenProcessLauncher,
@@ -19,7 +23,7 @@ public class CreateProcessLauncherHelper(
     string profileKeeperExePath)
     : ICreateProcessLauncherHelper
 {
-    public ProcessInfo LaunchUsingAcquiredToken(IntPtr hToken, ProcessLaunchTarget psi, AccountLaunchIdentity identity)
+    public ProcessInfo? LaunchUsingAcquiredToken(IntPtr hToken, ProcessLaunchTarget psi, AccountLaunchIdentity identity)
     {
         var tokenSource = identity.Credentials!.Value.TokenSource;
         var privilegeLevel = identity.PrivilegeLevel!.Value;
@@ -29,10 +33,13 @@ public class CreateProcessLauncherHelper(
         // it was seeded (DACL, privileges, IL) so children automatically get the right setup.
         bool useJobKeeper = privilegeLevel is PrivilegeLevel.Isolated or PrivilegeLevel.LowIntegrity;
         bool isLow = privilegeLevel == PrivilegeLevel.LowIntegrity;
+        bool isHighIntegrity = privilegeLevel == PrivilegeLevel.HighIntegrity;
         if (useJobKeeper && jobKeeperService.HasJobKeeper(identity.Sid, isLow))
         {
             try
             {
+                log.Info(
+                    $"LaunchUsingAcquiredToken: launching via existing JobKeeper for {identity.Sid} (isLow={isLow}), target='{psi.ExePath}', args='{psi.Arguments ?? string.Empty}'");
                 return restrictedJobLaunchCoordinator.LaunchViaJobKeeper(identity.Sid, isLow, psi);
             }
             catch (StaleJobKeeperException ex) when (string.Equals(ex.Sid, identity.Sid, StringComparison.Ordinal))
@@ -47,17 +54,17 @@ public class CreateProcessLauncherHelper(
         IntPtr hRestrictedToken = IntPtr.Zero;
         IntPtr pIntegritySid = IntPtr.Zero;
         IntPtr tmlBuffer = IntPtr.Zero;
+        ProcessLaunchNative.PROCESS_INFORMATION pi = default;
 
         try
         {
-            ProcessLaunchNative.PROCESS_INFORMATION pi;
-
             switch (privilegeLevel)
             {
                 case PrivilegeLevel.HighestAllowed:
                 {
                     var sourceToken = hToken;
-                    if (tokenSource != LaunchTokenSource.CurrentProcess && !TokenRestrictionHelper.IsTokenElevated(hToken))
+                    var sourceTokenIsElevated = tokenPrivilegeStateReader.IsElevated(hToken);
+                    if (tokenSource != LaunchTokenSource.CurrentProcess && !sourceTokenIsElevated)
                     {
                         var hProbeToken = LinkedTokenHelper.TryGetLinkedToken(hToken);
                         if (hProbeToken != IntPtr.Zero)
@@ -68,6 +75,7 @@ public class CreateProcessLauncherHelper(
                             {
                                 hLinkedToken = elevatedLinkedTokenProvider.AcquireElevatedLinkedToken(hToken);
                                 sourceToken = hLinkedToken;
+                                sourceTokenIsElevated = tokenPrivilegeStateReader.IsElevated(sourceToken);
                                 log.Info("LaunchUsingAcquiredToken: using elevated linked token");
                             }
                             catch (Exception ex)
@@ -89,16 +97,33 @@ public class CreateProcessLauncherHelper(
                         TokenPrivilegeHelper.EnableAllPresentPrivilegesOnToken(hDupToken);
                     }
 
+                    if (!sourceTokenIsElevated
+                        || !tokenPrivilegeStateReader.TryGetIntegrityLevel(hDupToken, out var currentIntegrityLevel)
+                        || currentIntegrityLevel < NativeTokenHelper.MandatoryLevelHigh)
+                    {
+                        log.Info("LaunchUsingAcquiredToken: set integrity to high");
+                        tokenIntegrityLevelService.SetHighIntegrity(hDupToken, out pIntegritySid, out tmlBuffer);
+                    }
+                    else
+                    {
+                        log.Info("LaunchUsingAcquiredToken: token already high integrity");
+                    }
+
                     pi = preparedTokenProcessLauncher.LaunchWithPreparedToken(hDupToken, psi, tokenSource, identity.Sid);
                     break;
                 }
                 case PrivilegeLevel.Isolated:
+                case PrivilegeLevel.HighIntegrity:
                 case PrivilegeLevel.Basic:
                 case PrivilegeLevel.LowIntegrity:
                 {
-                    var integrityLabel = isLow ? "low" : "medium";
+                    var integrityLabel = isLow
+                        ? "low"
+                        : isHighIntegrity
+                            ? "high"
+                            : "medium";
 
-                    if (TokenRestrictionHelper.IsTokenElevated(hToken))
+                    if (tokenPrivilegeStateReader.IsElevated(hToken))
                     {
                         log.Info("LaunchUsingAcquiredToken: IsTokenElevated");
 
@@ -131,13 +156,19 @@ public class CreateProcessLauncherHelper(
                         log.Info($"LaunchUsingAcquiredToken: set integrity to {integrityLabel}");
                         if (isLow)
                             tokenIntegrityLevelService.SetLowIntegrity(effectiveToken, out pIntegritySid, out tmlBuffer);
+                        else if (isHighIntegrity)
+                            tokenIntegrityLevelService.SetHighIntegrity(effectiveToken, out pIntegritySid, out tmlBuffer);
                         else
                             tokenIntegrityLevelService.SetMediumIntegrity(effectiveToken, out pIntegritySid, out tmlBuffer);
 
                         if (useJobKeeper)
                         {
+                            log.Info(
+                                $"LaunchUsingAcquiredToken: launching via seeded JobKeeper for {identity.Sid} (isLow={isLow}), target='{psi.ExePath}', args='{psi.Arguments ?? string.Empty}'");
                             pi = restrictedJobLaunchCoordinator.SeedJobKeeperAndLaunch(effectiveToken, tokenSource, identity.Sid, isLow, psi);
-                            return new ProcessInfo(pi);
+                            var keeperProcessInfo = new ProcessInfo(pi);
+                            pi = default;
+                            return keeperProcessInfo;
                         }
 
                         pi = preparedTokenProcessLauncher.LaunchWithPreparedToken(effectiveToken, psi, tokenSource, identity.Sid);
@@ -151,11 +182,20 @@ public class CreateProcessLauncherHelper(
                             log.Info("LaunchUsingAcquiredToken: not elevated, set low integrity");
                             tokenIntegrityLevelService.SetLowIntegrity(hDupToken, out pIntegritySid, out tmlBuffer);
                         }
+                        else if (isHighIntegrity)
+                        {
+                            log.Info("LaunchUsingAcquiredToken: not elevated, set high integrity");
+                            tokenIntegrityLevelService.SetHighIntegrity(hDupToken, out pIntegritySid, out tmlBuffer);
+                        }
 
                         if (useJobKeeper)
                         {
+                            log.Info(
+                                $"LaunchUsingAcquiredToken: launching via seeded JobKeeper for {identity.Sid} (isLow={isLow}), target='{psi.ExePath}', args='{psi.Arguments ?? string.Empty}'");
                             pi = restrictedJobLaunchCoordinator.SeedJobKeeperAndLaunch(hDupToken, tokenSource, identity.Sid, isLow, psi);
-                            return new ProcessInfo(pi);
+                            var keeperProcessInfo = new ProcessInfo(pi);
+                            pi = default;
+                            return keeperProcessInfo;
                         }
 
                         pi = preparedTokenProcessLauncher.LaunchWithPreparedToken(hDupToken, psi, tokenSource, identity.Sid);
@@ -168,12 +208,22 @@ public class CreateProcessLauncherHelper(
 
             if (pi.hProcess != IntPtr.Zero)
             {
-                processJobManager.TryAssignToJob(identity.Sid, pi.hProcess, JobAssignment.Tracking);
-                if (pi.hThread != IntPtr.Zero && ProcessLaunchNative.ResumeThread(pi.hThread) == uint.MaxValue)
-                    log.Error($"ResumeThread failed for process {pi.dwProcessId}: error {Marshal.GetLastWin32Error()}");
+                var trackingAssignment = processJobManager.TryAssignToJob(identity.Sid, pi.hProcess, JobAssignment.Tracking);
+                if (trackingAssignment.Succeeded && trackingAssignment.AssignedKind == JobAssignment.Tracking)
+                    trackingJobStateStoreFactory().AddTrackingJobSid(identity.Sid);
+
+                if (pi.hThread != IntPtr.Zero && !processControl.ResumeThread(pi.hThread, out var error))
+                    log.Error($"ResumeThread failed for process {pi.dwProcessId}: error {error}");
             }
 
-            return new ProcessInfo(pi);
+            var launchedProcessInfo = new ProcessInfo(pi);
+            pi = default;
+            return launchedProcessInfo;
+        }
+        catch
+        {
+            CleanupOwnedProcessInformation(ref pi);
+            throw;
         }
         finally
         {
@@ -239,5 +289,23 @@ public class CreateProcessLauncherHelper(
                     ProcessNative.CloseHandle(pi.hProcess);
             }
         });
+    }
+
+    private void CleanupOwnedProcessInformation(ref ProcessLaunchNative.PROCESS_INFORMATION pi)
+    {
+        if (pi.hProcess != IntPtr.Zero)
+            processControl.TerminateProcessBestEffort(pi.hProcess, 1);
+
+        if (pi.hThread != IntPtr.Zero)
+        {
+            processControl.CloseHandle(pi.hThread);
+            pi.hThread = IntPtr.Zero;
+        }
+
+        if (pi.hProcess != IntPtr.Zero)
+        {
+            processControl.CloseHandle(pi.hProcess);
+            pi.hProcess = IntPtr.Zero;
+        }
     }
 }

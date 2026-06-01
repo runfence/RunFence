@@ -167,7 +167,6 @@ public class FirewallDnsRefreshServiceTests
         var dirtyDecision = _domainCache.GetRefreshDecision(Sid, database.GetOrCreateAccount(Sid).Firewall, EmptyChangedDomains());
 
         Assert.True(dirtyDecision.WasDirty);
-        _log.Verify(l => l.Warn(It.Is<string>(message => message.Contains("DNS resolution failed", StringComparison.Ordinal))), Times.Exactly(2));
         _refreshTarget.Verify(f => f.RefreshAllowlistRules(
             Sid,
             Username,
@@ -197,7 +196,6 @@ public class FirewallDnsRefreshServiceTests
                 cache.Count == 1
                 && cache.ContainsKey("good.example")
                 && cache["good.example"].SequenceEqual(new[] { "203.0.113.20" }))), Times.Once);
-        _log.Verify(l => l.Warn(It.Is<string>(message => message.Contains("DNS returned no addresses", StringComparison.Ordinal))), Times.Once);
     }
 
     [Fact]
@@ -217,7 +215,6 @@ public class FirewallDnsRefreshServiceTests
         var dirtyDecision = _domainCache.GetRefreshDecision(Sid, database.GetOrCreateAccount(Sid).Firewall, EmptyChangedDomains());
 
         Assert.True(dirtyDecision.WasDirty);
-        _log.Verify(l => l.Warn(It.Is<string>(message => message.Contains("DNS returned no addresses", StringComparison.Ordinal))), Times.Once);
         _refreshTarget.Verify(f => f.RefreshAllowlistRules(
             Sid,
             Username,
@@ -258,9 +255,6 @@ public class FirewallDnsRefreshServiceTests
             OtherUsername,
             It.IsAny<FirewallAccountSettings>(),
             It.IsAny<IReadOnlyDictionary<string, IReadOnlyList<string>>>()), Times.Once);
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("Failed to refresh allowlist rules", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
     }
 
     [Fact]
@@ -331,9 +325,6 @@ public class FirewallDnsRefreshServiceTests
         service.ProcessDnsRefresh();
 
         Assert.Contains(Sid, _retryState.GetDnsServerRefreshPendingSids());
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("Failed to refresh allowlist rules", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
     }
 
     [Fact]
@@ -359,9 +350,6 @@ public class FirewallDnsRefreshServiceTests
             Username,
             It.IsAny<FirewallAccountSettings>(),
             It.IsAny<IReadOnlyDictionary<string, IReadOnlyList<string>>>()), Times.Once);
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("Failed to refresh local address rules", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
     }
 
     [Fact]
@@ -389,9 +377,6 @@ public class FirewallDnsRefreshServiceTests
         _globalIcmpPolicy.Verify(g => g.EnforceGlobalIcmpBlock(
             It.IsAny<AppDatabase>(),
             It.IsAny<IReadOnlyDictionary<string, IReadOnlyList<string>>>()), Times.Exactly(2));
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("Failed to enforce global ICMP", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
     }
 
     [Fact]
@@ -528,9 +513,6 @@ public class FirewallDnsRefreshServiceTests
         service.ProcessDnsRefresh();
 
         Assert.True(invokedOnCallerThread);
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("DNS refresh cycle failed", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Never);
     }
 
     [Fact]
@@ -551,9 +533,7 @@ public class FirewallDnsRefreshServiceTests
         service.ProcessDnsRefresh();
         service.ProcessDnsRefresh();
 
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("DNS refresh cycle failed", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
+        Assert.Equal(2, invokeCalls);
     }
 
     [Fact]

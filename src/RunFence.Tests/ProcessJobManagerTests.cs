@@ -9,16 +9,16 @@ namespace RunFence.Tests;
 public class ProcessJobManagerTests
 {
     private const string Sid = "S-1-5-21-100-200-300-1001";
+    private const string TrackingSid = "S-1-5-18";
     private static readonly IntPtr ProcessHandle = new(10);
     private static readonly IntPtr JobHandle = new(20);
-
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IJobObjectApi> _jobApi = new();
 
     [Fact]
     public void TryAssignToJob_AssignFails_ReturnsFailureBeforeUiPolicy()
     {
-        var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
+        var manager = CreateManager();
         _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.GetLastWin32Error()).Returns(0);
@@ -38,7 +38,7 @@ public class ProcessJobManagerTests
     [Fact]
     public void TryAssignToJob_SetUiRestrictionsFails_ReturnsFailure()
     {
-        var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
+        var manager = CreateManager();
         _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.GetLastWin32Error()).Returns(0);
@@ -56,7 +56,7 @@ public class ProcessJobManagerTests
     [Fact]
     public void TryAssignToJob_PrecreatedRestrictedJob_ReturnsFailureWithoutAssigning()
     {
-        var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
+        var manager = CreateManager();
         _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.GetLastWin32Error()).Returns(183);
@@ -73,7 +73,7 @@ public class ProcessJobManagerTests
     [Fact]
     public void TryAssignToJob_RestrictedSuccess_ReturnsTypedSuccess()
     {
-        var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
+        var manager = CreateManager();
         _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.GetLastWin32Error()).Returns(0);
@@ -93,13 +93,12 @@ public class ProcessJobManagerTests
     [Fact]
     public void TryAssignToJob_TrackingSuccess_DoesNotReportRestrictedPolicy()
     {
-        const string systemSid = "S-1-5-18";
-        var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
-        _jobApi.Setup(a => a.CreateJobObject($@"Global\RunFence_Job_{systemSid}", null))
+        var manager = CreateManager();
+        _jobApi.Setup(a => a.CreateJobObject($@"Global\RunFence_Job_{TrackingSid}", null))
             .Returns(JobHandle);
         _jobApi.Setup(a => a.AssignProcessToJobObject(JobHandle, ProcessHandle)).Returns(true);
 
-        var result = manager.TryAssignToJob(systemSid, ProcessHandle, JobAssignment.Tracking);
+        var result = manager.TryAssignToJob(TrackingSid, ProcessHandle, JobAssignment.Tracking);
 
         Assert.True(result.Succeeded);
         Assert.False(result.UiRestrictionsApplied);
@@ -110,7 +109,7 @@ public class ProcessJobManagerTests
     [Fact]
     public void TryAssignToJob_ExistingRestrictedJobPolicyMismatch_EvictsBadHandleWithoutAssigning()
     {
-        var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
+        var manager = CreateManager();
         var secondProcessHandle = new IntPtr(11);
         _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
@@ -133,7 +132,7 @@ public class ProcessJobManagerTests
     [Fact]
     public void TryAssignToJob_ExistingRestrictedJobLosesPolicyAfterAssignment_EvictsBadHandle()
     {
-        var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
+        var manager = CreateManager();
         var secondProcessHandle = new IntPtr(11);
         _jobApi.Setup(a => a.CreateJobObject("job", GetExpectedRestrictedJobSecurityDescriptor()))
             .Returns(JobHandle);
@@ -160,13 +159,71 @@ public class ProcessJobManagerTests
     [Fact]
     public void RegisterVerifiedRestrictedJob_MakesReconnectedJobQueryable()
     {
-        var manager = new ProcessJobManager(_log.Object, _jobApi.Object);
+        var manager = CreateManager();
         _jobApi.Setup(a => a.QueryProcessIds(JobHandle)).Returns([1234]);
 
         manager.RegisterVerifiedRestrictedJob(Sid, isLow: false, JobHandle);
 
         Assert.Equal(new HashSet<int> { 1234 }, manager.GetKeeperJobMembers(Sid, isLow: false));
-        Assert.Equal(JobHandle, manager.TryGetRestrictedJobForPid(1234));
+    }
+
+    [Fact]
+    public void GetJobMembers_ReopenTrackingRequestedWithoutCachedHandle_ReopensPersistedTrackingJob()
+    {
+        var manager = CreateManager();
+        _jobApi.Setup(a => a.OpenJobObject(
+                ProcessJobManager.JobObjectReconnectAccess,
+                false,
+                $@"Global\RunFence_Job_{TrackingSid}"))
+            .Returns(JobHandle);
+        _jobApi.Setup(a => a.QueryProcessIds(JobHandle)).Returns([1234]);
+
+        var members = manager.GetJobMembers(TrackingSid, reopenTrackingJob: true);
+
+        Assert.Equal(new HashSet<int> { 1234 }, members);
+        _jobApi.Verify(a => a.OpenJobObject(
+            ProcessJobManager.JobObjectReconnectAccess,
+            false,
+            $@"Global\RunFence_Job_{TrackingSid}"), Times.Once);
+    }
+
+    [Fact]
+    public void GetJobMembers_ReopenTrackingNotRequested_DoesNotReopenTrackingJob()
+    {
+        var manager = CreateManager();
+
+        var members = manager.GetJobMembers(TrackingSid, reopenTrackingJob: false);
+
+        Assert.Null(members);
+        _jobApi.Verify(a => a.OpenJobObject(It.IsAny<uint>(), It.IsAny<bool>(), It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void GetJobMembers_CachedTrackingHandle_SkipsReopenEvenWhenRequested()
+    {
+        var manager = CreateManager();
+        _jobApi.Setup(a => a.CreateJobObject($@"Global\RunFence_Job_{TrackingSid}", null))
+            .Returns(JobHandle);
+        _jobApi.Setup(a => a.AssignProcessToJobObject(JobHandle, ProcessHandle)).Returns(true);
+        _jobApi.Setup(a => a.QueryProcessIds(JobHandle)).Returns([1234]);
+
+        var assignment = manager.TryAssignToJob(TrackingSid, ProcessHandle, JobAssignment.Tracking);
+        var members = manager.GetJobMembers(TrackingSid, reopenTrackingJob: true);
+
+        Assert.True(assignment.Succeeded);
+        Assert.Equal(new HashSet<int> { 1234 }, members);
+        _jobApi.Verify(a => a.OpenJobObject(It.IsAny<uint>(), It.IsAny<bool>(), It.IsAny<string>()), Times.Never);
+    }
+
+    [Fact]
+    public void GetJobMembers_ReopenRequestedForNonTrackingSid_DoesNotOpenTrackingJob()
+    {
+        var manager = CreateManager();
+
+        var members = manager.GetJobMembers(Sid, reopenTrackingJob: true);
+
+        Assert.Null(members);
+        _jobApi.Verify(a => a.OpenJobObject(It.IsAny<uint>(), It.IsAny<bool>(), It.IsAny<string>()), Times.Never);
     }
 
     [Fact]
@@ -189,4 +246,7 @@ public class ProcessJobManagerTests
     private static string GetExpectedRestrictedJobSecurityDescriptor()
         => AdminOperationMockAccessHelper.AppendCurrentProcessGenericAllAce(
             ProcessJobManager.RestrictedJobSecurityDescriptor);
+
+    private ProcessJobManager CreateManager() =>
+        new(_log.Object, _jobApi.Object);
 }

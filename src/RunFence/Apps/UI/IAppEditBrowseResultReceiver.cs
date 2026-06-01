@@ -15,10 +15,11 @@ public interface IAppEditBrowseResultReceiver
     void SetFolderMode(bool isFolder);
     void SetWorkingDir(string path);
     void SetDefaultArgs(string args);
+    string? GetSelectedAccountSid();
 
     /// <summary>
-    /// Returns true when the privilege level combo is enabled and not set to Highest Allowed,
-    /// meaning a suggestion to switch to Basic is applicable.
+    /// Returns true when the privilege level combo is enabled and not already at
+    /// Highest Allowed, High Integrity, or Basic.
     /// </summary>
     bool CanSuggestBasicPrivilegeLevel();
     void SetPrivilegeLevel(PrivilegeLevel? level);

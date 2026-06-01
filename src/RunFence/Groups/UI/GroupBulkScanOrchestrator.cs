@@ -6,21 +6,19 @@ namespace RunFence.Groups.UI;
 
 public class GroupBulkScanOrchestrator(
     IModalCoordinator modalCoordinator,
-    ILocalGroupMembershipService groupMembership,
+    ILocalGroupQueryService groupMembership,
     AclBulkScanWorkflow workflow,
-    IAclBulkScanMessagePresenter messagePresenter)
+    IAclBulkScanMessagePresenter messagePresenter,
+    ISessionSaver sessionSaver)
 {
     public async Task ScanAcls(
         IWin32Window owner,
-        Action<bool> setScanButtonEnabled,
-        Action<string> setStatusText,
-        Action saveDatabase)
+        IGroupScanProgressPresenter progressPresenter)
     {
         await workflow.RunAsync(new GroupAclBulkScanWorkflowContext(
             owner,
-            setScanButtonEnabled,
-            setStatusText,
-            saveDatabase,
+            progressPresenter,
+            sessionSaver,
             modalCoordinator,
             groupMembership,
             messagePresenter));

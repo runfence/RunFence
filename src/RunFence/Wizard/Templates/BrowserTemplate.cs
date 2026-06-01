@@ -1,6 +1,5 @@
 using RunFence.Account.UI;
 using RunFence.Apps;
-using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
@@ -25,9 +24,7 @@ internal class BrowserTemplate(
     IAppHandlerRegistrationService registrationService,
     WizardFolderGrantHelper grantHelper,
     IWizardSessionSaver sessionSaver,
-    IShortcutDiscoveryService discoveryService,
-    IShortcutIconHelper iconHelper,
-    IExecutablePathResolver executablePathResolver)
+    StandardAppWizardStepBuilder stepBuilder)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -35,7 +32,7 @@ internal class BrowserTemplate(
     public string DisplayName => "Browser";
     public string Description => "Isolated browser account with selected folder access and URL handler associations";
     public string IconEmoji => "\U0001F310"; // 🌐
-    public Action<IWin32Window>? PostWizardAction => null;
+    public Func<IWin32Window, Task>? PostWizardAction => null;
 
     public void Cleanup()
     {
@@ -51,20 +48,17 @@ internal class BrowserTemplate(
                 (name, password) => { _data.Username = name; password.Dispose(); },
                 description: "Choose a name for the new isolated browser account. " +
                              "The browser will run in this account, keeping it separated from your main session."),
-            new AppPathStep(
+            stepBuilder.CreateAppPathStep(
                 (path, name) =>
                 {
                     _data.AppPath = path;
                     _data.AppName = name;
                 },
-                discoveryService,
-                iconHelper,
-                executablePathResolver,
                 description: "Select the browser executable. The app name will appear in the RunFence app list " +
                              "and as the desktop shortcut label."),
-            new AllowedPathsStep(
+            stepBuilder.CreateAllowedFoldersStep(
                 paths => _data.AllowedPaths = paths,
-                labelText: "Add folders the browser should be able to access (downloads, documents, etc.):"),
+                "Add folders the browser should be able to access (downloads, documents, etc.):"),
         ];
     }
 

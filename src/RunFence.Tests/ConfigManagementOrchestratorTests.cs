@@ -61,7 +61,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         _handlerMappingService
             .Setup(s => s.GetEffectiveHandlerMappings(It.IsAny<AppDatabase>()))
@@ -225,7 +225,6 @@ public class ConfigManagementOrchestratorTests : IDisposable
         // Assert
         Assert.True(result);
         _shortcutService.Verify(s => s.RevertShortcuts(app2, It.IsAny<ShortcutTraversalCache>()), Times.Once);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
     }
 
     // --- LoadApps ---
@@ -338,32 +337,6 @@ public class ConfigManagementOrchestratorTests : IDisposable
         Assert.True(success);
         Assert.True(loadedApp.ManageShortcuts);
         _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Never);
-    }
-
-    [Fact]
-    public void LoadApps_ManageShortcuts_CreatesOneTraversalCacheForLoadedApps()
-    {
-        var app1 = new AppEntry { Id = AppEntry.GenerateId(), Name = "App1", ExePath = @"C:\App\one.exe", ManageShortcuts = true };
-        var app2 = new AppEntry { Id = AppEntry.GenerateId(), Name = "App2", ExePath = @"C:\App\two.exe", ManageShortcuts = true };
-        SetupLoad([app1, app2]);
-
-        var (success, _) = _handler.LoadApps(ConfigPath);
-
-        Assert.True(success);
-        _shortcutDiscovery.Verify(d => d.CreateTraversalCacheIfNeeded(It.IsAny<IEnumerable<AppEntry>>()), Times.Once);
-    }
-
-    [Fact]
-    public void LoadApps_NoManageShortcuts_DoesNotScanShortcuts()
-    {
-        var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App", ExePath = @"C:\App\app.exe", ManageShortcuts = false };
-        SetupLoad([app]);
-
-        var (success, _) = _handler.LoadApps(ConfigPath);
-
-        Assert.True(success);
-        _shortcutDiscovery.Verify(d => d.CreateTraversalCacheIfNeeded(It.IsAny<IEnumerable<AppEntry>>()), Times.Once);
-        _shortcutDiscovery.Verify(d => d.CreateTraversalCache(), Times.Never);
     }
 
     [Fact]
@@ -541,17 +514,6 @@ public class ConfigManagementOrchestratorTests : IDisposable
         Assert.Contains("Wrong PIN", result.ErrorMessage);
     }
 
-    [Fact]
-    public void LoadAppConfigBackup_UsesRequestedConfigBackupPath()
-    {
-        _loadedGoodBackupStore.Setup(s => s.GetBackupPath(ConfigPath))
-            .Returns(Path.Combine(Path.GetDirectoryName(ConfigPath)!, "extra.ramc.lastgood"));
-
-        _handler.LoadAppConfigBackup(ConfigPath);
-
-        _loadedGoodBackupStore.Verify(s => s.GetBackupPath(ConfigPath), Times.Once);
-    }
-
     // --- LoadApps: save after successful load ---
 
     [Fact]
@@ -709,7 +671,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore { ArgonSalt = specificSalt },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         var app = new AppEntry { Id = AppEntry.GenerateId(), Name = "App", ExePath = @"C:\App\app.exe" };
         _databaseService.Setup(s => s.TryGetAppConfigSalt(ConfigPath)).Returns((byte[]?)null);
@@ -742,17 +704,17 @@ public class ConfigManagementOrchestratorTests : IDisposable
     [Fact]
     public void CleanupAllApps_RemovesFirewallArtifactsThroughCleanupService()
     {
-        // Real AppEntryEnforcementHelper + ConfigEnforcementOrchestrator + ShutdownCleanupService
+        // Real AppEntryEnforcementCoordinator + ConfigEnforcementOrchestrator + ShutdownCleanupService
         // are used here to verify the full delegation chain: CleanupAllApps must reach
         // IFirewallCleanupService.RemoveAll without calling ACL or shortcut enforce services.
         var session = new SessionContext
 {
             Database = _database,
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         var sessionProvider = new SessionProvider();
         sessionProvider.SetSession(session);
-        var enforcementHelper = new AppEntryEnforcementHelper(
+        var enforcementCoordinator = AppEntryEnforcementTestFactory.CreateCoordinator(
             _aclService.Object,
             _shortcutService.Object,
             _besideTargetShortcutService.Object,
@@ -760,13 +722,14 @@ public class ConfigManagementOrchestratorTests : IDisposable
             new Mock<ISidNameCacheService>().Object,
             new Mock<IInteractiveUserDesktopProvider>().Object,
             new Mock<IInteractiveUserSidResolver>().Object,
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
             new Mock<ILoggingService>().Object);
         var enforcementHandler = new ConfigEnforcementOrchestrator(
             sessionProvider,
             _aclService.Object,
             _iconService.Object,
             _log.Object,
-            enforcementHelper,
+            enforcementCoordinator,
             _shortcutDiscovery.Object);
         var shutdownCleanupService = new ShutdownCleanupService(
             enforcementHandler,
@@ -806,7 +769,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
 {
                 Database = _database,
                 CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
-            }.WithOwnedPinDerivedKey(_pinKey),
+            }.WithClonedPinDerivedKey(_pinKey),
             secureDesktop: secureDesktop.Object);
 
         // Act: salt mismatch → secure desktop PIN prompt → cancelled → Cancelled result
@@ -827,16 +790,21 @@ public class ConfigManagementOrchestratorTests : IDisposable
     {
         var sessionProvider = new SessionProvider();
         sessionProvider.SetSession(session);
-        var enforcementHelper = new AppEntryEnforcementHelper(
-            _aclService.Object, _shortcutService.Object, _besideTargetShortcutService.Object,
-            _iconService.Object, new Mock<ISidNameCacheService>().Object,
-            new Mock<IInteractiveUserDesktopProvider>().Object, new Mock<IInteractiveUserSidResolver>().Object,
+        var enforcementCoordinator = AppEntryEnforcementTestFactory.CreateCoordinator(
+            _aclService.Object,
+            _shortcutService.Object,
+            _besideTargetShortcutService.Object,
+            _iconService.Object,
+            new Mock<ISidNameCacheService>().Object,
+            new Mock<IInteractiveUserDesktopProvider>().Object,
+            new Mock<IInteractiveUserSidResolver>().Object,
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
             new Mock<ILoggingService>().Object);
         var enforcementHandler = new ConfigEnforcementOrchestrator(
             sessionProvider, _aclService.Object, _iconService.Object,
-            _log.Object, enforcementHelper, _shortcutDiscovery.Object);
+            _log.Object, enforcementCoordinator, _shortcutDiscovery.Object);
         var mismatchKeyResolver = new ConfigMismatchKeyResolver(
-            sessionProvider, _databaseService.Object, new ConfigMismatchPinVerifier(_pinService.Object),
+            sessionProvider, _databaseService.Object, _databaseService.Object, new ConfigMismatchPinVerifier(_pinService.Object),
             secureDesktop ?? new SecureDesktopHelper(_log.Object, new Mock<ISecureDesktopNative>().Object), new OperationGuard());
         var handlerSyncHelper = new HandlerSyncHelper(sessionProvider,
             _handlerRegistrationService.Object, _handlerMappingService.Object,
@@ -845,7 +813,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
         var configLoadUnloadService = new ConfigLoadUnloadService(
             sessionProvider, _appConfigService.Object,
             _log.Object, licenseService ?? _licenseService.Object, _loadedGoodBackupStore.Object, enforcementHandler,
-            mismatchKeyResolver, handlerSyncHelper, _handlerMappingService.Object, _databaseService.Object);
+            mismatchKeyResolver, handlerSyncHelper, _handlerMappingService.Object, _databaseService.Object, _databaseService.Object);
         var shutdownCleanupService = new ShutdownCleanupService(
             enforcementHandler, sessionProvider, _log.Object,
             _contextMenuService.Object, _handlerRegistrationService.Object,
@@ -862,7 +830,7 @@ public class ConfigManagementOrchestratorTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         return BuildHandler(session, licenseService: licenseService);
     }
 

@@ -174,14 +174,14 @@ public sealed class SecurityScannerScriptAndProfileTests : SecurityScannerTestBa
 
     // ===== Wow6432 per-user paths test (validates B2 fix) =====
 
-    // These tests use DefaultScannerDataAccess (real OS APIs) intentionally: the scanner's
+    // These tests use AutorunRegistryDataAccess (real path-building logic) intentionally: the scanner's
     // path-building logic depends on registry hive naming conventions that are best verified
     // against the real implementation rather than a fabricated test double.
 
     [Fact]
     public void GetWow6432RunKeyPaths_WithUserSid_ReturnsHkuPaths()
     {
-        var dataAccess = new DefaultScannerDataAccess();
+        var dataAccess = new AutorunRegistryDataAccess();
         var paths = dataAccess.GetWow6432RunKeyPaths("S-1-5-21-123");
 
         Assert.Equal(4, paths.Count);
@@ -192,7 +192,7 @@ public sealed class SecurityScannerScriptAndProfileTests : SecurityScannerTestBa
     [Fact]
     public void GetWow6432RunKeyPaths_WithNullUserSid_ReturnsHklmOnly()
     {
-        var dataAccess = new DefaultScannerDataAccess();
+        var dataAccess = new AutorunRegistryDataAccess();
         var paths = dataAccess.GetWow6432RunKeyPaths(null);
 
         Assert.Equal(2, paths.Count);

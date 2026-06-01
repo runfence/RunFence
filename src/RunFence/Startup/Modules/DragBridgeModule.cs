@@ -76,6 +76,14 @@ public class DragBridgeModule : Module
             .As<IDragBridgeLauncher>()
             .SingleInstance();
 
+        builder.RegisterType<WindowOwnerNativeReader>()
+            .As<IWindowOwnerNativeReader>()
+            .SingleInstance();
+
+        builder.RegisterType<WindowOwnerProcessTokenReader>()
+            .As<IWindowOwnerProcessTokenReader>()
+            .SingleInstance();
+
         builder.RegisterType<WindowOwnerDetector>()
             .As<IWindowOwnerDetector>()
             .SingleInstance();
@@ -85,9 +93,6 @@ public class DragBridgeModule : Module
             .SingleInstance();
 
         builder.RegisterType<DragBridgeTempFileManager>()
-            .WithParameter(
-                "tempRoot",
-                Path.Combine(PathConstants.ProgramDataDir, PathConstants.DragBridgeTempDir))
             .As<IDragBridgeTempFileManager>()
             .SingleInstance();
 

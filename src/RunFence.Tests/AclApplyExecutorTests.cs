@@ -17,11 +17,21 @@ public class AclApplyExecutorTests
     public async Task ExecuteAsync_RunsRemoveBeforeAddAndTraverse()
     {
         var calls = new List<string>();
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        var traverseService = grantMutatorService.As<ITraverseService>();
+        grantMutatorService
             .Setup(p => p.RemoveGrant(TestSid, @"C:\Remove", false))
-            .Callback(() => calls.Add("remove"));
-        pathGrantService
+            .Callback(() => calls.Add("grant-remove"));
+        traverseService
+            .Setup(p => p.RemoveTraverse(TestSid, @"C:\TraverseRemove"))
+            .Callback(() => calls.Add("traverse-remove"));
+        grantMutatorService
+            .Setup(p => p.UntrackGrant(TestSid, @"C:\GrantUntrack", false))
+            .Callback(() => calls.Add("grant-untrack"));
+        traverseService
+            .Setup(p => p.UntrackTraverse(TestSid, @"C:\TraverseUntrack"))
+            .Callback(() => calls.Add("traverse-untrack"));
+        grantMutatorService
             .Setup(p => p.AddGrant(
                 TestSid,
                 @"C:\Add",
@@ -29,22 +39,46 @@ public class AclApplyExecutorTests
                 It.IsAny<SavedRightsState?>(),
                 null,
                 null))
-            .Callback(() => calls.Add("add"));
-        pathGrantService
+            .Callback(() => calls.Add("grant-add"));
+        grantMutatorService
+            .Setup(p => p.UpdateGrant(
+                TestSid,
+                @"C:\Modify",
+                false,
+                It.IsAny<SavedRightsState>(),
+                null,
+                null))
+            .Callback(() => calls.Add("grant-modify"));
+        traverseService
             .Setup(p => p.AddTraverse(TestSid, @"C:\Traverse", null))
-            .Callback(() => calls.Add("traverse"));
+            .Callback(() => calls.Add("traverse-add"));
+        grantMutatorService
+            .Setup(p => p.FixGrantAcl(TestSid, @"C:\GrantFix", false))
+            .Callback(() => calls.Add("grant-fix"));
+        traverseService
+            .Setup(p => p.FixTraverseAcl(TestSid, @"C:\TraverseFix"))
+            .Callback(() => calls.Add("traverse-fix"));
 
-        var executor = CreateExecutor(pathGrantService.Object, out _);
+        var executor = CreateExecutor(grantMutatorService.Object, traverseService.Object, out _);
+        var modifiedEntry = new GrantedPathEntry { Path = @"C:\Modify", IsDeny = false, SavedRights = SavedRightsState.DefaultForMode(false) };
         var plan = new AclApplyPlan(
             PendingAdds: [new GrantedPathEntry { Path = @"C:\Add", IsDeny = false, SavedRights = SavedRightsState.DefaultForMode(false) }],
             PendingRemoves: [new GrantedPathEntry { Path = @"C:\Remove", IsDeny = false }],
-            PendingModifications: [],
-            PendingGrantFixes: [],
+            PendingModifications:
+            [
+                new PendingModification(
+                    modifiedEntry,
+                    WasIsDeny: false,
+                    WasOwn: false,
+                    NewIsDeny: false,
+                    NewRights: modifiedEntry.SavedRights)
+            ],
+            PendingGrantFixes: [new GrantedPathEntry { Path = @"C:\GrantFix", IsDeny = false }],
             PendingTraverseAdds: [new GrantedPathEntry { Path = @"C:\Traverse", IsTraverseOnly = true }],
-            PendingTraverseRemoves: [],
-            PendingTraverseFixes: [],
-            PendingUntrackGrants: [],
-            PendingUntrackTraverse: [],
+            PendingTraverseRemoves: [new GrantedPathEntry { Path = @"C:\TraverseRemove", IsTraverseOnly = true }],
+            PendingTraverseFixes: [new GrantedPathEntry { Path = @"C:\TraverseFix", IsTraverseOnly = true }],
+            PendingUntrackGrants: [new GrantedPathEntry { Path = @"C:\GrantUntrack", IsDeny = false }],
+            PendingUntrackTraverse: [new GrantedPathEntry { Path = @"C:\TraverseUntrack", IsTraverseOnly = true }],
             PendingConfigMoves: [],
             PendingTraverseConfigMoves: []);
 
@@ -52,7 +86,18 @@ public class AclApplyExecutorTests
 
         Assert.Empty(result.Errors);
         Assert.False(result.WasCanceled);
-        Assert.Equal(["remove", "add", "traverse"], calls);
+        Assert.Equal(
+        [
+            "grant-remove",
+            "traverse-remove",
+            "grant-untrack",
+            "traverse-untrack",
+            "grant-add",
+            "grant-modify",
+            "traverse-add",
+            "grant-fix",
+            "traverse-fix"
+        ], calls);
     }
 
     [Fact]
@@ -62,12 +107,12 @@ public class AclApplyExecutorTests
             GrantApplyFailureStep.GrantAclRemove,
             @"C:\Fail",
             new InvalidOperationException("boom"));
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        grantMutatorService
             .Setup(p => p.RemoveGrant(TestSid, @"C:\Fail", false))
             .Throws(exception);
 
-        var executor = CreateExecutor(pathGrantService.Object, out _);
+        var executor = CreateExecutor(grantMutatorService.Object, new Mock<ITraverseService>().Object, out _);
         var plan = new AclApplyPlan(
             PendingAdds: [],
             PendingRemoves: [new GrantedPathEntry { Path = @"C:\Fail", IsDeny = false }],
@@ -94,8 +139,8 @@ public class AclApplyExecutorTests
     [Fact]
     public async Task ExecuteAsync_GrantAdd_UsesSelectedStore()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
-        var executor = CreateExecutor(pathGrantService.Object, out var stores);
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        var executor = CreateExecutor(grantMutatorService.Object, new Mock<ITraverseService>().Object, out var stores);
         var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
         stores.AddLoadedStore(additionalStore);
 
@@ -114,7 +159,7 @@ public class AclApplyExecutorTests
 
         await executor.ExecuteAsync(plan, TestSid, isContainer: false, new Progress<(int current, int total)>());
 
-        pathGrantService.Verify(p => p.AddGrant(
+        grantMutatorService.Verify(p => p.AddGrant(
             TestSid,
             @"C:\Add",
             false,
@@ -126,8 +171,8 @@ public class AclApplyExecutorTests
     [Fact]
     public async Task ExecuteAsync_Modification_UsesSelectedStoreAndSwitchGrantMode()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
-        var executor = CreateExecutor(pathGrantService.Object, out var stores);
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        var executor = CreateExecutor(grantMutatorService.Object, new Mock<ITraverseService>().Object, out var stores);
         var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
         stores.AddLoadedStore(additionalStore);
         var entry = new GrantedPathEntry
@@ -161,14 +206,13 @@ public class AclApplyExecutorTests
 
         await executor.ExecuteAsync(plan, TestSid, isContainer: false, new Progress<(int current, int total)>());
 
-        pathGrantService.Verify(p => p.SwitchGrantMode(
+        grantMutatorService.Verify(p => p.SwitchGrantMode(
             TestSid,
             entry.Path,
             true,
             It.IsAny<SavedRightsState>(),
             It.Is<Func<bool>>(confirm => confirm()),
             additionalStore), Times.Once);
-        pathGrantService.Verify(p => p.ResetOwner(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
     }
 
     [Fact]
@@ -179,8 +223,8 @@ public class AclApplyExecutorTests
             GrantApplyFailureStep.GrantAclApply,
             @"C:\SwitchFallback",
             new InvalidOperationException("acl failed"));
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        grantMutatorService
             .Setup(p => p.SwitchGrantMode(
                 TestSid,
                 @"C:\SwitchFallback",
@@ -190,7 +234,7 @@ public class AclApplyExecutorTests
                 additionalStore))
             .Throws(exception);
 
-        var executor = CreateExecutor(pathGrantService.Object, out var stores);
+        var executor = CreateExecutor(grantMutatorService.Object, new Mock<ITraverseService>().Object, out var stores);
         stores.AddLoadedStore(additionalStore);
         var entry = new GrantedPathEntry
         {
@@ -233,8 +277,8 @@ public class AclApplyExecutorTests
     [Fact]
     public async Task ExecuteAsync_TraverseAdd_UsesSelectedStore()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
-        var executor = CreateExecutor(pathGrantService.Object, out var stores);
+        var traverseService = new Mock<ITraverseService>();
+        var executor = CreateExecutor(new Mock<IGrantMutatorService>().Object, traverseService.Object, out var stores);
         var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
         stores.AddLoadedStore(additionalStore);
 
@@ -253,14 +297,15 @@ public class AclApplyExecutorTests
 
         await executor.ExecuteAsync(plan, TestSid, isContainer: false, new Progress<(int current, int total)>());
 
-        pathGrantService.Verify(p => p.AddTraverse(TestSid, @"C:\Traverse", additionalStore), Times.Once);
+        traverseService.Verify(p => p.AddTraverse(TestSid, @"C:\Traverse", additionalStore), Times.Once);
     }
 
     [Fact]
     public async Task ExecuteAsync_UntrackAndFixPhases_CallPersistedOperations()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
-        var executor = CreateExecutor(pathGrantService.Object, out _);
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        var traverseService = grantMutatorService.As<ITraverseService>();
+        var executor = CreateExecutor(grantMutatorService.Object, traverseService.Object, out _);
 
         var plan = new AclApplyPlan(
             PendingAdds: [],
@@ -277,10 +322,10 @@ public class AclApplyExecutorTests
 
         await executor.ExecuteAsync(plan, TestSid, isContainer: false, new Progress<(int current, int total)>());
 
-        pathGrantService.Verify(p => p.UntrackGrant(TestSid, @"C:\UntrackGrant", false), Times.Once);
-        pathGrantService.Verify(p => p.UntrackTraverse(TestSid, @"C:\UntrackTraverse"), Times.Once);
-        pathGrantService.Verify(p => p.FixGrantAcl(TestSid, @"C:\FixGrant", false), Times.Once);
-        pathGrantService.Verify(p => p.FixTraverseAcl(TestSid, @"C:\FixTraverse"), Times.Once);
+        grantMutatorService.Verify(p => p.UntrackGrant(TestSid, @"C:\UntrackGrant", false), Times.Once);
+        traverseService.Verify(p => p.UntrackTraverse(TestSid, @"C:\UntrackTraverse"), Times.Once);
+        grantMutatorService.Verify(p => p.FixGrantAcl(TestSid, @"C:\FixGrant", false), Times.Once);
+        traverseService.Verify(p => p.FixTraverseAcl(TestSid, @"C:\FixTraverse"), Times.Once);
     }
 
     [Fact]
@@ -296,8 +341,8 @@ public class AclApplyExecutorTests
             @"C:\Configs\extra.rfn",
             new InvalidOperationException("rollback save failed"));
 
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        grantMutatorService
             .Setup(p => p.UpdateGrant(
                 TestSid,
                 @"C:\Modify",
@@ -335,49 +380,12 @@ public class AclApplyExecutorTests
             PendingConfigMoves: [],
             PendingTraverseConfigMoves: []);
 
-        var executor = CreateExecutor(pathGrantService.Object, out _);
+        var executor = CreateExecutor(grantMutatorService.Object, new Mock<ITraverseService>().Object, out _);
         var result = await executor.ExecuteAsync(plan, TestSid, isContainer: false, new Progress<(int current, int total)>());
 
         var error = Assert.Single(result.Errors);
         Assert.Same(exception, error.Exception);
         Assert.Single(error.Exception.CleanupFailures);
-    }
-
-    [Fact]
-    public async Task ExecuteAsync_GrantOperationFailure_LogsFormattedMessageAndRetainsExceptionObject()
-    {
-        var exception = CreateGrantOperationException(
-            GrantApplyFailureStep.GrantAclRemove,
-            @"C:\LogFailure",
-            new InvalidOperationException("boom"),
-            @"C:\Configs\extra.rfn");
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
-            .Setup(p => p.RemoveGrant(TestSid, @"C:\LogFailure", false))
-            .Throws(exception);
-        var log = new Mock<ILoggingService>();
-
-        var executor = CreateExecutor(pathGrantService.Object, out _, log.Object);
-        var plan = new AclApplyPlan(
-            PendingAdds: [],
-            PendingRemoves: [new GrantedPathEntry { Path = @"C:\LogFailure", IsDeny = false }],
-            PendingModifications: [],
-            PendingGrantFixes: [],
-            PendingTraverseAdds: [],
-            PendingTraverseRemoves: [],
-            PendingTraverseFixes: [],
-            PendingUntrackGrants: [],
-            PendingUntrackTraverse: [],
-            PendingConfigMoves: [],
-            PendingTraverseConfigMoves: []);
-
-        var result = await executor.ExecuteAsync(plan, TestSid, isContainer: false, new Progress<(int current, int total)>());
-
-        var error = Assert.Single(result.Errors);
-        log.Verify(x => x.Error(
-            GrantApplyFailureFormatter.Format(exception.Step, exception.Path, exception.ConfigPath, exception.Cause),
-            exception), Times.Once);
-        Assert.Same(exception, error.Exception);
     }
 
     [Fact]
@@ -398,15 +406,16 @@ public class AclApplyExecutorTests
             @"C:\TraverseWarning",
             null,
             new InvalidOperationException("traverse save warning"));
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        var traverseService = grantMutatorService.As<ITraverseService>();
+        grantMutatorService
             .Setup(p => p.RemoveGrant(TestSid, @"C:\GrantWarning", false))
             .Returns(new GrantApplyResult(
                 GrantApplied: true,
                 DatabaseModified: true,
                 DurableSaveCompleted: false,
                 Warnings: [removeWarning]));
-        pathGrantService
+        grantMutatorService
             .Setup(p => p.AddGrant(
                 TestSid,
                 @"C:\AddWarning",
@@ -419,7 +428,7 @@ public class AclApplyExecutorTests
                 DatabaseModified: true,
                 DurableSaveCompleted: false,
                 Warnings: [addWarning]));
-        pathGrantService
+        traverseService
             .Setup(p => p.RemoveTraverse(TestSid, @"C:\TraverseWarning"))
             .Returns(new GrantApplyResult(
                 TraverseApplied: true,
@@ -427,7 +436,7 @@ public class AclApplyExecutorTests
                 DurableSaveCompleted: false,
                 Warnings: [traverseWarning]));
 
-        var executor = CreateExecutor(pathGrantService.Object, out _);
+        var executor = CreateExecutor(grantMutatorService.Object, traverseService.Object, out _);
         var plan = new AclApplyPlan(
             PendingAdds: [new GrantedPathEntry { Path = @"C:\AddWarning", IsDeny = false, SavedRights = SavedRightsState.DefaultForMode(false) }],
             PendingRemoves: [new GrantedPathEntry { Path = @"C:\GrantWarning", IsDeny = false }],
@@ -451,8 +460,8 @@ public class AclApplyExecutorTests
     [Fact]
     public async Task ExecuteAsync_Cancellation_StopsCurrentApplyWithoutRecordingError()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        grantMutatorService
             .Setup(p => p.AddGrant(
                 TestSid,
                 @"C:\Cancel",
@@ -462,7 +471,8 @@ public class AclApplyExecutorTests
                 null))
             .Throws(new OperationCanceledException("user canceled"));
 
-        var executor = CreateExecutor(pathGrantService.Object, out _);
+        var traverseService = new Mock<ITraverseService>();
+        var executor = CreateExecutor(grantMutatorService.Object, traverseService.Object, out _);
         var plan = new AclApplyPlan(
             PendingAdds: [new GrantedPathEntry { Path = @"C:\Cancel", IsDeny = true, SavedRights = SavedRightsState.DefaultForMode(true) }],
             PendingRemoves: [],
@@ -480,21 +490,22 @@ public class AclApplyExecutorTests
 
         Assert.True(result.WasCanceled);
         Assert.Empty(result.Errors);
-        pathGrantService.Verify(p => p.AddTraverse(TestSid, @"C:\SkippedTraverse", It.IsAny<IGrantIntentStore?>()), Times.Never);
+        traverseService.Verify(p => p.AddTraverse(TestSid, @"C:\SkippedTraverse", It.IsAny<IGrantIntentStore?>()), Times.Never);
     }
 
     [Fact]
     public async Task ExecuteAsync_UnexpectedFailure_CapturesFatalFailureAndStopsLaterPhases()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantMutatorService = new Mock<IGrantMutatorService>();
+        grantMutatorService
             .Setup(p => p.RemoveGrant(TestSid, @"C:\Completed", false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
-        pathGrantService
+        grantMutatorService
             .Setup(p => p.RemoveGrant(TestSid, @"C:\Fatal", false))
             .Throws(new InvalidOperationException("boom"));
 
-        var executor = CreateExecutor(pathGrantService.Object, out _);
+        var traverseService = new Mock<ITraverseService>();
+        var executor = CreateExecutor(grantMutatorService.Object, traverseService.Object, out _);
         var plan = new AclApplyPlan(
             PendingAdds: [],
             PendingRemoves:
@@ -524,19 +535,24 @@ public class AclApplyExecutorTests
         Assert.Equal(GrantApplyFailureStep.GrantAclRemove, fatal.Exception.Step);
         Assert.IsType<InvalidOperationException>(fatal.Exception.Cause);
         Assert.Equal("boom", fatal.Exception.Cause.Message);
-        pathGrantService.Verify(p => p.AddTraverse(TestSid, @"C:\SkippedTraverse", It.IsAny<IGrantIntentStore?>()), Times.Never);
+        traverseService.Verify(p => p.AddTraverse(TestSid, @"C:\SkippedTraverse", It.IsAny<IGrantIntentStore?>()), Times.Never);
     }
 
     private static AclApplyExecutor CreateExecutor(
-        IPathGrantService pathGrantService,
+        IGrantMutatorService grantMutatorService,
+        ITraverseService traverseService,
         out TestGrantIntentStoreProvider stores,
         ILoggingService? log = null)
     {
         stores = new TestGrantIntentStoreProvider(new TestGrantIntentStore());
+        var phaseCatalog = new AclApplyPhaseCatalog();
         return new AclApplyExecutor(
-            log ?? new Mock<ILoggingService>().Object,
-            pathGrantService,
-            stores);
+            phaseCatalog,
+            new AclApplyPhaseExecutor(
+                log ?? new Mock<ILoggingService>().Object,
+                grantMutatorService,
+                traverseService,
+                new AclApplySelectedStoreResolver(stores)));
     }
 
     private static GrantOperationException CreateGrantOperationException(

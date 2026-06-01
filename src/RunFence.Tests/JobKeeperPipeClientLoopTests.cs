@@ -41,7 +41,7 @@ public sealed class JobKeeperPipeClientLoopTests
         public JobKeeperLaunchResponse Handle(JobKeeperLaunchRequest request)
         {
             HandledRequests.Add(request);
-            return new JobKeeperLaunchResponse(1234, 0);
+            return new JobKeeperLaunchResponse(1234, 0, 77);
         }
     }
 

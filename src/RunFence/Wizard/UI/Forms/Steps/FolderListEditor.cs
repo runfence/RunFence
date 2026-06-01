@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using RunFence.Core.Infrastructure;
 using RunFence.Infrastructure;
 using RunFence.UI;
 
@@ -30,9 +29,11 @@ public class FolderListEditor : UserControl
     private FolderBrowseDialogType _browseType;
     private Func<string, bool>? _validate;
     private string? _browseDialogTitle;
+    private readonly IOpenFileDialogAdapterFactory _openFileDialogFactory;
 
-    public FolderListEditor()
+    public FolderListEditor(IOpenFileDialogAdapterFactory openFileDialogFactory)
     {
+        _openFileDialogFactory = openFileDialogFactory;
         BackColor = Color.White;
         BuildContent();
     }
@@ -212,12 +213,12 @@ public class FolderListEditor : UserControl
             }
             case FolderBrowseDialogType.ExecutableFile:
             {
-                using var dlg = new OpenFileDialog();
+                using var dlgAdapter = _openFileDialogFactory.Create();
+                var dlg = dlgAdapter.Dialog;
                 dlg.Title = _browseDialogTitle ?? "Select Executable";
                 dlg.Filter = "Executable files (*.exe)|*.exe|All files (*.*)|*.*";
                 dlg.CheckFileExists = true;
-                FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-                return dlg.ShowDialog(this) == DialogResult.OK ? dlg.FileName : null;
+                return dlgAdapter.ShowDialog(this) == DialogResult.OK ? dlg.FileName : null;
             }
             default:
                 return null;

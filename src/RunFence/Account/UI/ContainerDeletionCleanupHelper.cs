@@ -8,7 +8,7 @@ using RunFence.Infrastructure;
 namespace RunFence.Account.UI;
 
 public class ContainerDeletionCleanupHelper(
-    AppEntryEnforcementHelper enforcementHelper,
+    AppEntryEnforcementCoordinator enforcementCoordinator,
     IAclService aclService,
     IIconService iconService,
     IShortcutDiscoveryService shortcutDiscovery,
@@ -23,7 +23,7 @@ public class ContainerDeletionCleanupHelper(
         {
             try
             {
-                enforcementHelper.RevertChanges(app, allApps, shortcutCache);
+                enforcementCoordinator.RevertChanges(app, allApps, shortcutCache);
                 iconService.DeleteIcon(app.Id);
             }
             catch (Exception ex)

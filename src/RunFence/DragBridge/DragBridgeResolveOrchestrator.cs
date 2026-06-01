@@ -16,7 +16,8 @@ public class DragBridgeResolveOrchestrator(
     IQuickAccessPinService quickAccessPinService,
     IUiThreadInvoker uiThreadInvoker,
     INotificationService notifications,
-    IPathGrantService pathGrantService)
+    IGrantMutatorService grantMutatorService,
+    ITraverseService traverseService)
 {
     /// <summary>
     /// Returns true when the target SID requires access resolution for the captured files
@@ -50,7 +51,7 @@ public class DragBridgeResolveOrchestrator(
                     {
                         try
                         {
-                            pathGrantService.RestoreGrant(
+                            grantMutatorService.RestoreGrant(
                                 rollback.Sid,
                                 rollback.Path,
                                 isDeny: false,
@@ -65,7 +66,7 @@ public class DragBridgeResolveOrchestrator(
                     {
                         try
                         {
-                            pathGrantService.RestoreTraverse(
+                            traverseService.RestoreTraverse(
                                 rollback.Sid,
                                 rollback.Path,
                                 rollback.PreviousState);

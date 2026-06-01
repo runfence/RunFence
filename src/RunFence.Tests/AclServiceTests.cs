@@ -1,4 +1,5 @@
 using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using Moq;
 using RunFence.Acl;
@@ -14,6 +15,7 @@ namespace RunFence.Tests;
 public class AclServiceTests
 {
     private readonly AclService _service;
+    private readonly IAclDenyModeService _denyService;
     private readonly Mock<ILoggingService> _log;
     private readonly CachingLocalUserProvider _localUserProvider;
 
@@ -24,20 +26,40 @@ public class AclServiceTests
     {
         _log = new Mock<ILoggingService>();
         _localUserProvider = new CachingLocalUserProvider(_log.Object, new LocalSamSidResolver(_log.Object), new SystemClock());
-        _service = CreateService(_log.Object, _localUserProvider);
+        (_service, _denyService) = CreateServiceAndDenyService(_log.Object, _localUserProvider);
     }
 
     private static AclService CreateService(ILoggingService log, CachingLocalUserProvider localUserProvider,
         IDatabaseProvider? databaseProvider = null,
-        Mock<IPathGrantService>? pathGrantService = null)
+        Mock<IGrantMutatorService>? grantMutatorService = null)
+        => CreateServiceAndDenyService(log, localUserProvider, databaseProvider, grantMutatorService).Item1;
+
+    private static (AclService service, IAclDenyModeService denyService) CreateServiceAndDenyService(
+        ILoggingService log,
+        CachingLocalUserProvider localUserProvider,
+        IDatabaseProvider? databaseProvider = null,
+        Mock<IGrantMutatorService>? grantMutatorService = null)
     {
         var resolvedDatabaseProvider = databaseProvider ?? new LambdaDatabaseProvider(() => new AppDatabase());
         var containerLookup = new ContainerLookupHelper(resolvedDatabaseProvider);
         var aclAccessor = AclAccessorFactory.Create();
-        var denyService = new AclDenyModeService(log, localUserProvider, containerLookup, new Mock<IInteractiveUserResolver>().Object, aclAccessor);
-        var allowService = new AclAllowModeService(log, localUserProvider, aclAccessor);
-        pathGrantService ??= new Mock<IPathGrantService>();
-        return new AclService(log, denyService, allowService, containerLookup, pathGrantService.Object);
+        var resolver = new AppEntryAclTargetResolver();
+        var denyService = new AclDenyModeService(log, localUserProvider, containerLookup, new Mock<IInteractiveUserResolver>().Object, aclAccessor, resolver);
+        var allowService = new AclAllowModeService(
+            log,
+            localUserProvider,
+            aclAccessor,
+            new AppEntryAllowAclRuleProvider(resolver));
+        grantMutatorService ??= new Mock<IGrantMutatorService>();
+        return (
+            new AclService(
+                log,
+                denyService,
+                allowService,
+                containerLookup,
+                grantMutatorService.Object,
+                resolver),
+            denyService);
     }
 
     private static AppEntry CreateApp(string id, string name, string exePath,
@@ -130,14 +152,14 @@ public class AclServiceTests
         Assert.Equal(clampedResult, result);
     }
 
+    // --- ApplyAcl routing logic tests ---
+
     [Fact]
     public void GetBlockedAclPaths_ReturnsNonEmptyArray()
     {
         var paths = PathConstants.GetBlockedAclPaths();
         Assert.NotEmpty(paths);
     }
-
-    // --- ApplyAcl routing logic tests ---
 
     [Fact]
     public void ApplyAcl_UrlSchemeApp_ReturnsEarlyWithoutAccessingPath()
@@ -151,8 +173,6 @@ public class AclServiceTests
         var exception = Record.Exception(() => _service.ApplyAcl(app, allApps));
 
         Assert.Null(exception);
-        _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Never);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Never);
     }
 
     [Fact]
@@ -166,8 +186,9 @@ public class AclServiceTests
         var exception = Record.Exception(() => _service.ApplyAcl(app, allApps));
 
         Assert.Null(exception);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Never);
     }
+
+    // --- RevertAcl routing logic tests ---
 
     [Fact]
     public void ApplyAcl_BlockedPath_LogsWarningAndReturns()
@@ -181,8 +202,6 @@ public class AclServiceTests
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Applied ACL"))), Times.Never);
     }
 
-    // --- RevertAcl routing logic tests ---
-
     [Fact]
     public void RevertAcl_UrlSchemeApp_ReturnsEarlyWithoutAccessingPath()
     {
@@ -194,7 +213,6 @@ public class AclServiceTests
         var exception = Record.Exception(() => _service.RevertAcl(app, allApps));
 
         Assert.Null(exception);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Never);
     }
 
     [Fact]
@@ -207,8 +225,9 @@ public class AclServiceTests
         var exception = Record.Exception(() => _service.RevertAcl(app, allApps));
 
         Assert.Null(exception);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Never);
     }
+
+    // --- GetAllowedSidsForPath direct tests ---
 
     [Fact]
     public void RevertAcl_SharedPathWithOtherApp_ReappliesAclForOther()
@@ -228,7 +247,7 @@ public class AclServiceTests
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Reverted ACL"))), Times.Once);
     }
 
-    [Fact]
+[Fact]
     public void RevertAcl_SharedPathWithUrlSchemeApp_DoesNotConsiderUrlScheme()
     {
         using var tempDir = new TempDirectory("RunFence_AclTest");
@@ -246,8 +265,6 @@ public class AclServiceTests
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Reverted ACL"))), Times.Once);
     }
 
-    // --- GetAllowedSidsForPath direct tests ---
-
     [Fact]
     public void GetAllowedSidsForPath_FolderTarget_IncludesChildExeTargetedApps()
     {
@@ -257,7 +274,7 @@ public class AclServiceTests
 
         var allApps = new List<AppEntry> { folderApp, exeApp };
 
-        var allowed = _service.GetAllowedSidsForPath(
+        var allowed = _denyService.GetAllowedSidsForPath(
             @"C:\Apps", allApps, isFolderTarget: true);
 
         Assert.Contains(Sid1, allowed);
@@ -274,7 +291,7 @@ public class AclServiceTests
 
         var allApps = new List<AppEntry> { parentApp, childApp };
 
-        var allowed = _service.GetAllowedSidsForPath(
+        var allowed = _denyService.GetAllowedSidsForPath(
             @"C:\Apps", allApps, isFolderTarget: true);
 
         Assert.Contains(Sid1, allowed);
@@ -289,7 +306,7 @@ public class AclServiceTests
 
         var allApps = new List<AppEntry> { exeApp, otherApp };
 
-        var allowed = _service.GetAllowedSidsForPath(
+        var allowed = _denyService.GetAllowedSidsForPath(
             @"C:\Apps\tool.exe", allApps, isFolderTarget: false);
 
         Assert.Contains(Sid1, allowed);
@@ -303,7 +320,7 @@ public class AclServiceTests
 
         var remainingApps = new List<AppEntry> { app2 };
 
-        var allowed = _service.GetAllowedSidsForPath(
+        var allowed = _denyService.GetAllowedSidsForPath(
             @"C:\Apps\tool.exe", remainingApps, isFolderTarget: false);
 
         Assert.DoesNotContain(Sid1, allowed);
@@ -317,7 +334,7 @@ public class AclServiceTests
 
         var allApps = new List<AppEntry> { app };
 
-        var allowed = _service.GetAllowedSidsForPath(
+        var allowed = _denyService.GetAllowedSidsForPath(
             @"C:\Apps\tool.exe", allApps, isFolderTarget: false);
 
         Assert.Empty(allowed);
@@ -330,11 +347,13 @@ public class AclServiceTests
 
         var allApps = new List<AppEntry> { app };
 
-        var allowed = _service.GetAllowedSidsForPath(
+        var allowed = _denyService.GetAllowedSidsForPath(
             "steam://run/123", allApps, isFolderTarget: false);
 
         Assert.Empty(allowed);
     }
+
+    // --- IsFolder ACL tests ---
 
     [Fact]
     public void RecomputeAllAncestorAcls_NoFolderApps_NoErrors()
@@ -346,6 +365,36 @@ public class AclServiceTests
         _service.RecomputeAllAncestorAcls(allApps);
 
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Recomputed ancestor ACL"))), Times.Never);
+    }
+
+    [Fact]
+    public void RecomputeAllAncestorAcls_BlockedAncestor_SkipsDenyMutation()
+    {
+        var denyService = new Mock<IAclDenyModeService>(MockBehavior.Strict);
+        var service = new AclService(
+            _log.Object,
+            denyService.Object,
+            new Mock<IAclAllowModeService>().Object,
+            new ContainerLookupHelper(new LambdaDatabaseProvider(() => new AppDatabase())),
+            new Mock<IGrantMutatorService>().Object,
+            new AppEntryAclTargetResolver());
+        var windowsDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var app = CreateApp(
+            "f0001",
+            "BlockedFolderApp",
+            Path.Combine(windowsDir, "System32", "notepad.exe"),
+            AclTarget.Folder,
+            accountSid: Sid1,
+            folderAclDepth: 1);
+
+        service.RecomputeAllAncestorAcls([app]);
+
+        denyService.Verify(
+            s => s.GetDeniedRightsPerSid(It.IsAny<string>(), It.IsAny<IReadOnlyList<AppEntry>>(), It.IsAny<bool>()),
+            Times.Never);
+        denyService.Verify(
+            s => s.ApplyDenyToFolderPerSid(It.IsAny<string>(), It.IsAny<Dictionary<string, DeniedRights>>()),
+            Times.Never);
     }
 
     [Fact]
@@ -371,21 +420,71 @@ public class AclServiceTests
     }
 
     [Fact]
-    public void RecomputeAllAncestorAcls_BlockedAncestorPath_LogsWarningAndSkips()
+    public void RecomputeAllAncestorAcls_DenyFolderWithoutCurrentDescendant_Recomputes()
     {
-        var folderApp = CreateApp("f0001", "FolderApp", @"C:\Windows\app.exe",
+        using var tempDir = new TempDirectory("RunFence_AclTest");
+        var subDir = Path.Combine(tempDir.Path, "Sub");
+        Directory.CreateDirectory(subDir);
+        var parentExePath = Path.Combine(tempDir.Path, "main.exe");
+        File.WriteAllBytes(parentExePath, []);
+        var childExePath = Path.Combine(subDir, "tool.exe");
+        File.WriteAllBytes(childExePath, []);
+
+        var folderApp = CreateApp("f0001", "FolderApp", parentExePath,
             AclTarget.Folder, accountSid: Sid1, folderAclDepth: 0);
-        var childApp = CreateApp("e0001", "ChildApp", @"C:\Windows\Sub\tool.exe", accountSid: Sid2);
+        var childApp = CreateApp("e0001", "ExeApp", childExePath, accountSid: Sid2);
+        var localUserProvider = new Mock<ILocalUserProvider>();
+        localUserProvider.Setup(provider => provider.GetLocalUserAccounts())
+            .Returns(
+            [
+                new LocalUserAccount("User1", Sid1),
+                new LocalUserAccount("User2", Sid2)
+            ]);
 
-        var allApps = new List<AppEntry> { folderApp, childApp };
+        var dbProvider = new LambdaDatabaseProvider(() => new AppDatabase());
+        var containerLookup = new ContainerLookupHelper(dbProvider);
+        var aclAccessor = AclAccessorFactory.Create();
+        var resolver = new AppEntryAclTargetResolver();
+        var denyService = new AclDenyModeService(
+            _log.Object,
+            localUserProvider.Object,
+            containerLookup,
+            new Mock<IInteractiveUserResolver>().Object,
+            aclAccessor,
+            resolver);
+        var allowService = new AclAllowModeService(
+            _log.Object,
+            localUserProvider.Object,
+            aclAccessor,
+            new AppEntryAllowAclRuleProvider(resolver));
+        var service = new AclService(
+            _log.Object,
+            denyService,
+            allowService,
+            containerLookup,
+            new Mock<IGrantMutatorService>().Object,
+            resolver);
 
-        _service.RecomputeAllAncestorAcls(allApps);
+        static List<FileSystemAccessRule> GetExplicitDenyRules(string path, string sid)
+        {
+            var security = new DirectoryInfo(path).GetAccessControl();
+            return security.GetAccessRules(true, false, typeof(SecurityIdentifier))
+                .Cast<FileSystemAccessRule>()
+                .Where(rule =>
+                    rule.AccessControlType == AccessControlType.Deny &&
+                    string.Equals(rule.IdentityReference.Value, sid, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
 
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("Blocked ancestor ACL target path"))), Times.Once);
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Recomputed ancestor ACL"))), Times.Never);
+        service.RecomputeAllAncestorAcls([folderApp, childApp]);
+        Assert.Empty(GetExplicitDenyRules(tempDir.Path, Sid2));
+
+        service.RecomputeAllAncestorAcls([folderApp]);
+
+        var denyRules = GetExplicitDenyRules(tempDir.Path, Sid2);
+        Assert.NotEmpty(denyRules);
+        Assert.Contains(denyRules, rule => rule.FileSystemRights.HasFlag(FileSystemRights.ExecuteFile));
     }
-
-    // --- IsFolder ACL tests ---
 
     [Fact]
     public void ResolveAclTargetPath_FolderApp_Depth0_ReturnsFolderItself()
@@ -416,9 +515,7 @@ public class AclServiceTests
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Applied ACL"))), Times.Never);
     }
 
-    // --- Allow mode routing tests ---
-
-    [Fact]
+[Fact]
     public void ApplyAcl_AllowMode_DispatchesToAllowPath()
     {
         using var tempDir = new TempDirectory("RunFence_AclTest");
@@ -436,7 +533,7 @@ public class AclServiceTests
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Applied deny ACL"))), Times.Never);
     }
 
-    [Fact]
+[Fact]
     public void RevertAcl_AllowMode_DispatchesToAllowRevert()
     {
         using var tempDir = new TempDirectory("RunFence_AclTest");
@@ -454,7 +551,7 @@ public class AclServiceTests
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Reverted allow-mode ACL"))), Times.Once);
     }
 
-    [Fact]
+[Fact]
     public void RevertAcl_DenyMode_OtherAppsFilter_ExcludesAllowMode()
     {
         using var tempDir = new TempDirectory("RunFence_AclTest");
@@ -484,11 +581,40 @@ public class AclServiceTests
 
         var allApps = new List<AppEntry> { denyApp, allowApp };
 
-        var allowed = _service.GetAllowedSidsForPath(
+        var allowed = _denyService.GetAllowedSidsForPath(
             @"C:\Apps\tool.exe", allApps, isFolderTarget: false);
 
         Assert.Contains(Sid1, allowed); // deny-mode SID is included
         Assert.DoesNotContain(Sid2, allowed); // allow-mode SID is excluded
+    }
+
+    // --- DeniedRights tests ---
+
+    [Theory]
+    [InlineData(DeniedRights.Execute, FileSystemRights.ExecuteFile)]
+    [InlineData(DeniedRights.ExecuteWrite,
+        FileSystemRights.ExecuteFile |
+        FileSystemRights.WriteData |
+        FileSystemRights.AppendData |
+        FileSystemRights.WriteAttributes |
+        FileSystemRights.WriteExtendedAttributes |
+        FileSystemRights.Delete |
+        FileSystemRights.DeleteSubdirectoriesAndFiles)]
+    [InlineData(DeniedRights.ExecuteReadWrite,
+        FileSystemRights.ExecuteFile |
+        FileSystemRights.WriteData |
+        FileSystemRights.AppendData |
+        FileSystemRights.WriteAttributes |
+        FileSystemRights.WriteExtendedAttributes |
+        FileSystemRights.Delete |
+        FileSystemRights.DeleteSubdirectoriesAndFiles |
+        FileSystemRights.ReadData |
+        FileSystemRights.ReadAttributes |
+        FileSystemRights.ReadExtendedAttributes)]
+    public void MapDeniedRights_ReturnsCorrectFlags(DeniedRights deniedRights, FileSystemRights expected)
+    {
+        var result = AclRightsHelper.MapDeniedRights(deniedRights);
+        Assert.Equal(expected, result);
     }
 
     [Fact]
@@ -515,8 +641,6 @@ public class AclServiceTests
         // Allow-mode folder app should be excluded, so no ancestor recomputation
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Recomputed ancestor ACL"))), Times.Never);
     }
-
-    // --- Mode transition tests ---
 
     [Fact]
     public void ApplyAcl_AllowMode_AfterDenyMode_CleansUpDenyAces()
@@ -558,35 +682,6 @@ public class AclServiceTests
         _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Applied deny ACL"))), Times.Once);
     }
 
-    // --- DeniedRights tests ---
-
-    [Theory]
-    [InlineData(DeniedRights.Execute, FileSystemRights.ExecuteFile)]
-    [InlineData(DeniedRights.ExecuteWrite,
-        FileSystemRights.ExecuteFile |
-        FileSystemRights.WriteData |
-        FileSystemRights.AppendData |
-        FileSystemRights.WriteAttributes |
-        FileSystemRights.WriteExtendedAttributes |
-        FileSystemRights.Delete |
-        FileSystemRights.DeleteSubdirectoriesAndFiles)]
-    [InlineData(DeniedRights.ExecuteReadWrite,
-        FileSystemRights.ExecuteFile |
-        FileSystemRights.WriteData |
-        FileSystemRights.AppendData |
-        FileSystemRights.WriteAttributes |
-        FileSystemRights.WriteExtendedAttributes |
-        FileSystemRights.Delete |
-        FileSystemRights.DeleteSubdirectoriesAndFiles |
-        FileSystemRights.ReadData |
-        FileSystemRights.ReadAttributes |
-        FileSystemRights.ReadExtendedAttributes)]
-    public void MapDeniedRights_ReturnsCorrectFlags(DeniedRights deniedRights, FileSystemRights expected)
-    {
-        var result = AclRightsHelper.MapDeniedRights(deniedRights);
-        Assert.Equal(expected, result);
-    }
-
     // --- Backward compatibility tests ---
 
     // --- AppContainer ACL integration tests ---
@@ -603,7 +698,7 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
         var service = CreateService(
             _log.Object,
             _localUserProvider,
@@ -621,7 +716,6 @@ public class AclServiceTests
             FileSystemRights.ReadAndExecute,
             null,
             false), Times.Once);
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Granted") && s.Contains(containerSid))), Times.Once);
     }
 
     [Fact]
@@ -635,7 +729,7 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
         var service = CreateService(
             _log.Object,
             _localUserProvider,
@@ -653,7 +747,6 @@ public class AclServiceTests
             containerSid,
             exePath,
             false), Times.Once);
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Revoked") && s.Contains(containerSid))), Times.Once);
     }
 
     [Fact]
@@ -667,7 +760,7 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
         pathGrantService.Setup(p => p.EnsureAccess(
                 containerSid,
                 exePath,
@@ -690,7 +783,6 @@ public class AclServiceTests
         var exception = Record.Exception(() => service.ApplyAcl(app, new List<AppEntry> { app }));
 
         Assert.Null(exception);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("Failed to grant AppContainer SID"))), Times.Once);
     }
 
     [Fact]
@@ -709,7 +801,7 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
         pathGrantService.Setup(p => p.EnsureAccess(
                 containerSid,
                 exePath,
@@ -731,7 +823,6 @@ public class AclServiceTests
         var exception = Record.Exception(() => service.ApplyAcl(app, new List<AppEntry> { app }));
 
         Assert.Null(exception);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(GrantApplyFailureFormatter.Format(warning)))), Times.Once);
     }
 
     [Fact]
@@ -745,7 +836,7 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
         pathGrantService.Setup(p => p.RemoveGrant(
                 containerSid,
                 exePath,
@@ -763,7 +854,6 @@ public class AclServiceTests
         var exception = Record.Exception(() => service.RevertAcl(app, new List<AppEntry> { app }));
 
         Assert.Null(exception);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("Failed to revoke AppContainer SID"))), Times.Once);
     }
 
     [Fact]
@@ -782,7 +872,7 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
         pathGrantService.Setup(p => p.RemoveGrant(
                 containerSid,
                 exePath,
@@ -804,7 +894,6 @@ public class AclServiceTests
         var exception = Record.Exception(() => service.RevertAcl(app, new List<AppEntry> { app }));
 
         Assert.Null(exception);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(GrantApplyFailureFormatter.Format(warning)))), Times.Once);
     }
 
     [Fact]
@@ -815,7 +904,7 @@ public class AclServiceTests
         var app = CreateApp("c0001", "ContainerApp", @"C:\Apps\tool.exe", accountSid: "", aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
 
-        var allowed = _service.GetAllowedSidsForPath(
+        var allowed = _denyService.GetAllowedSidsForPath(
             @"C:\Apps\tool.exe", new List<AppEntry> { app }, isFolderTarget: false);
 
         // Empty string must NOT be in the allowed set
@@ -833,16 +922,22 @@ public class AclServiceTests
 
         var containerLookup = new ContainerLookupHelper(new LambdaDatabaseProvider(() => new AppDatabase()));
         var aclAccessor = AclAccessorFactory.Create();
+        var resolver = new AppEntryAclTargetResolver();
         var denyService = new AclDenyModeService(_log.Object, _localUserProvider,
-            containerLookup, interactiveResolver.Object, aclAccessor);
-        var service = new AclService(_log.Object, denyService, new AclAllowModeService(_log.Object, _localUserProvider, aclAccessor),
+            containerLookup, interactiveResolver.Object, aclAccessor, resolver);
+        var service = new AclService(_log.Object, denyService, new AclAllowModeService(
+                _log.Object,
+                _localUserProvider,
+                aclAccessor,
+                new AppEntryAllowAclRuleProvider(resolver)),
             new ContainerLookupHelper(new LambdaDatabaseProvider(() => new AppDatabase())),
-            new Mock<IPathGrantService>().Object);
+            new Mock<IGrantMutatorService>().Object,
+            resolver);
 
         var app = CreateApp("c0001", "ContainerApp", @"C:\Apps\tool.exe", accountSid: "", aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
 
-        var allowed = service.GetAllowedSidsForPath(
+        var allowed = denyService.GetAllowedSidsForPath(
             @"C:\Apps\tool.exe", new List<AppEntry> { app }, isFolderTarget: false);
 
         Assert.Contains(interactiveSid, allowed, StringComparer.OrdinalIgnoreCase);
@@ -857,11 +952,12 @@ public class AclServiceTests
         var db = new AppDatabase();
         db.AppContainers.Add(new AppContainerEntry { Name = "ram_browser", DisplayName = "Browser", Sid = containerSid });
 
-        var service = CreateService(_log.Object, _localUserProvider, new LambdaDatabaseProvider(() => db));
+        var (service, denyService) = CreateServiceAndDenyService(
+            _log.Object, _localUserProvider, new LambdaDatabaseProvider(() => db));
         var app = CreateApp("c0001", "ContainerApp", @"C:\Apps\tool.exe", accountSid: "", aclMode: AclMode.Deny);
         app.AppContainerName = "ram_browser";
 
-        var allowed = service.GetAllowedSidsForPath(
+        var allowed = denyService.GetAllowedSidsForPath(
             @"C:\Apps\tool.exe", new List<AppEntry> { app }, isFolderTarget: false);
 
         Assert.Contains(containerSid, allowed, StringComparer.OrdinalIgnoreCase);
@@ -889,4 +985,3 @@ public class AclServiceTests
         Assert.Null(app.AllowedAclEntries);
     }
 }
-

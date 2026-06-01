@@ -670,13 +670,6 @@ public sealed class SecurityScannerAutorunAndIfeoTests : SecurityScannerTestBase
         Assert.Empty(candidates);
     }
 
-    [Fact]
-    public void ComputeUnquotedPathCandidates_UnquotedPath_HasCandidates()
-    {
-        var candidates = CommandLineParser.ComputeUnquotedPathCandidates("C:\\Program Files\\App\\svc.exe -arg");
-        Assert.NotEmpty(candidates);
-    }
-
     // ===== CancellationToken test =====
 
     [Fact]

@@ -35,6 +35,19 @@ public class LicensingModule : Module
             .As<ILicenseMessageFormatter>()
             .SingleInstance();
 
+        builder.RegisterType<RegistryLicenseNagStore>()
+            .As<ILicenseNagStore>()
+            .SingleInstance();
+
+        builder.RegisterType<LicenseNagService>()
+            .AsSelf()
+            .As<ILicenseNagService>()
+            .SingleInstance();
+
+        builder.RegisterType<LicenseNagEligibilityService>()
+            .AsSelf()
+            .SingleInstance();
+
         builder.RegisterType<LicenseService>()
             .As<ILicenseService>()
             .As<IRequiresInitialization>()

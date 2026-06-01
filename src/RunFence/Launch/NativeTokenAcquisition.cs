@@ -38,6 +38,13 @@ public static class NativeTokenAcquisition
         => SetIntegrityOnToken(hToken, ProcessLaunchNative.MediumIntegritySid, out pSid, out tmlBuffer);
 
     /// <summary>
+    /// Applies the High Integrity mandatory label to <paramref name="hToken"/>.
+    /// Used for non-elevating launches that still need a high integrity label.
+    /// </summary>
+    public static void SetHighIntegrityOnToken(IntPtr hToken, out IntPtr pSid, out IntPtr tmlBuffer)
+        => SetIntegrityOnToken(hToken, ProcessLaunchNative.HighIntegritySid, out pSid, out tmlBuffer);
+
+    /// <summary>
     /// Replaces the DefaultDacl on <paramref name="hToken"/> with a minimal DACL granting
     /// GENERIC_ALL only to SYSTEM, <paramref name="accountSid"/>, and any
     /// <paramref name="additionalSids"/>. This propagates to every process and kernel object

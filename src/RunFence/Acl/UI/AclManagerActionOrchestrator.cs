@@ -134,13 +134,13 @@ public class AclManagerActionOrchestrator(
         if (CancelPendingAddOrReturn(key))
             return;
 
-        _pending.PendingUntrackGrants[key] = entry;
+        _pending.Grants.UntrackGrant(entry);
         // Discard any pending modification or config move — untrack supersedes them.
         // Also discard any config move re-keyed to the new mode by a prior mode switch.
-        _pending.PendingGrantFixes.Remove(key);
-        if (_pending.PendingModifications.Remove(key, out var mod))
-            _pending.PendingConfigMoves.Remove((entry.Path, mod.NewIsDeny));
-        _pending.PendingConfigMoves.Remove(key);
+        _pending.Grants.RemoveGrantFix(entry.Path, entry.IsDeny);
+        if (_pending.Grants.RemoveGrantModification(entry.Path, entry.IsDeny, out var mod))
+            _pending.Grants.RemoveGrantConfigMove(entry.Path, mod!.NewIsDeny, out _);
+        _pending.Grants.RemoveGrantConfigMove(entry.Path, entry.IsDeny, out _);
     }
 
     /// <summary>
@@ -153,16 +153,16 @@ public class AclManagerActionOrchestrator(
         var normalized = Path.GetFullPath(entry.Path);
 
         // Pending add — discard entirely.
-        if (_pending.PendingTraverseAdds.Remove(normalized))
+        if (_pending.Traverse.RemoveTraverse(normalized))
         {
-            _pending.PendingTraverseConfigMoves.Remove(normalized);
+            _pending.Traverse.RemoveTraverseConfigMove(normalized, out _);
             return;
         }
 
-        _pending.PendingUntrackTraverse[normalized] = entry;
+        _pending.Traverse.UntrackTraverse(entry);
         // Discard any pending fix or config move — untrack supersedes them.
-        _pending.PendingTraverseFixes.Remove(normalized);
-        _pending.PendingTraverseConfigMoves.Remove(normalized);
+        _pending.Traverse.RemoveTraverseFix(normalized);
+        _pending.Traverse.RemoveTraverseConfigMove(normalized, out _);
     }
 
     /// <summary>
@@ -176,13 +176,13 @@ public class AclManagerActionOrchestrator(
             return;
 
         // Queue the existing DB entry for deferred removal.
-        _pending.PendingRemoves[key] = entry;
+        _pending.Grants.MarkGrantForRemoval(entry);
         // Discard any pending modification or config move — removal supersedes them.
         // Also discard any config move re-keyed to the new mode by a prior mode switch.
-        _pending.PendingGrantFixes.Remove(key);
-        if (_pending.PendingModifications.Remove(key, out var mod))
-            _pending.PendingConfigMoves.Remove((entry.Path, mod.NewIsDeny));
-        _pending.PendingConfigMoves.Remove(key);
+        _pending.Grants.RemoveGrantFix(entry.Path, entry.IsDeny);
+        if (_pending.Grants.RemoveGrantModification(entry.Path, entry.IsDeny, out var mod))
+            _pending.Grants.RemoveGrantConfigMove(entry.Path, mod!.NewIsDeny, out _);
+        _pending.Grants.RemoveGrantConfigMove(entry.Path, entry.IsDeny, out _);
 
         // Auto-remove traverse if no other allow grants depend on it.
         if (!entry.IsDeny)
@@ -201,10 +201,10 @@ public class AclManagerActionOrchestrator(
     /// </summary>
     private bool CancelPendingAddOrReturn((string Path, bool IsDeny) key)
     {
-        if (!_pending.PendingAdds.Remove(key))
+        if (!_pending.Grants.RemoveGrant(key.Path, key.IsDeny))
             return false;
 
-        _pending.PendingConfigMoves.Remove(key);
+        _pending.Grants.RemoveGrantConfigMove(key.Path, key.IsDeny, out _);
         if (!key.IsDeny)
         {
             var traversePath = traverseAutoManager.GetTraversePath(key.Path);
@@ -241,7 +241,7 @@ public class AclManagerActionOrchestrator(
 
         // 1. Same-mode duplicate check. A committed DB entry is a duplicate only when its
         // explicit ACE is already healthy; otherwise adding the path again means "fix it".
-        if (_pending.IsPendingAdd(normalized, isDeny))
+        if (_pending.Grants.IsPendingAdd(normalized, isDeny))
             return "This path is already in the list.";
         if (TryQueueExistingGrantFix(database, normalized, isDeny, targetConfigPath, hasExplicitTargetSection))
             return null;
@@ -253,12 +253,12 @@ public class AclManagerActionOrchestrator(
             return conflictMessage;
 
         // 2. Opposite-mode check: if opposite mode exists, flip isDeny to match.
-        if (_pending.IsPendingAdd(normalized, !isDeny) ||
+        if (_pending.Grants.IsPendingAdd(normalized, !isDeny) ||
             ExistsCommittedGrant(database, normalized, !isDeny))
         {
             isDeny = !isDeny;
             // After flipping, re-check for same-mode duplicate with the new mode.
-            if (_pending.IsPendingAdd(normalized, isDeny))
+            if (_pending.Grants.IsPendingAdd(normalized, isDeny))
                 return "This path is already in the list.";
             if (TryQueueExistingGrantFix(database, normalized, isDeny, targetConfigPath, hasExplicitTargetSection))
                 return null;
@@ -270,8 +270,8 @@ public class AclManagerActionOrchestrator(
         }
 
         // 3. If this path is queued for removal or untrack (same final mode), cancel it.
-        bool cancelledRemoval = _pending.PendingRemoves.Remove((normalized, isDeny));
-        bool cancelledUntrack = !cancelledRemoval && _pending.PendingUntrackGrants.Remove((normalized, isDeny));
+        bool cancelledRemoval = _pending.Grants.CancelGrantRemoval(normalized, isDeny);
+        bool cancelledUntrack = !cancelledRemoval && _pending.Grants.RemoveUntrackedGrant(normalized, isDeny);
         if (cancelledRemoval || cancelledUntrack)
         {
             var existingEntry = FindCommittedGrant(database, normalized, isDeny);
@@ -279,8 +279,7 @@ public class AclManagerActionOrchestrator(
                 existingEntry != null &&
                 grantsHelper.TargetsDifferentConfigSection(existingEntry, targetConfigPath))
             {
-                _pending.PendingConfigMoves[(normalized, isDeny)] =
-                    new PendingConfigMove(existingEntry, targetConfigPath);
+                _pending.Grants.MoveGrantConfig(existingEntry, targetConfigPath);
             }
 
             bool traverseRestored = false;
@@ -321,12 +320,11 @@ public class AclManagerActionOrchestrator(
             }
         }
 
-        _pending.PendingAdds[(normalized, isDeny)] = entry;
+        _pending.Grants.AddGrant(entry);
 
         // Record target config if the user dropped onto a specific config section.
         if (hasExplicitTargetSection)
-            _pending.PendingConfigMoves[(normalized, isDeny)] =
-                new PendingConfigMove(entry, targetConfigPath);
+            _pending.Grants.MoveGrantConfig(entry, targetConfigPath);
 
         // 6. For allow grants: auto-add traverse entry for the grant path (folder grant) or its parent (file grant).
         bool traverseAdded = false;
@@ -362,11 +360,10 @@ public class AclManagerActionOrchestrator(
         if (SavedRightsComparer.Instance.MatchesSavedRights(entry, ntfsState, _isContainer, isFolder))
             return false;
 
-        var key = (entry.Path, entry.IsDeny);
-        _pending.PendingGrantFixes[key] = entry;
+        _pending.Grants.AddGrantFix(entry);
         if (hasExplicitTargetSection &&
             grantsHelper.TargetsDifferentConfigSection(entry, targetConfigPath))
-            _pending.PendingConfigMoves[key] = new PendingConfigMove(entry, targetConfigPath);
+            _pending.Grants.MoveGrantConfig(entry, targetConfigPath);
 
         _gridRefresher.RefreshGrantsGrid();
         return true;
@@ -381,7 +378,7 @@ public class AclManagerActionOrchestrator(
             string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase) &&
             e.IsDeny == isDeny &&
             !e.IsTraverseOnly &&
-            !_pending.IsPendingRemove(normalized, isDeny) &&
-            !_pending.IsUntrackGrant(normalized, isDeny));
+            !_pending.Grants.IsPendingRemove(normalized, isDeny) &&
+            !_pending.Grants.IsUntrackGrant(normalized, isDeny));
     }
 }

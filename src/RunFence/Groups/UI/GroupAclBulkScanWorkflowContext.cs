@@ -10,26 +10,23 @@ public sealed class GroupAclBulkScanWorkflowContext : IAclBulkScanWorkflowContex
     private const string NoResultsMessage = "No ACL entries found for the local groups in the selected folder.";
 
     private readonly IWin32Window owner;
-    private readonly Action<bool> setScanButtonEnabled;
-    private readonly Action<string> setStatusText;
-    private readonly Action saveDatabase;
+    private readonly IGroupScanProgressPresenter progressPresenter;
+    private readonly ISessionSaver sessionSaver;
     private readonly IModalCoordinator modalCoordinator;
-    private readonly ILocalGroupMembershipService groupMembership;
+    private readonly ILocalGroupQueryService groupMembership;
     private readonly IAclBulkScanMessagePresenter messagePresenter;
 
     public GroupAclBulkScanWorkflowContext(
         IWin32Window owner,
-        Action<bool> setScanButtonEnabled,
-        Action<string> setStatusText,
-        Action saveDatabase,
+        IGroupScanProgressPresenter progressPresenter,
+        ISessionSaver sessionSaver,
         IModalCoordinator modalCoordinator,
-        ILocalGroupMembershipService groupMembership,
+        ILocalGroupQueryService groupMembership,
         IAclBulkScanMessagePresenter messagePresenter)
     {
         this.owner = owner;
-        this.setScanButtonEnabled = setScanButtonEnabled;
-        this.setStatusText = setStatusText;
-        this.saveDatabase = saveDatabase;
+        this.progressPresenter = progressPresenter;
+        this.sessionSaver = sessionSaver;
         this.modalCoordinator = modalCoordinator;
         this.groupMembership = groupMembership;
         this.messagePresenter = messagePresenter;
@@ -48,13 +45,13 @@ public sealed class GroupAclBulkScanWorkflowContext : IAclBulkScanWorkflowContex
                 .ToHashSet(StringComparer.OrdinalIgnoreCase));
     }
 
-    public void SetScanBusy(bool busy) => setScanButtonEnabled(!busy);
+    public void SetScanBusy(bool busy) => progressPresenter.SetScanBusy(busy);
 
-    public void SetStatusText(string text) => setStatusText(text);
+    public void SetStatusText(string text) => progressPresenter.SetStatusText(text);
 
     public DialogResult ShowResults(Form dialog) => modalCoordinator.ShowModal(dialog, owner);
 
-    public void SaveImportedResults() => saveDatabase();
+    public void SaveImportedResults() => sessionSaver.SaveConfig();
 
     public void ShowNoKnownSids() => messagePresenter.ShowNoKnownSids(owner, NoKnownSidsMessage);
 

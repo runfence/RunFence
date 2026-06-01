@@ -12,7 +12,7 @@ public class TempDirectoryAclHelper : ITempDirectoryAclHelper
     private static readonly SecurityIdentifier AdminSid =
         new(WellKnownSidType.BuiltinAdministratorsSid, null);
 
-    public void ApplyRestrictedAcl(DirectoryInfo dirInfo,
+    public DirectorySecurity ApplyRestrictedAcl(DirectoryInfo dirInfo,
         params (IdentityReference identity, FileSystemRights rights)[] additionalRules)
     {
         var currentUser = WindowsIdentity.GetCurrent().User;
@@ -39,7 +39,7 @@ public class TempDirectoryAclHelper : ITempDirectoryAclHelper
                 InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
                 PropagationFlags.None, AccessControlType.Allow));
         }
-
         dirInfo.SetAccessControl(security);
+        return security;
     }
 }

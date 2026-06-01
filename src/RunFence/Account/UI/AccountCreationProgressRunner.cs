@@ -1,5 +1,5 @@
 using System.Runtime.ExceptionServices;
-using RunFence.Account.UI.Forms;
+using RunFence.UI.Forms;
 
 namespace RunFence.Account.UI;
 
@@ -7,7 +7,7 @@ public sealed class AccountCreationProgressRunner : IAccountCreationProgressRunn
 {
     public async Task RunAsync(Func<IAccountCreationProgressReporter, Task> operation)
     {
-        using var progressForm = new AccountCreationProgressForm();
+        using var progressForm = new CancellableProgressForm("Creating Account", "Please wait...");
         Exception? failure = null;
 
         progressForm.Shown += async (_, _) =>
@@ -32,7 +32,7 @@ public sealed class AccountCreationProgressRunner : IAccountCreationProgressRunn
             ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
-    private sealed class FormProgressReporter(AccountCreationProgressForm form) : IAccountCreationProgressReporter
+    private sealed class FormProgressReporter(CancellableProgressForm form) : IAccountCreationProgressReporter
     {
         public CancellationToken CancellationToken => form.CancellationToken;
 

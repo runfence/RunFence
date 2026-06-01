@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using RunFence.Account;
 using RunFence.Core;
 using RunFence.Infrastructure;
 
@@ -13,8 +14,8 @@ public static class TokenPrivilegeHelper
     public const string SeImpersonatePrivilege = "SeImpersonatePrivilege";
     public const string SeIncreaseQuotaPrivilege = "SeIncreaseQuotaPrivilege";
     public const string SeDebugPrivilege = "SeDebugPrivilege";
-    public const string SeTcbPrivilege = "SeTcbPrivilege";
-    public const string SeRelabelPrivilege = "SeRelabelPrivilege";
+    public const string SeTcbPrivilege = LsaRightsHelper.SeTcbPrivilege;
+    public const string SeRelabelPrivilege = LsaRightsHelper.SeRelabelPrivilege;
 
     public static void EnablePrivileges(IEnumerable<string> privilegeNames)
     {

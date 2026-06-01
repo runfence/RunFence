@@ -5,7 +5,19 @@ using RunFence.SecurityScanner;
 
 namespace RunFence.Tests.Helpers;
 
-public sealed class TestScannerDataAccess : IScannerDataAccess
+public sealed class TestScannerDataAccess :
+    IEnvironmentDataAccess,
+    IFileSystemDataAccess,
+    IDriveRootNativeReader,
+    IAutorunRegistryAccess,
+    IWinlogonRegistryAccess,
+    IServiceRegistryAccess,
+    IIfeoRegistryAccess,
+    IWindowsComponentRegistryAccess,
+    ITaskSchedulerDataAccess,
+    IGroupPolicyDataAccess,
+    IAccountPolicyDataAccess,
+    IFirewallPolicyDataAccess
 {
     private string? _publicStartupPath;
     private string? _currentUserStartupPath;
@@ -161,7 +173,7 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
     public void SetWindowsFirewallServiceState((bool IsDisabled, bool IsStopped)? state) =>
         _firewallServiceState = state;
 
-    // --- IScannerDataAccess implementation ---
+    // --- Scanner data-access implementation ---
 
     public string? GetPublicStartupPath() => _publicStartupPath;
     public string? GetCurrentUserStartupPath() => _currentUserStartupPath;
@@ -330,11 +342,6 @@ public sealed class TestScannerDataAccess : IScannerDataAccess
     public bool? GetBlankPasswordRestrictionEnabled() => _blankPasswordRestrictionEnabled;
     public List<(string ProfileName, bool Enabled)>? GetFirewallProfileStates() => _firewallProfileStates;
     public (bool IsDisabled, bool IsStopped)? GetWindowsFirewallServiceState() => _firewallServiceState;
-
-    public void LogError(string message)
-    {
-        /* suppress in tests */
-    }
 
     public void AddDirSecurityThrows(string path) => _dirSecurityThrows.Add(path);
 

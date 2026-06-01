@@ -7,7 +7,7 @@ using RunFence.Core.Models;
 
 namespace RunFence.SecurityScanner;
 
-public class AclCheckHelper(IEnvironmentDataAccess environment, IFileSystemDataAccess fileSystem, IAutorunRegistryAccess registry)
+public class AclCheckHelper(IEnvironmentDataAccess environment, IAutorunRegistryAccess registry, ILoggingService log)
 {
     private readonly Dictionary<string, string> _displayNameCache = new(StringComparer.OrdinalIgnoreCase);
     // Pre-populated in bulk by BulkPrewarmGroupMemberSids before each filtering pass.
@@ -107,7 +107,7 @@ public class AclCheckHelper(IEnvironmentDataAccess environment, IFileSystemDataA
         }
         catch (Exception ex)
         {
-            fileSystem.LogError($"Failed to check registry key '{displayPath}': {ex.Message}");
+            log.Error($"Failed to check registry key '{displayPath}'.", ex);
         }
     }
 

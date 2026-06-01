@@ -1,14 +1,13 @@
 using System;
-using Microsoft.Win32;
 using RunFence.Core;
 using RunFence.Core.Helpers;
 using RunFence.Infrastructure;
 
 namespace RunFence.Apps;
 
-public class AssociationFallbackRegistry(RegistryKey usersRoot) : IAssociationFallbackRegistry
+public class AssociationFallbackRegistry(IRegistryKey usersRoot) : IAssociationFallbackRegistry
 {
-    private readonly RegistryKey _usersRoot = usersRoot ?? throw new ArgumentNullException(nameof(usersRoot));
+    private readonly IRegistryKey _usersRoot = usersRoot ?? throw new ArgumentNullException(nameof(usersRoot));
 
     public IOwnedAssociationRegistryRoot? OpenUserClassesRoot(string? targetSid = null)
     {
@@ -83,16 +82,16 @@ public class AssociationFallbackRegistry(RegistryKey usersRoot) : IAssociationFa
         ShellNative.SHChangeNotify(ShellNative.SHCNE_ASSOCCHANGED, ShellNative.SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
     }
 
-    private static RegistryKey GetClassesRoot(IOwnedAssociationRegistryRoot root)
+    private static IRegistryKey GetClassesRoot(IOwnedAssociationRegistryRoot root)
     {
         if (root is not OwnedAssociationRegistryRoot ownedRoot)
             throw new InvalidOperationException($"Unsupported root type: {root.GetType().FullName}");
         return ownedRoot.ClassesRoot;
     }
 
-    private sealed class OwnedAssociationRegistryRoot(RegistryKey classesRoot) : IOwnedAssociationRegistryRoot
+    private sealed class OwnedAssociationRegistryRoot(IRegistryKey classesRoot) : IOwnedAssociationRegistryRoot
     {
-        public RegistryKey ClassesRoot { get; } = classesRoot;
+        public IRegistryKey ClassesRoot { get; } = classesRoot;
         public void Dispose() => ClassesRoot.Dispose();
     }
 }

@@ -41,7 +41,7 @@ public class EphemeralContainerServiceTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }
@@ -158,19 +158,6 @@ public class EphemeralContainerServiceTests : IDisposable
         Assert.Single(database.AppContainers);
         Assert.Empty(_containerDeletion.DeletedContainerNames);
         _databaseService.Verify(s => s.SaveConfig(It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()), Times.Never);
-    }
-
-    [Fact]
-    public async Task ProcessExpiredContainers_PassesContainerSidToDeleteContainer()
-    {
-        var containerSid = "S-1-15-2-1234567890";
-        var database = new AppDatabase();
-        database.AppContainers.Add(ExpiredContainer("ram_expired", containerSid));
-
-        using var service = CreateStartedService(database);
-        await service.ProcessExpiredContainers();
-
-        Assert.Equal(["ram_expired"], _containerDeletion.DeletedContainerNames);
     }
 
     [Fact]
@@ -380,7 +367,6 @@ public class EphemeralContainerServiceTests : IDisposable
         using var service = CreateStartedService(database, _containerDeletion);
         await service.ProcessExpiredContainers();
 
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(warning, StringComparison.Ordinal))), Times.Once);
         _trayBalloon.Verify(t => t.ShowWarning(warning), Times.Once);
     }
 

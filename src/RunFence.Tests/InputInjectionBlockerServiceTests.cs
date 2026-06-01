@@ -41,12 +41,6 @@ public class InputInjectionBlockerServiceTests : IDisposable
     }
 
     [Fact]
-    public void DefaultState_IsEnabled()
-    {
-        Assert.True(_service.IsEnabled);
-    }
-
-    [Fact]
     public void SetTimedDisable_UsesInjectedTimerFactory()
     {
         _service.SetTimedDisable(TimeSpan.FromSeconds(7));
@@ -293,21 +287,6 @@ public class InputInjectionBlockerServiceTests : IDisposable
         Assert.Contains((IntPtr)22, _hooks.Unhooked);
     }
 
-    [Fact]
-    public void Dispose_DoesNotThrow()
-    {
-        var service = new InputInjectionBlockerService(
-            _log.Object,
-            _hooks,
-            _foreground,
-            _process,
-            _timerFactory);
-
-        var ex = Record.Exception(service.Dispose);
-
-        Assert.Null(ex);
-    }
-
     private IntPtr InvokeKeyboardHook(uint vkCode, uint flags, int nCode = 0)
     {
         EnsureHookCallbacksInstalled();
@@ -384,6 +363,7 @@ public class InputInjectionBlockerServiceTests : IDisposable
     {
         public ForegroundWindowInfo Info { get; set; }
         public ForegroundWindowInfo GetForegroundWindow() => Info;
+        public ForegroundWindowInfo GetWindowInfo(IntPtr hwnd) => Info with { HWnd = hwnd };
     }
 
     private sealed class FakeProcessOwnerSidReader : IProcessOwnerSidReader

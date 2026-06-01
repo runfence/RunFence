@@ -17,7 +17,7 @@ public class OptionsMaintenanceLaunchHandler(
         {
             using var launch = launchFacade.LaunchFile(
                 log.LogFilePath,
-                AccountLaunchIdentity.CurrentAccountBasic with
+                AccountLaunchIdentity.CurrentAccountIsolated with
                 {
                     AssociationResolutionPolicy = AssociationResolutionPolicy.AllowAccountRedirection
                 });

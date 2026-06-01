@@ -21,7 +21,7 @@ public class AccountEditHelperTests : IDisposable
     private readonly TestCredentialDecryptionService _credentialDecryption = new();
     private readonly Mock<IAccountPasswordService> _accountPassword = new();
     private readonly Mock<ISessionProvider> _sessionProvider = new();
-    private readonly Mock<IConfigRepository> _configRepository = new();
+    private readonly Mock<IMainConfigPersistence> _configRepository = new();
     private readonly Mock<ISettingsTransferService> _settingsTransferService = new();
     private readonly SecureSecret _pinKey;
 
@@ -35,7 +35,7 @@ public class AccountEditHelperTests : IDisposable
     public AccountEditHelperTests()
     {
         var persistenceHelper = new SessionPersistenceHelper(
-            new Mock<ICredentialRepository>().Object,
+            new Mock<IConfigReencryptionPersistence>().Object,
             _configRepository.Object,
             new Mock<ISidNameCacheService>().Object,
             () => new InlineUiThreadInvoker(action => action()),
@@ -51,7 +51,7 @@ public class AccountEditHelperTests : IDisposable
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessionProvider.Setup(s => s.GetSession()).Returns(session);
 
         _helper = new AccountEditHelper(

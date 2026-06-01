@@ -1,8 +1,19 @@
+using RunFence.Core;
 using RunFence.Core.Models;
 
 namespace RunFence.SecurityScanner;
 
-public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHelper aclCheck, PerUserScanner perUserScanner)
+public class MachineLevelPolicyScanner(
+    IEnvironmentDataAccess environment,
+    IFileSystemDataAccess fileSystem,
+    ITaskSchedulerDataAccess taskScheduler,
+    IGroupPolicyDataAccess groupPolicy,
+    IServiceRegistryAccess serviceRegistry,
+    IFirewallPolicyDataAccess firewallPolicy,
+    IAccountPolicyDataAccess accountPolicy,
+    AclCheckHelper aclCheck,
+    PerUserScanner perUserScanner,
+    ILoggingService log)
 {
     private const int TaskActionExecute = 0;
     private const string NetworkConfigurationOperatorsSid = "S-1-5-32-556";
@@ -11,7 +22,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
     {
         try
         {
-            var tasks = dataAccess.GetTaskSchedulerData();
+            var tasks = taskScheduler.GetTaskSchedulerData();
 
             foreach (var task in tasks)
             {
@@ -46,7 +57,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to scan Task Scheduler: {ex.Message}");
+            log.Error("Failed to scan Task Scheduler.", ex);
         }
     }
 
@@ -54,14 +65,14 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
     {
         try
         {
-            foreach (var gpDir in new[] { dataAccess.GetMachineGpScriptsDir(), dataAccess.GetMachineGpUserScriptsDir() })
+            foreach (var gpDir in new[] { groupPolicy.GetMachineGpScriptsDir(), groupPolicy.GetMachineGpUserScriptsDir() })
             {
-                if (string.IsNullOrEmpty(gpDir) || !dataAccess.DirectoryExists(gpDir))
+                if (string.IsNullOrEmpty(gpDir) || !fileSystem.DirectoryExists(gpDir))
                     continue;
                 ctx.AutorunLocationPaths.Add(gpDir);
                 try
                 {
-                    var dirSecurity = dataAccess.GetDirectorySecurity(gpDir);
+                    var dirSecurity = fileSystem.GetDirectorySecurity(gpDir);
                     bool insecure = aclCheck.CheckContainerAcl(dirSecurity, gpDir, ctx.AdminSids,
                         StartupSecurityCategory.LogonScript, SecurityScanner.ContainerWriteRightsMask, ctx.Findings, ctx.Seen);
                     if (insecure)
@@ -69,11 +80,11 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
                 }
                 catch (Exception ex)
                 {
-                    dataAccess.LogError($"Failed to read ACL for machine GP scripts dir '{gpDir}': {ex.Message}");
+                    log.Error($"Failed to read ACL for machine GP scripts dir '{gpDir}'.", ex);
                 }
             }
 
-            foreach (var scriptPath in dataAccess.GetMachineGpScriptPaths())
+            foreach (var scriptPath in groupPolicy.GetMachineGpScriptPaths())
             {
                 if (!string.IsNullOrEmpty(scriptPath))
                     SecurityScanner.AddAutorunPath(ctx.Autorun, scriptPath, null, StartupSecurityCategory.LogonScript);
@@ -81,13 +92,13 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to scan machine GP scripts: {ex.Message}");
+            log.Error("Failed to scan machine GP scripts.", ex);
         }
     }
 
     public void ScanPublicStartupFolder(ScanContext ctx)
     {
-        var publicStartup = dataAccess.GetPublicStartupPath();
+        var publicStartup = environment.GetPublicStartupPath();
         if (string.IsNullOrEmpty(publicStartup))
             return;
         ctx.AutorunLocationPaths.Add(publicStartup);
@@ -99,14 +110,14 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
     {
         try
         {
-            var scriptsDir = dataAccess.GetSharedWrapperScriptsDir();
-            if (string.IsNullOrEmpty(scriptsDir) || !dataAccess.DirectoryExists(scriptsDir))
+            var scriptsDir = groupPolicy.GetSharedWrapperScriptsDir();
+            if (string.IsNullOrEmpty(scriptsDir) || !fileSystem.DirectoryExists(scriptsDir))
                 return;
 
             ctx.AutorunLocationPaths.Add(scriptsDir);
             try
             {
-                var dirSecurity = dataAccess.GetDirectorySecurity(scriptsDir);
+                var dirSecurity = fileSystem.GetDirectorySecurity(scriptsDir);
                 bool insecure = aclCheck.CheckContainerAcl(dirSecurity, scriptsDir, ctx.AdminSids,
                     StartupSecurityCategory.LogonScript, SecurityScanner.ContainerWriteRightsMask, ctx.Findings, ctx.Seen);
                 if (insecure)
@@ -114,10 +125,10 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
             }
             catch (Exception ex)
             {
-                dataAccess.LogError($"Failed to read ACL for wrapper scripts dir '{scriptsDir}': {ex.Message}");
+                log.Error($"Failed to read ACL for wrapper scripts dir '{scriptsDir}'.", ex);
             }
 
-            foreach (var filePath in dataAccess.GetFilesInFolder(scriptsDir))
+            foreach (var filePath in fileSystem.GetFilesInFolder(scriptsDir))
             {
                 if (!string.IsNullOrEmpty(filePath))
                     SecurityScanner.AddAutorunPath(ctx.Autorun, filePath, null, StartupSecurityCategory.LogonScript);
@@ -125,7 +136,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to scan shared wrapper scripts: {ex.Message}");
+            log.Error("Failed to scan shared wrapper scripts.", ex);
         }
     }
 
@@ -133,7 +144,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
     {
         try
         {
-            foreach (var svc in dataAccess.GetAutoStartServices())
+            foreach (var svc in serviceRegistry.GetAutoStartServices())
             {
                 try
                 {
@@ -159,7 +170,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
                 }
                 catch (Exception ex)
                 {
-                    dataAccess.LogError($"Failed to check service key '{svc.ServiceName}': {ex.Message}");
+                    log.Error($"Failed to check service key '{svc.ServiceName}'.", ex);
                 }
 
                 if (!string.IsNullOrEmpty(svc.ExpandedImagePath))
@@ -174,10 +185,10 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
                     try
                     {
                         var parentDir = Path.GetDirectoryName(candidate);
-                        if (string.IsNullOrEmpty(parentDir) || !dataAccess.DirectoryExists(parentDir))
+                        if (string.IsNullOrEmpty(parentDir) || !fileSystem.DirectoryExists(parentDir))
                             continue;
 
-                        var dirSecurity = dataAccess.GetDirectorySecurity(parentDir);
+                        var dirSecurity = fileSystem.GetDirectorySecurity(parentDir);
                         var effective = aclCheck.ComputeFilteredFileRights(dirSecurity, ctx.AdminSids, SecurityScanner.ContainerWriteRightsMask);
                         foreach (var (sidStr, rights) in effective)
                         {
@@ -197,14 +208,14 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
                     }
                     catch (Exception ex)
                     {
-                        dataAccess.LogError($"Failed to check unquoted path candidate '{candidate}': {ex.Message}");
+                        log.Error($"Failed to check unquoted path candidate '{candidate}'.", ex);
                     }
                 }
             }
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to scan services: {ex.Message}");
+            log.Error("Failed to scan services.", ex);
         }
     }
 
@@ -212,7 +223,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
     {
         try
         {
-            var serviceState = dataAccess.GetWindowsFirewallServiceState();
+            var serviceState = firewallPolicy.GetWindowsFirewallServiceState();
             if (serviceState != null)
             {
                 var (isDisabled, isStopped) = serviceState.Value;
@@ -241,12 +252,12 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to check Windows Firewall service state: {ex.Message}");
+            log.Error("Failed to check Windows Firewall service state.", ex);
         }
 
         try
         {
-            var profiles = dataAccess.GetFirewallProfileStates();
+            var profiles = firewallPolicy.GetFirewallProfileStates();
             if (profiles == null)
                 return;
 
@@ -265,7 +276,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to check Windows Firewall profile states: {ex.Message}");
+            log.Error("Failed to check Windows Firewall profile states.", ex);
         }
     }
 
@@ -273,7 +284,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
     {
         try
         {
-            var enabled = dataAccess.GetBlankPasswordRestrictionEnabled();
+            var enabled = accountPolicy.GetBlankPasswordRestrictionEnabled();
             if (enabled == false)
             {
                 ctx.Findings.Add(new StartupSecurityFinding(
@@ -286,7 +297,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to check blank password policy: {ex.Message}");
+            log.Error("Failed to check blank password policy.", ex);
         }
     }
 
@@ -294,7 +305,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
     {
         try
         {
-            var threshold = dataAccess.GetAccountLockoutThreshold();
+            var threshold = accountPolicy.GetAccountLockoutThreshold();
             if (threshold is null)
                 return;
 
@@ -309,7 +320,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
                 return;
             }
 
-            var adminLockoutEnabled = dataAccess.GetAdminAccountLockoutEnabled();
+            var adminLockoutEnabled = accountPolicy.GetAdminAccountLockoutEnabled();
             if (adminLockoutEnabled == false)
             {
                 ctx.Findings.Add(new StartupSecurityFinding(
@@ -322,7 +333,7 @@ public class MachineLevelPolicyScanner(IScannerDataAccess dataAccess, AclCheckHe
         }
         catch (Exception ex)
         {
-            dataAccess.LogError($"Failed to check account lockout policy: {ex.Message}");
+            log.Error("Failed to check account lockout policy.", ex);
         }
     }
 }

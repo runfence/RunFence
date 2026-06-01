@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Acl;
 using RunFence.Acl.Traverse;
 using RunFence.Core;
 
@@ -14,6 +15,7 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
 {
     private const string LogoffCmdLine = "logoff.exe";
     private const string ScriptFileName = "block_login.cmd";
+    private const string LegacyScriptDirName = "scripts";
 
     private readonly string _gpUsersDir;
     private readonly string _scriptsDir;
@@ -21,20 +23,42 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
     private readonly ILoggingService _log;
     private readonly ILogonScriptTraverseGranter? _traverseGranter;
     private readonly LogonScriptIniManager _iniManager;
+    private readonly IProgramDataDirectoryProvisioningService _programDataDirectoryProvisioningService;
+    private readonly IProgramDataManagedObjectRepairService _programDataManagedObjectRepairService;
+    private readonly IProgramDataPathPolicyService _programDataPathPolicyService;
+    private readonly IProgramDataObjectProvisioner _programDataObjectProvisioner;
+    private readonly string _knownScriptsDir;
+    private readonly LogonScriptStateRollbackStore _rollbackStore;
 
-    public GroupPolicyScriptHelper(LogonScriptIniManager iniManager, ILoggingService log,
-        ILogonScriptTraverseGranter? traverseGranter = null, string? systemDir = null,
-        string? scriptsDir = null, string? legacyScriptsDir = null)
+    public GroupPolicyScriptHelper(
+        LogonScriptIniManager iniManager,
+        LogonScriptStateRollbackStore rollbackStore,
+        ILoggingService log,
+        IProgramDataDirectoryProvisioningService programDataDirectoryProvisioningService,
+        IProgramDataManagedObjectRepairService programDataManagedObjectRepairService,
+        IProgramDataPathPolicyService programDataPathPolicyService,
+        IProgramDataObjectProvisioner programDataObjectProvisioner,
+        IProgramDataKnownPathResolver programDataKnownPathResolver,
+        ILogonScriptTraverseGranter? traverseGranter = null,
+        string? systemDir = null,
+        string? scriptsDir = null,
+        string? legacyScriptsDir = null)
     {
         var sysDir = systemDir ?? Environment.GetFolderPath(Environment.SpecialFolder.System);
         _gpUsersDir = Path.Combine(sysDir, "GroupPolicyUsers");
-        _scriptsDir = scriptsDir ?? Path.Combine(PathConstants.ProgramDataDir, "scripts");
+        _knownScriptsDir = programDataKnownPathResolver.GetDirectoryPath(ProgramDataPolicies.Scripts);
+        _scriptsDir = scriptsDir ?? _knownScriptsDir;
         _legacyScriptsDir = legacyScriptsDir ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-            "RunAsManager", "scripts");
+            "RunAsManager", LegacyScriptDirName);
         _log = log;
         _traverseGranter = traverseGranter;
         _iniManager = iniManager;
+        _programDataDirectoryProvisioningService = programDataDirectoryProvisioningService;
+        _programDataManagedObjectRepairService = programDataManagedObjectRepairService;
+        _programDataPathPolicyService = programDataPathPolicyService;
+        _programDataObjectProvisioner = programDataObjectProvisioner;
+        _rollbackStore = rollbackStore;
     }
 
     private string GetIniPath(string sid) =>
@@ -44,15 +68,20 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
         Path.Combine(_gpUsersDir, sid, "gpt.ini");
 
     public bool IsLoginBlocked(string sid)
+        => GetLogonBlockEntryState(sid).IsBlocked;
+
+    private LogonBlockEntryState GetLogonBlockEntryState(string sid)
     {
         var iniPath = GetIniPath(sid);
         if (!File.Exists(iniPath))
-            return false;
+            return new LogonBlockEntryState(false, false);
 
         var wrapperPath = GetWrapperScriptPath(sid);
         var legacyWrapperPath = GetLegacyWrapperScriptPath(sid);
 
         bool inLogon = false;
+        bool hasCurrentWrapper = false;
+        bool hasLegacyOrBare = false;
         foreach (var line in File.ReadAllLines(iniPath))
         {
             var trimmed = line.Trim();
@@ -69,15 +98,15 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
             if (match.Success)
             {
                 var cmdLine = match.Groups[1].Value;
-                // Detect old bare logoff.exe, new-style wrapper, and legacy RunAsManager wrapper
-                if (cmdLine.Equals(LogoffCmdLine, StringComparison.OrdinalIgnoreCase) ||
-                    cmdLine.Equals(wrapperPath, StringComparison.OrdinalIgnoreCase) ||
-                    cmdLine.Equals(legacyWrapperPath, StringComparison.OrdinalIgnoreCase))
-                    return true;
+                if (cmdLine.Equals(wrapperPath, StringComparison.OrdinalIgnoreCase))
+                    hasCurrentWrapper = true;
+                else if (cmdLine.Equals(LogoffCmdLine, StringComparison.OrdinalIgnoreCase) ||
+                         cmdLine.Equals(legacyWrapperPath, StringComparison.OrdinalIgnoreCase))
+                    hasLegacyOrBare = true;
             }
         }
 
-        return false;
+        return new LogonBlockEntryState(hasCurrentWrapper, hasLegacyOrBare);
     }
 
     private string GetWrapperScriptPath(string sid) =>
@@ -91,19 +120,55 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
         var iniPath = GetIniPath(sid);
         var wrapperPath = GetWrapperScriptPath(sid);
         var legacyWrapperPath = GetLegacyWrapperScriptPath(sid);
+        var gptIniPath = GetGptIniPath(sid);
 
         if (blocked)
         {
-            if (IsLoginBlocked(sid))
-                return new SetLoginBlockedResult(wrapperPath, null);
+            var blockEntryState = GetLogonBlockEntryState(sid);
+
+            if (blockEntryState.IsCurrentWrapperOnly)
+            {
+                var snapshot = _rollbackStore.Capture(iniPath, gptIniPath, wrapperPath, legacyWrapperPath);
+                try
+                {
+                    EnsureWrapperScript(wrapperPath, sid);
+                    var traversePaths = _traverseGranter?.GrantTraverseAccess(sid, _scriptsDir);
+
+                    return new SetLoginBlockedResult(wrapperPath, traversePaths);
+                }
+                catch (Exception ex)
+                {
+                    TryRollbackLogonScriptState(() => _rollbackStore.Restore(snapshot), ex);
+                }
+            }
+
+            if (blockEntryState.IsBlocked)
+            {
+                var snapshot = _rollbackStore.Capture(iniPath, gptIniPath, wrapperPath, legacyWrapperPath);
+                try
+                {
+                    EnsureWrapperScript(wrapperPath, sid);
+                    var traversePaths = _traverseGranter?.GrantTraverseAccess(sid, _scriptsDir);
+                    _iniManager.RemoveLogonEntry(iniPath, wrapperPath, legacyWrapperPath);
+                    _iniManager.AppendLogonEntry(iniPath, wrapperPath);
+                    _iniManager.UpdateGptIni(gptIniPath, hasScripts: true);
+
+                    return new SetLoginBlockedResult(wrapperPath, traversePaths);
+                }
+                catch (Exception ex)
+                {
+                    TryRollbackLogonScriptState(() => _rollbackStore.Restore(snapshot), ex);
+                }
+            }
 
             try
             {
                 EnsureWrapperScript(wrapperPath, sid);
-                _iniManager.AppendLogonEntry(iniPath, wrapperPath);
-                _iniManager.UpdateGptIni(GetGptIniPath(sid), hasScripts: true);
 
                 var traversePaths = _traverseGranter?.GrantTraverseAccess(sid, _scriptsDir);
+                _iniManager.AppendLogonEntry(iniPath, wrapperPath);
+                _iniManager.UpdateGptIni(gptIniPath, hasScripts: true);
+
                 return new SetLoginBlockedResult(wrapperPath, traversePaths);
             }
             catch (Exception ex)
@@ -130,7 +195,12 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
         return new SetLoginBlockedResult(wrapperPath, null);
     }
 
-    private void RemoveBlockedStateArtifacts(string sid, string iniPath, string wrapperPath, string legacyWrapperPath, bool strictRollback)
+    private void RemoveBlockedStateArtifacts(
+        string sid,
+        string iniPath,
+        string wrapperPath,
+        string legacyWrapperPath,
+        bool strictRollback)
     {
         if (File.Exists(iniPath))
             _iniManager.RemoveLogonEntry(iniPath, wrapperPath, legacyWrapperPath);
@@ -199,15 +269,90 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
     private void EnsureWrapperScript(string scriptPath, string userSid)
     {
         var scriptDir = Path.GetDirectoryName(scriptPath)!;
-        Directory.CreateDirectory(scriptDir);
-        SecureScriptsDirectory(scriptDir);
+        var isProgramDataScript = _programDataPathPolicyService.IsUnderRoot(scriptDir);
+        if (isProgramDataScript)
+        {
+            if (string.Equals(
+                    Path.GetFullPath(scriptDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    Path.GetFullPath(_knownScriptsDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                _programDataDirectoryProvisioningService.EnsureKnownDirectory(ProgramDataPolicies.Scripts);
+            }
+            else
+            {
+                _programDataObjectProvisioner.CreateOrRepairDirectory(
+                    new ProgramDataExplicitDirectoryRequest(
+                        scriptDir,
+                        ProgramDataDirectoryAclProfile.CurrentProcessUserFullControl,
+                        [],
+                        ReplaceExistingSecurity: true));
+            }
+        }
+        else
+        {
+            Directory.CreateDirectory(scriptDir);
+            SecureScriptsDirectory(scriptDir);
+        }
 
         var tmpPath = scriptPath + "." + Guid.NewGuid().ToString("N")[..8] + ".tmp";
-        File.WriteAllText(tmpPath, "@echo off\r\nlogoff.exe\r\n");
+        try
+        {
+            if (isProgramDataScript)
+            {
+                _programDataObjectProvisioner.CreateFile(
+                    new ProgramDataExplicitFileRequest(
+                        tmpPath,
+                        ProgramDataFileAclProfile.CurrentProcessUserFullControl,
+                        [CreateFileAccess(userSid, FileSystemRights.ReadAndExecute)],
+                    FileShare.Read,
+                    OverwriteExisting: false),
+                    stream =>
+                    {
+                        using var writer = new StreamWriter(stream, System.Text.Encoding.UTF8, 1024, leaveOpen: true);
+                        writer.Write("@echo off\r\nlogoff.exe\r\n");
+                    });
+            }
+            else
+            {
+                using var fs = CreateRestrictedFile(tmpPath, userSid);
+                using var writer = new StreamWriter(fs, System.Text.Encoding.UTF8);
+                writer.Write("@echo off\r\nlogoff.exe\r\n");
+            }
 
-        // Secure the temp file before moving it to the target location
-        var tmpInfo = new FileInfo(tmpPath);
-        var security = tmpInfo.GetAccessControl();
+            File.Move(tmpPath, scriptPath, overwrite: true);
+        }
+        catch
+        {
+            try
+            {
+                if (File.Exists(tmpPath))
+                    File.Delete(tmpPath);
+            }
+            catch (Exception cleanupEx)
+            {
+                _log.Warn($"Failed to delete temporary logon script '{tmpPath}': {cleanupEx.Message}");
+            }
+
+            throw;
+        }
+
+        if (_programDataPathPolicyService.IsUnderRoot(scriptPath))
+        {
+            _programDataManagedObjectRepairService.EnsureManagedFileOwner(scriptPath);
+        }
+    }
+
+    private static ProgramDataPrincipalAccess CreateFileAccess(string sid, FileSystemRights rights)
+        => new(
+            new SecurityIdentifier(sid),
+            rights,
+            InheritanceFlags.None,
+            PropagationFlags.None);
+
+    private FileStream CreateRestrictedFile(string filePath, string userSid)
+    {
+        var security = new FileSecurity();
         security.SetAccessRuleProtection(true, false);
 
         var systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
@@ -218,22 +363,33 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
         security.AddAccessRule(new FileSystemAccessRule(
             adminSid, FileSystemRights.FullControl, AccessControlType.Allow));
 
-        // Ensure the current process user retains FullControl so the file can be moved after
-        // SetAccessControl strips inherited ACEs (needed when running as non-admin, e.g. in tests).
         var currentUser = WindowsIdentity.GetCurrent().User;
         if (currentUser != null)
+        {
             security.AddAccessRule(new FileSystemAccessRule(
                 currentUser, FileSystemRights.FullControl, AccessControlType.Allow));
+        }
 
-        // Grant only the specific user whose login is being blocked — not the entire Users group,
-        // since membership is not guaranteed (e.g. custom or restricted accounts).
+        // Grant only the specific user whose login is being blocked.
         var targetUserSid = new SecurityIdentifier(userSid);
         security.AddAccessRule(new FileSystemAccessRule(
             targetUserSid, FileSystemRights.ReadAndExecute, AccessControlType.Allow));
 
-        tmpInfo.SetAccessControl(security);
+        var fileInfo = new FileInfo(filePath);
+        var stream = fileInfo.Create(
+            FileMode.CreateNew,
+            FileSystemRights.ReadData | FileSystemRights.WriteData,
+            FileShare.Read,
+            4096,
+            FileOptions.None,
+            security);
+        if (_programDataPathPolicyService.IsUnderRoot(filePath))
+        {
+            _log.Info(
+                $"ProgramData security created restricted logon script '{filePath}' with {ProgramDataSecurityChangeFormatter.DescribeSecurityState(security)}.");
+        }
 
-        File.Move(tmpPath, scriptPath, overwrite: true);
+        return stream;
     }
 
     private void SecureScriptsDirectory(string dirPath)
@@ -242,8 +398,6 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
         {
             var dirInfo = new DirectoryInfo(dirPath);
             var security = dirInfo.GetAccessControl();
-
-            // Only apply if inheritance is not already broken (idempotent).
             if (security.AreAccessRulesProtected)
                 return;
 
@@ -256,7 +410,6 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
                 PropagationFlags.None,
                 AccessControlType.Allow));
 
-            // Grant the elevated admin process user explicit FullControl.
             var currentUser = WindowsIdentity.GetCurrent().User;
             if (currentUser != null)
             {
@@ -274,11 +427,6 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
                 PropagationFlags.None,
                 AccessControlType.Allow));
 
-            // No shared ACE on the scripts directory itself — each user's script file
-            // gets a per-user ReadAndExecute ACE in EnsureWrapperScript, and traverse
-            // access on this directory and its ancestors is granted individually via
-            // LogonScriptTraverseGranter when login blocking is activated.
-
             dirInfo.SetAccessControl(security);
         }
         catch (Exception ex)
@@ -286,4 +434,11 @@ public class GroupPolicyScriptHelper : IGroupPolicyScriptHelper
             _log.Warn($"Failed to secure scripts directory: {ex.Message}");
         }
     }
+
+    private readonly record struct LogonBlockEntryState(bool HasCurrentWrapper, bool HasLegacyOrBare)
+    {
+        public bool IsBlocked => HasCurrentWrapper || HasLegacyOrBare;
+        public bool IsCurrentWrapperOnly => HasCurrentWrapper && !HasLegacyOrBare;
+    }
+
 }

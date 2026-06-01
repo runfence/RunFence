@@ -3,8 +3,8 @@ using System.Text;
 namespace RunFence.Core.Helpers;
 
 /// <summary>
-/// Pure-logic helpers for association command handling: argument substitution,
-/// RunFence ProgId detection, and registry fallback restoration.
+/// Pure-logic helpers for association argument substitution/materialization,
+/// command parsing, and RunFence executable or ProgId detection.
 /// </summary>
 /// <remarks>Lines above threshold: 369 lines: all methods are pure string operations in RunFence.Core (no deps). Splitting into "substitution" vs "detection" would separate methods that callers use together (substitute then detect), requiring callers to depend on two classes instead of one for a single operation. Reviewed 2026-04-09.</remarks>
 public static class AssociationCommandHelper
@@ -298,39 +298,6 @@ public static class AssociationCommandHelper
             return normalizedTarget;
 
         return null;
-    }
-
-    public static bool ApplyFallbackRestore(
-        string keyName,
-        string fallbackValue,
-        Action<string?> setDefaultValue,
-        Action<string> setNamedValue,
-        Action<string> deleteValue,
-        Action<string> deleteSubKeyTree,
-        Action deleteExtensionCommandSubkeys)
-    {
-        if (keyName.StartsWith('.'))
-        {
-            if (!string.IsNullOrEmpty(fallbackValue))
-                setDefaultValue(fallbackValue);
-            else
-                deleteValue(string.Empty);
-            deleteExtensionCommandSubkeys();
-        }
-        else
-        {
-            if (!string.IsNullOrEmpty(fallbackValue))
-            {
-                setNamedValue(fallbackValue);
-            }
-            else
-            {
-                deleteSubKeyTree("shell");
-                deleteValue("URL Protocol");
-            }
-        }
-
-        return true;
     }
 
     private static bool TryGetSupportedPlaceholderLength(string command, int index, out int length)

@@ -11,21 +11,25 @@ namespace RunFence.Tests;
 public class SettingsTransferAccessGrantServiceTests
 {
     private const string TestSid = "S-1-5-21-1111-1111-1111-1111";
-    private readonly Mock<IPathGrantService> _pathGrantService;
+    private readonly Mock<IGrantMutatorService> _grantMutatorService;
+    private readonly Mock<ITraverseService> _traverseService;
+    private readonly Mock<IGrantIntentSnapshotService> _grantIntentSnapshotService;
     private readonly Mock<IGrantAceService> _grantAceService;
     private readonly Mock<ILoggingService> _log;
     private readonly ISettingsTransferAccessGrantService _service;
 
     public SettingsTransferAccessGrantServiceTests()
     {
-        _pathGrantService = new Mock<IPathGrantService>();
-        _pathGrantService
+        _grantMutatorService = new Mock<IGrantMutatorService>();
+        _traverseService = new Mock<ITraverseService>();
+        _grantIntentSnapshotService = new Mock<IGrantIntentSnapshotService>();
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureGrantRestoreSnapshot(It.IsAny<string>(), It.IsAny<string>(), false))
             .Returns(new GrantIntentRestoreSnapshot(null, []));
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureTraverseRestoreSnapshot(It.IsAny<string>(), It.IsAny<string>()))
             .Returns(new GrantIntentRestoreSnapshot(null, []));
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureAccess(
                 It.IsAny<string>(),
                 It.IsAny<string>(),
@@ -33,7 +37,7 @@ public class SettingsTransferAccessGrantServiceTests
                 It.IsAny<Func<string, string, bool>?>(),
                 It.IsAny<bool>()))
             .Returns(new GrantApplyResult());
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureTemporaryAccess(
                 It.IsAny<string>(),
                 It.IsAny<string>(),
@@ -41,17 +45,19 @@ public class SettingsTransferAccessGrantServiceTests
                 It.IsAny<Func<string, string, bool>?>(),
                 It.IsAny<bool>()))
             .Returns(new GrantApplyResult());
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.RestoreGrant(It.IsAny<string>(), It.IsAny<string>(), false, It.IsAny<GrantIntentRestoreSnapshot>()))
             .Returns(new GrantApplyResult());
-        _pathGrantService
+        _traverseService
             .Setup(g => g.RestoreTraverse(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<GrantIntentRestoreSnapshot>()))
             .Returns(new GrantApplyResult());
 
         _grantAceService = new Mock<IGrantAceService>();
         _log = new Mock<ILoggingService>();
         _service = new SettingsTransferAccessGrantService(
-            _pathGrantService.Object,
+            _grantMutatorService.Object,
+            _traverseService.Object,
+            _grantIntentSnapshotService.Object,
             _grantAceService.Object,
             _log.Object);
     }
@@ -62,7 +68,7 @@ public class SettingsTransferAccessGrantServiceTests
         var path = "C:\\temp\\preftrans";
         var normalizedPath = Path.GetFullPath(path);
 
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureAccess(TestSid, normalizedPath, FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true));
 
@@ -73,16 +79,16 @@ public class SettingsTransferAccessGrantServiceTests
 
         _service.CleanupTemporaryGrant();
 
-        _pathGrantService.Verify(
+        _grantIntentSnapshotService.Verify(
             g => g.CaptureGrantRestoreSnapshot(It.IsAny<string>(), It.IsAny<string>(), false),
             Times.Never);
-        _pathGrantService.Verify(
+        _grantIntentSnapshotService.Verify(
             g => g.CaptureTraverseRestoreSnapshot(It.IsAny<string>(), It.IsAny<string>()),
             Times.Never);
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             g => g.RestoreGrant(It.IsAny<string>(), It.IsAny<string>(), false, It.IsAny<GrantIntentRestoreSnapshot>()),
             Times.Never);
-        _pathGrantService.Verify(
+        _traverseService.Verify(
             g => g.RestoreTraverse(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<GrantIntentRestoreSnapshot>()),
             Times.Never);
     }
@@ -96,13 +102,13 @@ public class SettingsTransferAccessGrantServiceTests
         var grantSnapshot = new GrantIntentRestoreSnapshot(null, []);
         var traverseSnapshot = new GrantIntentRestoreSnapshot(null, []);
 
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureGrantRestoreSnapshot(TestSid, normalizedPath, false))
             .Returns(grantSnapshot);
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureTraverseRestoreSnapshot(TestSid, traversePath))
             .Returns(traverseSnapshot);
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureAccess(TestSid, normalizedPath, FileSystemRights.Read, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true));
 
@@ -113,10 +119,10 @@ public class SettingsTransferAccessGrantServiceTests
 
         _service.CleanupTemporaryGrant();
 
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             g => g.RestoreGrant(TestSid, normalizedPath, false, grantSnapshot),
             Times.Once);
-        _pathGrantService.Verify(
+        _traverseService.Verify(
             g => g.RestoreTraverse(TestSid, traversePath, traverseSnapshot),
             Times.Once);
     }
@@ -127,7 +133,7 @@ public class SettingsTransferAccessGrantServiceTests
         var path = "C:\\temp\\existing.txt";
         var normalizedPath = Path.GetFullPath(path);
 
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureAccess(TestSid, normalizedPath, FileSystemRights.Read, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: false));
 
@@ -138,10 +144,10 @@ public class SettingsTransferAccessGrantServiceTests
 
         _service.CleanupTemporaryGrant();
 
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             g => g.RestoreGrant(It.IsAny<string>(), It.IsAny<string>(), false, It.IsAny<GrantIntentRestoreSnapshot>()),
             Times.Never);
-        _pathGrantService.Verify(
+        _traverseService.Verify(
             g => g.RestoreTraverse(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<GrantIntentRestoreSnapshot>()),
             Times.Never);
     }
@@ -159,19 +165,19 @@ public class SettingsTransferAccessGrantServiceTests
         var traverseSnapshot = new GrantIntentRestoreSnapshot(null, []);
         var cleanupTraverseSnapshot = new GrantIntentRestoreSnapshot(null, []);
 
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureGrantRestoreSnapshot(TestSid, normalizedTransferPath, false))
             .Returns(grantSnapshot);
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureTraverseRestoreSnapshot(TestSid, transferTraversePath))
             .Returns(traverseSnapshot);
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureTraverseRestoreSnapshot(TestSid, cleanupTraversePath))
             .Returns(cleanupTraverseSnapshot);
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureAccess(TestSid, normalizedTransferPath, FileSystemRights.ReadAndExecute, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true));
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureTemporaryAccess(
                 TestSid,
                 normalizedCleanupOnlyPath,
@@ -193,7 +199,7 @@ public class SettingsTransferAccessGrantServiceTests
 
         _service.CleanupTemporaryGrant();
 
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             g => g.EnsureTemporaryAccess(
                 TestSid,
                 normalizedCleanupOnlyPath,
@@ -201,16 +207,16 @@ public class SettingsTransferAccessGrantServiceTests
                 null,
                 false),
             Times.Once);
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             g => g.RestoreGrant(TestSid, normalizedTransferPath, false, grantSnapshot),
             Times.Once);
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             g => g.RestoreGrant(TestSid, normalizedCleanupOnlyPath, false, It.IsAny<GrantIntentRestoreSnapshot>()),
             Times.Never);
         _grantAceService.Verify(
             g => g.RevertAce(normalizedCleanupOnlyPath, TestSid, false),
             Times.Once);
-        _pathGrantService.Verify(
+        _traverseService.Verify(
             g => g.RestoreTraverse(TestSid, cleanupTraversePath, cleanupTraverseSnapshot),
             Times.Once);
     }
@@ -223,10 +229,10 @@ public class SettingsTransferAccessGrantServiceTests
         var cleanupTraversePath = Path.GetDirectoryName(normalizedCleanupOnlyPath)!;
         var cleanupTraverseSnapshot = new GrantIntentRestoreSnapshot(null, []);
 
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureTraverseRestoreSnapshot(TestSid, cleanupTraversePath))
             .Returns(cleanupTraverseSnapshot);
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureTemporaryAccess(
                 TestSid,
                 normalizedCleanupOnlyPath,
@@ -246,13 +252,13 @@ public class SettingsTransferAccessGrantServiceTests
 
         _service.CleanupTemporaryGrant();
 
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             g => g.RestoreGrant(It.IsAny<string>(), It.IsAny<string>(), false, It.IsAny<GrantIntentRestoreSnapshot>()),
             Times.Never);
         _grantAceService.Verify(
             g => g.RevertAce(normalizedCleanupOnlyPath, TestSid, false),
             Times.Once);
-        _pathGrantService.Verify(
+        _traverseService.Verify(
             g => g.RestoreTraverse(TestSid, cleanupTraversePath, cleanupTraverseSnapshot),
             Times.Once);
     }
@@ -265,10 +271,10 @@ public class SettingsTransferAccessGrantServiceTests
         var cleanupTraversePath = Path.GetDirectoryName(normalizedCleanupOnlyPath)!;
         var cleanupTraverseSnapshot = new GrantIntentRestoreSnapshot(null, []);
 
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureTraverseRestoreSnapshot(TestSid, cleanupTraversePath))
             .Returns(cleanupTraverseSnapshot);
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureTemporaryAccess(
                 TestSid,
                 normalizedCleanupOnlyPath,
@@ -288,13 +294,13 @@ public class SettingsTransferAccessGrantServiceTests
 
         _service.CleanupTemporaryGrant();
 
-        _pathGrantService.Verify(
+        _grantMutatorService.Verify(
             g => g.RestoreGrant(It.IsAny<string>(), It.IsAny<string>(), false, It.IsAny<GrantIntentRestoreSnapshot>()),
             Times.Never);
         _grantAceService.Verify(
             g => g.RevertAce(It.IsAny<string>(), It.IsAny<string>(), false),
             Times.Never);
-        _pathGrantService.Verify(
+        _traverseService.Verify(
             g => g.RestoreTraverse(TestSid, cleanupTraversePath, cleanupTraverseSnapshot),
             Times.Once);
     }
@@ -305,7 +311,7 @@ public class SettingsTransferAccessGrantServiceTests
         var path = "C:\\temp\\transfer.txt";
         var normalizedPath = Path.GetFullPath(path);
 
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureGrantRestoreSnapshot(TestSid, normalizedPath, false))
             .Throws(new InvalidOperationException("access check failed"));
 
@@ -325,19 +331,19 @@ public class SettingsTransferAccessGrantServiceTests
         var grantSnapshot = new GrantIntentRestoreSnapshot(null, []);
         var traverseSnapshot = new GrantIntentRestoreSnapshot(null, []);
 
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureGrantRestoreSnapshot(TestSid, normalizedPath, false))
             .Returns(grantSnapshot);
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureTraverseRestoreSnapshot(TestSid, traversePath))
             .Returns(traverseSnapshot);
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureAccess(TestSid, normalizedPath, FileSystemRights.Read, null, false))
             .Returns(new GrantApplyResult(DatabaseModified: true));
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.RestoreGrant(TestSid, normalizedPath, false, grantSnapshot))
             .Throws(new InvalidOperationException("grant cleanup failed"));
-        _pathGrantService
+        _traverseService
             .Setup(g => g.RestoreTraverse(TestSid, traversePath, traverseSnapshot))
             .Throws(new InvalidOperationException("traverse cleanup failed"));
 
@@ -357,10 +363,10 @@ public class SettingsTransferAccessGrantServiceTests
         var cleanupTraversePath = Path.GetDirectoryName(normalizedCleanupOnlyPath)!;
         var cleanupTraverseSnapshot = new GrantIntentRestoreSnapshot(null, []);
 
-        _pathGrantService
+        _grantIntentSnapshotService
             .Setup(g => g.CaptureTraverseRestoreSnapshot(TestSid, cleanupTraversePath))
             .Returns(cleanupTraverseSnapshot);
-        _pathGrantService
+        _grantMutatorService
             .Setup(g => g.EnsureTemporaryAccess(
                 TestSid,
                 normalizedCleanupOnlyPath,

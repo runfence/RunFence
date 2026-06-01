@@ -3,6 +3,7 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using Moq;
 using RunFence.Account;
+using RunFence.Acl;
 using RunFence.Acl.Traverse;
 using RunFence.Core;
 using Xunit;
@@ -18,21 +19,39 @@ public class GroupPolicyScriptHelperTests : IDisposable
         public (string Sid, string ScriptsDirPath)? LastGrantCall { get; private set; }
         public (string Sid, string ScriptsDirPath)? LastRevokeCall { get; private set; }
         public List<string>? NextGrantResult { get; set; }
+        public Exception? NextGrantException { get; set; }
+        public Exception? NextRevokeException { get; set; }
+        public int GrantCallCount { get; private set; }
+        public int RevokeCallCount { get; private set; }
 
         public List<string>? GrantTraverseAccess(string sid, string scriptsDirPath)
         {
             LastGrantCall = (sid, scriptsDirPath);
+            GrantCallCount++;
+            if (NextGrantException != null)
+                throw NextGrantException;
+
             return NextGrantResult;
         }
 
         public void RevokeTraverseAccess(string sid, string scriptsDirPath)
         {
             LastRevokeCall = (sid, scriptsDirPath);
+            RevokeCallCount++;
+            if (NextRevokeException != null)
+                throw NextRevokeException;
+
         }
     }
 
     private readonly TempDirectory _tempDir;
     private readonly FakeLogonScriptTraverseGranter _traverseGranter;
+    private readonly Mock<IProgramDataDirectoryProvisioningService> _directoryService;
+    private readonly Mock<IProgramDataManagedObjectRepairService> _repairService;
+    private readonly Mock<IProgramDataPathPolicyService> _pathPolicyService;
+    private readonly Mock<IProgramDataObjectProvisioner> _objectProvisioner;
+    private readonly Mock<IProgramDataKnownPathResolver> _pathResolver;
+    private readonly List<ProgramDataExplicitFileRequest> _explicitFileRequests = [];
     private readonly GroupPolicyScriptHelper _helper;
     private readonly string _iniPath;
     private readonly string _gptPath;
@@ -44,8 +63,25 @@ public class GroupPolicyScriptHelperTests : IDisposable
         _tempDir = new TempDirectory("ram_gptest");
         _scriptsDir = Path.Combine(_tempDir.Path, "scripts");
         _legacyScriptsDir = Path.Combine(_tempDir.Path, "legacy_scripts");
+        Directory.CreateDirectory(_scriptsDir);
+        Directory.CreateDirectory(_legacyScriptsDir);
         _traverseGranter = new FakeLogonScriptTraverseGranter();
-        _helper = new GroupPolicyScriptHelper(new LogonScriptIniManager(), new Mock<ILoggingService>().Object,
+        _directoryService = new Mock<IProgramDataDirectoryProvisioningService>();
+        _repairService = new Mock<IProgramDataManagedObjectRepairService>();
+        _pathPolicyService = new Mock<IProgramDataPathPolicyService>();
+        _objectProvisioner = new Mock<IProgramDataObjectProvisioner>();
+        _pathResolver = new Mock<IProgramDataKnownPathResolver>();
+        _pathResolver
+            .Setup(resolver => resolver.GetDirectoryPath(ProgramDataPolicies.Scripts))
+            .Returns(_scriptsDir);
+        SetupRestrictedProvisioner();
+        SetupManagedScriptsDirectory();
+        _helper = new GroupPolicyScriptHelper(new LogonScriptIniManager(), new LogonScriptStateRollbackStore(), new Mock<ILoggingService>().Object,
+            _directoryService.Object,
+            _repairService.Object,
+            _pathPolicyService.Object,
+            _objectProvisioner.Object,
+            _pathResolver.Object,
             _traverseGranter,
             systemDir: _tempDir.Path, scriptsDir: _scriptsDir, legacyScriptsDir: _legacyScriptsDir);
         _iniPath = Path.Combine(_tempDir.Path, "GroupPolicyUsers", FakeSid, "User", "Scripts", "scripts.ini");
@@ -183,19 +219,64 @@ public class GroupPolicyScriptHelperTests : IDisposable
         _helper.SetLoginBlocked(FakeSid, true);
 
         var wrapperPath = Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
-        var scriptsDirInfo = new DirectoryInfo(_scriptsDir);
-        var directorySecurity = scriptsDirInfo.GetAccessControl();
-        Assert.True(directorySecurity.AreAccessRulesProtected);
+        var request = Assert.Single(_explicitFileRequests);
+        Assert.StartsWith(wrapperPath + ".", request.Path, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(".tmp", request.Path, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(ProgramDataFileAclProfile.CurrentProcessUserFullControl, request.Profile);
+        Assert.Contains(request.AdditionalAccess, access =>
+            access.Principal.Value == FakeSid &&
+            access.Rights == FileSystemRights.ReadAndExecute &&
+            access.InheritanceFlags == InheritanceFlags.None &&
+            access.PropagationFlags == PropagationFlags.None);
 
-        var fileSecurity = new FileInfo(wrapperPath).GetAccessControl();
-        var accessRules = fileSecurity.GetAccessRules(true, true, typeof(SecurityIdentifier))
-            .Cast<FileSystemAccessRule>()
-            .ToArray();
-        var sidMatch = new SecurityIdentifier(FakeSid);
-        Assert.Contains(accessRules, rule =>
-            rule.IdentityReference.Value == sidMatch.Value &&
-            rule.AccessControlType == AccessControlType.Allow &&
-            (rule.FileSystemRights & FileSystemRights.ReadAndExecute) != 0);
+        _repairService.Verify(s => s.EnsureManagedFileOwner(wrapperPath), Times.Once);
+
+        _repairService.Verify(
+            s => s.EnsureManagedFileOwner(Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd")),
+            Times.Once);
+    }
+
+    [Fact]
+    public void SetLoginBlocked_Block_WithNonManagedScriptsDirectory_SecuresDirectoryAcl()
+    {
+        var scriptsDir = Path.Combine(_tempDir.Path, "non_managed_scripts");
+        var helper = new GroupPolicyScriptHelper(
+            new LogonScriptIniManager(),
+            new LogonScriptStateRollbackStore(),
+            new Mock<ILoggingService>().Object,
+            Mock.Of<IProgramDataDirectoryProvisioningService>(),
+            Mock.Of<IProgramDataManagedObjectRepairService>(),
+            Mock.Of<IProgramDataPathPolicyService>(),
+            Mock.Of<IProgramDataObjectProvisioner>(),
+            Mock.Of<IProgramDataKnownPathResolver>(),
+            _traverseGranter,
+            systemDir: _tempDir.Path,
+            scriptsDir: scriptsDir,
+            legacyScriptsDir: _legacyScriptsDir);
+
+        helper.SetLoginBlocked(FakeSid, true);
+
+        var directorySecurity = new DirectoryInfo(scriptsDir).GetAccessControl();
+        Assert.True(directorySecurity.AreAccessRulesProtected);
+    }
+
+    [Fact]
+    public void SetLoginBlocked_BlockTwice_RewritesWrapperAndReappliesTraverse()
+    {
+        _traverseGranter.NextGrantResult = [_scriptsDir];
+        _helper.SetLoginBlocked(FakeSid, true);
+        ResetProgramDataMocks();
+        SetupManagedScriptsDirectory();
+
+        var result = _helper.SetLoginBlocked(FakeSid, true);
+
+        Assert.NotNull(result.TraversePaths);
+        Assert.NotNull(_traverseGranter.LastGrantCall);
+        Assert.Equal((FakeSid, _scriptsDir), _traverseGranter.LastGrantCall);
+        Assert.Equal(2, _traverseGranter.GrantCallCount);
+        _repairService.Verify(
+            s => s.EnsureManagedFileOwner(result.ScriptPath!),
+            Times.Once);
     }
 
     [Fact]
@@ -208,6 +289,135 @@ public class GroupPolicyScriptHelperTests : IDisposable
         Assert.NotNull(_traverseGranter.LastGrantCall);
         Assert.Equal((FakeSid, _scriptsDir), _traverseGranter.LastGrantCall);
         Assert.Equal(_traverseGranter.NextGrantResult, result.TraversePaths);
+    }
+
+    [Fact]
+    public void SetLoginBlocked_AlreadyBlocked_ExistingBlockRepairFailure_DoesNotLoseExistingState_WhenEnsureOwnerFails()
+    {
+        _helper.SetLoginBlocked(FakeSid, true);
+        var wrapperPath = Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
+        var iniBytes = File.ReadAllBytes(_iniPath);
+        var gptBytes = File.ReadAllBytes(_gptPath);
+        var wrapperBytes = File.ReadAllBytes(wrapperPath);
+
+        ResetProgramDataMocks();
+        SetupManagedScriptsDirectory();
+        _repairService.Setup(s => s.EnsureManagedFileOwner(wrapperPath))
+            .Throws(new IOException("forced"));
+
+        var ex = Assert.Throws<AccountRestrictionOperationException>(() =>
+            _helper.SetLoginBlocked(FakeSid, true));
+
+        Assert.Equal(AccountRestrictionStatus.RolledBack, ex.Status);
+        Assert.True(_helper.IsLoginBlocked(FakeSid));
+        Assert.Equal(iniBytes, File.ReadAllBytes(_iniPath));
+        Assert.Equal(gptBytes, File.ReadAllBytes(_gptPath));
+        Assert.Equal(wrapperBytes, File.ReadAllBytes(wrapperPath));
+    }
+
+    [Fact]
+    public void SetLoginBlocked_AlreadyBlocked_ExistingBlockRepairFailure_RestoresReadOnlyWrapper()
+    {
+        _helper.SetLoginBlocked(FakeSid, true);
+        var wrapperPath = Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
+        var wrapperBytes = File.ReadAllBytes(wrapperPath);
+        File.SetAttributes(wrapperPath, File.GetAttributes(wrapperPath) | FileAttributes.ReadOnly);
+
+        try
+        {
+            ResetProgramDataMocks();
+            SetupManagedScriptsDirectory();
+            _repairService.Setup(s => s.EnsureManagedFileOwner(wrapperPath))
+                .Throws(new IOException("forced"));
+
+            var ex = Assert.Throws<AccountRestrictionOperationException>(() =>
+                _helper.SetLoginBlocked(FakeSid, true));
+
+            Assert.Equal(AccountRestrictionStatus.RolledBack, ex.Status);
+            Assert.True(File.Exists(wrapperPath));
+            Assert.Equal(wrapperBytes, File.ReadAllBytes(wrapperPath));
+            Assert.True((File.GetAttributes(wrapperPath) & FileAttributes.ReadOnly) != 0);
+            Assert.True(_helper.IsLoginBlocked(FakeSid));
+        }
+        finally
+        {
+            if (File.Exists(wrapperPath))
+                File.SetAttributes(wrapperPath, File.GetAttributes(wrapperPath) & ~FileAttributes.ReadOnly);
+        }
+    }
+
+    [Fact]
+    public void SetLoginBlocked_AlreadyBlocked_ExistingBlockRepairFailure_DoesNotDeleteExistingScripts()
+    {
+        _helper.SetLoginBlocked(FakeSid, true);
+        var wrapperPath = Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
+        ResetProgramDataMocks();
+        SetupManagedScriptsDirectory();
+        _traverseGranter.NextGrantException = new IOException("forced");
+
+        var ex = Assert.Throws<AccountRestrictionOperationException>(() =>
+            _helper.SetLoginBlocked(FakeSid, true));
+
+        Assert.Equal(AccountRestrictionStatus.RolledBack, ex.Status);
+        Assert.True(_helper.IsLoginBlocked(FakeSid));
+        Assert.True(File.Exists(_iniPath));
+        Assert.True(File.Exists(_gptPath));
+        Assert.True(File.Exists(wrapperPath));
+    }
+
+    [Fact]
+    public void SetLoginBlocked_FirstTimeBlockFailure_RollsBackCreatedArtifacts()
+    {
+        _traverseGranter.NextGrantException = new IOException("forced");
+        var ex = Assert.Throws<AccountRestrictionOperationException>(() =>
+            _helper.SetLoginBlocked(FakeSid, true));
+
+        var wrapperPath = Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
+        Assert.Equal(AccountRestrictionStatus.RolledBack, ex.Status);
+        Assert.False(File.Exists(_iniPath));
+        Assert.False(File.Exists(_gptPath));
+        Assert.False(File.Exists(wrapperPath));
+        Assert.False(_helper.IsLoginBlocked(FakeSid));
+    }
+
+    [Fact]
+    public void SetLoginBlocked_FirstTimeWrapperPublishFailure_DeletesTemporaryWrapper()
+    {
+        var wrapperPath = Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
+        Directory.CreateDirectory(wrapperPath);
+
+        var ex = Assert.Throws<AccountRestrictionOperationException>(() =>
+            _helper.SetLoginBlocked(FakeSid, true));
+
+        Assert.Equal(AccountRestrictionStatus.RolledBack, ex.Status);
+        Assert.Empty(Directory.EnumerateFiles(_scriptsDir, $"{FakeSid}_block_login.cmd.*.tmp"));
+        Assert.False(_helper.IsLoginBlocked(FakeSid));
+    }
+
+    [Fact]
+    public void SetLoginBlocked_FirstTimeScriptsIniPublishFailure_DeletesTemporaryIni()
+    {
+        Directory.CreateDirectory(_iniPath);
+
+        var ex = Assert.Throws<AccountRestrictionOperationException>(() =>
+            _helper.SetLoginBlocked(FakeSid, true));
+
+        Assert.Equal(AccountRestrictionStatus.RolledBack, ex.Status);
+        Assert.Empty(Directory.EnumerateFiles(Path.GetDirectoryName(_iniPath)!, "scripts.ini.*.tmp"));
+        Assert.False(_helper.IsLoginBlocked(FakeSid));
+    }
+
+    [Fact]
+    public void SetLoginBlocked_FirstTimeGptIniPublishFailure_DeletesTemporaryGptIni()
+    {
+        Directory.CreateDirectory(_gptPath);
+
+        var ex = Assert.Throws<AccountRestrictionOperationException>(() =>
+            _helper.SetLoginBlocked(FakeSid, true));
+
+        Assert.Equal(AccountRestrictionStatus.RolledBack, ex.Status);
+        Assert.Empty(Directory.EnumerateFiles(Path.GetDirectoryName(_gptPath)!, "gpt.ini.*.tmp"));
+        Assert.False(_helper.IsLoginBlocked(FakeSid));
     }
 
     [Fact]
@@ -433,6 +643,74 @@ public class GroupPolicyScriptHelperTests : IDisposable
     }
 
     [Fact]
+    public void SetLoginBlocked_Block_BareLogoffAlreadyBlocked_ReplacesEntryWithCurrentWrapper()
+    {
+        WriteIni("[Logon]\r\n0CmdLine=logoff.exe\r\n0Parameters=\r\n");
+
+        var result = _helper.SetLoginBlocked(FakeSid, true);
+
+        var wrapperPath = GetWrapperPath();
+        Assert.Equal(wrapperPath, result.ScriptPath);
+        Assert.True(File.Exists(wrapperPath));
+        Assert.True(File.Exists(_gptPath));
+
+        var content = File.ReadAllText(_iniPath);
+        Assert.Contains($"0CmdLine={wrapperPath}", content);
+        Assert.DoesNotContain("CmdLine=logoff.exe", content);
+        Assert.Equal(65536, ReadGptVersion());
+    }
+
+    [Fact]
+    public void SetLoginBlocked_Block_LegacyWrapperAlreadyBlocked_ReplacesEntryWithCurrentWrapper()
+    {
+        var legacyWrapperPath = GetLegacyWrapperPath();
+        WriteIni($"[Logon]\r\n0CmdLine={legacyWrapperPath}\r\n0Parameters=\r\n");
+
+        var result = _helper.SetLoginBlocked(FakeSid, true);
+
+        var wrapperPath = GetWrapperPath();
+        Assert.Equal(wrapperPath, result.ScriptPath);
+        Assert.True(File.Exists(wrapperPath));
+        Assert.True(File.Exists(_gptPath));
+
+        var content = File.ReadAllText(_iniPath);
+        Assert.Contains($"0CmdLine={wrapperPath}", content);
+        Assert.DoesNotContain(legacyWrapperPath, content);
+        Assert.Equal(65536, ReadGptVersion());
+    }
+
+    [Fact]
+    public void SetLoginBlocked_Block_CurrentWrapperAlreadyBlocked_KeepsExistingGptVersion()
+    {
+        _helper.SetLoginBlocked(FakeSid, true);
+        var version = ReadGptVersion();
+        ResetProgramDataMocks();
+        SetupManagedScriptsDirectory();
+
+        _helper.SetLoginBlocked(FakeSid, true);
+
+        var content = File.ReadAllText(_iniPath);
+        Assert.Contains($"0CmdLine={GetWrapperPath()}", content);
+        Assert.Equal(version, ReadGptVersion());
+    }
+
+    [Fact]
+    public void SetLoginBlocked_Block_CurrentAndLegacyWrappersAlreadyBlocked_RemovesLegacyEntry()
+    {
+        var wrapperPath = GetWrapperPath();
+        var legacyWrapperPath = GetLegacyWrapperPath();
+        WriteIni($"[Logon]\r\n0CmdLine={wrapperPath}\r\n0Parameters=\r\n1CmdLine={legacyWrapperPath}\r\n1Parameters=\r\n");
+
+        _helper.SetLoginBlocked(FakeSid, true);
+
+        var content = File.ReadAllText(_iniPath);
+        Assert.Contains($"0CmdLine={wrapperPath}", content);
+        Assert.DoesNotContain(legacyWrapperPath, content);
+        Assert.DoesNotContain("1CmdLine=", content);
+        Assert.Equal(65536, ReadGptVersion());
+    }
+
+    [Fact]
     public void SetLoginBlocked_UnblockNonBlocked_NoGptIniCreated()
     {
         _helper.SetLoginBlocked(FakeSid, false);
@@ -502,10 +780,56 @@ public class GroupPolicyScriptHelperTests : IDisposable
         throw new InvalidOperationException("Version not found in gpt.ini");
     }
 
+    private string GetWrapperPath() =>
+        Path.Combine(_scriptsDir, $"{FakeSid}_block_login.cmd");
+
+    private string GetLegacyWrapperPath() =>
+        Path.Combine(_legacyScriptsDir, $"{FakeSid}_block_login.cmd");
+
     private void WriteIni(string content)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(_iniPath)!);
         File.WriteAllText(_iniPath, content,
             new UnicodeEncoding(bigEndian: false, byteOrderMark: true));
+    }
+
+    private void SetupManagedScriptsDirectory()
+    {
+        _pathPolicyService.Setup(s => s.IsUnderRoot(It.Is<string>(path =>
+                path.Equals(_scriptsDir, StringComparison.OrdinalIgnoreCase) ||
+                path.StartsWith(_scriptsDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))))
+            .Returns(true);
+        _objectProvisioner
+            .Setup(p => p.CreateOrRepairDirectory(It.Is<ProgramDataExplicitDirectoryRequest>(
+                request =>
+                    request.Path == _scriptsDir &&
+                    request.Profile == ProgramDataDirectoryAclProfile.CurrentProcessUserFullControl &&
+                    request.AdditionalAccess.Count == 0 &&
+                    request.ReplaceExistingSecurity)))
+            .Callback<ProgramDataExplicitDirectoryRequest>(request => Directory.CreateDirectory(request.Path));
+        _repairService.Setup(s => s.EnsureManagedFileOwner(It.IsAny<string>())).Returns(false);
+    }
+
+    private void ResetProgramDataMocks()
+    {
+        _directoryService.Reset();
+        _repairService.Reset();
+        _pathPolicyService.Reset();
+    }
+
+    private void SetupRestrictedProvisioner()
+    {
+        _objectProvisioner
+            .Setup(p => p.CreateFile(It.IsAny<ProgramDataExplicitFileRequest>(), It.IsAny<Action<Stream>>()))
+            .Callback<ProgramDataExplicitFileRequest, Action<Stream>>((request, writeContent) =>
+            {
+                _explicitFileRequests.Add(request);
+                Directory.CreateDirectory(Path.GetDirectoryName(request.Path)!);
+                using var stream = new FileStream(request.Path, FileMode.CreateNew, FileAccess.ReadWrite, request.Share);
+                writeContent(stream);
+            });
+        _objectProvisioner
+            .Setup(p => p.CreateOrRepairDirectory(It.IsAny<ProgramDataExplicitDirectoryRequest>()))
+            .Callback<ProgramDataExplicitDirectoryRequest>(request => Directory.CreateDirectory(request.Path));
     }
 }

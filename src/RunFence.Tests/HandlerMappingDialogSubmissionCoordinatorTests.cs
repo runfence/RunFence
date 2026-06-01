@@ -15,11 +15,11 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
     private const string AppId = "app01";
 
     [Fact]
-    public async Task SubmitAddAsync_WhenDirectValidationFails_ReturnsValidationMessage()
+    public void SubmitAdd_WhenDirectValidationFails_ReturnsValidationMessage()
     {
         var context = CreateContext();
 
-        var result = await context.Coordinator.SubmitAddAsync(new HandlerMappingAddDialogSubmitRequest(
+        var result = context.Coordinator.SubmitAdd(new HandlerMappingAddDialogSubmitRequest(
             IsDirectMode: true,
             ResolvedKeys: ["bad key"],
             SelectedApp: null,
@@ -37,11 +37,11 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
     }
 
     [Fact]
-    public async Task SubmitAddAsync_WhenSaveFails_RestoresDatabaseAndReturnsUnresolvedFailure()
+    public void SubmitAdd_WhenSaveFails_RestoresDatabaseAndReturnsUnresolvedFailure()
     {
         var context = CreateContext(saveDatabase: () => throw new InvalidOperationException("save failed"));
 
-        var result = await context.Coordinator.SubmitAddAsync(new HandlerMappingAddDialogSubmitRequest(
+        var result = context.Coordinator.SubmitAdd(new HandlerMappingAddDialogSubmitRequest(
             IsDirectMode: true,
             ResolvedKeys: [".pdf"],
             SelectedApp: null,
@@ -60,7 +60,7 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
     }
 
     [Fact]
-    public async Task SubmitEditAppAsync_WhenNothingChanged_ReturnsCloseWithoutSaving()
+    public void SubmitEditApp_WhenNothingChanged_ReturnsCloseWithoutSaving()
     {
         var context = CreateContext(seed: (database, _) =>
         {
@@ -73,7 +73,7 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
 
         var saveCalls = 0;
         var savePersistence = new FakeHandlerMappingDialogPersistence(context.Database, () => saveCalls++);
-        var result = await context.Coordinator.SubmitEditAppAsync(new EditAppHandlerMappingSubmitRequest(
+        var result = context.Coordinator.SubmitEditApp(new EditAppHandlerMappingSubmitRequest(
             Key: ".txt",
             SelectedApp: context.App,
             ArgumentsTemplate: "\"old %1\"",
@@ -94,7 +94,7 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
     }
 
     [Fact]
-    public async Task SubmitEditDirectAsync_WhenSaveFails_RestoresDirectHandler()
+    public void SubmitEditDirect_WhenSaveFails_RestoresDirectHandler()
     {
         var context = CreateContext(
             seed: (database, _) =>
@@ -107,7 +107,7 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
             saveDatabase: () => throw new InvalidOperationException("save failed"));
         var currentEntry = context.Database.Settings.DirectHandlerMappings![".txt"];
 
-        var result = await context.Coordinator.SubmitEditDirectAsync(new EditDirectHandlerMappingSubmitRequest(
+        var result = context.Coordinator.SubmitEditDirect(new EditDirectHandlerMappingSubmitRequest(
             Key: ".txt",
             CurrentEntry: currentEntry,
             CurrentValue: "txtfile",
@@ -121,7 +121,7 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
     }
 
     [Fact]
-    public async Task SubmitEditAppAsync_WhenSaveFails_RestoresMappingAndAppState()
+    public void SubmitEditApp_WhenSaveFails_RestoresMappingAndAppState()
     {
         var context = CreateContext(
             seed: (database, _) =>
@@ -133,7 +133,7 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
             },
             saveDatabase: () => throw new InvalidOperationException("save failed"));
 
-        var result = await context.Coordinator.SubmitEditAppAsync(new EditAppHandlerMappingSubmitRequest(
+        var result = context.Coordinator.SubmitEditApp(new EditAppHandlerMappingSubmitRequest(
             Key: ".txt",
             SelectedApp: context.App,
             ArgumentsTemplate: "\"new %1\"",
@@ -153,7 +153,7 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
     }
 
     [Fact]
-    public async Task SubmitImportAsync_WhenRegistrySyncFails_ReturnsWarningAndKeepsSavedMutation()
+    public void SubmitImport_WhenRegistrySyncFails_ReturnsWarningAndKeepsSavedMutation()
     {
         var context = CreateContext();
         context.RegistrationService
@@ -165,7 +165,7 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
                 new InteractiveAssociationEntry(".pdf", new DirectHandlerEntry { ClassName = "Acrobat.Document.DC" }, "Pdf")
             };
 
-        var result = await context.Coordinator.SubmitImportAsync(
+        var result = context.Coordinator.SubmitImport(
             new ImportAssociationsDialogSubmitRequest(selectedEntries),
             context.Persistence);
 
@@ -180,12 +180,12 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
     }
 
     [Fact]
-    public async Task ExecuteRetryableAsync_WhenCallbackThrows_ReturnsUnexpectedFailure()
+    public void ExecuteRetryable_WhenCallbackThrows_ReturnsUnexpectedFailure()
     {
         var exception = new InvalidOperationException("unexpected failure");
         Exception? reported = null;
 
-        var result = await HandlerMappingDialogSubmissionCoordinator.ExecuteRetryableAsync(
+        var result = HandlerMappingDialogSubmissionCoordinator.ExecuteRetryable(
             () => throw exception,
             ex => reported = ex);
 
@@ -196,56 +196,9 @@ public class HandlerMappingDialogSubmissionCoordinatorTests
     }
 
     [Fact]
-    public async Task ExecuteRetryableAsync_ReturnsCallbackResultForRetryDecisions()
+    public void ExecuteRetryable_WhenReporterThrows_StillReturnsUnexpectedFailure()
     {
-        var attempt = 0;
-
-        var validationFailure = await HandlerMappingDialogSubmissionCoordinator.ExecuteRetryableAsync(() =>
-        {
-            attempt++;
-            return Task.FromResult(new HandlerMappingDialogSubmitResult(
-                DialogResult: null,
-                ValidationMessage: "invalid",
-                HasUnresolvedFailure: false,
-                UnresolvedFailureText: null,
-                WarningMessage: null,
-                UnexpectedErrorMessage: null));
-        });
-        var saveFailure = await HandlerMappingDialogSubmissionCoordinator.ExecuteRetryableAsync(() =>
-        {
-            attempt++;
-            return Task.FromResult(new HandlerMappingDialogSubmitResult(
-                DialogResult: null,
-                ValidationMessage: null,
-                HasUnresolvedFailure: true,
-                UnresolvedFailureText: "save failed",
-                WarningMessage: null,
-                UnexpectedErrorMessage: null));
-        });
-        var success = await HandlerMappingDialogSubmissionCoordinator.ExecuteRetryableAsync(() =>
-        {
-            attempt++;
-            return Task.FromResult(new HandlerMappingDialogSubmitResult(
-                DialogResult: System.Windows.Forms.DialogResult.OK,
-                ValidationMessage: null,
-                HasUnresolvedFailure: false,
-                UnresolvedFailureText: null,
-                WarningMessage: null,
-                UnexpectedErrorMessage: null));
-        });
-
-        Assert.Equal("invalid", validationFailure.ValidationMessage);
-        Assert.False(validationFailure.HasUnresolvedFailure);
-        Assert.Equal("save failed", saveFailure.UnresolvedFailureText);
-        Assert.True(saveFailure.HasUnresolvedFailure);
-        Assert.Equal(System.Windows.Forms.DialogResult.OK, success.DialogResult);
-        Assert.Equal(3, attempt);
-    }
-
-    [Fact]
-    public async Task ExecuteRetryableAsync_WhenReporterThrows_StillReturnsUnexpectedFailure()
-    {
-        var result = await HandlerMappingDialogSubmissionCoordinator.ExecuteRetryableAsync(
+        var result = HandlerMappingDialogSubmissionCoordinator.ExecuteRetryable(
             () => throw new InvalidOperationException("unexpected failure"),
             _ => throw new InvalidOperationException("report failed"));
 

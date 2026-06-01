@@ -141,18 +141,19 @@ public class AppContainerSerializationTests
                 ArgonSalt = new byte[32],
                 EncryptedCanary = [1]
             },
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         var sessionProvider = new Mock<ISessionProvider>();
         sessionProvider.Setup(provider => provider.GetSession()).Returns(session);
-        var handlerMappings = new Mock<IHandlerMappingService>().Object;
         var appIdValidator = new AppIdValidator();
+        var ownershipProjection = new GrantIntentOwnershipProjectionService();
+        var index = new AppConfigIndex(ownershipProjection, appIdValidator);
+        var handlerMappings = new HandlerMappingService(index);
         var configSaveOrchestrator = new ConfigSaveOrchestrator(
             sessionProvider.Object,
             () => new InlineUiThreadInvoker(action => action()),
             mockDb.Object,
-            new Mock<IAppConfigService>().Object,
+            Mock.Of<IAppConfigService>(),
             handlerMappings);
-        var ownershipProjection = new GrantIntentOwnershipProjectionService();
         var mainStore = new MainGrantIntentStore(
             sessionProvider.Object,
             configSaveOrchestrator,
@@ -161,15 +162,17 @@ public class AppContainerSerializationTests
             mainStore,
             configSaveOrchestrator,
             ownershipProjection);
-        var grantIntentRepository = new GrantIntentRepository(grantIntentStoreProvider);
         var appConfigService = new AppConfigService(
             new Mock<ILoggingService>().Object,
-            new AppConfigIndex(ownershipProjection, appIdValidator),
+            index,
             ownershipProjection,
             () => grantIntentStoreProvider,
             handlerMappings,
             mockDb.Object,
-            new AppConfigSaveHelper(() => grantIntentStoreProvider, handlerMappings, mockDb.Object),
+            new AppConfigSaveHelper(
+                () => grantIntentStoreProvider,
+                handlerMappings,
+                mockDb.Object),
             new AppEntryIdGenerator(),
             appIdValidator);
         var database = session.Database;

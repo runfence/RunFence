@@ -11,7 +11,7 @@ public static class PathConstants
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "RunFenceDebug",
-            DebugHelper.AppId!);
+            DebugHelper.AppId ?? "Default");
 
     public static string RoamingAppDataDir =>
         !string.IsNullOrEmpty(DebugHelper.AppId)
@@ -24,11 +24,9 @@ public static class PathConstants
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
 
     public static string ProgramDataDir =>
-        !string.IsNullOrEmpty(DebugHelper.AppId)
+        !string.IsNullOrEmpty(DebugHelper.AppId) || DebugHelper.UseAdminOperationMocks
             ? Path.Combine(DebugDataRoot, "ProgramData")
             : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), AppName);
-
-    public static string ProgramDataIconDir => Path.Combine(ProgramDataDir, "icons");
 
     // License
     public static string LicenseFilePath => Path.Combine(RoamingAppDataDir, "license.dat");
@@ -74,6 +72,7 @@ public static class PathConstants
     public const string JobKeeperExeName = "RunFence.JobKeeper.exe";
     public const string PinHelperExeName = "RunFence.PinHelper.exe";
     public const string ProfileKeeperExeName = "RunFence.ProfileKeeper.exe";
+    public const string AppxLauncherExeName = "RunFence.AppxLauncher.exe";
     public const string ShellServerExeName = "RunFence.ShellServer.exe";
     public const string PrefTransExeName = "preftrans.exe";
     public const string SecurityScannerExeName = "RunFence.SecurityScanner.exe";

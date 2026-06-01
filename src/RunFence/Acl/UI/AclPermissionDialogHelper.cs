@@ -41,35 +41,53 @@ public static class AclPermissionDialogHelper
     /// </summary>
     public static Func<string, string, bool> CreateLaunchPermissionPrompt(
         ISidNameCacheService sidNameCache, IWin32Window? owner = null)
-        => (path, sid) => ShowPermissionDialog(owner, "Missing permissions",
-                $"'{sidNameCache.GetDisplayName(sid)}' needs access to:\n{path}")
+        => (path, sid) => ShowPermissionDialog(
+                owner,
+                new PermissionPromptModel(
+                    Caption: "Permission Required",
+                    Heading: "Missing permissions",
+                    BodyText: $"'{sidNameCache.GetDisplayName(sid)}' needs access to:\n{path}\n\nYou can add permissions, proceed without them, or cancel.",
+                    ConfirmButtonText: "Add Permissions",
+                    SkipButtonText: "Launch Without",
+                    CancelButtonText: "Cancel"))
             ?? throw new OperationCanceledException();
 
     /// <summary>Returns true = grant, false = skip, null = cancel.</summary>
     public static bool? ShowPermissionDialog(IWin32Window? owner, string heading, string text,
         string skipButtonText = "Launch Without")
+        => ShowPermissionDialog(
+            owner,
+            new PermissionPromptModel(
+                Caption: "Permission Required",
+                Heading: heading,
+                BodyText: text + "\n\nYou can add permissions, proceed without them, or cancel.",
+                ConfirmButtonText: "Add Permissions",
+                SkipButtonText: skipButtonText,
+                CancelButtonText: "Cancel"));
+
+    public static bool? ShowPermissionDialog(IWin32Window? owner, PermissionPromptModel prompt)
     {
-        var addPermsBtn = new TaskDialogButton("Add Permissions");
-        var skipBtn = new TaskDialogButton(skipButtonText);
-        var cancelBtn = new TaskDialogButton("Cancel");
+        var confirmButton = new TaskDialogButton(prompt.ConfirmButtonText);
+        var skipButton = new TaskDialogButton(prompt.SkipButtonText);
+        var cancelButton = new TaskDialogButton(prompt.CancelButtonText);
 
         var page = new TaskDialogPage
         {
-            Caption = "Permission Required",
-            Heading = heading,
-            Text = text + "\n\nYou can add permissions, proceed without them, or cancel.",
+            Caption = prompt.Caption,
+            Heading = prompt.Heading,
+            Text = prompt.BodyText,
             Icon = TaskDialogIcon.ShieldWarningYellowBar,
-            Buttons = { addPermsBtn, skipBtn, cancelBtn },
-            DefaultButton = addPermsBtn,
+            Buttons = { confirmButton, skipButton, cancelButton },
+            DefaultButton = confirmButton,
             AllowCancel = true
         };
 
         var result = owner != null
             ? TaskDialog.ShowDialog(owner, page)
             : TaskDialog.ShowDialog(page);
-        if (result == addPermsBtn)
+        if (result == confirmButton)
             return true;
-        if (result == cancelBtn)
+        if (result == cancelButton)
             return null;
         return false;
     }

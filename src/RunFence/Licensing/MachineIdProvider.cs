@@ -21,20 +21,9 @@ public class MachineIdProvider : IMachineIdProvider
 
     private readonly MachineIdentityResult _result;
 
-    public MachineIdProvider(ILoggingService log)
-        : this(new MachineIdentityReader(), log)
-    {
-    }
-
     public MachineIdProvider(IMachineIdentityReader reader, ILoggingService? log = null)
     {
         _result = Resolve(reader, log);
-    }
-
-    // Test constructor for explicit SMBIOS value-only tests.
-    public MachineIdProvider(string? smbiosUuid, ILoggingService? log = null)
-        : this(new FixedMachineIdentityReader(smbiosUuid, null), log)
-    {
     }
 
     public MachineIdentityResult GetMachineIdentity()
@@ -126,9 +115,4 @@ public class MachineIdProvider : IMachineIdProvider
 
     public static string Base32Encode(byte[] data) => Base32.Encode(data);
 
-    private sealed class FixedMachineIdentityReader(string? smbiosUuid, string? machineGuid) : IMachineIdentityReader
-    {
-        public string? ReadSmbiosUuid() => smbiosUuid;
-        public string? ReadWindowsMachineGuid() => machineGuid;
-    }
 }

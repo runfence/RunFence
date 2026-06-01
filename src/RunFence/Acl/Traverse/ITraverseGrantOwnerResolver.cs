@@ -23,4 +23,10 @@ public interface ITraverseGrantOwnerResolver
         string sid,
         string normalizedPath,
         bool includeManualSharedEntries = false);
+
+    void RestoreTraverseEntry(
+        AppDatabase database,
+        string sid,
+        string normalizedPath,
+        GrantedPathEntry? snapshot);
 }

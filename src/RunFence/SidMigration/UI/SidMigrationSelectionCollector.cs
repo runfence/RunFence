@@ -6,8 +6,7 @@ namespace RunFence.SidMigration.UI;
 public class SidMigrationSelectionCollector(
     SidMigrationMappingValidator validator,
     IMessageBoxService messageBoxService,
-    IReadOnlyDictionary<string, string> sidDisplayNames,
-    IReadOnlyDictionary<string, OrphanedSid> orphanedBySid)
+    IReadOnlyDictionary<string, string> sidDisplayNames)
 {
     public SidMigrationSelectionResult Collect(
         IReadOnlyList<SidMigrationSelectionRow> rows,
@@ -86,22 +85,6 @@ public class SidMigrationSelectionCollector(
 
         if (!confirmUnresolvedSelections(result.Select(m => m.OldSid).Concat(deleteSids)))
             return new SidMigrationSelectionResult(false, [], [], rowErrors);
-
-        var deleteBlockedByOwnerRefs = deleteSids
-            .Where(sid => orphanedBySid.TryGetValue(sid, out var orphan) && orphan.OwnerCount > 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (deleteBlockedByOwnerRefs.Count > 0)
-        {
-            messageBoxService.Show(
-                "Delete cannot be used for SIDs that still own files or folders.\n\n" +
-                string.Join("\n", deleteBlockedByOwnerRefs.Select(sid => validator.ResolveSidName(sid) ?? sid)) +
-                "\n\nChoose Migrate and provide a replacement owner SID instead.",
-                "Owner Migration Required",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            return new SidMigrationSelectionResult(false, [], [], rowErrors);
-        }
 
         return new SidMigrationSelectionResult(true, result, deleteSids, rowErrors);
     }

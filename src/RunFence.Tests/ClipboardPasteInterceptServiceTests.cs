@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using Moq;
 using RunFence.Core;
 using RunFence.Infrastructure;
@@ -203,32 +204,45 @@ public class ClipboardPasteInterceptServiceTests : IDisposable
     [Fact]
     public void TargetResolver_NonRestrictedForeground_PassesThrough()
     {
-        var jobManager = new Mock<IProcessJobManager>();
+        var restrictedJobInspector = new Mock<IRestrictedJobInspector>();
         var foreground = new Mock<IForegroundWindowResolver>();
         var process = new TestProcessIdentityReader();
         var clipboard = new Mock<IClipboardFormatReader>();
         foreground.Setup(r => r.GetForegroundWindow()).Returns(new ForegroundWindowInfo((IntPtr)10, 100, "Edit"));
-        jobManager.Setup(j => j.TryGetRestrictedJobForPid(100)).Returns(IntPtr.Zero);
-        var resolver = new ClipboardPasteTargetResolver(foreground.Object, process, process, clipboard.Object, jobManager.Object, _log.Object);
+        restrictedJobInspector.Setup(i => i.IsProcessInHandleLimitedJob(100)).Returns(false);
+        var resolver = new ClipboardPasteTargetResolver(
+            foreground.Object,
+            process,
+            process,
+            clipboard.Object,
+            restrictedJobInspector.Object,
+            _log.Object);
 
         var result = resolver.Resolve();
 
         Assert.False(result.ShouldIntercept);
+        restrictedJobInspector.Verify(i => i.IsProcessInHandleLimitedJob(100), Times.Once);
     }
 
     [Fact]
     public void TargetResolver_ConsoleWindow_UsesConhostPid()
     {
-        var jobManager = new Mock<IProcessJobManager>();
+        var restrictedJobInspector = new Mock<IRestrictedJobInspector>();
         var foreground = new Mock<IForegroundWindowResolver>();
         var process = new TestProcessIdentityReader();
         var clipboard = new Mock<IClipboardFormatReader>();
         foreground.Setup(r => r.GetForegroundWindow()).Returns(new ForegroundWindowInfo((IntPtr)10, 100, WindowNative.ConsoleWindowClass));
-        jobManager.Setup(j => j.TryGetRestrictedJobForPid(100)).Returns((IntPtr)555);
+        restrictedJobInspector.Setup(i => i.IsProcessInHandleLimitedJob(100)).Returns(true);
         process.ConsoleHostProcessIds[100] = 200;
         clipboard.Setup(c => c.GetClipboardOwnerWindow()).Returns((IntPtr)20);
         process.WindowProcessIds[(IntPtr)20] = 300;
-        var resolver = new ClipboardPasteTargetResolver(foreground.Object, process, process, clipboard.Object, jobManager.Object, _log.Object);
+        var resolver = new ClipboardPasteTargetResolver(
+            foreground.Object,
+            process,
+            process,
+            clipboard.Object,
+            restrictedJobInspector.Object,
+            _log.Object);
 
         var result = resolver.Resolve();
 
@@ -236,24 +250,32 @@ public class ClipboardPasteInterceptServiceTests : IDisposable
         Assert.Equal(100, result.Target.ForegroundProcessId);
         Assert.Equal(200, result.Target.TargetProcessId);
         Assert.Equal(300u, result.Target.ClipboardOwnerProcessId);
+        restrictedJobInspector.Verify(i => i.IsProcessInHandleLimitedJob(100), Times.Once);
     }
 
     [Fact]
     public void TargetResolver_ClipboardOwnerIsTarget_PassesThrough()
     {
-        var jobManager = new Mock<IProcessJobManager>();
+        var restrictedJobInspector = new Mock<IRestrictedJobInspector>();
         var foreground = new Mock<IForegroundWindowResolver>();
         var process = new TestProcessIdentityReader();
         var clipboard = new Mock<IClipboardFormatReader>();
         foreground.Setup(r => r.GetForegroundWindow()).Returns(new ForegroundWindowInfo((IntPtr)10, 100, "Edit"));
-        jobManager.Setup(j => j.TryGetRestrictedJobForPid(100)).Returns((IntPtr)555);
+        restrictedJobInspector.Setup(i => i.IsProcessInHandleLimitedJob(100)).Returns(true);
         clipboard.Setup(c => c.GetClipboardOwnerWindow()).Returns((IntPtr)20);
         process.WindowProcessIds[(IntPtr)20] = 100;
-        var resolver = new ClipboardPasteTargetResolver(foreground.Object, process, process, clipboard.Object, jobManager.Object, _log.Object);
+        var resolver = new ClipboardPasteTargetResolver(
+            foreground.Object,
+            process,
+            process,
+            clipboard.Object,
+            restrictedJobInspector.Object,
+            _log.Object);
 
         var result = resolver.Resolve();
 
         Assert.False(result.ShouldIntercept);
+        restrictedJobInspector.Verify(i => i.IsProcessInHandleLimitedJob(100), Times.Once);
     }
 
     [Theory]
@@ -403,7 +425,7 @@ public class ClipboardPasteInterceptServiceTests : IDisposable
         public IntPtr CallNextHook(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam) => (IntPtr)99;
     }
 
-    private sealed class TestProcessIdentityReader : IProcessIdentityReader
+    private sealed class TestProcessIdentityReader : IWindowProcessIdReader, IConsoleHostProcessResolver
     {
         public Dictionary<IntPtr, uint> WindowProcessIds { get; } = [];
         public Dictionary<int, int> ConsoleHostProcessIds { get; } = [];
@@ -413,9 +435,5 @@ public class ClipboardPasteInterceptServiceTests : IDisposable
 
         public bool TryGetConsoleHostProcessId(int processId, out int consoleHostProcessId) =>
             ConsoleHostProcessIds.TryGetValue(processId, out consoleHostProcessId);
-
-        public string? TryGetProcessOwnerSid(uint processId) => null;
-
-        public string? TryGetProcessImageFileName(uint processId) => null;
     }
 }

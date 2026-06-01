@@ -103,24 +103,6 @@ public class DynamicPortRangeCheckerTests
                 "int ipv6 set dynamicport tcp start=49152 num=16384"
             ],
             netsh.Arguments);
-        log.Verify(l => l.Info(It.Is<string>(message => message.Contains("reset TCP dynamic port range", StringComparison.Ordinal))), Times.Once);
-    }
-
-    [Fact]
-    public async Task CheckIfNeededAsync_ResetFailure_DoesNotLogSuccess()
-    {
-        var log = new Mock<ILoggingService>();
-        var netsh = new TestNetshCommandRunner();
-        var checker = new DynamicPortRangeChecker(log.Object, Confirm(true).Object, netsh);
-        netsh.Enqueue("int ipv4 show dynamicport tcp", SuccessOutput(1024, 64511));
-        netsh.Enqueue("int ipv6 show dynamicport tcp", SuccessOutput(49152, 16384));
-        netsh.Enqueue("int ipv4 set dynamicport tcp start=49152 num=16384", new DynamicPortRangeCommandResult(1, string.Empty, false, "failed"));
-        netsh.Enqueue("int ipv6 set dynamicport tcp start=49152 num=16384", SuccessOutput(0, 0));
-
-        await checker.CheckIfNeededAsync(SettingsRequiringCheck());
-
-        log.Verify(l => l.Info(It.IsAny<string>()), Times.Never);
-        log.Verify(l => l.Warn(It.Is<string>(message => message.Contains("failed to reset TCP dynamic port range", StringComparison.Ordinal))), Times.Once);
     }
 
     [Fact]

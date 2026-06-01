@@ -19,6 +19,7 @@ public class ConfigMismatchPinVerifierTests
     [Fact]
     public void VerifyTemporary_WrongPin_ReturnsWrongPin()
     {
+        ISecureSecretSnapshotSource? observedKey = null;
         _pinService.Setup(s => s.DeriveKeySecret(It.IsAny<ProtectedString>(), FileSalt))
             .Returns(() => TestSecretFactory.Create(32));
 
@@ -26,15 +27,23 @@ public class ConfigMismatchPinVerifierTests
         using var result = CreateVerifier().VerifyTemporary(
             pin,
             FileSalt,
-            _ => throw new CryptographicException("wrong pin"));
+            key =>
+            {
+                observedKey = key;
+                Assert.Equal(Enumerable.Repeat((byte)0x00, 32), key.TransformSnapshot(data => data.ToArray()));
+                throw new CryptographicException("wrong pin");
+            });
 
         Assert.Equal(ConfigMismatchPinVerificationResult.StatusKind.WrongPin, result.Status);
         Assert.Null(result.FatalException);
+        Assert.NotNull(observedKey);
+        Assert.Throws<ObjectDisposedException>(() => observedKey!.TransformSnapshot(data => data.ToArray()));
     }
 
     [Fact]
     public void VerifyTemporary_FatalException_ReturnsAbortToRecovery()
     {
+        ISecureSecretSnapshotSource? observedKey = null;
         var fatal = new InvalidOperationException("boom");
         _pinService.Setup(s => s.DeriveKeySecret(It.IsAny<ProtectedString>(), FileSalt))
             .Returns(() => TestSecretFactory.Create(32));
@@ -43,10 +52,16 @@ public class ConfigMismatchPinVerifierTests
         using var result = CreateVerifier().VerifyTemporary(
             pin,
             FileSalt,
-            _ => throw fatal);
+            key =>
+            {
+                observedKey = key;
+                throw fatal;
+            });
 
         Assert.Equal(ConfigMismatchPinVerificationResult.StatusKind.AbortToRecovery, result.Status);
         Assert.Same(fatal, result.FatalException);
+        Assert.NotNull(observedKey);
+        Assert.Throws<ObjectDisposedException>(() => observedKey!.TransformSnapshot(data => data.ToArray()));
     }
 
     [Fact]

@@ -9,4 +9,6 @@ public readonly record struct WindowsAppsPackagePath(
     string RelativeExecutablePath)
 {
     public string PackageFamilyName => $"{PackageName}_{PublisherId}";
+
+    public string PackageFullName => $"{PackageName}_{Version}_{Architecture}__{PublisherId}";
 }

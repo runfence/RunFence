@@ -15,7 +15,7 @@ namespace RunFence.Startup.UI;
 public class StartupUI(
     ISecureDesktopRunner secureDesktop,
     IPinService pinService,
-    IDatabaseService databaseService,
+    ICredentialStorePersistence credentialStorePersistence,
     ILoggingService log,
     IPinResetFlowRunner pinResetFlowRunner)
     : IStartupUI
@@ -33,7 +33,7 @@ public class StartupUI(
                 try
                 {
                     result = await Task.Run(() => pinService.ResetPin(newPin));
-                    databaseService.SaveCredentialStore(result.Store);
+                    credentialStorePersistence.SaveCredentialStore(result.Store);
                     return null;
                 }
                 catch (Exception ex)
@@ -160,7 +160,7 @@ public class StartupUI(
                             ? pinService.DeriveKeySecret(newPin, configSalt)
                             : null;
                     });
-                    databaseService.SaveCredentialStore(resetResult!.Store);
+                    credentialStorePersistence.SaveCredentialStore(resetResult!.Store);
                     log.Info("Credential store recreated after DPAPI loss");
                     return null;
                 }

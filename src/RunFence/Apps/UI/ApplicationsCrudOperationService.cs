@@ -12,22 +12,25 @@ namespace RunFence.Apps.UI;
 /// </summary>
 public class ApplicationsCrudOperationService(
     IAclService aclService,
-    AppEntryEnforcementHelper enforcementHelper,
+    AppEntryEnforcementCoordinator enforcementCoordinator,
     ILoggingService log)
 {
     public ApplicationsCrudOperationResult ApplyChanges(
         IApplicationMutationContext context,
         AppEntry app,
         ShortcutTraversalCache shortcutCache,
+        AppEntryChangeSet changeSet,
         string? selectAppId = null,
-        int fallbackIndex = -1,
-        bool targetedSave = false)
+        int fallbackIndex = -1)
     {
-        var saveResult = SaveAfterMutation(context, app, selectAppId, fallbackIndex, targetedSave);
+        var saveResult = SaveAfterMutation(context, app, changeSet.ConfigSaveScope, selectAppId, fallbackIndex);
         if (saveResult.Status == ApplicationsCrudOperationStatus.SaveFailed)
             return saveResult;
 
-        var warning = ApplyEnforcement(context, app, shortcutCache);
+        if (!AppEntryEnforcementCoordinator.RequiresEnforcement(changeSet))
+            return saveResult;
+
+        var warning = ApplyEnforcement(context, app, shortcutCache, changeSet);
         return warning == null
             ? new ApplicationsCrudOperationResult(ApplicationsCrudOperationStatus.Succeeded)
             : new ApplicationsCrudOperationResult(
@@ -39,13 +42,17 @@ public class ApplicationsCrudOperationService(
         IApplicationMutationContext context,
         AppEntry app,
         ShortcutTraversalCache shortcutCache,
+        AppEntryChangeSet changeSet,
         ShortcutWarningPolicy shortcutWarningPolicy = ShortcutWarningPolicy.TreatAsFailure)
     {
+        if (!AppEntryEnforcementCoordinator.RequiresEnforcement(changeSet))
+            return new ApplicationsCrudOperationResult(ApplicationsCrudOperationStatus.Succeeded);
+
         string? warning = null;
         string? error = null;
         try
         {
-            enforcementHelper.RevertChanges(app, context.Database.Apps, shortcutCache);
+            enforcementCoordinator.RevertTargetedChanges(app, context.Database.Apps, shortcutCache, changeSet);
         }
         catch (ShortcutEnforcementException ex)
         {
@@ -68,8 +75,11 @@ public class ApplicationsCrudOperationService(
 
         try
         {
-            var appsAfterRevert = context.Database.Apps.Where(a => a.Id != app.Id).ToList();
-            aclService.RecomputeAllAncestorAcls(appsAfterRevert);
+            if (changeSet.RequiresAclReapply)
+            {
+                var appsAfterRevert = context.Database.Apps.Where(a => a.Id != app.Id).ToList();
+                aclService.RecomputeAllAncestorAcls(appsAfterRevert);
+            }
         }
         catch (Exception ex)
         {
@@ -94,13 +104,16 @@ public class ApplicationsCrudOperationService(
     public ApplicationsCrudOperationResult SaveAfterMutation(
         IApplicationMutationContext context,
         AppEntry app,
+        AppEditConfigSaveScope configSaveScope,
         string? selectAppId = null,
-        int fallbackIndex = -1,
-        bool targetedSave = false)
+        int fallbackIndex = -1)
     {
         try
         {
-            context.SaveAndRefresh(selectAppId, fallbackIndex, targetedSave);
+            context.SaveAndRefresh(
+                selectAppId,
+                fallbackIndex,
+                targetedSave: configSaveScope == AppEditConfigSaveScope.CurrentAppConfigOnly);
         }
         catch (Exception ex)
         {
@@ -116,13 +129,17 @@ public class ApplicationsCrudOperationService(
     public ApplicationsCrudOperationResult RestoreEnforcementAfterFailedEdit(
         AppEntry previousApp,
         IReadOnlyList<AppEntry> allAppsAfterRollback,
-        ShortcutTraversalCache shortcutCache)
+        ShortcutTraversalCache shortcutCache,
+        AppEntryChangeSet changeSet)
     {
+        if (!AppEntryEnforcementCoordinator.RequiresEnforcement(changeSet))
+            return new ApplicationsCrudOperationResult(ApplicationsCrudOperationStatus.Succeeded);
+
         string? warning = null;
 
         try
         {
-            enforcementHelper.ApplyChanges(previousApp, allAppsAfterRollback, shortcutCache);
+            enforcementCoordinator.ApplyTargetedChanges(previousApp, allAppsAfterRollback, shortcutCache, changeSet);
         }
         catch (Exception ex)
         {
@@ -132,7 +149,8 @@ public class ApplicationsCrudOperationService(
 
         try
         {
-            aclService.RecomputeAllAncestorAcls(allAppsAfterRollback);
+            if (changeSet.RequiresAclReapply)
+                aclService.RecomputeAllAncestorAcls(allAppsAfterRollback);
         }
         catch (Exception ex)
         {
@@ -150,12 +168,13 @@ public class ApplicationsCrudOperationService(
     private string? ApplyEnforcement(
         IApplicationMutationContext context,
         AppEntry app,
-        ShortcutTraversalCache shortcutCache)
+        ShortcutTraversalCache shortcutCache,
+        AppEntryChangeSet changeSet)
     {
         string? warning = null;
         try
         {
-            enforcementHelper.ApplyChanges(app, context.Database.Apps, shortcutCache);
+            enforcementCoordinator.ApplyTargetedChanges(app, context.Database.Apps, shortcutCache, changeSet);
         }
         catch (Exception ex)
         {
@@ -165,7 +184,8 @@ public class ApplicationsCrudOperationService(
 
         try
         {
-            aclService.RecomputeAllAncestorAcls(context.Database.Apps);
+            if (changeSet.RequiresAclReapply)
+                aclService.RecomputeAllAncestorAcls(context.Database.Apps);
         }
         catch (Exception ex)
         {
@@ -175,4 +195,5 @@ public class ApplicationsCrudOperationService(
 
         return warning;
     }
+
 }

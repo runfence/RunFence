@@ -5,6 +5,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.SidMigration.UI.Forms;
 using RunFence.UI;
+using RunFence.UI.Controls;
 
 namespace RunFence.SidMigration.UI;
 
@@ -78,15 +79,12 @@ public class SidMigrationMappingBuilder(
         var confirmedCount = _orphanedBySid.Values.Count(o => o.Classification == OrphanedSidClassification.ConfirmedOrphaned);
         var unresolvedCount = _orphanedBySid.Values.Count(o => o.Classification == OrphanedSidClassification.Unresolved);
 
-        MappingGrid = new DataGridView
+        MappingGrid = new StyledDataGridView
         {
             Dock = DockStyle.Fill,
-            AllowUserToAddRows = false,
-            AllowUserToDeleteRows = false,
             SelectionMode = DataGridViewSelectionMode.CellSelect,
             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-            RowHeadersVisible = false,
-            AllowUserToResizeRows = false
+            MultiSelect = false
         };
 
         MappingGrid.Columns.Add(new DataGridViewComboBoxColumn
@@ -158,16 +156,27 @@ public class SidMigrationMappingBuilder(
             if (string.IsNullOrEmpty(oldSid))
                 return;
 
-            if (_orphanedBySid.TryGetValue(oldSid, out var orphan) && orphan.SamplePaths.Count > 0)
+            if (_orphanedBySid.TryGetValue(oldSid, out var orphan) &&
+                (orphan.AceSamplePaths.Count > 0 || orphan.OwnerSamplePaths.Count > 0))
             {
-                var total = orphan.AceCount + orphan.OwnerCount;
                 if (orphan.Classification == OrphanedSidClassification.Unresolved)
                     pathsDetail.Items.Add("Lookup status: unresolved. Include only if you have independently confirmed this SID is stale.");
                 else
                     pathsDetail.Items.Add("Lookup status: confirmed orphaned.");
-                pathsDetail.Items.Add($"{total} reference(s) found (showing up to {OrphanedSid.MaxSamplePaths} paths):");
-                foreach (var p in orphan.SamplePaths)
-                    pathsDetail.Items.Add(p);
+
+                if (orphan.AceCount > 0)
+                {
+                    pathsDetail.Items.Add($"ACL reference(s): {orphan.AceCount} (showing up to {OrphanedSid.MaxSamplePaths} paths):");
+                    foreach (var path in orphan.AceSamplePaths)
+                        pathsDetail.Items.Add(path);
+                }
+
+                if (orphan.OwnerCount > 0)
+                {
+                    pathsDetail.Items.Add($"Owner reference(s): {orphan.OwnerCount} (showing up to {OrphanedSid.MaxSamplePaths} paths):");
+                    foreach (var path in orphan.OwnerSamplePaths)
+                        pathsDetail.Items.Add(path);
+                }
             }
             else
             {
@@ -220,8 +229,7 @@ public class SidMigrationMappingBuilder(
         var collector = new SidMigrationSelectionCollector(
             validator,
             messageBoxService,
-            _sidDisplayNames,
-            _orphanedBySid);
+            _sidDisplayNames);
         var rows = MappingGrid.Rows
             .Cast<DataGridViewRow>()
             .Select(row => new SidMigrationSelectionRow(

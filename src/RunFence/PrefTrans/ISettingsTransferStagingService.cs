@@ -1,5 +1,3 @@
-using System.Security.AccessControl;
-
 namespace RunFence.PrefTrans;
 
 public interface ISettingsTransferStagingService
@@ -15,10 +13,6 @@ public interface ISettingsTransferStagingService
     string? TryDeleteTempFile(string path);
 
     string? TryDeleteTempDirectory(string path);
-
-    FileSecurity BuildRestrictedFileSecurity(string interactiveSid);
-
-    DirectorySecurity BuildRestrictedDirectorySecurity(string interactiveSid);
 
     void CopyExportFileToDestination(string sourcePath, string destinationPath);
 }

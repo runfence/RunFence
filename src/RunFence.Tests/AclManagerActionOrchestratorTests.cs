@@ -7,6 +7,7 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -15,6 +16,17 @@ public class AclManagerActionOrchestratorTests
 {
     private const string TestSid = "S-1-5-21-111-222-333-1001";
     private const string ContainerSid = "S-1-15-2-99-1-2-3-4-5-6";
+
+    private static AclGrantPendingChangesSnapshot GetGrantSnapshot(AclManagerPendingChanges pending)
+        => pending.Grants.GetSnapshot();
+
+    private static void AssertEntryEquivalent(GrantedPathEntry expected, GrantedPathEntry actual)
+    {
+        Assert.Equal(expected.Path, actual.Path);
+        Assert.Equal(expected.IsDeny, actual.IsDeny);
+        Assert.Equal(expected.IsTraverseOnly, actual.IsTraverseOnly);
+        Assert.Equal(expected.SavedRights, actual.SavedRights);
+    }
 
     [Fact]
     public void AddGrantPathDirect_ExistingBrokenGrant_QueuesPendingFix()
@@ -31,8 +43,8 @@ public class AclManagerActionOrchestratorTests
         database.GetOrCreateAccount(TestSid).Grants.Add(existing);
 
         var pending = new AclManagerPendingChanges();
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantInspectionService = new Mock<IGrantInspectionService>();
+        grantInspectionService
             .Setup(s => s.ReadGrantState(path, TestSid, It.IsAny<IReadOnlyList<string>>()))
             .Returns(new GrantRightsState(
                 AllowExecute: RightCheckState.Unchecked,
@@ -50,13 +62,13 @@ public class AclManagerActionOrchestratorTests
                 DirectDenyAceCount: 0));
 
         var refresher = new TestGridRefresher();
-        var orchestrator = CreateOrchestrator(database, pathGrantService.Object, pending, refresher);
+        var orchestrator = CreateOrchestrator(database, grantInspectionService.Object, pending, refresher);
 
         var error = orchestrator.AddGrantPathDirect(path, isDeny: true);
 
         Assert.Null(error);
-        var pendingFix = Assert.Single(pending.PendingGrantFixes).Value;
-        Assert.Same(existing, pendingFix);
+        var pendingFix = Assert.Single(GetGrantSnapshot(pending).PendingGrantFixes).Value;
+        AssertEntryEquivalent(existing, pendingFix);
         Assert.Equal(1, refresher.GrantsRefreshCount);
     }
 
@@ -76,8 +88,8 @@ public class AclManagerActionOrchestratorTests
         database.GetOrCreateAccount(TestSid).Grants.Add(existing);
 
         var pending = new AclManagerPendingChanges();
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantInspectionService = new Mock<IGrantInspectionService>();
+        grantInspectionService
             .Setup(s => s.ReadGrantState(path, TestSid, It.IsAny<IReadOnlyList<string>>()))
             .Returns(new GrantRightsState(
                 AllowExecute: RightCheckState.Unchecked,
@@ -98,7 +110,7 @@ public class AclManagerActionOrchestratorTests
         var additionalStore = new TestGrantIntentStore(targetConfigPath);
         var orchestrator = CreateOrchestrator(
             database,
-            pathGrantService.Object,
+            grantInspectionService.Object,
             pending,
             refresher,
             loadedStores: [additionalStore]);
@@ -110,9 +122,10 @@ public class AclManagerActionOrchestratorTests
             hasExplicitTargetSection: true);
 
         Assert.Null(error);
-        var pendingFix = Assert.Single(pending.PendingGrantFixes).Value;
-        Assert.Same(existing, pendingFix);
-        Assert.Equal(targetConfigPath, pending.PendingConfigMoves[(path, true)].TargetConfigPath);
+        var pendingFix = Assert.Single(GetGrantSnapshot(pending).PendingGrantFixes).Value;
+        AssertEntryEquivalent(existing, pendingFix);
+        Assert.True(pending.Grants.TryGetPendingConfigMove(path, true, out var move));
+        Assert.Equal(targetConfigPath, move!.TargetConfigPath);
         Assert.Equal(1, refresher.GrantsRefreshCount);
     }
 
@@ -131,8 +144,8 @@ public class AclManagerActionOrchestratorTests
         database.GetOrCreateAccount(TestSid).Grants.Add(existing);
 
         var pending = new AclManagerPendingChanges();
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantInspectionService = new Mock<IGrantInspectionService>();
+        grantInspectionService
             .Setup(s => s.ReadGrantState(path, TestSid, It.IsAny<IReadOnlyList<string>>()))
             .Returns(new GrantRightsState(
                 AllowExecute: RightCheckState.Unchecked,
@@ -154,7 +167,7 @@ public class AclManagerActionOrchestratorTests
         additionalStore.AddEntry(TestSid, existing);
         var orchestrator = CreateOrchestrator(
             database,
-            pathGrantService.Object,
+            grantInspectionService.Object,
             pending,
             refresher,
             loadedStores: [additionalStore]);
@@ -162,9 +175,9 @@ public class AclManagerActionOrchestratorTests
         var error = orchestrator.AddGrantPathDirect(path, isDeny: true);
 
         Assert.Null(error);
-        var pendingFix = Assert.Single(pending.PendingGrantFixes).Value;
-        Assert.Same(existing, pendingFix);
-        Assert.Empty(pending.PendingConfigMoves);
+        var pendingFix = Assert.Single(GetGrantSnapshot(pending).PendingGrantFixes).Value;
+        AssertEntryEquivalent(existing, pendingFix);
+        Assert.Empty(GetGrantSnapshot(pending).PendingConfigMoves);
         Assert.Equal(1, refresher.GrantsRefreshCount);
     }
 
@@ -183,8 +196,8 @@ public class AclManagerActionOrchestratorTests
         database.GetOrCreateAccount(TestSid).Grants.Add(existing);
 
         var pending = new AclManagerPendingChanges();
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantInspectionService = new Mock<IGrantInspectionService>();
+        grantInspectionService
             .Setup(s => s.ReadGrantState(path, TestSid, It.IsAny<IReadOnlyList<string>>()))
             .Returns(new GrantRightsState(
                 AllowExecute: RightCheckState.Unchecked,
@@ -206,7 +219,7 @@ public class AclManagerActionOrchestratorTests
         additionalStore.AddEntry(TestSid, existing);
         var orchestrator = CreateOrchestrator(
             database,
-            pathGrantService.Object,
+            grantInspectionService.Object,
             pending,
             refresher,
             loadedStores: [additionalStore]);
@@ -218,10 +231,10 @@ public class AclManagerActionOrchestratorTests
             hasExplicitTargetSection: true);
 
         Assert.Null(error);
-        var pendingFix = Assert.Single(pending.PendingGrantFixes).Value;
-        Assert.Same(existing, pendingFix);
-        Assert.True(pending.PendingConfigMoves.ContainsKey((path, true)));
-        Assert.Null(pending.PendingConfigMoves[(path, true)].TargetConfigPath);
+        var pendingFix = Assert.Single(GetGrantSnapshot(pending).PendingGrantFixes).Value;
+        AssertEntryEquivalent(existing, pendingFix);
+        Assert.True(pending.Grants.TryGetPendingConfigMove(path, true, out var move));
+        Assert.Null(move!.TargetConfigPath);
         Assert.Equal(1, refresher.GrantsRefreshCount);
     }
 
@@ -240,14 +253,14 @@ public class AclManagerActionOrchestratorTests
         database.GetOrCreateAccount(TestSid).Grants.Add(existing);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingRemoves[(path, true)] = existing;
-        var pathGrantService = new Mock<IPathGrantService>();
+        pending.Grants.MarkGrantForRemoval(existing);
+        var grantInspectionService = new Mock<IGrantInspectionService>();
         var refresher = new TestGridRefresher();
         var additionalStore = new TestGrantIntentStore(@"C:\Configs\extra.rfn");
         additionalStore.AddEntry(TestSid, existing);
         var orchestrator = CreateOrchestrator(
             database,
-            pathGrantService.Object,
+            grantInspectionService.Object,
             pending,
             refresher,
             loadedStores: [additionalStore]);
@@ -259,9 +272,9 @@ public class AclManagerActionOrchestratorTests
             hasExplicitTargetSection: true);
 
         Assert.Null(error);
-        Assert.Empty(pending.PendingRemoves);
-        Assert.True(pending.PendingConfigMoves.ContainsKey((path, true)));
-        Assert.Null(pending.PendingConfigMoves[(path, true)].TargetConfigPath);
+        Assert.Empty(GetGrantSnapshot(pending).PendingRemoves);
+        Assert.True(pending.Grants.TryGetPendingConfigMove(path, true, out var move));
+        Assert.Null(move!.TargetConfigPath);
         Assert.Equal(1, refresher.GrantsRefreshCount);
     }
 
@@ -279,8 +292,8 @@ public class AclManagerActionOrchestratorTests
         });
 
         var pending = new AclManagerPendingChanges();
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService
+        var grantInspectionService = new Mock<IGrantInspectionService>();
+        grantInspectionService
             .Setup(s => s.ReadGrantState(path, TestSid, It.IsAny<IReadOnlyList<string>>()))
             .Returns(new GrantRightsState(
                 AllowExecute: RightCheckState.Unchecked,
@@ -297,12 +310,12 @@ public class AclManagerActionOrchestratorTests
                 DirectAllowAceCount: 0,
                 DirectDenyAceCount: 1));
 
-        var orchestrator = CreateOrchestrator(database, pathGrantService.Object, pending, new TestGridRefresher());
+        var orchestrator = CreateOrchestrator(database, grantInspectionService.Object, pending, new TestGridRefresher());
 
         var error = orchestrator.AddGrantPathDirect(path, isDeny: true);
 
         Assert.Equal("This path is already in the list.", error);
-        Assert.Empty(pending.PendingGrantFixes);
+        Assert.Empty(GetGrantSnapshot(pending).PendingGrantFixes);
     }
 
     [Fact]
@@ -318,7 +331,7 @@ public class AclManagerActionOrchestratorTests
 
         var orchestrator = CreateOrchestrator(
             database,
-            new Mock<IPathGrantService>().Object,
+            new Mock<IGrantInspectionService>().Object,
             pending,
             new TestGridRefresher(),
             AclHelper.LowIntegritySid,
@@ -327,7 +340,7 @@ public class AclManagerActionOrchestratorTests
         var error = orchestrator.AddGrantPathDirect(path, isDeny: false);
 
         Assert.Contains("Specific AppContainer ACEs conflict", error);
-        Assert.Empty(pending.PendingAdds);
+        Assert.Empty(GetGrantSnapshot(pending).PendingAdds);
     }
 
     [Fact]
@@ -343,7 +356,7 @@ public class AclManagerActionOrchestratorTests
 
         var orchestrator = CreateOrchestrator(
             database,
-            new Mock<IPathGrantService>().Object,
+            new Mock<IGrantInspectionService>().Object,
             pending,
             new TestGridRefresher(),
             ContainerSid,
@@ -352,12 +365,12 @@ public class AclManagerActionOrchestratorTests
         var error = orchestrator.AddGrantPathDirect(path, isDeny: false);
 
         Assert.Contains("ordinary Low Integrity access stop working", error);
-        Assert.Empty(pending.PendingAdds);
+        Assert.Empty(GetGrantSnapshot(pending).PendingAdds);
     }
 
     private static AclManagerActionOrchestrator CreateOrchestrator(
         AppDatabase database,
-        IPathGrantService pathGrantService,
+        IGrantInspectionService grantInspectionService,
         AclManagerPendingChanges pending,
         IAclManagerGridRefresher refresher,
         string sid = TestSid,
@@ -372,7 +385,7 @@ public class AclManagerActionOrchestratorTests
             .Returns<string, IWin32Window>((p, _) => [p]);
 
         var renderer = new AclManagerGrantRowRenderer(
-            pathGrantService,
+            grantInspectionService,
             new Mock<IAclPathIconProvider>().Object,
             new Mock<ILoggingService>().Object);
         using var grid = new DataGridView();
@@ -384,15 +397,16 @@ public class AclManagerActionOrchestratorTests
         traverseAutoManager.Initialize(pending, sid, groupSids: []);
 
         var traverseOperations = new AclManagerTraverseOperations(
-            databaseProvider, reparsePointHelper.Object, aclPermission.Object, pathInfo);
-        traverseOperations.Initialize(sid, pending, new Lazy<IReadOnlyList<string>>(() => []), () => { });
+            databaseProvider, reparsePointHelper.Object, aclPermission.Object, pathInfo, Mock.Of<IOpenFileDialogAdapterFactory>());
+        traverseOperations.Initialize(sid, pending, [], () => { });
         var grantIntentStoreProvider = new TestGrantIntentStoreProvider(new TestGrantIntentStore());
         foreach (var store in loadedStores ?? [])
             grantIntentStoreProvider.AddLoadedStore(store);
         var grantIntentRepository = new GrantIntentRepository(grantIntentStoreProvider);
 
+        var appConfig = new AppConfigTestContext();
         var grantsHelper = new AclManagerGrantsHelper(
-            new Mock<IAppConfigService>().Object,
+            appConfig.Service,
             grantIntentRepository,
             grantIntentStoreProvider,
             databaseProvider,
@@ -400,7 +414,7 @@ public class AclManagerActionOrchestratorTests
             traverseAutoManager,
             new AclManagerPendingStateHelper(),
             () => renderer);
-        grantsHelper.Initialize(grid, sid, isContainer: false, groupSids: [], pending);
+        grantsHelper.Initialize(grid, sid, isContainer: false, groupSids: [], pending, new AclManagerSectionHeaderFactory());
 
         var orchestrator = new AclManagerActionOrchestrator(
             databaseProvider,

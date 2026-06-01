@@ -23,7 +23,7 @@ public class StartupIpcBootstrapperTests
 {
             Database = liveDatabase,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         var sessionProvider = new Mock<ISessionProvider>();
         var sessionThreadId = 0;
         sessionProvider.Setup(s => s.GetSession())

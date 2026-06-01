@@ -8,6 +8,7 @@ public sealed class DedicatedThreadUiInvoker : IUiThreadInvoker, IDisposable
 {
     private readonly BlockingCollection<Action> _queue = [];
     private readonly Thread _thread;
+    private bool _disposed;
 
     public DedicatedThreadUiInvoker()
     {
@@ -62,8 +63,13 @@ public sealed class DedicatedThreadUiInvoker : IUiThreadInvoker, IDisposable
 
     public void Dispose()
     {
+        if (_disposed)
+            return;
+
+        _disposed = true;
         _queue.CompleteAdding();
-        _thread.Join();
+        if (_thread.IsAlive)
+            _thread.Join();
         _queue.Dispose();
     }
 }

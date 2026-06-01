@@ -1,6 +1,8 @@
 using Autofac;
 using Autofac.Core;
-using Microsoft.Win32;
+using RunFence.Account.UI;
+using RunFence.Account.UI.Forms;
+using RunFence.Acl.UI;
 using RunFence.Apps;
 using RunFence.Apps.UI;
 using RunFence.Apps.UI.Forms;
@@ -16,7 +18,11 @@ using RunFence.SidMigration;
 using RunFence.Startup;
 using RunFence.Startup.NonElevatedMocks;
 using RunFence.Startup.UI;
+using RunFence.ForegroundMarker;
+using RunFence.Tests.Helpers;
+using RunFence.TrayIcon;
 using RunFence.UI.Forms;
+using RunFence.Wizard.UI.Forms;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -51,7 +57,7 @@ public class ContainerRegistrationTests
 {
                     Database = new AppDatabase(),
                     CredentialStore = new CredentialStore(),
-                }.WithOwnedPinDerivedKey(pinKey);
+                }.WithClonedPinDerivedKey(pinKey);
 
                 stage = "begin session scope";
                 using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
@@ -86,10 +92,10 @@ public class ContainerRegistrationTests
                 sessionScope.Resolve<IPreparedTokenProcessLauncher>();
                 sessionScope.Resolve<InAppMigrationHandler>();
 
-                var fallbackRegistryFactory = sessionScope.Resolve<Func<RegistryKey, AssociationFallbackRegistry>>();
+                var fallbackRegistryFactory = sessionScope.Resolve<Func<IRegistryKey, AssociationFallbackRegistry>>();
                 Assert.NotNull(fallbackRegistryFactory);
                 stage = "build fallback registry";
-                var fallbackRegistry = fallbackRegistryFactory(Registry.Users);
+                var fallbackRegistry = fallbackRegistryFactory(InMemoryRegistryKey.CreateRoot());
                 Assert.NotNull(fallbackRegistry);
 
                 var fallbackRestoreFactory = sessionScope.Resolve<Func<IAssociationFallbackRegistry, AssociationFallbackRestoreService>>();
@@ -116,7 +122,7 @@ public class ContainerRegistrationTests
     }
 
     [Fact]
-    public void Stage1A_PublicConstructorsForUiProductionTypes()
+    public void ForegroundPrivilegeMarkerService_AndStateSource_ResolveSameInstance()
     {
         using var foundationContainer = ContainerRegistrationBuilder.BuildFoundationContainer();
         using var pinKey = TestSecretFactory.Create(32);
@@ -124,17 +130,38 @@ public class ContainerRegistrationTests
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(pinKey);
+        }.WithClonedPinDerivedKey(pinKey);
 
         using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
             foundationContainer, session, new StartupOptions(false, false));
 
-        Assert.NotNull(sessionScope.Resolve<AppEditBrowseHelper>());
-        Assert.NotNull(sessionScope.Resolve<AppEditDialogController>());
-        using var appEditDialog = sessionScope.Resolve<AppEditDialog>();
-        Assert.NotNull(appEditDialog);
-        using var runAsDialog = sessionScope.Resolve<RunAsDialog>();
-        Assert.NotNull(runAsDialog);
+        var service = sessionScope.Resolve<IForegroundPrivilegeMarkerService>();
+        var stateSource = sessionScope.Resolve<IForegroundPrivilegeMarkerStateSource>();
+
+        Assert.Same(service, stateSource);
+    }
+
+    [Fact]
+    public void TrayIconManager_AndForegroundMarkerOverlaySink_ResolveSameInstance()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var foundationContainer = ContainerRegistrationBuilder.BuildFoundationContainer();
+            using var pinKey = TestSecretFactory.Create(32);
+            var session = new SessionContext
+{
+                Database = new AppDatabase(),
+                CredentialStore = new CredentialStore(),
+            }.WithClonedPinDerivedKey(pinKey);
+
+            using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
+                foundationContainer, session, new StartupOptions(false, false));
+
+            var trayIconManager = sessionScope.Resolve<TrayIconManager>();
+            var overlaySink = sessionScope.Resolve<ITrayForegroundMarkerOverlaySink>();
+
+            Assert.Same(trayIconManager, overlaySink);
+        });
     }
 
     [Fact]
@@ -149,23 +176,19 @@ public class ContainerRegistrationTests
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(pinKey);
+        }.WithClonedPinDerivedKey(pinKey);
 
         using var sessionScope = ContainerRegistrationBuilder.BeginSessionScope(
             foundationContainer, session, new StartupOptions(false, false));
 
         var query = sessionScope.Resolve<ILocalGroupQueryService>();
         var mutation = sessionScope.Resolve<ILocalGroupMutationService>();
-        var membership = sessionScope.Resolve<ILocalGroupMembershipService>();
-
         Assert.IsType<MockLocalGroupQueryService>(query);
         Assert.IsType<MockLocalGroupMutationService>(mutation);
 
         var sid = mutation.CreateGroup("ContainerRegistrationTests.MockGroup", "mock");
         var queryGroups = query.GetLocalGroups();
-        var combinedGroups = membership.GetLocalGroups();
 
         Assert.Contains(queryGroups, g => string.Equals(g.Sid, sid, StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(combinedGroups, g => string.Equals(g.Sid, sid, StringComparison.OrdinalIgnoreCase));
     }
 }

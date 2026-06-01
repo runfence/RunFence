@@ -16,7 +16,7 @@ namespace RunFence.RunAs;
 public class RunAsAccountSettingsApplier(
     IAppStateProvider appState,
     SessionContext session,
-    IDatabaseService databaseService,
+    IMainConfigPersistence mainConfigPersistence,
     ILoggingService log,
     ISettingsTransferService settingsTransferService,
     FirewallApplyHelper firewallApplyHelper,
@@ -115,7 +115,7 @@ public class RunAsAccountSettingsApplier(
 
     private void SaveConfig()
     {
-        databaseService.SaveConfig(
+        mainConfigPersistence.SaveConfig(
             appState.Database,
             session.PinDerivedKey,
             session.CredentialStore.ArgonSalt);

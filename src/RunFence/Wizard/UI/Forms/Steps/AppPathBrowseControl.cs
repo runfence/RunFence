@@ -1,21 +1,23 @@
 using System.ComponentModel;
 using RunFence.Apps.Shortcuts;
-using RunFence.Apps.UI.Forms;
-using RunFence.Core.Infrastructure;
+using RunFence.Apps.UI;
 using RunFence.Infrastructure;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
 
 /// <summary>
-/// Reusable UserControl that encapsulates a path textbox, Browse button, and Discover button
-/// for selecting an executable. Used by wizard steps that need app-path input.
+/// Reusable UserControl that encapsulates a path textbox, Browse button, and optional Discover button
+/// for selecting an application file or folder. Used by wizard steps that need app-path input.
 /// </summary>
 public partial class AppPathBrowseControl : UserControl
 {
-    private readonly IShortcutDiscoveryService _discoveryService;
-    private readonly IShortcutIconHelper _iconHelper;
-    private readonly string _dialogTitle;
-    private readonly string _dialogFilter;
+    private IShortcutDiscoveryService? _discoveryService;
+    private IShortcutIconHelper? _iconHelper;
+    private IAppDiscoveryDialogService? _appDiscoveryDialogService;
+    private IOpenFileDialogAdapterFactory? _openFileDialogFactory;
+    private IFolderBrowserDialogAdapterFactory? _folderBrowserDialogFactory;
+    private AppPathBrowseConfiguration? _configuration;
+    private bool _isInitialized;
 
     /// <summary>Raised when the path text changes.</summary>
     public event EventHandler? PathChanged;
@@ -28,33 +30,42 @@ public partial class AppPathBrowseControl : UserControl
         set => _pathTextBox.Text = value;
     }
 
-    public AppPathBrowseControl(
+    public void Initialize(
+        IOpenFileDialogAdapterFactory openFileDialogFactory,
+        IFolderBrowserDialogAdapterFactory folderBrowserDialogFactory,
+        AppPathBrowseConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(openFileDialogFactory);
+        ArgumentNullException.ThrowIfNull(folderBrowserDialogFactory);
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        _openFileDialogFactory = openFileDialogFactory;
+        _folderBrowserDialogFactory = folderBrowserDialogFactory;
+        _configuration = configuration;
+        _isInitialized = true;
+        ApplyBrowseMode();
+        UpdateButtonHeights();
+    }
+
+    public void InitializeDiscovery(
         IShortcutDiscoveryService discoveryService,
         IShortcutIconHelper iconHelper,
-        string dialogTitle = "Select Application",
-        string dialogFilter = "Executable files (*.exe)|*.exe|All files (*.*)|*.*")
+        IAppDiscoveryDialogService appDiscoveryDialogService)
     {
+        ArgumentNullException.ThrowIfNull(discoveryService);
+        ArgumentNullException.ThrowIfNull(iconHelper);
+        ArgumentNullException.ThrowIfNull(appDiscoveryDialogService);
+
         _discoveryService = discoveryService;
         _iconHelper = iconHelper;
-        _dialogTitle = dialogTitle;
-        _dialogFilter = dialogFilter;
-
-        InitializeComponent();
-
-        // Set button heights to match the textbox preferred height (DPI-correct).
-        int inputHeight = _pathTextBox.PreferredHeight;
-        _browseButton.Height = inputHeight;
-        _discoverButton.Height = inputHeight;
-        Height = inputHeight;
+        _appDiscoveryDialogService = appDiscoveryDialogService;
+        ApplyBrowseMode();
     }
 
     protected override void OnFontChanged(EventArgs e)
     {
         base.OnFontChanged(e);
-        int inputHeight = _pathTextBox.PreferredHeight;
-        _browseButton.Height = inputHeight;
-        _discoverButton.Height = inputHeight;
-        Height = inputHeight;
+        UpdateButtonHeights();
     }
 
     private bool _pathChangingFromDiscover;
@@ -68,20 +79,35 @@ public partial class AppPathBrowseControl : UserControl
 
     private void OnBrowseClick(object? sender, EventArgs e)
     {
-        using var dlg = new OpenFileDialog();
-        dlg.Title = _dialogTitle;
-        dlg.Filter = _dialogFilter;
-        dlg.CheckFileExists = true;
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
+        if (!_isInitialized || _configuration == null)
+            return;
 
-        if (!string.IsNullOrWhiteSpace(_pathTextBox.Text))
+        if (_configuration.BrowseMode == AppPathBrowseMode.Folder)
         {
-            var dir = Path.GetDirectoryName(_pathTextBox.Text);
+            BrowseFolder();
+            return;
+        }
+
+        if (_openFileDialogFactory == null)
+            return;
+
+        using var dlgAdapter = _openFileDialogFactory.Create();
+        var dlg = dlgAdapter.Dialog;
+        dlg.Title = _configuration.DialogTitle;
+        dlg.Filter = _configuration.FileFilter;
+        dlg.CheckFileExists = true;
+
+        var initialPath = !string.IsNullOrWhiteSpace(_pathTextBox.Text)
+            ? _pathTextBox.Text
+            : _configuration.InitialPath;
+        if (!string.IsNullOrWhiteSpace(initialPath))
+        {
+            var dir = Path.GetDirectoryName(initialPath);
             if (Directory.Exists(dir))
                 dlg.InitialDirectory = dir;
         }
 
-        if (dlg.ShowDialog(this) == DialogResult.OK)
+        if (dlgAdapter.ShowDialog(this) == DialogResult.OK)
         {
             DiscoveredName = null;
             _pathTextBox.Text = dlg.FileName;
@@ -90,6 +116,12 @@ public partial class AppPathBrowseControl : UserControl
 
     private async void OnDiscoverClick(object? sender, EventArgs e)
     {
+        if (_configuration?.BrowseMode != AppPathBrowseMode.File
+            || _discoveryService == null
+            || _iconHelper == null
+            || _appDiscoveryDialogService == null)
+            return;
+
         _discoverButton.Enabled = false;
         Cursor = Cursors.WaitCursor;
         try
@@ -98,12 +130,12 @@ public partial class AppPathBrowseControl : UserControl
                 ShortcutClassificationHelper.ExcludeSystemExecutables(_discoveryService.DiscoverApps()));
             if (IsDisposed) return;
 
-            using var dlg = new AppDiscoveryDialog(apps, _iconHelper);
-            if (await dlg.ShowDialogAsync(this) == DialogResult.OK)
+            var selection = _appDiscoveryDialogService.ShowDialog(apps, _iconHelper, this);
+            if (selection != null)
             {
-                DiscoveredName = dlg.SelectedName;
+                DiscoveredName = selection.Value.name;
                 _pathChangingFromDiscover = true;
-                try { _pathTextBox.Text = dlg.SelectedPath; }
+                try { _pathTextBox.Text = selection.Value.path; }
                 finally { _pathChangingFromDiscover = false; }
             }
         }
@@ -123,4 +155,47 @@ public partial class AppPathBrowseControl : UserControl
     /// Callers may use this to auto-fill a name field.
     /// </summary>
     public string? DiscoveredName { get; private set; }
+
+    private void BrowseFolder()
+    {
+        if (_folderBrowserDialogFactory == null || _configuration == null)
+            return;
+
+        using var dlgAdapter = _folderBrowserDialogFactory.Create();
+        var dlg = dlgAdapter.Dialog;
+        dlg.Description = _configuration.DialogTitle;
+        dlg.UseDescriptionForTitle = true;
+
+        var initialPath = !string.IsNullOrWhiteSpace(_pathTextBox.Text)
+            ? _pathTextBox.Text
+            : _configuration.InitialPath;
+        if (!string.IsNullOrWhiteSpace(initialPath) && Directory.Exists(initialPath))
+            dlg.InitialDirectory = initialPath;
+
+        if (dlgAdapter.ShowDialog(this) == DialogResult.OK)
+        {
+            DiscoveredName = null;
+            _pathTextBox.Text = dlg.SelectedPath;
+        }
+    }
+
+    private void UpdateButtonHeights()
+    {
+        int inputHeight = _pathTextBox.PreferredHeight;
+        _browseButton.Height = inputHeight;
+        _discoverButton.Height = inputHeight;
+        Height = inputHeight;
+    }
+
+    private void ApplyBrowseMode()
+    {
+        var isFileMode = _configuration?.BrowseMode != AppPathBrowseMode.Folder;
+        _browseButton.Enabled = _isInitialized;
+        _discoverButton.Visible = isFileMode;
+        _discoverButton.Enabled = _isInitialized
+            && isFileMode
+            && _discoveryService != null
+            && _iconHelper != null
+            && _appDiscoveryDialogService != null;
+    }
 }

@@ -19,23 +19,6 @@ public sealed class ShortcutAclTestScope : IDisposable
     public FileSecurity ReadAcl(string shortcutPath)
         => new FileInfo(shortcutPath).GetAccessControl();
 
-    public void AssertManagedAces(string shortcutPath, params string[] expectedSids)
-    {
-        var actualSids = ReadAcl(shortcutPath)
-            .GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier))
-            .Cast<FileSystemAccessRule>()
-            .Select(rule => ((SecurityIdentifier)rule.IdentityReference).Value)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        var expected = expectedSids
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        foreach (var expectedSid in expected)
-            Assert.Contains(actualSids, sid => string.Equals(sid, expectedSid, StringComparison.OrdinalIgnoreCase));
-    }
-
     public void Dispose()
     {
         foreach (var filePath in Directory.Exists(_tempDirectory.Path)

@@ -281,7 +281,6 @@ public class StartupSecurityServiceTests
         var findings = service.RunChecks();
 
         Assert.Empty(findings);
-        log.Verify(l => l.Warn("Security scanner timed out."), Times.Once);
     }
 
     [Fact]
@@ -317,26 +316,6 @@ public class StartupSecurityServiceTests
 
         var finding = Assert.Single(findings);
         Assert.Equal(StartupSecurityCategory.StartupFolder, finding.Category);
-        log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("exited with code 17: scanner failed"))), Times.Once);
-    }
-
-    [Fact]
-    public void RunChecks_StderrWithZeroExit_DoesNotLogExitWarning()
-    {
-        var log = new Mock<ILoggingService>();
-        using var tempDir = new TempDirectory("RunFence_StartupSecurityService");
-        var service = CreateService(log.Object, tempDir.Path, new ProcessExecutionResult(
-            Started: true,
-            ExitCode: 0,
-            TimedOut: false,
-            StandardOutput: string.Empty,
-            StandardError: "warning text",
-            FailureMessage: null));
-
-        var findings = service.RunChecks();
-
-        Assert.Empty(findings);
-        log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("exited with code"))), Times.Never);
     }
 
     [Fact]
@@ -374,7 +353,6 @@ public class StartupSecurityServiceTests
         var findings = service.RunChecks();
 
         Assert.Empty(findings);
-        log.Verify(l => l.Error(It.Is<string>(message => message.Contains("Security scanner not found:", StringComparison.Ordinal))), Times.Once);
     }
 
     [Fact]
@@ -393,7 +371,6 @@ public class StartupSecurityServiceTests
         var findings = service.RunChecks();
 
         Assert.Empty(findings);
-        log.Verify(l => l.Error("Failed to start security scanner process: denied"), Times.Once);
     }
 
     private static StartupSecurityService CreateService(

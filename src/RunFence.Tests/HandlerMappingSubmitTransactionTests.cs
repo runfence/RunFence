@@ -109,7 +109,7 @@ public class HandlerMappingSubmitTransactionTests
     }
 
     [Fact]
-    public async Task SubmitAsync_WhenSaveFails_RestoresAffectedAppMappingsAndAppState()
+    public void Submit_WhenSaveFails_RestoresAffectedAppMappingsAndAppState()
     {
         var context = CreateContext();
         context.Database.Settings.HandlerMappings = new Dictionary<string, HandlerMappingEntry>(StringComparer.OrdinalIgnoreCase)
@@ -122,7 +122,7 @@ public class HandlerMappingSubmitTransactionTests
             Persistence = new FakeHandlerMappingDialogPersistence(context.Database, () => throw new InvalidOperationException("disk full"))
         };
 
-        var result = await context.Transaction.SubmitAsync(
+        var result = context.Transaction.Submit(
                 context.Persistence,
                 [".txt"],
                 [AppId],
@@ -154,7 +154,7 @@ public class HandlerMappingSubmitTransactionTests
     }
 
     [Fact]
-    public async Task SubmitAsync_WhenSnapshotCaptureFails_ReturnsRetryableFailureWithoutMutating()
+    public void Submit_WhenSnapshotCaptureFails_ReturnsRetryableFailureWithoutMutating()
     {
         var context = CreateContext();
         context.HandlerMappingService
@@ -162,7 +162,7 @@ public class HandlerMappingSubmitTransactionTests
             .Throws(new InvalidOperationException("snapshot failed"));
         var mutateCalled = false;
 
-        var result = await context.Transaction.SubmitAsync(
+        var result = context.Transaction.Submit(
             context.Persistence,
             [".txt"],
             [AppId],
@@ -183,7 +183,7 @@ public class HandlerMappingSubmitTransactionTests
     }
 
     [Fact]
-    public async Task SubmitAsync_WhenSaveFails_RestoresAffectedDirectHandler()
+    public void Submit_WhenSaveFails_RestoresAffectedDirectHandler()
     {
         var context = CreateContext();
         context.Database.Settings.DirectHandlerMappings = new Dictionary<string, DirectHandlerEntry>(StringComparer.OrdinalIgnoreCase)
@@ -196,7 +196,7 @@ public class HandlerMappingSubmitTransactionTests
             Persistence = new FakeHandlerMappingDialogPersistence(context.Database, () => throw new InvalidOperationException("save failed"))
         };
 
-        var result = await context.Transaction.SubmitAsync(
+        var result = context.Transaction.Submit(
                 context.Persistence,
                 [".txt"],
                 [],
@@ -216,14 +216,14 @@ public class HandlerMappingSubmitTransactionTests
     }
 
     [Fact]
-    public async Task SubmitAsync_WhenSyncFailsAfterSave_ReturnsWarningCompletionAndKeepsMutation()
+    public void Submit_WhenSyncFailsAfterSave_ReturnsWarningCompletionAndKeepsMutation()
     {
         var context = CreateContext();
 
         context.RegistrationService.Setup(service => service.Sync(It.IsAny<Dictionary<string, HandlerMappingEntry>>(), It.IsAny<List<AppEntry>>()))
             .Throws(new InvalidOperationException("registry unavailable"));
 
-        var result = await context.Transaction.SubmitAsync(
+        var result = context.Transaction.Submit(
                 context.Persistence,
                 [".txt"],
                 [AppId],

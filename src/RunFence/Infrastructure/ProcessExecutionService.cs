@@ -201,8 +201,9 @@ public sealed class ProcessExecutionService : IProcessExecutionService
     private static ProcessStartInfo CreateStartInfo(ProcessExecutionRequest request) =>
         new(request.FileName, request.Arguments)
         {
-            UseShellExecute = false,
-            CreateNoWindow = true,
+            UseShellExecute = request.UseShellExecute,
+            CreateNoWindow = !request.UseShellExecute,
+            WindowStyle = request.WindowStyle,
             RedirectStandardOutput = request.RedirectStandardOutput,
             RedirectStandardError = request.RedirectStandardError
         };

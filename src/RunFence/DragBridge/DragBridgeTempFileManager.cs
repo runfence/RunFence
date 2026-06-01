@@ -8,19 +8,24 @@ namespace RunFence.DragBridge;
 
 public class DragBridgeTempFileManager(
     ILoggingService log,
-    IPathGrantService pathGrantService,
+    ITraverseService traverseService,
     ITempDirectoryAclHelper aclHelper,
-    string tempRoot)
+    IProgramDataDirectoryProvisioningService programDataDirectoryProvisioningService,
+    IProgramDataManagedObjectRepairService programDataManagedObjectRepairService,
+    IProgramDataPathPolicyService programDataPathPolicyService,
+    IProgramDataObjectProvisioner programDataObjectProvisioner,
+    IProgramDataKnownPathResolver programDataKnownPathResolver)
     : IDragBridgeTempFileManager
 {
-    private string TempRoot { get; } = tempRoot;
+    private string TempRoot { get; } = programDataKnownPathResolver.GetDirectoryPath(
+        ProgramDataPolicies.DragBridge);
 
     public DragBridgeTempFolderResult CreateTempFolder(string targetSid, string? containerSid = null)
     {
         string? tempFolder = null;
         try
         {
-            Directory.CreateDirectory(TempRoot);
+            EnsureTempRoot();
 
             // Ensure each involved SID can traverse TempRoot and all ancestors to reach their
             // per-session subfolder. This is needed for accounts not in BUILTIN\Users
@@ -31,20 +36,33 @@ public class DragBridgeTempFileManager(
                 EnsureTraverseAccess(TempRoot, containerSid);
 
             tempFolder = Path.Combine(TempRoot, Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(tempFolder);
-
             var targetIdentity = new SecurityIdentifier(targetSid);
-            if (containerSid != null)
+            if (programDataPathPolicyService.IsUnderRoot(tempFolder))
             {
+                var additionalAccess = CreateTempFolderAccess(targetIdentity, containerSid);
+                programDataObjectProvisioner.CreateOrRepairDirectory(
+                    new ProgramDataExplicitDirectoryRequest(
+                        tempFolder,
+                        ProgramDataDirectoryAclProfile.CurrentProcessUserFullControl,
+                        additionalAccess,
+                        ReplaceExistingSecurity: true));
+                LogProgramDataTempDirectoryCreation(tempFolder, targetSid, containerSid);
+            }
+            else if (containerSid != null)
+            {
+                Directory.CreateDirectory(tempFolder);
                 var containerIdentity = new SecurityIdentifier(containerSid);
-                aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
+                var appliedSecurity = aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
                     (targetIdentity, FileSystemRights.ReadAndExecute),
                     (containerIdentity, FileSystemRights.ReadAndExecute));
+                LogProgramDataTempDirectoryCreation(tempFolder, appliedSecurity, targetSid, containerSid);
             }
             else
             {
-                aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
+                Directory.CreateDirectory(tempFolder);
+                var appliedSecurity = aclHelper.ApplyRestrictedAcl(new DirectoryInfo(tempFolder),
                     (targetIdentity, FileSystemRights.ReadAndExecute));
+                LogProgramDataTempDirectoryCreation(tempFolder, appliedSecurity, targetSid, containerSid: null);
             }
 
             return new DragBridgeTempFolderResult(true, tempFolder, null);
@@ -61,7 +79,28 @@ public class DragBridgeTempFileManager(
 
     private void EnsureTraverseAccess(string dirPath, string sid)
     {
-        pathGrantService.AddTraverse(sid, dirPath);
+        traverseService.AddTraverse(sid, dirPath);
+    }
+
+    private void EnsureTempRoot()
+    {
+        if (programDataPathPolicyService.IsUnderRoot(TempRoot))
+        {
+            var managedTempRoot = programDataDirectoryProvisioningService.EnsureKnownDirectory(
+                ProgramDataPolicies.DragBridge);
+            if (!string.Equals(
+                    Path.GetFullPath(managedTempRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    Path.GetFullPath(TempRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"DragBridge temp root '{TempRoot}' does not match managed ProgramData DragBridge root '{managedTempRoot}'.");
+            }
+
+            return;
+        }
+
+        Directory.CreateDirectory(TempRoot);
     }
 
     /// <summary>
@@ -71,6 +110,13 @@ public class DragBridgeTempFileManager(
     /// </summary>
     public DragBridgeTempFileResult CopyFilesToTemp(string tempFolder, IReadOnlyList<string> filePaths)
     {
+        if (filePaths.Count == 0)
+            return new DragBridgeTempFileResult(true, [], []);
+
+        var preflightFailure = TryEnsureWritableTempFolder(tempFolder, filePaths);
+        if (preflightFailure != null)
+            return preflightFailure;
+
         var tempPaths = new List<string>(filePaths.Count);
         var entries = new List<DragBridgeTempFileEntryResult>(filePaths.Count);
         foreach (var src in filePaths)
@@ -183,6 +229,33 @@ public class DragBridgeTempFileManager(
         }
     }
 
+    private DragBridgeTempFileResult? TryEnsureWritableTempFolder(string tempFolder, IReadOnlyList<string> filePaths)
+    {
+        if (!programDataPathPolicyService.IsUnderRoot(tempFolder))
+            return null;
+
+        try
+        {
+            EnsureTempRoot();
+            programDataManagedObjectRepairService.EnsureManagedDirectoryOwner(tempFolder);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            log.Warn($"DragBridgeTempFileManager: temp folder security validation failed for '{tempFolder}': {ex.Message}");
+            var entries = filePaths
+                .Select(path => new DragBridgeTempFileEntryResult(
+                    path,
+                    null,
+                    DragBridgeTempFileCopyStatus.Failed,
+                    DragBridgeTempFileGrantStatus.NotAttempted,
+                    DragBridgeTempFileRollbackStatus.NotRequired,
+                    ex.Message))
+                .ToList();
+            return new DragBridgeTempFileResult(false, entries, []);
+        }
+    }
+
     public void CleanupOldFolders(TimeSpan maxAge)
     {
         try
@@ -218,5 +291,53 @@ public class DragBridgeTempFileManager(
         catch
         {
         }
+    }
+
+    private void LogProgramDataTempDirectoryCreation(
+        string tempFolder,
+        DirectorySecurity appliedSecurity,
+        string targetSid,
+        string? containerSid)
+    {
+        if (!programDataPathPolicyService.IsUnderRoot(tempFolder))
+            return;
+
+        log.Info(
+            $"ProgramData security created restricted DragBridge temp directory '{tempFolder}' with "
+            + $"{ProgramDataSecurityChangeFormatter.DescribeSecurityState(appliedSecurity)}; target SID '{targetSid}'"
+            + (containerSid == null ? "." : $"; container SID '{containerSid}'."));
+    }
+
+    private void LogProgramDataTempDirectoryCreation(
+        string tempFolder,
+        string targetSid,
+        string? containerSid)
+        => log.Info(
+            $"ProgramData security created restricted DragBridge temp directory '{tempFolder}' for target SID '{targetSid}'"
+            + (containerSid == null ? "." : $"; container SID '{containerSid}'."));
+
+    private static IReadOnlyList<ProgramDataPrincipalAccess> CreateTempFolderAccess(
+        SecurityIdentifier targetIdentity,
+        string? containerSid)
+    {
+        var access = new List<ProgramDataPrincipalAccess>
+        {
+            new(
+                targetIdentity,
+                FileSystemRights.ReadAndExecute,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None)
+        };
+
+        if (containerSid != null)
+        {
+            access.Add(new ProgramDataPrincipalAccess(
+                new SecurityIdentifier(containerSid),
+                FileSystemRights.ReadAndExecute,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None));
+        }
+
+        return access;
     }
 }

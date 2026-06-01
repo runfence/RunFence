@@ -1,9 +1,7 @@
-using Microsoft.Win32;
-
 namespace RunFence.Core;
 
 public sealed class FolderHandlerOwnedRegistryCleaner(
-    RegistryKey root,
+    IRegistryKey root,
     string classesRootPath,
     string launcherExeName,
     string shellServerExeName,
@@ -39,7 +37,7 @@ public sealed class FolderHandlerOwnedRegistryCleaner(
     {
         try
         {
-            using var key = root.OpenSubKey(GetClassesRegistryPath(relativeSubKeyPath));
+        using var key = root.OpenSubKey(GetClassesRegistryPath(relativeSubKeyPath));
             return key?.GetValue(null) is string value &&
                    value.Contains(launcherExeName, StringComparison.OrdinalIgnoreCase);
         }

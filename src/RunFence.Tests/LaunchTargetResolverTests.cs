@@ -1,11 +1,14 @@
+using Microsoft.Win32;
 using Moq;
 using RunFence.Acl.Permissions;
 using RunFence.Apps.Shortcuts;
 using RunFence.Core;
+using RunFence.Core.Helpers;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Persistence;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -35,28 +38,35 @@ public class LaunchTargetResolverTests : IDisposable
 {
             Database = _database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32)));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32)));
     }
 
     public void Dispose() => _registry.Dispose();
 
     private LaunchTargetResolver CreateResolver(
-        IShortcutComHelper? shortcutComHelper = null,
+        IShortcutGateway? shortcutGateway = null,
         IAssociationExecutablePathResolver? associationExecutablePathResolver = null,
         IUiThreadInvoker? uiThreadInvoker = null,
         ISessionProvider? sessionProvider = null)
     {
-        var registryResolver = new AssociationRegistryResolver(_log.Object, _registry.HklmRoot, _registry.HkuRoot);
+        var registryResolver = new AssociationRegistryResolver(
+            _log.Object,
+            new TestHklmClassesRootProvider(_registry.HklmRoot),
+            new TestHkuRootProvider(_registry.HkuRoot),
+            new AssociationRegistryProtocolMarkerReader());
         var executablePathResolver = associationExecutablePathResolver ?? CreateValidAssociationExecutablePathResolver();
         var materializer = new AssociationCommandMaterializer(_log.Object, executablePathResolver);
         var leaseCoordinator = new LaunchHiveLeaseCoordinator(_registry.HiveManager.Object);
-
-        var shortcutTargetResolver = new ShortcutTargetResolver(shortcutComHelper!);
-        return new LaunchTargetResolver(
-            _interactiveUserResolver.Object,
+        var candidateResolver = new AssociationLaunchCandidateResolver(
             registryResolver,
             materializer,
             _associationLaunchResolver.Object,
+            _log.Object);
+
+        var shortcutTargetResolver = new ShortcutTargetResolver(shortcutGateway!);
+        return new LaunchTargetResolver(
+            _interactiveUserResolver.Object,
+            candidateResolver,
             new UiThreadDatabaseAccessor(
                 new LambdaDatabaseProvider(() => (sessionProvider ?? _sessionProvider.Object).GetSession().Database),
                 () => uiThreadInvoker ?? _uiThreadInvoker),
@@ -1131,6 +1141,20 @@ public class LaunchTargetResolverTests : IDisposable
     }
 
     [Fact]
+    public void ResolveUrlTarget_NoUsableHandler_HighIntegrityFallsBackToLegacyWrappedTarget()
+    {
+        var resolver = CreateResolver();
+        var legacyTarget = ProcessLaunchHelper.BuildUrlLaunchTarget("steam://run/12345");
+
+        using var result = resolver.ResolveUrlHandler(
+            new AccountLaunchIdentity(TestSid) { PrivilegeLevel = PrivilegeLevel.HighIntegrity },
+            "steam://run/12345");
+
+        Assert.Equal(legacyTarget, result.Target);
+        Assert.Equal(LaunchResolutionKind.ShellWrapped, result.Kind);
+    }
+
+    [Fact]
     public void ResolveUrlTarget_NoUsableHandler_BasicFallback_KeepsLoadedHiveLeasesUntilReturnedLeaseIsDisposed()
     {
         var launchedLease = new TrackingDisposable();
@@ -1202,19 +1226,19 @@ public class LaunchTargetResolverTests : IDisposable
 {
             Database = liveDatabase,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         var sessionProvider = new Mock<ISessionProvider>();
         var sessionThreadId = 0;
         sessionProvider.Setup(s => s.GetSession())
             .Callback(() => sessionThreadId = Environment.CurrentManagedThreadId)
             .Returns(session);
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
-            .Returns(new ShortcutDefinition(lnkPath, LauncherPath, app.Id, null));
+        var shortcutGateway = new Mock<IShortcutGateway>();
+        shortcutGateway.Setup(h => h.Read(lnkPath))
+            .Returns(new ShortcutData(LauncherPath, app.Id, null, null, 0, null, 0, 1));
 
         using var uiInvoker = new DedicatedThreadUiInvoker();
         var resolver = CreateResolver(
-            shortcutComHelper: shortcutHelper.Object,
+            shortcutGateway: shortcutGateway.Object,
             uiThreadInvoker: uiInvoker,
             sessionProvider: sessionProvider.Object);
 
@@ -1236,7 +1260,7 @@ public class LaunchTargetResolverTests : IDisposable
 {
             Database = liveDatabase,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         var sessionProvider = new Mock<ISessionProvider>();
         var sessionThreadId = 0;
         sessionProvider.Setup(s => s.GetSession())
@@ -1297,11 +1321,11 @@ public class LaunchTargetResolverTests : IDisposable
     {
         var lnkPath = @"C:\Shortcuts\notepad.lnk";
         var targetPath = @"C:\Windows\system32\notepad.exe";
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
-            .Returns(new ShortcutDefinition(lnkPath, targetPath, null, null));
+        var shortcutGateway = new Mock<IShortcutGateway>();
+        shortcutGateway.Setup(h => h.Read(lnkPath))
+            .Returns(new ShortcutData(targetPath, null, null, null, 0, null, 0, 1));
 
-        var result = CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity());
+        var result = CreateResolver(shortcutGateway.Object).TraversePath(lnkPath, BasicIdentity());
 
         Assert.False(result.IsFolder);
         Assert.Equal(targetPath, result.TraversedPath);
@@ -1315,11 +1339,11 @@ public class LaunchTargetResolverTests : IDisposable
         var lnkPath = @"C:\Shortcuts\managed.lnk";
         var app = new AppEntry { Id = "app01", ExePath = @"C:\Apps\managed.exe", AccountSid = TestSid };
         _database.Apps.Add(app);
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
-            .Returns(new ShortcutDefinition(lnkPath, LauncherPath, app.Id, null));
+        var shortcutGateway = new Mock<IShortcutGateway>();
+        shortcutGateway.Setup(h => h.Read(lnkPath))
+            .Returns(new ShortcutData(LauncherPath, app.Id, null, null, 0, null, 0, 1));
 
-        var result = CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity());
+        var result = CreateResolver(shortcutGateway.Object).TraversePath(lnkPath, BasicIdentity());
 
         Assert.False(result.IsFolder);
         Assert.Equal(app.ExePath, result.TraversedPath);
@@ -1330,11 +1354,11 @@ public class LaunchTargetResolverTests : IDisposable
     {
         var lnkPath = @"C:\Shortcuts\myfolder.lnk";
         var folderPath = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar);
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
-            .Returns(new ShortcutDefinition(lnkPath, folderPath, null, null));
+        var shortcutGateway = new Mock<IShortcutGateway>();
+        shortcutGateway.Setup(h => h.Read(lnkPath))
+            .Returns(new ShortcutData(folderPath, null, null, null, 0, null, 0, 1));
 
-        var result = CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity());
+        var result = CreateResolver(shortcutGateway.Object).TraversePath(lnkPath, BasicIdentity());
 
         Assert.True(result.IsFolder);
         Assert.Equal(folderPath, result.TraversedPath);
@@ -1344,12 +1368,12 @@ public class LaunchTargetResolverTests : IDisposable
     public void TraversePath_BrokenLnkShortcut_ThrowsInvalidOperationException()
     {
         var lnkPath = @"C:\Shortcuts\broken.lnk";
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
-            .Returns(new ShortcutDefinition(lnkPath, null, null, null));
+        var shortcutGateway = new Mock<IShortcutGateway>();
+        shortcutGateway.Setup(h => h.Read(lnkPath))
+            .Returns(new ShortcutData(string.Empty, null, null, null, 0, null, 0, 1));
 
         Assert.Throws<InvalidOperationException>(() =>
-            CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity()));
+            CreateResolver(shortcutGateway.Object).TraversePath(lnkPath, BasicIdentity()));
     }
 
     [Fact]
@@ -1357,13 +1381,27 @@ public class LaunchTargetResolverTests : IDisposable
     {
         var lnkPath = @"C:\Shortcuts\script.lnk";
         var targetPath = @"C:\Scripts\run.exe";
-        var shortcutHelper = new Mock<IShortcutComHelper>();
-        shortcutHelper.Setup(h => h.GetShortcutDefinition(lnkPath))
-            .Returns(new ShortcutDefinition(lnkPath, targetPath, "--from-lnk", null));
+        var shortcutGateway = new Mock<IShortcutGateway>();
+        shortcutGateway.Setup(h => h.Read(lnkPath))
+            .Returns(new ShortcutData(targetPath, "--from-lnk", null, null, 0, null, 0, 1));
 
-        var result = CreateResolver(shortcutHelper.Object).TraversePath(lnkPath, BasicIdentity());
+        var result = CreateResolver(shortcutGateway.Object).TraversePath(lnkPath, BasicIdentity());
 
         Assert.Equal("--from-lnk", result.ShortcutArguments);
     }
 
+}
+
+file sealed class TestHklmClassesRootProvider(InMemoryRegistryKey classesRoot) : IHklmClassesRootProvider
+{
+    public IRegistryKey OpenClassesRoot()
+    {
+        using var _ = classesRoot.CreateSubKey(@"Software\Classes");
+        return classesRoot.OpenSubKey(@"Software\Classes")!;
+    }
+}
+
+file sealed class TestHkuRootProvider(InMemoryRegistryKey usersRoot) : IHkuRootProvider
+{
+    public IRegistryKey OpenUsersRoot() => usersRoot;
 }

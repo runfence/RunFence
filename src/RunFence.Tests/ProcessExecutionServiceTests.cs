@@ -9,6 +9,8 @@ namespace RunFence.Tests;
 
 public class ProcessExecutionServiceTests
 {
+    private static readonly TimeSpan ProcessStartupTimeout = TimeSpan.FromSeconds(10);
+
     [Fact]
     public void Run_StartFailure_ReturnsNotStartedResult()
     {
@@ -67,22 +69,22 @@ public class ProcessExecutionServiceTests
 
         var runTask = Task.Run(() => service.Run(new ProcessExecutionRequest(
             FileName: "powershell.exe",
-            Arguments: BuildBlockingPowerShellArguments(startedPath, pidPath),
-            Timeout: TimeSpan.FromSeconds(5),
+            Arguments: BuildReadinessFirstPowerShellArguments(startedPath, pidPath),
+            Timeout: ProcessStartupTimeout + TimeSpan.FromSeconds(1),
             KillEntireProcessTreeOnTimeout: true,
             RedirectStandardOutput: true,
             RedirectStandardError: true,
             CancellationToken: CancellationToken.None)));
 
-        WaitForFile(startedPath, TimeSpan.FromSeconds(10));
-        WaitForFile(pidPath, TimeSpan.FromSeconds(10));
-        var pid = int.Parse(ReadAllTextWhenAvailable(pidPath, TimeSpan.FromSeconds(10)).Trim(), CultureInfo.InvariantCulture);
+        WaitForFile(startedPath, ProcessStartupTimeout);
+        WaitForFile(pidPath, ProcessStartupTimeout);
+        var pid = int.Parse(ReadAllTextWhenAvailable(pidPath, ProcessStartupTimeout).Trim(), CultureInfo.InvariantCulture);
 
         var result = await runTask;
 
         Assert.True(result.Started);
         Assert.True(result.TimedOut);
-        Assert.True(WaitForProcessExit(pid, TimeSpan.FromSeconds(10)));
+        Assert.True(WaitForProcessExit(pid, TimeSpan.FromSeconds(3)));
     }
 
     [Fact]
@@ -96,20 +98,20 @@ public class ProcessExecutionServiceTests
 
         var runTask = service.RunAsync(new ProcessExecutionRequest(
             FileName: "powershell.exe",
-            Arguments: BuildBlockingPowerShellArguments(startedPath, pidPath),
-            Timeout: TimeSpan.FromSeconds(30),
+            Arguments: BuildReadinessFirstPowerShellArguments(startedPath, pidPath),
+            Timeout: TimeSpan.FromSeconds(3),
             KillEntireProcessTreeOnTimeout: true,
             RedirectStandardOutput: true,
             RedirectStandardError: true,
             CancellationToken: cts.Token));
 
-        WaitForFile(startedPath, TimeSpan.FromSeconds(10));
-        WaitForFile(pidPath, TimeSpan.FromSeconds(10));
-        var pid = int.Parse(ReadAllTextWhenAvailable(pidPath, TimeSpan.FromSeconds(10)).Trim(), CultureInfo.InvariantCulture);
+        WaitForFile(startedPath, ProcessStartupTimeout);
+        WaitForFile(pidPath, ProcessStartupTimeout);
+        var pid = int.Parse(ReadAllTextWhenAvailable(pidPath, ProcessStartupTimeout).Trim(), CultureInfo.InvariantCulture);
         cts.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(() => runTask);
-        Assert.True(WaitForProcessExit(pid, TimeSpan.FromSeconds(10)));
+        Assert.True(WaitForProcessExit(pid, TimeSpan.FromSeconds(3)));
     }
 
     [Fact]
@@ -123,20 +125,20 @@ public class ProcessExecutionServiceTests
 
         var runTask = Task.Run(() => service.Run(new ProcessExecutionRequest(
                 FileName: "powershell.exe",
-                Arguments: BuildBlockingPowerShellArguments(startedPath, pidPath),
-                Timeout: TimeSpan.FromSeconds(30),
+                Arguments: BuildReadinessFirstPowerShellArguments(startedPath, pidPath),
+                Timeout: TimeSpan.FromSeconds(3),
                 KillEntireProcessTreeOnTimeout: true,
                 RedirectStandardOutput: true,
                 RedirectStandardError: true,
                 CancellationToken: cts.Token)));
 
-        WaitForFile(startedPath, TimeSpan.FromSeconds(10));
-        WaitForFile(pidPath, TimeSpan.FromSeconds(10));
-        var pid = int.Parse(ReadAllTextWhenAvailable(pidPath, TimeSpan.FromSeconds(10)).Trim(), CultureInfo.InvariantCulture);
+        WaitForFile(startedPath, ProcessStartupTimeout);
+        WaitForFile(pidPath, ProcessStartupTimeout);
+        var pid = int.Parse(ReadAllTextWhenAvailable(pidPath, ProcessStartupTimeout).Trim(), CultureInfo.InvariantCulture);
         cts.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(async () => await runTask);
-        Assert.True(WaitForProcessExit(pid, TimeSpan.FromSeconds(10)));
+        Assert.True(WaitForProcessExit(pid, TimeSpan.FromSeconds(3)));
     }
 
     private static string CreateBatchFile(string directoryPath, string contents)
@@ -146,16 +148,48 @@ public class ProcessExecutionServiceTests
         return scriptPath;
     }
 
-    private static string BuildBlockingPowerShellArguments(string startedPath, string pidPath)
+    private static string BuildReadinessFirstPowerShellArguments(string startedPath, string pidPath)
     {
         var escapedStartedPath = startedPath.Replace("'", "''", StringComparison.Ordinal);
         var escapedPidPath = pidPath.Replace("'", "''", StringComparison.Ordinal);
-        return
-            "-NoProfile -NonInteractive -Command " +
-            "\"Set-Content -LiteralPath '" + escapedStartedPath + "' -Value started; " +
-            "Set-Content -LiteralPath '" + escapedPidPath + "' -Value $PID; " +
-            "$event = [System.Threading.ManualResetEvent]::new($false); " +
-            "$event.WaitOne()\"";
+        var script = $$"""
+            $startedStream = [System.IO.File]::Open('{{escapedStartedPath}}', [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+            try {
+                $startedWriter = [System.IO.StreamWriter]::new($startedStream, [System.Text.UTF8Encoding]::new($false))
+                try {
+                    $startedWriter.Write('started')
+                    $startedWriter.Flush()
+                    $startedStream.Flush($true)
+                }
+                finally {
+                    $startedWriter.Dispose()
+                }
+            }
+            finally {
+                $startedStream.Dispose()
+            }
+
+            $pidStream = [System.IO.File]::Open('{{escapedPidPath}}', [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)
+            try {
+                $pidWriter = [System.IO.StreamWriter]::new($pidStream, [System.Text.UTF8Encoding]::new($false))
+                try {
+                    $pidWriter.Write([string]$PID)
+                    $pidWriter.Flush()
+                    $pidStream.Flush($true)
+                }
+                finally {
+                    $pidWriter.Dispose()
+                }
+            }
+            finally {
+                $pidStream.Dispose()
+            }
+
+            $gate = [System.Threading.ManualResetEventSlim]::new($false)
+            $gate.Wait()
+            """;
+        var encodedScript = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+        return $"-NoProfile -NonInteractive -EncodedCommand {encodedScript}";
     }
 
     private static void WaitForFile(string path, TimeSpan timeout)

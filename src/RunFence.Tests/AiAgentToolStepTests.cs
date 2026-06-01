@@ -1,5 +1,7 @@
 using Moq;
+using RunFence.Apps.UI;
 using RunFence.Apps.Shortcuts;
+using RunFence.Infrastructure;
 using RunFence.Tests.Helpers;
 using RunFence.Wizard;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -72,7 +74,10 @@ public class AiAgentToolStepTests
         => new(
             capture,
             Mock.Of<IShortcutDiscoveryService>(),
-            Mock.Of<IShortcutIconHelper>());
+            Mock.Of<IShortcutIconHelper>(),
+            Mock.Of<IOpenFileDialogAdapterFactory>(),
+            Mock.Of<IFolderBrowserDialogAdapterFactory>(),
+            Mock.Of<IAppDiscoveryDialogService>());
 
     private static void SelectOtherTool(AiAgentToolStep step, string pathText)
     {

@@ -15,7 +15,7 @@ namespace RunFence.RunAs;
 public class RunAsCredentialCreator(
     SessionContext session,
     ICredentialEncryptionSpanService encryptionService,
-    IDatabaseService databaseService,
+    ICredentialStorePersistence credentialStorePersistence,
     ILocalUserProvider localUserProvider,
     ISidNameCacheService sidNameCache)
 {
@@ -49,7 +49,7 @@ public class RunAsCredentialCreator(
 
         try
         {
-            databaseService.SaveCredentialStore(session.CredentialStore);
+            credentialStorePersistence.SaveCredentialStore(session.CredentialStore);
         }
         catch (Exception ex)
         {

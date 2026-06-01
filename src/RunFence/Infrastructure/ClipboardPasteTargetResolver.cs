@@ -7,7 +7,7 @@ public sealed class ClipboardPasteTargetResolver(
     IWindowProcessIdReader windowProcessIdReader,
     IConsoleHostProcessResolver consoleHostProcessResolver,
     IClipboardFormatReader clipboardFormatReader,
-    IProcessJobManager jobManager,
+    IRestrictedJobInspector restrictedJobInspector,
     ILoggingService log) : IClipboardPasteTargetResolver
 {
     public ClipboardPasteTargetResolution Resolve()
@@ -17,7 +17,7 @@ public sealed class ClipboardPasteTargetResolver(
         if (foregroundProcessId == 0)
             return ClipboardPasteTargetResolution.Passthrough();
 
-        if (jobManager.TryGetRestrictedJobForPid(foregroundProcessId) == IntPtr.Zero)
+        if (!restrictedJobInspector.IsProcessInHandleLimitedJob(foregroundProcessId))
             return ClipboardPasteTargetResolution.Passthrough();
 
         int targetProcessId = foregroundProcessId;

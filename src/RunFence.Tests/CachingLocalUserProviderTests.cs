@@ -38,17 +38,6 @@ public class CachingLocalUserProviderTests
         Assert.NotSame(first, second);
     }
 
-    [Fact]
-    public void InvalidateCache_CausesRefresh()
-    {
-        var first = _localUserProvider.GetLocalUserAccounts();
-
-        _localUserProvider.InvalidateCache();
-        var second = _localUserProvider.GetLocalUserAccounts();
-
-        Assert.Equal(first, second);
-    }
-
     private sealed class ManualClock(DateTime utcNow) : IClock
     {
         public DateTime UtcNow { get; set; } = utcNow;

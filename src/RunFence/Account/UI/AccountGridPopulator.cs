@@ -20,7 +20,7 @@ public class AccountGridPopulator(
     ILoggingService log,
     AccountGridSorter sorter,
     AccountGridSupplementarySections supplementarySections,
-    AccountGridIconLifetimeManager iconLifetimeManager)
+    AccountGridRowComposer rowComposer)
 {
     private DataGridView _grid = null!;
 
@@ -69,7 +69,7 @@ public class AccountGridPopulator(
         HashSet<string> representedSids,
         List<CredentialEntry> ephemeralCredRows)
     {
-        AccountGridHelper.AddGroupHeaderRow(_grid, iconLifetimeManager, "Credentials");
+        rowComposer.AddGroupHeaderRow(_grid, "Credentials");
         AddSystemRow(data, representedSids);
 
         // Interactive user with no stored credential: show in Credentials section regardless.
@@ -125,18 +125,18 @@ public class AccountGridPopulator(
             var profilePath = windowsAccountQueryService.GetProfilePath(cred.Sid).ProfilePath ?? "";
             var logonValue = !isKnown || state.NoLogonState == false;
             var allowInternet = data.Database.GetAccount(cred.Sid)?.Firewall.AllowInternet ?? true;
-            var row = AccountGridHelper.AddAccountGridRow(_grid, iconLifetimeManager, accountRow, credIcon, displayName, logonValue, allowInternet, appsText, profilePath);
-            row.Cells["Credential"].ToolTipText = hasStoredPassword ? "Stored" : "No Password";
-            row.Cells["Import"].ReadOnly = !canImport;
-            row.Cells["Account"].ReadOnly = false;
+            var row = rowComposer.AddAccountGridRow(_grid, accountRow, credIcon, displayName, logonValue, allowInternet, appsText, profilePath);
+            row.Cells[AccountGridColumns.Credential].ToolTipText = hasStoredPassword ? "Stored" : "No Password";
+            row.Cells[AccountGridColumns.Import].ReadOnly = !canImport;
+            row.Cells[AccountGridColumns.Account].ReadOnly = false;
             AccountGridSupplementarySections.SetLogonCellState(row, state);
             if (!isKnown)
-                row.Cells["Logon"].ReadOnly = true;
+                row.Cells[AccountGridColumns.Logon].ReadOnly = true;
 
             if (!canImport)
-                row.Cells["Import"].ToolTipText = "No password stored for this account";
+                row.Cells[AccountGridColumns.Import].ToolTipText = "No password stored for this account";
             if (state.IsInteractive)
-                row.Cells["Logon"].ToolTipText = "Cannot change Logon for the interactive desktop user";
+                row.Cells[AccountGridColumns.Logon].ToolTipText = "Cannot change Logon for the interactive desktop user";
 
             if (!string.IsNullOrEmpty(cred.Sid))
                 representedSids.Add(cred.Sid);
@@ -173,17 +173,17 @@ public class AccountGridPopulator(
         var logonValue = !row.IsKnown || row.State.NoLogonState == false;
         var allowInternet = database.GetAccount(row.Sid)?.Firewall.AllowInternet ?? true;
         var accountRow = new AccountRow(null, row.Username, row.Sid, false);
-        var gridRow = AccountGridHelper.AddAccountGridRow(_grid, iconLifetimeManager, accountRow, AccountGridHelper.CreateKeyIcon(),
+        var gridRow = rowComposer.AddAccountGridRow(_grid, accountRow, AccountGridHelper.CreateKeyIcon(),
             row.Username + " (interactive)", logonValue, allowInternet, row.AppsText, row.ProfilePath);
-        gridRow.Cells["Credential"].ToolTipText = "No Password";
-        gridRow.Cells["Import"].ReadOnly = !row.CanImport;
-        gridRow.Cells["Account"].ReadOnly = false;
+        gridRow.Cells[AccountGridColumns.Credential].ToolTipText = "No Password";
+        gridRow.Cells[AccountGridColumns.Import].ReadOnly = !row.CanImport;
+        gridRow.Cells[AccountGridColumns.Account].ReadOnly = false;
         AccountGridSupplementarySections.SetLogonCellState(gridRow, row.State);
         if (!row.IsKnown)
-            gridRow.Cells["Logon"].ReadOnly = true;
+            gridRow.Cells[AccountGridColumns.Logon].ReadOnly = true;
         if (!row.CanImport)
-            gridRow.Cells["Import"].ToolTipText = "No password stored for this account";
-        gridRow.Cells["Logon"].ToolTipText = "Cannot change Logon for the interactive desktop user";
+            gridRow.Cells[AccountGridColumns.Import].ToolTipText = "No password stored for this account";
+        gridRow.Cells[AccountGridColumns.Logon].ToolTipText = "Cannot change Logon for the interactive desktop user";
         representedSids.Add(row.Sid);
     }
 
@@ -193,16 +193,16 @@ public class AccountGridPopulator(
         var allowInternet = data.Database.GetAccount(systemSid)?.Firewall.AllowInternet ?? true;
         var appsText = supplementarySections.GetAppsText(data.Database, systemSid);
         var systemAccountRow = new AccountRow(null, "SYSTEM", systemSid, hasStoredPassword: false);
-        var row = AccountGridHelper.AddAccountGridRow(_grid, iconLifetimeManager, systemAccountRow, AccountGridHelper.CreateKeyIcon(), "SYSTEM",
+        var row = rowComposer.AddAccountGridRow(_grid, systemAccountRow, AccountGridHelper.CreateKeyIcon(), "SYSTEM",
             true, allowInternet, appsText, "");
-        row.Cells["Credential"].ToolTipText = "System Account";
-        row.Cells["Import"].ToolTipText = "Cannot import SYSTEM account";
+        row.Cells[AccountGridColumns.Credential].ToolTipText = "System Account";
+        row.Cells[AccountGridColumns.Import].ToolTipText = "Cannot import SYSTEM account";
         foreach (DataGridViewCell cell in row.Cells)
             cell.ReadOnly = true;
         // NoLogonState = false means "no restriction", IsInteractive = false — SYSTEM has no logon restriction concept.
         AccountGridSupplementarySections.SetLogonCellState(row, new AccountGridSupplementarySections.AccountState(NoLogonState: false, IsInteractive: false));
         // SetLogonCellState sets ReadOnly based on state — re-set to true for SYSTEM.
-        row.Cells["Logon"].ReadOnly = true;
+        row.Cells[AccountGridColumns.Logon].ReadOnly = true;
         representedSids.Add(systemSid);
     }
 
@@ -232,7 +232,7 @@ public class AccountGridPopulator(
         if (localOnlyAccounts.Count == 0)
             return;
 
-        AccountGridHelper.AddGroupHeaderRow(_grid, iconLifetimeManager, "Local Accounts");
+        rowComposer.AddGroupHeaderRow(_grid, "Local Accounts");
 
         foreach (var localUser in sorter.SortLocalAccounts(data, localOnlyAccounts))
         {
@@ -243,14 +243,14 @@ public class AccountGridPopulator(
             var displayName = state.IsInteractive ? localUser.Username + " (interactive)" : localUser.Username;
             var localAllowInternet = data.Database.GetAccount(localUser.Sid)?.Firewall.AllowInternet ?? true;
             Image localCredIcon = state.IsInteractive ? AccountGridHelper.CreateKeyIcon() : AccountGridHelper.EmptyIcon;
-            var row = AccountGridHelper.AddAccountGridRow(_grid, iconLifetimeManager, accountRow, localCredIcon, displayName,
+            var row = rowComposer.AddAccountGridRow(_grid, accountRow, localCredIcon, displayName,
                 state.NoLogonState == false, localAllowInternet, localAppsText, localProfilePath);
-            row.Cells["Import"].ReadOnly = !state.IsInteractive;
+            row.Cells[AccountGridColumns.Import].ReadOnly = !state.IsInteractive;
             AccountGridSupplementarySections.SetLogonCellState(row, state);
             if (!state.IsInteractive)
-                row.Cells["Import"].ToolTipText = "No credentials stored \u2014 use Edit to add";
+                row.Cells[AccountGridColumns.Import].ToolTipText = "No credentials stored \u2014 use Edit to add";
             if (state.IsInteractive)
-                row.Cells["Logon"].ToolTipText = "Cannot change Logon for the interactive desktop user";
+                row.Cells[AccountGridColumns.Logon].ToolTipText = "Cannot change Logon for the interactive desktop user";
             representedSids.Add(localUser.Sid);
         }
     }

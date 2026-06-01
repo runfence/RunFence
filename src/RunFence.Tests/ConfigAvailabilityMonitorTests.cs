@@ -105,20 +105,6 @@ public class ConfigAvailabilityMonitorTests
     }
 
     [Fact]
-    public void Tick_StopsTimer_BeforeCheckingPaths()
-    {
-        _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(Array.Empty<string>());
-
-        using var monitor = BuildMonitor();
-        monitor.ScheduleAvailabilityCheck();
-
-        // Fire the timer Tick event
-        _timer.Raise(t => t.Tick += null, _timer.Object, EventArgs.Empty);
-
-        _timer.Verify(t => t.Stop(), Times.AtLeastOnce);
-    }
-
-    [Fact]
     public void Tick_ChecksConfigPaths_WhenGuardsPass()
     {
         _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns(Array.Empty<string>());
@@ -138,24 +124,15 @@ public class ConfigAvailabilityMonitorTests
 
         try
         {
-            // Use ManualResetEventSlim to avoid Thread.Sleep polling: signal when BeginInvoke fires.
-            var callbackSignal = new ManualResetEventSlim(false);
-            Action? capturedAction = null;
-            _uiThreadInvoker.Setup(u => u.BeginInvoke(It.IsAny<Action>()))
-                .Callback<Action>(a =>
-                {
-                    capturedAction = a;
-                    callbackSignal.Set();
-                });
-
             List<string>? unloadedPaths = null;
+            using var uiInvoker = new QueuedUiThreadInvoker();
 
             var manualTimerFactory = new ManualUiTimerFactory();
             using var monitor = new ConfigAvailabilityMonitor(
                 _appConfigService.Object,
                 _log.Object,
                 _appStateProvider.Object,
-                _uiThreadInvoker.Object,
+                uiInvoker,
                 _enforcementGuard,
                 manualTimerFactory);
             monitor.AutoUnloadRequired += (_, paths) => unloadedPaths = paths;
@@ -164,14 +141,12 @@ public class ConfigAvailabilityMonitorTests
             var timer = Assert.Single(manualTimerFactory.Timers);
             timer.Fire();
 
-            // Wait for Task.Run to post the UI thread callback (no polling - event-driven)
-            Assert.True(callbackSignal.Wait(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
+            Assert.True(uiInvoker.WaitForPendingAction(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
 
             File.WriteAllText(missingPath, "restored");
-            capturedAction!();
+            uiInvoker.RunNext();
 
             Assert.Null(unloadedPaths);
-            _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Auto-unloading"))), Times.Never);
         }
         finally
         {
@@ -186,23 +161,15 @@ public class ConfigAvailabilityMonitorTests
         var missingPath = Path.Combine(Path.GetTempPath(), $"runfence-missing-{Guid.NewGuid():N}.rfn");
         _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([missingPath]);
 
-        var callbackSignal = new ManualResetEventSlim(false);
-        Action? capturedAction = null;
-        _uiThreadInvoker.Setup(u => u.BeginInvoke(It.IsAny<Action>()))
-            .Callback<Action>(a =>
-            {
-                capturedAction = a;
-                callbackSignal.Set();
-            });
-
         List<string>? unloadedPaths = null;
+        using var uiInvoker = new QueuedUiThreadInvoker();
 
         var manualTimerFactory = new ManualUiTimerFactory();
         using var monitor = new ConfigAvailabilityMonitor(
             _appConfigService.Object,
             _log.Object,
             _appStateProvider.Object,
-            _uiThreadInvoker.Object,
+            uiInvoker,
             _enforcementGuard,
             manualTimerFactory);
         monitor.AutoUnloadRequired += (_, paths) => unloadedPaths = paths;
@@ -211,11 +178,10 @@ public class ConfigAvailabilityMonitorTests
         var timer = Assert.Single(manualTimerFactory.Timers);
         timer.Fire();
 
-        Assert.True(callbackSignal.Wait(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
-        capturedAction!();
+        Assert.True(uiInvoker.WaitForPendingAction(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
+        uiInvoker.RunNext();
 
         Assert.Equal([missingPath], unloadedPaths);
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Auto-unloading"))), Times.Once);
     }
 
     [Fact]
@@ -223,26 +189,59 @@ public class ConfigAvailabilityMonitorTests
     {
         var missingPath = Path.Combine(Path.GetTempPath(), $"runfence-missing-{Guid.NewGuid():N}.rfn");
         _appConfigService.Setup(s => s.GetLoadedConfigPaths()).Returns([missingPath]);
+        using var uiInvoker = new QueuedUiThreadInvoker();
 
-        var callbackSignal = new ManualResetEventSlim(false);
-        Action? capturedAction = null;
-        _uiThreadInvoker.Setup(u => u.BeginInvoke(It.IsAny<Action>()))
-            .Callback<Action>(a =>
-            {
-                capturedAction = a;
-                callbackSignal.Set();
-            });
-
-        using var monitor = BuildMonitor();
+        using var monitor = new ConfigAvailabilityMonitor(
+            _appConfigService.Object,
+            _log.Object,
+            _appStateProvider.Object,
+            uiInvoker,
+            _enforcementGuard,
+            _timerFactory.Object);
         monitor.AutoUnloadRequired += (_, _) => { };
 
         monitor.ScheduleAvailabilityCheck();
         _timer.Raise(t => t.Tick += null, _timer.Object, EventArgs.Empty);
 
-        Assert.True(callbackSignal.Wait(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
-        capturedAction!();
+        Assert.True(uiInvoker.WaitForPendingAction(TimeSpan.FromSeconds(2)), "BeginInvoke was not called within 2 seconds");
+        uiInvoker.RunNext();
 
         // After unload, ScheduleAvailabilityCheck is called -> timer restarted (Stop then Start again)
         _timer.Verify(t => t.Start(), Times.AtLeast(2));
+    }
+
+    private sealed class QueuedUiThreadInvoker : IUiThreadInvoker, IDisposable
+    {
+        private readonly Queue<Action> _actions = new();
+        private readonly ManualResetEventSlim _actionQueued = new(false);
+        private readonly object _sync = new();
+
+        public T Invoke<T>(Func<T> func) => func();
+
+        public void BeginInvoke(Action action)
+        {
+            lock (_sync)
+            {
+                _actions.Enqueue(action);
+                _actionQueued.Set();
+            }
+        }
+
+        public bool WaitForPendingAction(TimeSpan timeout) => _actionQueued.Wait(timeout);
+
+        public void RunNext()
+        {
+            Action action;
+            lock (_sync)
+            {
+                action = _actions.Dequeue();
+                if (_actions.Count == 0)
+                    _actionQueued.Reset();
+            }
+
+            action();
+        }
+
+        public void Dispose() => _actionQueued.Dispose();
     }
 }

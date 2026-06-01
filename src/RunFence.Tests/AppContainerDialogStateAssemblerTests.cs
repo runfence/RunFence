@@ -41,25 +41,5 @@ public class AppContainerDialogStateAssemblerTests
 
         Assert.StartsWith("rfn_e", result.ProfileName);
         Assert.Equal(11, result.ProfileName.Length);
-        Assert.True(result.IsEphemeral);
-    }
-
-    [Fact]
-    public void BuildRequest_Edit_UsesExistingProfileName()
-    {
-        var assembler = new AppContainerDialogStateAssembler();
-        var existing = new AppContainerEntry { Name = "rfn_existing", DisplayName = "Existing" };
-
-        var result = assembler.BuildRequest(
-            existing,
-            displayName: "Updated",
-            isEphemeral: true,
-            selectedCapabilities: ["S-1-15-3-1"],
-            loopbackChecked: false,
-            comClsids: []);
-
-        Assert.Same(existing, result.Existing);
-        Assert.Equal("rfn_existing", result.ProfileName);
-        Assert.Equal("Updated", result.DisplayName);
     }
 }

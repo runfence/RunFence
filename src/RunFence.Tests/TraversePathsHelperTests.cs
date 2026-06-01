@@ -7,21 +7,7 @@ namespace RunFence.Tests;
 public class TraversePathsHelperTests
 {
     private const string TestSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
-    private const string OtherSid = "S-1-5-21-1234567890-1234567890-1234567890-1002";
-
     // --- TrackPath ---
-
-    [Fact]
-    public void TrackPath_NewPath_ReturnsTrueAddsEntryAndSetsIsTraverseOnly()
-    {
-        var traversePaths = new List<GrantedPathEntry>();
-
-        var result = TraversePathsHelper.TrackPath(traversePaths, @"C:\Foo\Bar", []);
-
-        Assert.True(result);
-        Assert.Single(traversePaths);
-        Assert.True(traversePaths[0].IsTraverseOnly);
-    }
 
     [Fact]
     public void TrackPath_NewPath_NormalizesStoredPath()
@@ -48,14 +34,37 @@ public class TraversePathsHelperTests
     }
 
     [Fact]
-    public void TrackPath_WithAppliedPaths_StoresThemOnEntry()
+    public void TrackPath_DuplicatePathWithFreshAppliedPaths_RefreshesStoredAppliedPaths()
     {
-        var traversePaths = new List<GrantedPathEntry>();
-        var appliedPaths = new List<string> { @"C:\Foo\Bar", @"C:\Foo", @"C:\" };
+        var traversePaths = new List<GrantedPathEntry>
+        {
+            new() { Path = @"C:\Foo\Bar", IsTraverseOnly = true, AllAppliedPaths = [@"C:\Old"] }
+        };
 
-        TraversePathsHelper.TrackPath(traversePaths, @"C:\Foo\Bar", appliedPaths);
+        var result = TraversePathsHelper.TrackPath(
+            traversePaths,
+            @"C:\Foo\Bar",
+            [@"C:\Foo\Bar", @"C:\Foo", @"C:\"]);
 
-        Assert.Equal(appliedPaths, traversePaths[0].AllAppliedPaths);
+        Assert.True(result);
+        Assert.Equal([@"C:\Foo\Bar", @"C:\Foo", @"C:\"], Assert.Single(traversePaths).AllAppliedPaths);
+    }
+
+    [Fact]
+    public void TrackPath_DuplicatePathWithEquivalentAppliedPaths_ReturnsFalse()
+    {
+        var traversePaths = new List<GrantedPathEntry>
+        {
+            new() { Path = @"C:\Foo\Bar", IsTraverseOnly = true, AllAppliedPaths = [@"C:\Foo\Bar", @"C:\Foo"] }
+        };
+
+        var result = TraversePathsHelper.TrackPath(
+            traversePaths,
+            @"C:\Foo\Bar",
+            [@"c:\foo\bar", @"c:\foo"]);
+
+        Assert.False(result);
+        Assert.Equal([@"C:\Foo\Bar", @"C:\Foo"], Assert.Single(traversePaths).AllAppliedPaths);
     }
 
     [Fact]
@@ -88,17 +97,46 @@ public class TraversePathsHelperTests
     {
         var traversePaths = new List<GrantedPathEntry>
         {
-            new() { Path = @"C:\Foo\Bar", IsTraverseOnly = true, SourceSids = null }
+            new() { Path = @"C:\Foo\Bar", IsTraverseOnly = true, AllAppliedPaths = [@"C:\Old"], SourceSids = null }
         };
 
         var changed = TraversePathsHelper.TrackPath(
             traversePaths,
             @"C:\Foo\Bar",
-            [],
+            [@"C:\Foo\Bar", @"C:\Foo"],
             trackedSourceSid: "S-1-15-2-99-1-2-3-4-5-6");
 
         Assert.False(changed);
-        Assert.Null(Assert.Single(traversePaths).SourceSids);
+        var entry = Assert.Single(traversePaths);
+        Assert.Null(entry.SourceSids);
+        Assert.Equal([@"C:\Old"], entry.AllAppliedPaths);
+    }
+
+    [Fact]
+    public void TrackPath_TrackedSourceSid_ExistingTrackedEntryRefreshesAppliedPaths()
+    {
+        const string containerSid = "S-1-15-2-99-1-2-3-4-5-6";
+        var traversePaths = new List<GrantedPathEntry>
+        {
+            new()
+            {
+                Path = @"C:\Foo\Bar",
+                IsTraverseOnly = true,
+                AllAppliedPaths = [@"C:\Old"],
+                SourceSids = [containerSid]
+            }
+        };
+
+        var changed = TraversePathsHelper.TrackPath(
+            traversePaths,
+            @"C:\Foo\Bar",
+            [@"C:\Foo\Bar", @"C:\Foo"],
+            trackedSourceSid: containerSid);
+
+        Assert.True(changed);
+        var entry = Assert.Single(traversePaths);
+        Assert.Equal([@"C:\Foo\Bar", @"C:\Foo"], entry.AllAppliedPaths);
+        Assert.Equal([containerSid], entry.SourceSids);
     }
 
     // --- CollectAncestorPaths ---
@@ -167,56 +205,7 @@ public class TraversePathsHelperTests
         Assert.NotNull(db.GetAccount(TestSid));
     }
 
-    [Fact]
-    public void GetOrCreateTraversePaths_ExistingEntry_ReturnsSameList()
-    {
-        var db = new AppDatabase();
-        var first = TraversePathsHelper.GetOrCreateTraversePaths(db, TestSid);
-        first.Add(new GrantedPathEntry { Path = @"C:\Foo", IsTraverseOnly = true });
-
-        var second = TraversePathsHelper.GetOrCreateTraversePaths(db, TestSid);
-
-        Assert.Same(first, second);
-        Assert.Single(second);
-    }
-
-    [Fact]
-    public void GetOrCreateTraversePaths_DifferentSids_IndependentLists()
-    {
-        var db = new AppDatabase();
-
-        var entries1 = TraversePathsHelper.GetOrCreateTraversePaths(db, TestSid);
-        var entries2 = TraversePathsHelper.GetOrCreateTraversePaths(db, OtherSid);
-
-        Assert.NotSame(entries1, entries2);
-    }
-
     // --- GetTraversePaths ---
-
-    [Fact]
-    public void GetTraversePaths_MissingSid_ReturnsEmptyList()
-    {
-        var db = new AppDatabase();
-
-        var result = TraversePathsHelper.GetTraversePaths(db, TestSid);
-
-        Assert.Empty(result);
-    }
-
-    [Fact]
-    public void GetTraversePaths_ExistingSid_ReturnsEntries()
-    {
-        var db = new AppDatabase();
-        var expected = new List<GrantedPathEntry>
-        {
-            new() { Path = @"C:\Foo", IsTraverseOnly = true }
-        };
-        db.GetOrCreateAccount(TestSid).Grants = expected;
-
-        var result = TraversePathsHelper.GetTraversePaths(db, TestSid);
-
-        Assert.Same(expected, result);
-    }
 
     [Fact]
     public void GetTraversePaths_MissingSid_DoesNotMutateAccounts()

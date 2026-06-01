@@ -11,7 +11,7 @@ namespace RunFence.Account.UI;
 public class AccountMenuStateConfigurator(
     IWindowsAccountQueryService windowsAccountQueryService,
     ISessionProvider sessionProvider,
-    AccountToolResolver toolResolver,
+    IWindowsTerminalAccountStateService windowsTerminalAccountStateService,
     IPackageInstallService packageInstallService)
 {
     public void ConfigureMenuState(
@@ -66,7 +66,8 @@ public class AccountMenuStateConfigurator(
 
         i.EditSubmenu.Enabled = !isUnavailable;
 
-        var useWindowsTerminal = canLaunch && !toolResolver.ResolveTerminalExe(accountRow.Sid).Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
+        var useWindowsTerminal = canLaunch &&
+                                 !windowsTerminalAccountStateService.ResolveLaunchTarget(accountRow.Sid).Equals("cmd.exe", StringComparison.OrdinalIgnoreCase);
         i.ManageSeparator.Visible = true;
         i.ManageSubmenu.Visible = true;
         i.ManageSubmenu.Enabled = !isUnavailable;

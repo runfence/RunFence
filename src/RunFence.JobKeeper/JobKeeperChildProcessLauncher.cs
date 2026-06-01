@@ -62,7 +62,7 @@ public sealed class JobKeeperChildProcessLauncher(
                 {
                     nativeProcessApi.CloseHandle(processInfo.ThreadHandle);
                     childProcessRegistry.Register(processInfo.ProcessHandle);
-                    return new JobKeeperLaunchResponse((int)processInfo.ProcessId, 0);
+                    return new JobKeeperLaunchResponse((int)processInfo.ProcessId, 0, processInfo.ProcessHandle.ToInt64());
                 }
 
                 error = nativeProcessApi.GetLastWin32Error();
@@ -73,7 +73,7 @@ public sealed class JobKeeperChildProcessLauncher(
 
         nativeProcessApi.CloseHandle(processInfo.ThreadHandle);
         childProcessRegistry.Register(processInfo.ProcessHandle);
-        return new JobKeeperLaunchResponse((int)processInfo.ProcessId, 0);
+        return new JobKeeperLaunchResponse((int)processInfo.ProcessId, 0, processInfo.ProcessHandle.ToInt64());
     }
 
     private bool TryCreateProcess(

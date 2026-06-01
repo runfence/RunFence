@@ -3,6 +3,7 @@ using RunFence.Core;
 using RunFence.Core.Ipc;
 using RunFence.Launch;
 using RunFence.Launcher;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -13,20 +14,16 @@ public class LauncherFolderHandlerUnregisterTests : IDisposable
     private const string ShellWindowsClsidRelativePath =
         @"CLSID\{9BA05972-F6A8-11CF-A442-00A0C90A8F39}";
 
-    private readonly string _testRootPath;
-    private readonly RegistryKey _testRoot;
+    private readonly InMemoryRegistryKey _testRoot;
 
     public LauncherFolderHandlerUnregisterTests()
     {
-        _testRootPath = $@"Software\RunFenceTests\LauncherFolderHandler\{Guid.NewGuid():N}";
-        _testRoot = Registry.CurrentUser.CreateSubKey(_testRootPath)
-            ?? throw new InvalidOperationException("Failed to create test registry root.");
+        _testRoot = InMemoryRegistryKey.CreateRoot("LauncherFolderHandler");
     }
 
     public void Dispose()
     {
         _testRoot.Dispose();
-        Registry.CurrentUser.DeleteSubKeyTree(_testRootPath, throwOnMissingSubKey: false);
     }
 
     [Fact]
@@ -309,31 +306,122 @@ public class LauncherFolderHandlerUnregisterTests : IDisposable
             $@"{ClassesRootRelativePath}\CLSID\{{00000000-0000-0000-0000-000000000001}}\LocalServer32"));
     }
 
+    [Fact]
+    public void Unregister_DisposesOpenedRegistryRoot()
+    {
+        var root = new TrackingRegistryRoot(_testRoot);
+        var handler = new TestLauncherOpenFolderHandler(
+            new RecordingLauncherIpcCommandSender(),
+            new TrackingProcessStarter(),
+            new RecordingNotifier(),
+            root);
+
+        handler.Unregister();
+
+        Assert.True(root.Disposed);
+    }
+
+    [Fact]
+    public void Unregister_DisposesOpenedRegistryRoot_WhenShellNotificationFails()
+    {
+        var root = new TrackingRegistryRoot(_testRoot);
+        var handler = new TestLauncherOpenFolderHandler(
+            new RecordingLauncherIpcCommandSender(),
+            new TrackingProcessStarter(),
+            new RecordingNotifier(),
+            root)
+        {
+            ThrowOnShellNotification = true
+        };
+
+        handler.Unregister();
+
+        Assert.True(root.Disposed);
+    }
+
     private TestLauncherOpenFolderHandler CreateHandler()
     {
         return new TestLauncherOpenFolderHandler(
             new RecordingLauncherIpcCommandSender(),
             new TrackingProcessStarter(),
-            _testRootPath);
+            new RecordingNotifier(),
+            _testRoot);
     }
 
     private sealed class TestLauncherOpenFolderHandler : OpenFolderHandler
     {
-        private readonly string _rootPath;
+        private readonly IRegistryKey _root;
 
         public TestLauncherOpenFolderHandler(
             ILauncherIpcCommandSender sender,
             ILauncherProcessStarter starter,
-            string rootPath)
-            : base(sender, starter)
+            ILauncherUserNotifier notifier,
+            IRegistryKey root)
+            : base(sender, starter, notifier)
         {
-            _rootPath = rootPath;
+            _root = root;
         }
+
+        public bool ThrowOnShellNotification { get; init; }
 
         protected override void NotifyShellAssociationsChanged()
         {
+            if (ThrowOnShellNotification)
+                throw new InvalidOperationException("launcher test failure");
         }
 
-        protected override string GetClassesRootPath() => $@"{_rootPath}\{ClassesRootRelativePath}";
+        protected override IRegistryKey OpenRegistryRoot() => _root;
+
+        protected override string GetClassesRootPath() => ClassesRootRelativePath;
+    }
+
+    private sealed class TrackingRegistryRoot(IRegistryKey inner) : IRegistryKey
+    {
+        public bool Disposed { get; private set; }
+
+        public string Name => inner.Name;
+
+        public int SubKeyCount => inner.SubKeyCount;
+
+        public int ValueCount => inner.ValueCount;
+
+        public IRegistryKey? OpenSubKey(string name, bool writable = false)
+            => inner.OpenSubKey(name, writable);
+
+        public IRegistryKey CreateSubKey(string subkey)
+            => inner.CreateSubKey(subkey);
+
+        public void DeleteSubKey(string subkey, bool throwOnMissingSubKey = true)
+            => inner.DeleteSubKey(subkey, throwOnMissingSubKey);
+
+        public void DeleteSubKeyTree(string subkey, bool throwOnMissingSubKey = true)
+            => inner.DeleteSubKeyTree(subkey, throwOnMissingSubKey);
+
+        public object? GetValue(string? name)
+            => inner.GetValue(name);
+
+        public RegistryValueKind GetValueKind(string? name)
+            => inner.GetValueKind(name);
+
+        public string[] GetValueNames()
+            => inner.GetValueNames();
+
+        public string[] GetSubKeyNames()
+            => inner.GetSubKeyNames();
+
+        public void SetValue(string? name, object value, RegistryValueKind valueKind = RegistryValueKind.String)
+            => inner.SetValue(name, value, valueKind);
+
+        public void DeleteValue(string? name, bool throwOnMissingValue = true)
+            => inner.DeleteValue(name, throwOnMissingValue);
+
+        public void Flush()
+            => inner.Flush();
+
+        public void Dispose()
+        {
+            Disposed = true;
+            inner.Dispose();
+        }
     }
 }

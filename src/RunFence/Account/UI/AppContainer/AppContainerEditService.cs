@@ -15,13 +15,13 @@ public class AppContainerEditService(
     IAppContainerService appContainerService,
     IDatabaseProvider databaseProvider,
     ILoggingService log,
-    IDatabaseService databaseService,
+    IMainConfigPersistence mainConfigPersistence,
     ISessionProvider sessionProvider) : IAppContainerEditService
 {
     private void SaveConfig(AppDatabase database)
     {
         var session = sessionProvider.GetSession();
-        databaseService.SaveConfig(
+        mainConfigPersistence.SaveConfig(
             database,
             session.PinDerivedKey,
             session.CredentialStore.ArgonSalt);

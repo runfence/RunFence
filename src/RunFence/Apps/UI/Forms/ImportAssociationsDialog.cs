@@ -207,12 +207,12 @@ public class ImportAssociationsDialog : RunFence.UI.Forms.ContextHelpForm, IImpo
         }
     }
 
-    private async void OnOkClick(object? sender, EventArgs e)
+    private void OnOkClick(object? sender, EventArgs e)
     {
-        await HandleOkAsync();
+        HandleOk();
     }
 
-    private async Task HandleOkAsync()
+    private void HandleOk()
     {
         if (IsDisposed || Disposing)
             return;
@@ -224,7 +224,7 @@ public class ImportAssociationsDialog : RunFence.UI.Forms.ContextHelpForm, IImpo
         try
         {
             Enabled = false;
-            var result = await _submissionCoordinator.SubmitImportAsync(
+            var result = _submissionCoordinator.SubmitImport(
                 new ImportAssociationsDialogSubmitRequest(SelectedEntries),
                 persistence);
             if (IsDisposed || Disposing)

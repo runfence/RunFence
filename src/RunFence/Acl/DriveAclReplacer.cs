@@ -11,9 +11,12 @@ namespace RunFence.Acl;
 /// and inheritance/propagation flags) for the specified target SID. If the drive owner is one
 /// of those three groups, ownership is transferred to the target SID.
 /// Requires <c>SeBackupPrivilege</c>, <c>SeRestorePrivilege</c>, and
-/// <c>SeTakeOwnershipPrivilege</c> — enabled at startup in <c>Program.cs</c>.
+/// <c>SeTakeOwnershipPrivilege</c> enabled at startup in <c>Program.cs</c>.
 /// </summary>
-public class DriveAclReplacer(IPathGrantService pathGrantService, ILoggingService log)
+public class DriveAclReplacer(
+    IGrantSyncService grantSyncService,
+    ILoggingService log,
+    IPathSecurityDescriptorAccessor aclAccessor)
 {
     private static readonly SecurityIdentifier UsersSid =
         new(WellKnownSidType.BuiltinUsersSid, null);
@@ -32,72 +35,62 @@ public class DriveAclReplacer(IPathGrantService pathGrantService, ILoggingServic
     {
         try
         {
-            var security = new DirectoryInfo(drivePath).GetAccessControl(AccessControlSections.Access | AccessControlSections.Owner);
             var targetIdentity = new SecurityIdentifier(targetSid);
 
-            var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier))
-                .Cast<FileSystemAccessRule>()
-                .ToList();
-
-            // Build a HashSet of existing target-SID rules keyed by (maskedRights, InheritanceFlags, PropagationFlags, AccessControlType)
-            // for O(1) duplicate checks in the loop below.
-            var existingTargetRuleKeys = new HashSet<(FileSystemRights, InheritanceFlags, PropagationFlags, AccessControlType)>(
-                rules
-                    .Where(r => r.IdentityReference.Equals(targetIdentity))
-                    .Select(r => (r.FileSystemRights & FileSystemRights.FullControl, r.InheritanceFlags, r.PropagationFlags, r.AccessControlType)));
-
-            bool changed = false;
-
-            foreach (var rule in rules)
+            aclAccessor.ModifyOwnerAndAclWithFallback(drivePath, security =>
             {
-                if (!IsBroadAccessSid((SecurityIdentifier)rule.IdentityReference))
-                    continue;
+                var rules = security.GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier))
+                    .Cast<FileSystemAccessRule>()
+                    .ToList();
 
-                security.RemoveAccessRuleSpecific(rule);
+                var existingTargetRuleKeys = new HashSet<(FileSystemRights, InheritanceFlags, PropagationFlags, AccessControlType)>(
+                    rules
+                        .Where(r => r.IdentityReference.Equals(targetIdentity))
+                        .Select(r => (r.FileSystemRights & FileSystemRights.FullControl, r.InheritanceFlags, r.PropagationFlags, r.AccessControlType)));
 
-                // Mask out generic-rights bits (GENERIC_READ/WRITE/EXECUTE/ALL = 0xF0000000)
-                // which are not part of the FileSystemRights enum and cause InvalidEnumArgumentException
-                // in the FileSystemAccessRule constructor. Drive root ACEs inherited from older OS
-                // installs or third-party software occasionally carry these non-standard bits.
-                var maskedRights = rule.FileSystemRights & FileSystemRights.FullControl;
+                bool changed = false;
 
-                if (maskedRights == 0)
+                foreach (var rule in rules)
                 {
-                    log.Warn($"DriveAclReplacer: ACE on {drivePath} has no standard FileSystemRights bits (raw: 0x{(int)rule.FileSystemRights:X8}) — removed broad ACE without replacement");
+                    if (!IsBroadAccessSid((SecurityIdentifier)rule.IdentityReference))
+                        continue;
+
+                    security.RemoveAccessRuleSpecific(rule);
+                    var maskedRights = rule.FileSystemRights & FileSystemRights.FullControl;
+
+                    if (maskedRights == 0)
+                    {
+                        log.Warn($"DriveAclReplacer: ACE on {drivePath} has no standard FileSystemRights bits (raw: 0x{(int)rule.FileSystemRights:X8}) - removed broad ACE without replacement");
+                        changed = true;
+                        continue;
+                    }
+
+                    var key = (maskedRights, rule.InheritanceFlags, rule.PropagationFlags, rule.AccessControlType);
+                    if (!existingTargetRuleKeys.Contains(key))
+                    {
+                        security.AddAccessRule(new FileSystemAccessRule(
+                            targetIdentity,
+                            maskedRights,
+                            rule.InheritanceFlags,
+                            rule.PropagationFlags,
+                            rule.AccessControlType));
+                        existingTargetRuleKeys.Add(key);
+                    }
+
                     changed = true;
-                    continue;
                 }
 
-                // Add equivalent ACE for the target SID, unless an identical ACE already exists.
-                var key = (maskedRights, rule.InheritanceFlags, rule.PropagationFlags, rule.AccessControlType);
-                if (!existingTargetRuleKeys.Contains(key))
+                var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+                if (owner != null && IsBroadAccessSid(owner))
                 {
-                    security.AddAccessRule(new FileSystemAccessRule(
-                        targetIdentity,
-                        maskedRights,
-                        rule.InheritanceFlags,
-                        rule.PropagationFlags,
-                        rule.AccessControlType));
-                    existingTargetRuleKeys.Add(key);
+                    security.SetOwner(targetIdentity);
+                    changed = true;
                 }
 
-                changed = true;
-            }
+                return changed;
+            });
 
-            // Transfer ownership if the current owner is one of the broad-access groups.
-            var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-            if (owner != null && IsBroadAccessSid(owner))
-            {
-                security.SetOwner(targetIdentity);
-                changed = true;
-            }
-
-            if (changed)
-                new DirectoryInfo(drivePath).SetAccessControl(security);
-
-            // Sync DB with actual NTFS state — reads back ACEs we (or other code) just wrote.
-            pathGrantService.UpdateFromPath(drivePath, targetSid);
-
+            grantSyncService.UpdateFromPath(drivePath, targetSid);
             return null;
         }
         catch (Exception ex)
@@ -116,8 +109,8 @@ public class DriveAclReplacer(IPathGrantService pathGrantService, ILoggingServic
     {
         try
         {
-            var rules = new DirectoryInfo(drivePath)
-                .GetAccessControl(AccessControlSections.Access)
+            var rules = aclAccessor
+                .GetSecurity(drivePath)
                 .GetAccessRules(includeExplicit: true, includeInherited: false, typeof(SecurityIdentifier));
             return rules.Cast<FileSystemAccessRule>().Any(rule => IsBroadAccessSid((SecurityIdentifier)rule.IdentityReference));
         }

@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using RunFence.Apps.Shortcuts;
+using RunFence.Apps.UI;
+using RunFence.Infrastructure;
 using RunFence.Launching.Resolution;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
@@ -23,6 +25,9 @@ internal class AppPathStep : WizardStepPage
         Action<string, string> setPathAndName,
         IShortcutDiscoveryService discoveryService,
         IShortcutIconHelper iconHelper,
+        IOpenFileDialogAdapterFactory openFileDialogFactory,
+        IFolderBrowserDialogAdapterFactory folderBrowserDialogFactory,
+        IAppDiscoveryDialogService appDiscoveryDialogService,
         IExecutablePathResolver executablePathResolver,
         string? description = null,
         string? initialPath = null,
@@ -30,7 +35,7 @@ internal class AppPathStep : WizardStepPage
     {
         _setPathAndName = setPathAndName;
         _executablePathResolver = executablePathResolver;
-        BuildContent(discoveryService, iconHelper, description, initialPath, initialName);
+        BuildContent(discoveryService, iconHelper, openFileDialogFactory, folderBrowserDialogFactory, appDiscoveryDialogService, description, initialPath, initialName);
     }
 
     public override string StepTitle => "Application";
@@ -58,6 +63,9 @@ internal class AppPathStep : WizardStepPage
     private void BuildContent(
         IShortcutDiscoveryService discoveryService,
         IShortcutIconHelper iconHelper,
+        IOpenFileDialogAdapterFactory openFileDialogFactory,
+        IFolderBrowserDialogAdapterFactory folderBrowserDialogFactory,
+        IAppDiscoveryDialogService appDiscoveryDialogService,
         string? description,
         string? initialPath,
         string? initialName)
@@ -88,7 +96,16 @@ internal class AppPathStep : WizardStepPage
             Padding = new Padding(0, 0, 0, 4)
         };
 
-        _pathBrowseControl = new AppPathBrowseControl(discoveryService, iconHelper);
+        _pathBrowseControl = new AppPathBrowseControl();
+        _pathBrowseControl.Initialize(
+            openFileDialogFactory,
+            folderBrowserDialogFactory,
+            new AppPathBrowseConfiguration(
+                "Select Application",
+                "Executable files (*.exe)|*.exe|All files (*.*)|*.*",
+                initialPath,
+                AppPathBrowseMode.File));
+        _pathBrowseControl.InitializeDiscovery(discoveryService, iconHelper, appDiscoveryDialogService);
         _pathBrowseControl.Font = new Font("Segoe UI", 10);
         _pathBrowseControl.PathChanged += (_, _) => AutoFillAppName();
 

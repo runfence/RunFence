@@ -9,6 +9,7 @@ using RunFence.Launch;
 using RunFence.Launch.Container;
 using RunFence.Launch.Tokens;
 using RunFence.Infrastructure;
+using RunFence.Persistence;
 using RunFence.Tests.Helpers;
 using Xunit;
 
@@ -30,44 +31,6 @@ public class AppContainerServiceTests : IDisposable
         catch
         {
         }
-    }
-
-    [Fact]
-    public void GetContainersRootPath_ReturnsAcUnderProgramData()
-    {
-        var result = AppContainerPaths.GetContainersRootPath();
-
-        Assert.Equal(Path.Combine(PathConstants.ProgramDataDir, "AC"), result);
-    }
-
-    [Theory]
-    [InlineData("ram_browser")]
-    [InlineData("ram_sandbox")]
-    public void GetContainerDataPath_ContainsProfileNameUnderAcRoot(string profileName)
-    {
-        var result = AppContainerPaths.GetContainerDataPath(profileName);
-
-        Assert.EndsWith(@"\AC\" + profileName, result, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public void GetSid_ValidName_ReturnsAppContainerSidFormat()
-    {
-        var service = CreateService();
-
-        var sid = service.GetSid("ram_test_container");
-
-        Assert.StartsWith("S-1-15-2-", sid);
-    }
-
-    [Fact]
-    public void GetContainerDataPath_UsesInjectedPathProvider()
-    {
-        var service = CreateService();
-
-        var path = service.GetContainerDataPath("ram_test");
-
-        Assert.Equal(Path.Combine(_containersRootPath, "ram_test"), path);
     }
 
     [Fact]
@@ -161,6 +124,22 @@ public class AppContainerServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task DeleteProfile_RemovesTrackingJobSidForDeletedContainer()
+    {
+        const string targetSid = "S-1-15-2-99-5-5";
+        var trackingJobStateStore = new Mock<ITrackingJobStateStore>();
+        var sidProvider = new Mock<IAppContainerSidProvider>();
+        sidProvider.Setup(s => s.GetSidString("ram_delete_tracking")).Returns(targetSid);
+        var service = CreateService(
+            sidProvider: sidProvider.Object,
+            trackingJobStateStore: trackingJobStateStore.Object);
+
+        await service.DeleteProfile("ram_delete_tracking");
+
+        trackingJobStateStore.Verify(s => s.RemoveTrackingJobSid(targetSid, false), Times.Once);
+    }
+
+    [Fact]
     public async Task DeleteProfile_NativeDeleteFailure_PreservesRegistryAndData()
     {
         const string targetSid = "S-1-15-2-99-9-9";
@@ -205,12 +184,12 @@ public class AppContainerServiceTests : IDisposable
     [Fact]
     public void RevertTraverseAccess_UsesCachedEntrySidWhenPresent()
     {
-        var pathGrantService = new Mock<IPathGrantService>();
+        var grantAccountCleanupService = new Mock<IGrantAccountCleanupService>();
         var expected = new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: true);
-        pathGrantService.Setup(p => p.RemoveAll("S-1-15-2-99-cached")).Returns(expected);
+        grantAccountCleanupService.Setup(p => p.RemoveAll("S-1-15-2-99-cached")).Returns(expected);
         var sidProvider = new Mock<IAppContainerSidProvider>();
         sidProvider.Setup(s => s.GetSidString("ram_cached_sid")).Returns("S-1-15-2-99-override");
-        var service = CreateService(pathGrantService: pathGrantService.Object, sidProvider: sidProvider.Object);
+        var service = CreateService(grantAccountCleanupService: grantAccountCleanupService.Object, sidProvider: sidProvider.Object);
         var entry = new AppContainerEntry
         {
             Name = "ram_cached_sid",
@@ -219,36 +198,14 @@ public class AppContainerServiceTests : IDisposable
 
         var result = service.RevertTraverseAccess(entry, new AppDatabase());
 
-        pathGrantService.Verify(p => p.RemoveAll(entry.Sid), Times.Once);
+        grantAccountCleanupService.Verify(p => p.RemoveAll(entry.Sid), Times.Once);
         sidProvider.Verify(s => s.GetSidString(It.IsAny<string>()), Times.Never);
         Assert.Equal(expected, result);
     }
 
-    [Fact]
-    public void RevertTraverseAccess_ReturnsRemoveAllWarnings()
-    {
-        var warning = new GrantApplyWarning(
-            GrantApplyFailureStep.PostRemoveAllSave,
-            @"C:\ContainerRoot",
-            null,
-            new InvalidOperationException("save failed"));
-        var expected = new GrantApplyResult(
-            DatabaseModified: true,
-            DurableSaveCompleted: false,
-            Warnings: [warning]);
-        var pathGrantService = new Mock<IPathGrantService>();
-        pathGrantService.Setup(p => p.RemoveAll("S-1-15-2-99-test")).Returns(expected);
-        var sidProvider = new Mock<IAppContainerSidProvider>();
-        sidProvider.Setup(s => s.GetSidString("ram_test")).Returns("S-1-15-2-99-test");
-        var service = CreateService(pathGrantService: pathGrantService.Object, sidProvider: sidProvider.Object);
-
-        var result = service.RevertTraverseAccess(new AppContainerEntry { Name = "ram_test" }, new AppDatabase());
-
-        Assert.Equal(expected, result);
-    }
-
     private AppContainerService CreateService(
-        IPathGrantService? pathGrantService = null,
+        ITraverseService? traverseService = null,
+        IGrantAccountCleanupService? grantAccountCleanupService = null,
         IAppContainerProfileSetup? profileSetup = null,
         IAppContainerDataFolderService? dataFolderService = null,
         IAppContainerComAccessService? comAccessService = null,
@@ -256,13 +213,17 @@ public class AppContainerServiceTests : IDisposable
         IAppContainerSidProvider? sidProvider = null,
         IAppContainerUserRegistryRoot? userRegistryRoot = null,
         IAppContainerPathProvider? pathProvider = null,
+        ITrackingJobStateStore? trackingJobStateStore = null,
         int deleteProfileHResult = 0)
     {
         var log = new Mock<ILoggingService>();
         var explorerProvider = explorerTokenProvider ?? CreateExplorerTokenProvider().Object;
+        var traverse = traverseService ?? new Mock<ITraverseService>().Object;
+        var cleanup = grantAccountCleanupService ?? new Mock<IGrantAccountCleanupService>().Object;
         return new TestAppContainerService(
             log.Object,
-            pathGrantService ?? new Mock<IPathGrantService>().Object,
+            traverse,
+            cleanup,
             profileSetup ?? new Mock<IAppContainerProfileSetup>().Object,
             dataFolderService ?? new Mock<IAppContainerDataFolderService>().Object,
             comAccessService ?? new Mock<IAppContainerComAccessService>().Object,
@@ -270,6 +231,7 @@ public class AppContainerServiceTests : IDisposable
             sidProvider ?? new AppContainerSidProvider(),
             userRegistryRoot ?? AppContainerProviderTestDoubles.CreateUserRegistryRoot(_registry.HkuRoot),
             pathProvider ?? AppContainerProviderTestDoubles.CreatePathProvider(_containersRootPath),
+            trackingJobStateStore,
             deleteProfileHResult);
     }
 
@@ -306,7 +268,8 @@ public class AppContainerServiceTests : IDisposable
 
     private sealed class TestAppContainerService(
         ILoggingService log,
-        IPathGrantService pathGrantService,
+        ITraverseService traverseService,
+        IGrantAccountCleanupService cleanupService,
         IAppContainerProfileSetup profileSetup,
         IAppContainerDataFolderService dataFolderService,
         IAppContainerComAccessService comAccessService,
@@ -314,17 +277,20 @@ public class AppContainerServiceTests : IDisposable
         IAppContainerSidProvider sidProvider,
         IAppContainerUserRegistryRoot userRegistryRoot,
         IAppContainerPathProvider pathProvider,
+        ITrackingJobStateStore? trackingJobStateStore,
         int deleteProfileHResult)
         : AppContainerService(
             log,
-            pathGrantService,
+            traverseService,
+            cleanupService,
             profileSetup,
             dataFolderService,
             comAccessService,
             explorerTokenProvider,
             sidProvider,
             userRegistryRoot,
-            pathProvider)
+            pathProvider,
+            trackingJobStateStore)
     {
         protected override int DeleteAppContainerProfile(string name)
             => deleteProfileHResult;

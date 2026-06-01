@@ -1,6 +1,7 @@
 using Autofac;
 using RunFence.Launch;
 using RunFence.Licensing;
+using RunFence.UI;
 using RunFence.UI.Forms;
 
 namespace RunFence.Startup;
@@ -15,11 +16,13 @@ public class StartupMainFormRunner : IStartupMainFormRunner
 {
     public void Run(ILifetimeScope sessionScope)
     {
-        // Initialize license before MainForm — its constructor reads IsLicensed for the title
+        // Initialize license before MainForm - its constructor reads IsLicensed for the title
         // and About panel. Other init services run later in AppLifecycleStarter.Start().
         sessionScope.Resolve<ILicenseService>().Initialize();
 
         var mainForm = sessionScope.Resolve<MainForm>();
+        var uiContext = sessionScope.Resolve<MainUiThreadContext>();
+        uiContext.Bind(mainForm);
         var lifecycleStarter = sessionScope.Resolve<AppLifecycleStarter>();
         var folderHandlerService = sessionScope.Resolve<IFolderHandlerService>();
 

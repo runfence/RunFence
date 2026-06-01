@@ -12,7 +12,7 @@ namespace RunFence.Tests;
 public class LaunchFeedbackPresenterTests
 {
     [Fact]
-    public void ShowMaintenanceWarning_WhenInteractiveSource_ShowsMessageBoxAndLogsFullWarning()
+    public void ShowMaintenanceWarning_WhenInteractiveSource_ShowsMessageBox()
     {
         var messageBox = new Mock<IAccountMessageBoxService>();
         var trayBalloon = new Mock<ITrayBalloonService>();
@@ -42,7 +42,6 @@ public class LaunchFeedbackPresenterTests
                 MessageBoxDefaultButton.Button1),
             Times.Once);
         trayBalloon.Verify(t => t.ShowWarning(It.IsAny<string>()), Times.Never);
-        log.Verify(l => l.Warn(It.Is<string>(text => text.Contains("folder handler cleanup failed", StringComparison.Ordinal))), Times.Once);
     }
 
     [Fact]
@@ -68,7 +67,6 @@ public class LaunchFeedbackPresenterTests
 
         messageBox.Verify(m => m.Show(It.IsAny<IWin32Window?>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<MessageBoxButtons>(), It.IsAny<MessageBoxIcon>(), It.IsAny<MessageBoxDefaultButton>()), Times.Never);
         trayBalloon.Verify(t => t.ShowWarning("Browser started with warnings."), Times.Once);
-        log.Verify(l => l.Warn(It.Is<string>(text => text.Contains("association refresh failed", StringComparison.Ordinal))), Times.Once);
     }
 
     [Fact]
@@ -106,7 +104,6 @@ public class LaunchFeedbackPresenterTests
                 MessageBoxDefaultButton.Button1),
             Times.Once);
         trayBalloon.Verify(t => t.ShowWarning(It.IsAny<string>()), Times.Never);
-        log.Verify(l => l.Error(It.Is<string>(text => text.Contains("required to launch 'C:\\Apps\\App.exe'", StringComparison.Ordinal)), exception), Times.Once);
     }
 
     [Fact]

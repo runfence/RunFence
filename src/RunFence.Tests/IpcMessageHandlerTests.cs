@@ -56,7 +56,8 @@ public class IpcMessageHandlerTests
                 It.IsAny<AppEntry>(),
                 It.IsAny<string?>(),
                 It.IsAny<string?>(),
-                It.IsAny<Func<string, string, bool>?>()))
+                It.IsAny<Func<string, string, bool>?>(),
+                It.IsAny<string?>()))
             .Returns(() => new LaunchExecutionResult(LaunchExecutionStatus.ProcessStarted, null));
         _log = new Mock<ILoggingService>();
         _idleMonitor = new Mock<IIdleMonitorService>();
@@ -77,10 +78,16 @@ public class IpcMessageHandlerTests
         var configHandler = new IpcConfigHandler(
             _appState.Object, _appLock.Object, ipcUiInvoker,
             resolvedIdleMonitor, _log.Object, configContext);
+        var unlockRequestFlow = new IpcUnlockRequestFlow(
+            ipcUiInvoker,
+            _elevatedUnlockRequestHandler.Object,
+            _operationUnlockRequestHandler.Object,
+            _showWindowRequestHandler.Object,
+            _log.Object);
         var lifecycleHandler = new IpcLifecycleHandler(
             _appState.Object, _appLock.Object, ipcUiInvoker,
-            _elevatedUnlockRequestHandler.Object, _operationUnlockRequestHandler.Object,
-            _showWindowRequestHandler.Object, _log.Object);
+            unlockRequestFlow,
+            _log.Object);
         var launchFeedbackPresenter = new LaunchFeedbackPresenter(
             _log.Object,
             new Mock<IAccountMessageBoxService>().Object,
@@ -90,9 +97,13 @@ public class IpcMessageHandlerTests
             _appState.Object, _appLock.Object, ipcUiInvoker,
             _orchestrator.Object, authorizer, _sidNameCache.Object,
             resolvedIdleMonitor, launchFeedbackPresenter, runAsFlowHandler);
+        var openFolderLeaseReleaser = new Mock<IOpenFolderValidationLeaseReleaser>();
+        openFolderLeaseReleaser
+            .Setup(r => r.ReleaseAfterSuccessfulOpen(It.IsAny<DirectoryValidationHandle>()))
+            .Returns(Task.CompletedTask);
         var openFolderHandler = new IpcOpenFolderHandler(
             _appLock.Object, ipcUiInvoker,
-            null, _log.Object, new ShellFolderOpener());
+            null, _log.Object, new ShellFolderOpener(), openFolderLeaseReleaser.Object);
         return new IpcMessageHandler(
             _log.Object, configHandler, lifecycleHandler, launchHandler, openFolderHandler, associationHandler);
     }
@@ -159,7 +170,12 @@ public class IpcMessageHandlerTests
         var result = _handler.HandleIpcMessage(message, new IpcCallerContext(@"DOMAIN\User", null, false, true));
 
         Assert.True(result.Success);
-        _orchestrator.Verify(o => o.Launch(app, message.Arguments, message.WorkingDirectory, It.IsAny<Func<string, string, bool>?>()), Times.Once);
+        _orchestrator.Verify(o => o.Launch(
+            app,
+            message.Arguments,
+            message.WorkingDirectory,
+            It.IsAny<Func<string, string, bool>?>(),
+            It.IsAny<string?>()), Times.Once);
     }
 
     [Fact]
@@ -218,19 +234,6 @@ public class IpcMessageHandlerTests
 
         Assert.False(result.Success);
         Assert.Equal("Unknown command: FooBar", result.ErrorMessage);
-    }
-
-    [Fact]
-    public void Launch_NullArguments_PassesNullToOrchestrator()
-    {
-        var app = new AppEntry { Id = "app01", Name = "TestApp" };
-        _database.Apps.Add(app);
-
-        var message = new IpcMessage { Command = IpcCommands.Launch, AppId = "app01", Arguments = null };
-
-        _handler.HandleIpcMessage(message, new IpcCallerContext(@"DOMAIN\User", null, false, true));
-
-        _orchestrator.Verify(o => o.Launch(app, null, null, It.IsAny<Func<string, string, bool>?>()), Times.Once);
     }
 
     // --- Shutdown command tests ---
@@ -424,7 +427,12 @@ public class IpcMessageHandlerTests
         _database.Apps.Add(app);
 
         _orchestrator
-            .Setup(o => o.Launch(app, It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<Func<string, string, bool>?>()))
+            .Setup(o => o.Launch(
+                app,
+                It.IsAny<string?>(),
+                It.IsAny<string?>(),
+                It.IsAny<Func<string, string, bool>?>(),
+                It.IsAny<string?>()))
             .Throws(new Win32Exception(ProcessLaunchNative.Win32ErrorLogonFailure));
 
         var message = new IpcMessage { Command = IpcCommands.Launch, AppId = "app01" };
@@ -433,6 +441,31 @@ public class IpcMessageHandlerTests
 
         Assert.True(result.Success);
         _log.Verify(l => l.Error(It.Is<string>(s => s.Contains("credentials are incorrect")), It.IsAny<Exception>()), Times.Once);
+    }
+
+    [Fact]
+    public void Launch_CanceledGrantPrompt_ReturnsSuccessWithoutFailureFeedback()
+    {
+        var app = new AppEntry { Id = "app01", Name = "TestApp" };
+        _database.Apps.Add(app);
+
+        _orchestrator
+            .Setup(o => o.Launch(
+                app,
+                It.IsAny<string?>(),
+                It.IsAny<string?>(),
+                It.IsAny<Func<string, string, bool>?>(),
+                It.IsAny<string?>()))
+            .Throws(new OperationCanceledException("User canceled launch access grant."));
+
+        var message = new IpcMessage { Command = IpcCommands.Launch, AppId = "app01" };
+
+        var result = _handler.HandleIpcMessage(message, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        Assert.True(result.Success);
+        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Never);
+        _trayBalloon.Verify(t => t.ShowWarning(It.IsAny<string>()), Times.Never);
+        _idleMonitor.Verify(m => m.ResetIdleTimer(), Times.Never);
     }
 
     // --- Idle monitor integration ---
@@ -480,7 +513,12 @@ public class IpcMessageHandlerTests
 
         Assert.False(result.Success);
         Assert.Equal("Busy.", result.ErrorMessage);
-        _orchestrator.Verify(o => o.Launch(It.IsAny<AppEntry>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<Func<string, string, bool>?>()), Times.Never);
+        _orchestrator.Verify(o => o.Launch(
+            It.IsAny<AppEntry>(),
+            It.IsAny<string?>(),
+            It.IsAny<string?>(),
+            It.IsAny<Func<string, string, bool>?>(),
+            It.IsAny<string?>()), Times.Never);
     }
 
     // --- T-5: IsModalOpen/IsOperationInProgress guards on config operations ---
@@ -1107,6 +1145,37 @@ public class IpcMessageHandlerTests
         Assert.False(result.Success);
         Assert.Equal("Launch failed: InvalidOperationException", result.ErrorMessage);
         _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
+    }
+
+    [Fact]
+    public void HandleAssociation_CanceledGrantPrompt_ReturnsSuccessWithoutFallbackOrFailure()
+    {
+        var app = new AppEntry { Id = "browser01", Name = "RunFence Browser" };
+        _database.Apps.Add(app);
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer.Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(), It.IsAny<string?>(), app, _database, It.IsAny<bool>()))
+            .Returns(true);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService.Setup(s => s.GetAllHandlerMappings(_database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>> { ["https"] = [new HandlerMappingEntry("browser01")] });
+
+        _orchestrator
+            .Setup(o => o.Launch(app, It.IsAny<string?>(), It.IsAny<string?>(),
+                It.IsAny<Func<string, string, bool>?>(), It.IsAny<string?>()))
+            .Throws(new OperationCanceledException("User canceled launch access grant."));
+
+        var handler = CreateAssociationHandler(authorizer, handlerMappingService);
+        var msg = new IpcMessage { Command = IpcCommands.HandleAssociation, Association = "https" };
+
+        var result = handler.HandleAssociation(msg, new IpcCallerContext(@"DOMAIN\User", null, false, true));
+
+        Assert.True(result.Success);
+        Assert.Null(result.WarningMessage);
+        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Never);
+        _idleMonitor.Verify(m => m.ResetIdleTimer(), Times.Never);
     }
 
     [Fact]

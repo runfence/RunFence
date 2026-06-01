@@ -43,7 +43,7 @@ public class RunAsCredentialPersisterTests : IDisposable
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }
@@ -53,41 +53,13 @@ public class RunAsCredentialPersisterTests : IDisposable
             _appState.Object,
             CreateSession(),
             new ByteArrayCredentialEncryptionSpanAdapter(_encryptionService.Object),
-            _databaseService.Object, _log.Object);
+            _databaseService.Object,
+            _databaseService.Object,
+            _log.Object);
 
     // ── Constructor — initial state from database ─────────────────────────
 
-    [Fact]
-    public void Constructor_InitializesFromDatabaseSettings()
-    {
-        // Arrange
-        _database.Settings.LastUsedRunAsAccountSid = AccountSid;
-        _database.Settings.LastUsedRunAsContainerName = ContainerName;
-
-        // Act
-        var persister = CreatePersister();
-
-        // Assert: persister reflects stored settings
-        Assert.Equal(AccountSid, persister.LastUsedRunAsAccountSid);
-        Assert.Equal(ContainerName, persister.LastUsedRunAsContainerName);
-    }
-
     // ── SetLastUsedAccount ────────────────────────────────────────────────
-
-    [Fact]
-    public void SetLastUsedAccount_UpdatesAccountSidAndClearsContainer()
-    {
-        // Arrange
-        _database.Settings.LastUsedRunAsContainerName = ContainerName;
-        var persister = CreatePersister();
-
-        // Act
-        persister.SetLastUsedAccount(AccountSid);
-
-        // Assert
-        Assert.Equal(AccountSid, persister.LastUsedRunAsAccountSid);
-        Assert.Null(persister.LastUsedRunAsContainerName);
-    }
 
     [Fact]
     public void SetLastUsedAccount_PersistsToDatabase()
@@ -120,21 +92,6 @@ public class RunAsCredentialPersisterTests : IDisposable
     }
 
     // ── SetLastUsedContainer ──────────────────────────────────────────────
-
-    [Fact]
-    public void SetLastUsedContainer_UpdatesContainerAndClearsAccountSid()
-    {
-        // Arrange
-        _database.Settings.LastUsedRunAsAccountSid = AccountSid;
-        var persister = CreatePersister();
-
-        // Act
-        persister.SetLastUsedContainer(ContainerName);
-
-        // Assert
-        Assert.Equal(ContainerName, persister.LastUsedRunAsContainerName);
-        Assert.Null(persister.LastUsedRunAsAccountSid);
-    }
 
     [Fact]
     public void SetLastUsedContainer_PersistsToDatabase()
@@ -280,7 +237,6 @@ public class RunAsCredentialPersisterTests : IDisposable
         persister.TrySaveRememberedPassword(result);
 
         // Assert: warning logged, no credential added
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("remember"))), Times.Once);
         Assert.Empty(_credentialStore.Credentials);
     }
 
@@ -297,11 +253,12 @@ public class RunAsCredentialPersisterTests : IDisposable
 {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(roundTripPinKey);
+        }.WithClonedPinDerivedKey(roundTripPinKey);
         var persister = new RunAsCredentialPersister(
             _appState.Object,
             session,
             encryptionService,
+            _databaseService.Object,
             _databaseService.Object,
             _log.Object);
 

@@ -13,6 +13,7 @@ public sealed class JobKeeperService(
     IJobKeeperProcessVerifier processVerifier,
     IJobKeeperRegistry registry,
     IJobKeeperProcessTerminator processTerminator,
+    IJobObjectApi jobObjectApi,
     TimeSpan waitForConnectionTimeout) : IJobKeeperService
 {
     public bool HasJobKeeper(string sid, bool isLow) => registry.Has(sid, isLow);
@@ -21,7 +22,8 @@ public sealed class JobKeeperService(
         JobKeeperInstanceIdentity identity,
         NamedPipeServerStream pipeServer,
         int expectedPid,
-        SecurityIdentifier targetUserSid)
+        SecurityIdentifier targetUserSid,
+        IntPtr keeperProcessHandle)
     {
         try
         {
@@ -45,10 +47,18 @@ public sealed class JobKeeperService(
             var verifiedPid = verification.ProcessId;
             identityStore.UpdateLastVerifiedPid(identity, verifiedPid);
             log.Info($"JobKeeper: registered keeper PID={verifiedPid} for {identity.TargetSid} ({identity.ExpectedMode})");
+            var registryProcessHandle = DuplicateKeeperProcessHandle(keeperProcessHandle);
+            if (keeperProcessHandle != IntPtr.Zero && registryProcessHandle == IntPtr.Zero)
+            {
+                log.Warn($"JobKeeper: failed to duplicate keeper process handle for {identity.TargetSid} ({identity.ExpectedMode})");
+                pipeServer.Dispose();
+                KillExpectedKeeper(expectedPid);
+                return 0;
+            }
             registry.Register(
                 identity.TargetSid,
                 identity.ExpectedMode == JobKeeperIntegrityMode.LowIntegrity,
-                new JobKeeperState(pipeServer, verifiedPid));
+                new JobKeeperState(pipeServer, verifiedPid) { ProcessHandle = registryProcessHandle });
             return verifiedPid;
         }
         catch (Exception ex)
@@ -101,12 +111,6 @@ public sealed class JobKeeperService(
         if (keeperPid == null)
             return RejectPersistedIdentity(sid, isLow, "no matching keeper process was found");
 
-        if (identity.LastVerifiedKeeperPid > 0 && identity.LastVerifiedKeeperPid != keeperPid.Value)
-        {
-            processTerminator.Kill(keeperPid.Value);
-            return RejectPersistedIdentity(sid, isLow, "matching keeper process did not have the persisted PID");
-        }
-
         log.Info($"JobKeeper: found existing keeper PID={keeperPid} for {sid} (isLow={isLow}), reconnecting");
         NamedPipeServerStream pipeServer;
         try
@@ -120,7 +124,7 @@ public sealed class JobKeeperService(
             return RejectPersistedIdentity(sid, isLow, "reconnect pipe creation failed");
         }
 
-        var connectedPid = WaitAndRegisterJobKeeper(identity, pipeServer, keeperPid.Value, targetUserSid);
+        var connectedPid = WaitAndRegisterJobKeeper(identity, pipeServer, keeperPid.Value, targetUserSid, IntPtr.Zero);
         if (connectedPid <= 0)
             return RejectPersistedIdentity(sid, isLow, "existing keeper failed verification or reconnect");
 
@@ -140,5 +144,20 @@ public sealed class JobKeeperService(
     {
         if (expectedPid > 0)
             processTerminator.Kill(expectedPid);
+    }
+
+    private IntPtr DuplicateKeeperProcessHandle(IntPtr keeperProcessHandle)
+    {
+        if (keeperProcessHandle == IntPtr.Zero)
+            return IntPtr.Zero;
+
+        return jobObjectApi.DuplicateHandleToProcess(
+            ProcessNative.GetCurrentProcess(),
+            keeperProcessHandle,
+            ProcessNative.GetCurrentProcess(),
+            ProcessNative.ProcessDuplicateHandle | ProcessNative.ProcessQueryLimitedInformation,
+            out var duplicatedHandle)
+            ? duplicatedHandle
+            : IntPtr.Zero;
     }
 }

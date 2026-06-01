@@ -7,4 +7,6 @@ public sealed record ProcessExecutionRequest(
     bool KillEntireProcessTreeOnTimeout,
     bool RedirectStandardOutput,
     bool RedirectStandardError,
-    CancellationToken CancellationToken);
+    CancellationToken CancellationToken,
+    bool UseShellExecute = false,
+    System.Diagnostics.ProcessWindowStyle WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden);

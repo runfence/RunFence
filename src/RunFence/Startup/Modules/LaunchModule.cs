@@ -23,6 +23,12 @@ public class LaunchModule : Module
         builder.RegisterType<MessageBoxProfileRepairPrompt>()
             .As<IProfileRepairPrompt>()
             .SingleInstance();
+        builder.RegisterType<RegistryProfileCorruptionDetector>()
+            .As<IProfileCorruptionDetector>()
+            .SingleInstance();
+        builder.RegisterType<ProfileRegistryRepairer>()
+            .As<IProfileRegistryRepairer>()
+            .SingleInstance();
         builder.RegisterType<RunFenceRestartService>()
             .As<IRunFenceRestartService>()
             .SingleInstance();
@@ -50,8 +56,9 @@ public class LaunchModule : Module
         builder.RegisterType<ElevatedLinkedTokenProvider>().As<IElevatedLinkedTokenProvider>().SingleInstance();
         builder.RegisterType<SaferDeElevationHelper>().As<ISaferDeElevationHelper>().SingleInstance();
         builder.RegisterType<TokenIntegrityLevelService>().As<ITokenIntegrityLevelService>().SingleInstance();
+        builder.RegisterType<TokenPrivilegeStateReader>().As<ITokenPrivilegeStateReader>().SingleInstance();
         builder.RegisterType<DefaultDesktopProfileKeeperBootstrapContext>().As<IProfileKeeperBootstrapContext>().SingleInstance();
-        builder.RegisterType<RestrictedProcessControl>().As<IRestrictedProcessControl>().SingleInstance();
+        builder.RegisterType<ProcessControl>().As<IProcessControl>().SingleInstance();
         builder.RegisterType<RestrictedProcessActivationGuard>().AsSelf().SingleInstance();
         builder.RegisterType<JobKeeperLaunchProcessApi>().As<IJobKeeperLaunchProcessApi>().SingleInstance();
         builder.RegisterType<PreparedTokenProcessLauncher>().As<IPreparedTokenProcessLauncher>().SingleInstance();
@@ -71,19 +78,39 @@ public class LaunchModule : Module
             .SingleInstance();
         builder.RegisterType<AppContainerService>().As<IAppContainerService>().As<IAppContainerProfileService>().SingleInstance();
         builder.RegisterType<ProcessLauncher>().As<IProcessLauncher>().SingleInstance();
-        builder.RegisterType<WindowsAppsPackageRegistrationRepairer>().As<IWindowsAppsPackageRegistrationRepairer>().SingleInstance();
-        builder.RegisterType<WindowsAppsRepairProcessLauncher>().As<IWindowsAppsRepairProcessLauncher>().SingleInstance();
-        builder.RegisterType<WindowsAppsRegistrationRepairRunner>().As<IWindowsAppsRegistrationRepairRunner>().SingleInstance();
+        builder.RegisterType<WindowsAppsActivationLauncher>().As<IWindowsAppsActivationLauncher>().SingleInstance();
+        builder.RegisterType<WindowsAppsActivationHelperLauncher>().As<IWindowsAppsActivationHelperLauncher>().SingleInstance();
+        builder.RegisterType<WindowsAppsActivationResultPoller>().As<IWindowsAppsActivationResultPoller>().SingleInstance();
+        builder.RegisterType<WindowsAppsActivationTargetFactory>()
+            .WithParameter(
+                "appxLauncherExePath",
+                Path.Combine(AppContext.BaseDirectory, PathConstants.AppxLauncherExeName))
+            .As<IWindowsAppsActivationTargetFactory>()
+            .SingleInstance();
         builder.RegisterType<LaunchDefaultsResolver>().As<ILaunchDefaultsResolver>().SingleInstance();
         builder.RegisterType<AppEntryLaunchPlanBuilder>().As<IAppEntryLaunchPlanBuilder>().SingleInstance();
         builder.RegisterType<AssociationLaunchResolver>().As<IAssociationLaunchResolver>().SingleInstance();
+        builder.RegisterType<VersionedPathRepairer>().AsSelf().SingleInstance();
         builder.RegisterType<WindowsAppsPackagePathRepairer>().As<IWindowsAppsPackagePathRepairer>().SingleInstance();
         builder.RegisterType<AssociationExecutablePathResolver>().As<IAssociationExecutablePathResolver>().SingleInstance();
-        builder.RegisterType<AssociationRegistryResolver>().AsSelf().SingleInstance();
+        builder.RegisterType<HklmClassesRootProvider>().As<IHklmClassesRootProvider>().SingleInstance();
+        builder.RegisterType<HkuRootProvider>().As<IHkuRootProvider>().SingleInstance();
+        builder.RegisterType<AssociationRegistryProtocolMarkerReader>()
+            .As<IAssociationRegistryProtocolMarkerReader>()
+            .SingleInstance();
+        builder.RegisterType<AssociationRegistryResolver>().As<IAssociationRegistryReader>().SingleInstance();
         builder.RegisterType<AssociationCommandMaterializer>().AsSelf().SingleInstance();
+        builder.RegisterType<AssociationLaunchCandidateResolver>().AsSelf().SingleInstance();
         builder.RegisterType<LaunchHiveLeaseCoordinator>().AsSelf().SingleInstance();
         builder.RegisterType<ShortcutTargetResolver>().AsSelf().SingleInstance();
         builder.RegisterType<LaunchTargetResolver>().As<ILaunchTargetResolver>().SingleInstance();
+        builder.Register(ctx =>
+            {
+                var sessionProvider = ctx.Resolve<SessionProvider>();
+                return new Func<RunFence.Persistence.ITrackingJobStateStore>(() =>
+                    sessionProvider.GetSessionScope().Resolve<RunFence.Persistence.ITrackingJobStateStore>());
+            })
+            .SingleInstance();
         builder.Register(ctx =>
             {
                 var sessionProvider = ctx.Resolve<SessionProvider>();
@@ -92,31 +119,33 @@ public class LaunchModule : Module
             .SingleInstance();
         builder.RegisterType<LaunchAccessManager>().As<ILaunchAccessManager>().SingleInstance();
         builder.RegisterType<LaunchFacade>().As<ILaunchFacade>().AsSelf().SingleInstance();
-        builder.RegisterType<AppEntryLauncher>().As<IAppEntryLauncher>().AsSelf().SingleInstance();
+        builder.RegisterType<AppEntryLauncher>().As<IAppEntryLaunchExecutor>().AsSelf().SingleInstance();
         builder.RegisterType<CredentialDecryptionService>().As<ICredentialDecryptionService>().SingleInstance();
         builder.RegisterType<LaunchCredentialsLookup>().As<ILaunchCredentialsLookup>().SingleInstance();
         builder.RegisterType<IpcCallerAuthorizer>().As<IIpcCallerAuthorizer>().SingleInstance();
         builder.RegisterType<FolderHandlerSidLockProvider>().SingleInstance();
-        builder.RegisterType<FolderHandlerRegistryStore>().SingleInstance();
+        builder.RegisterType<FolderHandlerSidPolicy>().SingleInstance();
+        builder.RegisterType<FolderHandlerTrackedSidState>().SingleInstance();
+        builder.RegisterType<FolderHandlerCleanupSidSnapshotProvider>().SingleInstance();
+        builder.RegisterType<FolderHandlerRegistrationAccessService>().SingleInstance();
+        builder.RegisterType<FolderHandlerRegistrationChangeTracker>().InstancePerDependency();
+        builder.RegisterType<FolderHandlerRunOnceMaintenance>().SingleInstance();
+        builder.RegisterType<FolderHandlerRegistrationRollbackWriter>().SingleInstance();
+        builder.RegisterType<FolderHandlerRegistrationWriter>().SingleInstance();
+        builder.RegisterType<FolderHandlerCleanupService>().SingleInstance();
         builder.RegisterType<FolderHandlerRegistrationRollback>().SingleInstance();
+        builder.RegisterType<FolderHandlerRegistrationWorkflow>().SingleInstance();
+        builder.RegisterType<FolderHandlerCleanupWorkflow>().SingleInstance();
         builder.RegisterType<FolderHandlerService>().As<IFolderHandlerService>().SingleInstance();
-        builder.RegisterType<AssociationRegistryWriter>().AsSelf().SingleInstance();
-        builder.RegisterType<AssociationFallbackRegistry>()
-            .AsSelf()
-            .InstancePerDependency();
-        builder.RegisterType<AssociationFallbackRegistry>()
-            .WithParameter("usersRoot", Registry.Users)
+        builder.RegisterType<AssociationRegistryWriter>().As<IAssociationRegistryWriter>().SingleInstance();
+        builder.Register(_ => new AssociationFallbackRegistry(new WindowsRegistryKey(Registry.Users)))
             .As<IAssociationFallbackRegistry>()
             .InstancePerDependency();
         builder.RegisterType<AssociationFallbackRestoreService>().AsSelf().InstancePerDependency();
-        builder.Register(context =>
-            {
-                var scope = context.Resolve<ILifetimeScope>();
-                return new Func<RegistryKey, AssociationFallbackRegistry>(
-                    usersRoot => scope.Resolve<AssociationFallbackRegistry>(
-                        new NamedParameter("usersRoot", usersRoot)));
-            })
-            .As<Func<RegistryKey, AssociationFallbackRegistry>>();
+        builder.Register(_ =>
+            new Func<IRegistryKey, AssociationFallbackRegistry>(
+                usersRoot => new AssociationFallbackRegistry(usersRoot)))
+            .As<Func<IRegistryKey, AssociationFallbackRegistry>>();
         builder.Register(context =>
             {
                 var scope = context.Resolve<ILifetimeScope>();

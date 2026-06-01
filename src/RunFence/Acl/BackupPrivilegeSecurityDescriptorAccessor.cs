@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
+using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 using RunFence.Infrastructure;
 
@@ -29,7 +30,25 @@ public class BackupPrivilegeSecurityDescriptorAccessor(IBackupPrivilegeSecurityN
         }
     }
 
+    public FileSystemSecurity ReadOwnerAndDacl(SafeFileHandle handle, bool isDirectory)
+    {
+        return ReadSecurityFromHandle(
+            handle.DangerousGetHandle(),
+            FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION |
+            FileSecurityNative.SECURITY_INFORMATION.OWNER_SECURITY_INFORMATION,
+            isDirectory);
+    }
+
     public void ModifyDacl(string path, bool isDirectory, Action<FileSystemSecurity> modifier)
+    {
+        ModifyDacl(path, isDirectory, security =>
+        {
+            modifier(security);
+            return true;
+        });
+    }
+
+    public bool ModifyDacl(string path, bool isDirectory, Func<FileSystemSecurity, bool> modifier)
     {
         IntPtr handle = OpenHandle(path, FileSecurityNative.READ_CONTROL | FileSecurityNative.WRITE_DAC);
         try
@@ -38,7 +57,29 @@ public class BackupPrivilegeSecurityDescriptorAccessor(IBackupPrivilegeSecurityN
                 handle,
                 FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION,
                 isDirectory);
-            modifier(security);
+            if (!modifier(security))
+            {
+                return false;
+            }
+
+            WriteSecurityInfo(
+                handle,
+                security,
+                FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION,
+                includeOwner: false);
+            return true;
+        }
+        finally
+        {
+            native.CloseHandle(handle);
+        }
+    }
+
+    public void WriteDaclNonPropagating(string path, FileSystemSecurity security)
+    {
+        IntPtr handle = OpenHandle(path, FileSecurityNative.MAXIMUM_ALLOWED);
+        try
+        {
             WriteSecurityInfo(
                 handle,
                 security,
@@ -49,6 +90,34 @@ public class BackupPrivilegeSecurityDescriptorAccessor(IBackupPrivilegeSecurityN
         {
             native.CloseHandle(handle);
         }
+    }
+
+    public void ModifyDacl(SafeFileHandle handle, bool isDirectory, Action<FileSystemSecurity> modifier)
+    {
+        ModifyDacl(handle, isDirectory, security =>
+        {
+            modifier(security);
+            return true;
+        });
+    }
+
+    public bool ModifyDacl(SafeFileHandle handle, bool isDirectory, Func<FileSystemSecurity, bool> modifier)
+    {
+        var security = ReadSecurityFromHandle(
+            handle.DangerousGetHandle(),
+            FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION,
+            isDirectory);
+        if (!modifier(security))
+        {
+            return false;
+        }
+
+        WriteSecurityInfo(
+            handle.DangerousGetHandle(),
+            security,
+            FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION,
+            includeOwner: false);
+        return true;
     }
 
     public void ModifyOwnerAndDacl(string path, bool isDirectory, Action<FileSystemSecurity> modifier)
@@ -94,6 +163,46 @@ public class BackupPrivilegeSecurityDescriptorAccessor(IBackupPrivilegeSecurityN
         finally
         {
             native.CloseHandle(handle);
+        }
+    }
+
+    public void SetOwner(string path, bool isDirectory, SecurityIdentifier ownerSid)
+    {
+        _ = isDirectory;
+        IntPtr handle = OpenHandle(path, FileSecurityNative.READ_CONTROL | FileSecurityNative.WRITE_OWNER);
+        try
+        {
+            SetOwner(new SafeFileHandle(handle, ownsHandle: false), ownerSid);
+        }
+        finally
+        {
+            native.CloseHandle(handle);
+        }
+    }
+
+    public void SetOwner(SafeFileHandle handle, SecurityIdentifier ownerSid)
+    {
+        byte[] sidBytes = new byte[ownerSid.BinaryLength];
+        ownerSid.GetBinaryForm(sidBytes, 0);
+        var sidHandle = GCHandle.Alloc(sidBytes, GCHandleType.Pinned);
+        try
+        {
+            int error = native.SetSecurityInfo(
+                handle.DangerousGetHandle(),
+                FileSecurityNative.SE_OBJECT_TYPE.SE_FILE_OBJECT,
+                FileSecurityNative.SECURITY_INFORMATION.OWNER_SECURITY_INFORMATION,
+                sidHandle.AddrOfPinnedObject(),
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            if (error != 0)
+            {
+                throw new Win32Exception(error);
+            }
+        }
+        finally
+        {
+            sidHandle.Free();
         }
     }
 

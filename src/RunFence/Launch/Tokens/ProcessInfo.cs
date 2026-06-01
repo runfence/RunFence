@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using RunFence.Infrastructure;
@@ -18,7 +18,7 @@ public sealed class ProcessInfo(ProcessLaunchNative.PROCESS_INFORMATION NativeIn
             return new(default);
         var pid = (uint)process.Id;
         var hProcess = ProcessNative.OpenProcess(
-            ProcessLaunchNative.SYNCHRONIZE | ProcessNative.ProcessQueryLimitedInformation, false, (int)pid);
+            ProcessLaunchNative.SYNCHRONIZE | ProcessNative.ProcessQueryLimitedInformation | ProcessNative.ProcessTerminate, false, (int)pid);
         process.Dispose();
         if (hProcess == IntPtr.Zero)
             return new(default);
@@ -32,6 +32,7 @@ public sealed class ProcessInfo(ProcessLaunchNative.PROCESS_INFORMATION NativeIn
     {
         get
         {
+            ThrowIfDisposed();
             if (NativeInfo.hProcess == IntPtr.Zero)
                 return -1;
 
@@ -45,6 +46,7 @@ public sealed class ProcessInfo(ProcessLaunchNative.PROCESS_INFORMATION NativeIn
     {
         get
         {
+            ThrowIfDisposed();
             if (NativeInfo.hProcess == IntPtr.Zero)
                 return true;
 
@@ -54,12 +56,14 @@ public sealed class ProcessInfo(ProcessLaunchNative.PROCESS_INFORMATION NativeIn
 
     public void Kill(int exitCode = -1)
     {
+        ThrowIfDisposed();
         if (!ProcessLaunchNative.TerminateProcess(NativeInfo.hProcess, (uint)exitCode))
             throw new Win32Exception(Marshal.GetLastWin32Error());
     }
 
     public bool WaitForExit(int timeoutMs)
     {
+        ThrowIfDisposed();
         if (NativeInfo.hProcess == IntPtr.Zero)
             return true;
         return ProcessLaunchNative.WaitForSingleObject(NativeInfo.hProcess, (uint)timeoutMs) == ProcessLaunchNative.WAIT_OBJECT_0;
@@ -77,6 +81,11 @@ public sealed class ProcessInfo(ProcessLaunchNative.PROCESS_INFORMATION NativeIn
         if (NativeInfo.hThread != IntPtr.Zero)
             ProcessNative.CloseHandle(NativeInfo.hThread);
         GC.SuppressFinalize(this);
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
     }
 
     ~ProcessInfo()

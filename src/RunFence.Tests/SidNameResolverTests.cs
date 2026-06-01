@@ -246,21 +246,7 @@ public class SidNameResolverTests
         Assert.Equal(FakeSid, username);
     }
 
-    // --- ResolveDomainAndUsername (CredentialEntry overload) ---
 
-    [Fact]
-    public void ResolveDomainAndUsername_CredentialEntry_CurrentAccount_UsesEnvironmentUsername()
-    {
-        var cred = new CredentialEntry { Sid = FakeSid };
-        // IsCurrentAccount is computed: matches SidResolutionHelper.GetCurrentUserSid().
-        // In tests, running as non-admin non-elevated user, GetCurrentUserSid() won't match FakeSid,
-        // so IsCurrentAccount will be false → fall through to resolver/map chain.
-        // We just verify the overload delegates correctly by checking it returns a consistent result.
-        var (domain, username) = SidNameResolver.ResolveDomainAndUsername(cred, NullResolver(), null);
-        // Either (empty, FakeSid) if not current account, or (empty, Environment.UserName) if it is.
-        Assert.NotNull(username);
-        Assert.NotNull(domain);
-    }
 
     // --- GetDisplayName(CredentialEntry) overload ---
 

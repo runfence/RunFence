@@ -9,7 +9,8 @@ public class AclService(
     IAclDenyModeService denyService,
     IAclAllowModeService allowService,
     ContainerLookupHelper containerLookup,
-    IPathGrantService pathGrantService)
+    IGrantMutatorService grantMutatorService,
+    IAppEntryAclTargetResolver aclTargetResolver)
     : IAclService
 {
     public void ApplyAcl(AppEntry app, IReadOnlyList<AppEntry> allApps)
@@ -50,7 +51,7 @@ public class AclService(
 
         // Deny mode
         var isFolderTarget = app.AclTarget == AclTarget.Folder;
-        var allowedSids = denyService.GetAllowedSidsForPath(targetPath, allApps, isFolderTarget, ResolveAclTargetPath);
+        var allowedSids = denyService.GetAllowedSidsForPath(targetPath, allApps, isFolderTarget);
 
         bool aclChanged = denyService.ApplyDeny(targetPath, isFolderTarget, allowedSids, app.DeniedRights);
 
@@ -131,23 +132,13 @@ public class AclService(
             if (recomputedPaths.Contains(ancestorPath))
                 continue;
 
-            // Check if any other app's exe is under this folder (making it an ancestor)
-            var hasDescendantExe = allApps.Any(a =>
-                a.Id != folderApp.Id &&
-                a is { RestrictAcl: true, IsUrlScheme: false } &&
-                a.AclMode != AclMode.Allow &&
-                AclHelper.PathIsAtOrBelow(AclHelper.NormalizePath(Path.GetFullPath(a.ExePath)), ancestorPath));
-
-            if (!hasDescendantExe)
-                continue;
-
             if (IsBlockedPath(ancestorPath))
             {
                 log.Warn($"Blocked ancestor ACL target path: {ancestorPath}");
                 continue;
             }
 
-            var deniedRightsPerSid = denyService.GetDeniedRightsPerSid(ancestorPath, allApps, isFolderTarget: true, ResolveAclTargetPath);
+            var deniedRightsPerSid = denyService.GetDeniedRightsPerSid(ancestorPath, allApps, isFolderTarget: true);
             if (denyService.ApplyDenyToFolderPerSid(ancestorPath, deniedRightsPerSid))
                 log.Info($"Recomputed ancestor ACL for folder {ancestorPath}");
             recomputedPaths.Add(ancestorPath);
@@ -172,33 +163,7 @@ public class AclService(
     }
 
     public string ResolveAclTargetPath(AppEntry app)
-    {
-        if (app.AclTarget == AclTarget.File)
-            return Path.GetFullPath(app.ExePath);
-
-        var folder = app.IsFolder
-            ? Path.GetFullPath(app.ExePath)
-            : Path.GetDirectoryName(Path.GetFullPath(app.ExePath))!;
-        var cappedDepth = Math.Min(app.FolderAclDepth, PathConstants.MaxFolderAclDepth);
-        for (int i = 0; i < cappedDepth; i++)
-        {
-            var parent = Path.GetDirectoryName(folder);
-            if (parent == null)
-                break;
-            folder = parent;
-        }
-
-        return folder;
-    }
-
-    /// <summary>
-    /// Returns the set of SIDs that are allowed (not denied) for a given path.
-    /// This method exists solely to give tests direct access to <see cref="IAclDenyModeService.GetAllowedSidsForPath"/>;
-    /// it is NOT part of the <see cref="IAclService"/> interface.
-    /// </summary>
-    public HashSet<string> GetAllowedSidsForPath(
-        string targetPath, IReadOnlyList<AppEntry> allApps, bool isFolderTarget)
-        => denyService.GetAllowedSidsForPath(targetPath, allApps, isFolderTarget, ResolveAclTargetPath);
+        => aclTargetResolver.ResolveTargetPath(app);
 
     // --- AppContainer SID helpers ---
 
@@ -206,7 +171,7 @@ public class AclService(
         =>
         TryModifyContainerSid(containerName, targetPath, "grant", sid =>
         {
-            var result = pathGrantService.EnsureAccess(sid, targetPath, FileSystemRights.ReadAndExecute, confirm: null);
+            var result = grantMutatorService.EnsureAccess(sid, targetPath, FileSystemRights.ReadAndExecute, confirm: null);
             LogGrantWarnings("grant", containerName, targetPath, result.Warnings);
             log.Info($"Granted AppContainer SID '{sid}' ReadAndExecute on '{targetPath}'");
         });
@@ -215,7 +180,7 @@ public class AclService(
         =>
         TryModifyContainerSid(containerName, targetPath, "revoke", sid =>
         {
-            var result = pathGrantService.RemoveGrant(sid, targetPath, isDeny: false);
+            var result = grantMutatorService.RemoveGrant(sid, targetPath, isDeny: false);
             LogGrantWarnings("revoke", containerName, targetPath, result.Warnings);
             log.Info($"Revoked AppContainer SID '{sid}' from '{targetPath}'");
         });

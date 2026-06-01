@@ -20,7 +20,7 @@ namespace RunFence.Acl.Traverse;
 /// </summary>
 public class GrantReconciliationService(
     IAclPermissionService aclPermission,
-    ILocalGroupMembershipService localGroupMembership,
+    ILocalGroupQueryService localGroupMembership,
     ILoggingService log,
     ISessionSaver sessionSaver,
     IDatabaseProvider databaseProvider,

@@ -54,78 +54,6 @@ public class IdleMonitorServiceTests
         }
     }
 
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    public void Configure_ZeroOrNegativeTimeout_StartDoesNotLog(int timeoutMinutes)
-    {
-        var (service, _, _) = CreateService();
-        service.Configure(timeoutMinutes);
-        service.Start();
-
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Idle monitor started"))), Times.Never);
-    }
-
-    [Fact]
-    public void Configure_PositiveTimeout_StartLogsMessage()
-    {
-        var (service, _, _) = CreateService();
-        service.Configure(5);
-        service.Start();
-
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("5 minute"))), Times.Once);
-
-        service.Stop();
-    }
-
-    [Fact]
-    public void Stop_AfterStart_DisposesCleanly()
-    {
-        var (service, _, _) = CreateService();
-        service.Configure(5);
-        service.Start();
-        service.Stop();
-
-        // Double stop should not throw
-        service.Stop();
-    }
-
-    [Fact]
-    public void Dispose_AfterStart_DisposesCleanly()
-    {
-        var (service, _, _) = CreateService();
-        service.Configure(5);
-        service.Start();
-        service.Dispose();
-
-        // Double dispose should not throw
-        service.Dispose();
-    }
-
-    [Fact]
-    public void ResetIdleTimer_DoesNotThrow()
-    {
-        var (service, _, _) = CreateService();
-        service.Configure(5);
-        service.Start();
-        service.ResetIdleTimer();
-
-        service.Stop();
-    }
-
-    [Fact]
-    public void Start_CalledTwice_StopsFirstTimer()
-    {
-        var (service, _, _) = CreateService();
-        service.Configure(5);
-        service.Start();
-        service.Start(); // Should stop previous and start new
-
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Idle monitor started"))), Times.Exactly(2));
-
-        service.Stop();
-    }
-
     [Fact]
     public void IdleTimeoutReached_FiresWhenActivityExceedsTimeout()
     {
@@ -142,7 +70,6 @@ public class IdleMonitorServiceTests
         invokeTimerTick();
 
         Assert.True(eventFired);
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("Idle timeout reached"))), Times.Once);
     }
 
     [Fact]

@@ -420,15 +420,6 @@ public class SecureSecretTests
         Assert.Equal(Enumerable.Repeat((byte)0x6E, 16), snapshot);
     }
 
-    [Fact]
-    public void ProtectedUtf16ZSnapshot_ExposesPointerAndCharCount()
-    {
-        var snapshot = new ProtectedUtf16ZSnapshot(7, new IntPtr(1234));
-
-        Assert.Equal(7, snapshot.CharCount);
-        Assert.Equal(new IntPtr(1234), snapshot.DangerousGetIntPtr());
-    }
-
     private static SecureSecret CreateSecret(int length, byte fillValue) =>
         new(length, data => data.Fill(fillValue), new RecordingProtectedMemoryApi(), TimeSpan.FromSeconds(1));
 

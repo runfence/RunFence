@@ -2,10 +2,8 @@ using RunFence.Core;
 using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Account.UI.Forms;
-using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
-using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -27,13 +25,11 @@ internal class ElevatedAppTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
     IAccountCredentialManager credentialManager,
-    WizardAccountPickerStepFactory pickerStepFactory,
+    WizardAccountPickerService pickerStepService,
     WizardCredentialCollector credentialCollector,
     SessionContext session,
     WizardLicenseChecker licenseChecker,
-    IShortcutDiscoveryService discoveryService,
-    IShortcutIconHelper iconHelper,
-    IExecutablePathResolver executablePathResolver)
+    StandardAppWizardStepBuilder stepBuilder)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -41,7 +37,7 @@ internal class ElevatedAppTemplate(
     public string DisplayName => "Elevated App";
     public string Description => "Run an app under a dedicated administrator account with a desktop shortcut.";
     public string IconEmoji => "\U0001F6E0\uFE0F";
-    public Action<IWin32Window>? PostWizardAction => null;
+    public Func<IWin32Window, Task>? PostWizardAction => null;
 
     public void Cleanup() => _data.CollectedPassword?.Dispose();
 
@@ -51,7 +47,7 @@ internal class ElevatedAppTemplate(
         // reused across multiple "Set up another" sessions in a single wizard session).
         _data.Reset();
 
-        var pickerStep = pickerStepFactory.CreatePickerStep(
+        var pickerStep = pickerStepService.CreatePickerStep(
             setSelection: (sid, isCreate) =>
             {
                 _data.SelectedExistingSid = sid;
@@ -60,21 +56,18 @@ internal class ElevatedAppTemplate(
             options: new AccountPickerStepOptions(
                 Credentials: session.CredentialStore.Credentials,
                 SidNames: session.Database.SidNames,
-                GroupSid: GroupFilterHelper.AdministratorsSid,
-                StepTitle: "Select Administrator Account",
-                InfoText: "Select an existing administrator account, or choose \"Create new account\" to add a dedicated one. " +
-                          "Accounts with a green dot have stored credentials; gray dot means you will be prompted for a password."),
+                  GroupSid: GroupFilterHelper.AdministratorsSid,
+                  StepTitle: "Select Administrator Account",
+                  InfoText: "Select an existing administrator account, or choose \"Create new account\" to add a dedicated one. " +
+                            "Accounts with a green dot have stored credentials; gray dot means you will be prompted for a password."),
             followingStepsFactory: isCreate =>
             {
-                var appPathStep = new AppPathStep(
+                var appPathStep = stepBuilder.CreateAppPathStep(
                     (path, name) =>
                     {
                         _data.AppPath = path;
                         _data.AppName = name;
                     },
-                    discoveryService,
-                    iconHelper,
-                    executablePathResolver,
                     description: "Select the application to launch under the administrator account. " +
                                  "A desktop shortcut will be created to run it elevated.");
 
@@ -100,15 +93,12 @@ internal class ElevatedAppTemplate(
                 return Task.CompletedTask;
             });
 
-        var initialAppPathStep = new AppPathStep(
+        var initialAppPathStep = stepBuilder.CreateAppPathStep(
             (path, name) =>
             {
                 _data.AppPath = path;
                 _data.AppName = name;
             },
-            discoveryService,
-            iconHelper,
-            executablePathResolver,
             description: "Select the application to launch under the administrator account. " +
                          "A desktop shortcut will be created to run it elevated.");
 

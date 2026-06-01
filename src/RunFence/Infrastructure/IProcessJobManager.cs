@@ -22,7 +22,7 @@ public interface IProcessJobManager
     /// Returns the union of PIDs in all job objects for <paramref name="sid"/>
     /// (tracking, restricted, and low-integrity), or null if none exist yet.
     /// </summary>
-    HashSet<int>? GetJobMembers(string sid);
+    HashSet<int>? GetJobMembers(string sid, bool reopenTrackingJob);
 
     /// <summary>
     /// Returns the PIDs in the restricted (isLow=false) or low-integrity (isLow=true) job
@@ -30,12 +30,6 @@ public interface IProcessJobManager
     /// Unlike <see cref="GetJobMembers"/>, this checks only the specific job used by the keeper.
     /// </summary>
     HashSet<int>? GetKeeperJobMembers(string sid, bool isLow);
-
-    /// <summary>
-    /// Returns the handle of the restricted or low-integrity job that contains
-    /// <paramref name="pid"/>, or <see cref="IntPtr.Zero"/> if not found.
-    /// </summary>
-    IntPtr TryGetRestrictedJobForPid(int pid);
 
     /// <summary>
     /// Takes ownership of a verified restricted/low-integrity job handle reopened during

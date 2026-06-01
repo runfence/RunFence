@@ -12,7 +12,10 @@ public sealed class WindowsAppsPackagePathRepairer(IBackupIntentFileSystem fileS
 
         string? bestPath = null;
         Version? bestVersion = null;
-        foreach (var packageDirectory in fileSystem.EnumerateDirectories(stalePath.InstallRoot))
+        if (!fileSystem.TryEnumerateDirectories(stalePath.InstallRoot, out var packageDirectories))
+            return null;
+
+        foreach (var packageDirectory in packageDirectories)
         {
             var folderName = Path.GetFileName(packageDirectory.TrimEnd(
                 Path.DirectorySeparatorChar,
@@ -28,7 +31,7 @@ public sealed class WindowsAppsPackagePathRepairer(IBackupIntentFileSystem fileS
             }
 
             var candidatePath = Path.Combine(packageDirectory, stalePath.RelativeExecutablePath);
-            if (!fileSystem.FileExists(candidatePath))
+            if (fileSystem.GetFileState(candidatePath) != BackupIntentPathState.Exists)
                 continue;
 
             if (bestVersion == null || version.CompareTo(bestVersion) > 0)

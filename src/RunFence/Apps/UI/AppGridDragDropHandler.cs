@@ -9,7 +9,8 @@ namespace RunFence.Apps.UI;
 /// ApplicationsPanel grid. Uses pure mouse-event tracking (no OLE DoDragDrop) so the
 /// grid can have AllowDrop=false and receive cross-IL shell file drops via WM_DROPFILES.
 /// </summary>
-public class AppGridDragDropHandler(IAppConfigService appConfigService)
+public class AppGridDragDropHandler(
+    IAppConfigService appConfigService)
 {
     private DataGridView _grid = null!;
     private IApplicationsPanelState _state = null!;

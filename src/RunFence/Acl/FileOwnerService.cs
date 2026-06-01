@@ -8,7 +8,10 @@ namespace RunFence.Acl;
 /// <summary>
 /// Low-level NTFS owner operations for grant-managed paths.
 /// </summary>
-public class FileOwnerService(ILoggingService log, IFileSystemPathInfo pathInfo) : IFileOwnerService
+public class FileOwnerService(
+    ILoggingService log,
+    IFileSystemPathInfo pathInfo,
+    IPathSecurityDescriptorAccessor aclAccessor) : IFileOwnerService
 {
     public void ChangeOwner(string path, string sid, bool recursive)
     {
@@ -28,20 +31,9 @@ public class FileOwnerService(ILoggingService log, IFileSystemPathInfo pathInfo)
 
     private void SetOwnerInternal(string path, SecurityIdentifier ownerSid)
     {
-        if (pathInfo.DirectoryExists(path))
-        {
-            var dirInfo = new DirectoryInfo(path);
-            var security = dirInfo.GetAccessControl(AccessControlSections.Owner);
-            security.SetOwner(ownerSid);
-            dirInfo.SetAccessControl(security);
-        }
-        else
-        {
-            var fileInfo = new FileInfo(path);
-            var security = fileInfo.GetAccessControl(AccessControlSections.Owner);
-            security.SetOwner(ownerSid);
-            fileInfo.SetAccessControl(security);
-        }
+        var security = aclAccessor.GetSecurity(path);
+        security.SetOwner(ownerSid);
+        aclAccessor.SetOwnerAndAclWithFallback(path, security);
     }
 
     private void RecursiveSetOwner(string dirPath, SecurityIdentifier ownerSid)

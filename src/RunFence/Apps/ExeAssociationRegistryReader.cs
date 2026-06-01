@@ -1,21 +1,22 @@
 using Microsoft.Win32;
 using RunFence.Acl.Permissions;
+using RunFence.Core;
 using RunFence.Core.Helpers;
 using RunFence.Infrastructure;
 
 namespace RunFence.Apps;
 
 /// <summary>
-/// Scans the interactive user's HKU and HKLM\Software\Classes to find which associations
-/// an exe handles and what arguments each uses. Results are cached per exe within the
-/// instance's lifetime (one instance per dialog).
+/// Scans the selected app account's loaded HKU hive, the interactive user's HKU, and
+/// HKLM\Software\Classes to find which associations an exe handles and what arguments
+/// each uses. Results are cached within the instance's lifetime (one instance per dialog).
 /// </summary>
 public class ExeAssociationRegistryReader : IExeAssociationRegistryReader
 {
     private readonly IUserHiveManager _hiveManager;
     private readonly IInteractiveUserResolver _interactiveUserResolver;
-    private readonly RegistryKey _hklm;
-    private readonly RegistryKey _hku;
+    private readonly IRegistryKey _hklm;
+    private readonly IRegistryKey _hku;
 
     private readonly Dictionary<string, IReadOnlyList<string>> _handleAssocCache =
         new(StringComparer.OrdinalIgnoreCase);
@@ -25,112 +26,163 @@ public class ExeAssociationRegistryReader : IExeAssociationRegistryReader
     public ExeAssociationRegistryReader(
         IUserHiveManager hiveManager,
         IInteractiveUserResolver interactiveUserResolver,
-        RegistryKey? hklmOverride = null,
-        RegistryKey? hkuOverride = null)
+        IAssociationRegistryProtocolMarkerReader protocolMarkerReader,
+        IRegistryKey? hklmOverride = null,
+        IRegistryKey? hkuOverride = null)
     {
         _hiveManager = hiveManager;
         _interactiveUserResolver = interactiveUserResolver;
-        _hklm = hklmOverride ?? Registry.LocalMachine;
-        _hku = hkuOverride ?? Registry.Users;
+        _protocolMarkerReader = protocolMarkerReader;
+        _hklm = hklmOverride ?? new WindowsRegistryKey(Registry.LocalMachine);
+        _hku = hkuOverride ?? new WindowsRegistryKey(Registry.Users);
     }
+
+    private readonly IAssociationRegistryProtocolMarkerReader _protocolMarkerReader;
 
     private string? GetInteractiveSid() => _interactiveUserResolver.GetInteractiveUserSid();
 
     private static bool IsAppDataPath(string exePath) =>
         exePath.Contains(@"\AppData\", StringComparison.OrdinalIgnoreCase);
 
-    private static string NormalizeCacheKey(string exePath, string key) =>
-        exePath.ToUpperInvariant() + "\0" + key.ToLowerInvariant();
+    private static string NormalizeAssociationCacheKey(string exePath, string? accountSid, bool useLoadedAccountClasses) =>
+        exePath.ToUpperInvariant() + "\0" + (accountSid?.ToUpperInvariant() ?? "") + "\0" + (useLoadedAccountClasses ? "1" : "0");
 
-    /// <remarks>
-    /// Iterates all HKU\{sid}\Software\Classes subkeys, then supplements with HKLM common suggestions.
-    /// Results cached per exe within the instance lifetime (one instance per dialog) — acceptable performance.
-    /// </remarks>
-    public IReadOnlyList<string> GetHandledAssociations(string exePath)
+    private static string NormalizeArgumentsCacheKey(string exePath, string key, string? accountSid, bool useLoadedAccountClasses) =>
+        NormalizeAssociationCacheKey(exePath, accountSid, useLoadedAccountClasses) + "\0" + key.ToLowerInvariant();
+
+    private bool ShouldUseLoadedAccountClasses(string? accountSid, string? interactiveSid)
     {
-        if (_handleAssocCache.TryGetValue(exePath, out var cached))
-            return cached;
-
-        var interactiveSid = GetInteractiveSid();
-        if (interactiveSid == null)
+        if (string.IsNullOrEmpty(accountSid)
+            || string.Equals(accountSid, interactiveSid, StringComparison.OrdinalIgnoreCase)
+            || !_hiveManager.IsHiveLoaded(accountSid))
         {
-            _handleAssocCache[exePath] = [];
-            return [];
+            return false;
         }
 
-        using var hiveHandle = _hiveManager.EnsureHiveLoaded(interactiveSid);
+        return true;
+    }
+
+    private IRegistryKey? OpenLoadedAccountClasses(string? accountSid, bool useLoadedAccountClasses)
+    {
+        if (!useLoadedAccountClasses)
+            return null;
+
+        return _hku.OpenSubKey($@"{accountSid}\Software\Classes");
+    }
+
+    /// <remarks>
+    /// Iterates the selected app account's loaded HKU\{sid}\Software\Classes subkeys, then
+    /// the interactive user's HKU\{sid}\Software\Classes subkeys, then supplements with HKLM
+    /// common suggestions. Results are cached per exe/account pair and loaded-hive state within
+    /// the instance lifetime (one instance per dialog).
+    /// </remarks>
+    public IReadOnlyList<string> GetHandledAssociations(string exePath, string? accountSid = null)
+    {
+        var interactiveSid = GetInteractiveSid();
+        var useLoadedAccountClasses = ShouldUseLoadedAccountClasses(accountSid, interactiveSid);
+        var associationCacheKey = NormalizeAssociationCacheKey(exePath, accountSid, useLoadedAccountClasses);
+        if (_handleAssocCache.TryGetValue(associationCacheKey, out var cached))
+            return cached;
+
+        using var hiveHandle = interactiveSid != null
+            ? _hiveManager.EnsureHiveLoaded(interactiveSid)
+            : null;
 
         var foundKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        using (var hkuClasses = _hku.OpenSubKey($@"{interactiveSid}\Software\Classes"))
-        using (var hklmClasses = _hklm.OpenSubKey(@"Software\Classes"))
+        using var accountClasses = OpenLoadedAccountClasses(accountSid, useLoadedAccountClasses);
+        using var interactiveClasses = interactiveSid != null
+            ? _hku.OpenSubKey($@"{interactiveSid}\Software\Classes")
+            : null;
+        using var hklmClasses = _hklm.OpenSubKey(@"Software\Classes");
+
+        if (accountClasses != null)
         {
-            if (hkuClasses != null)
+            foreach (var keyName in accountClasses.GetSubKeyNames())
             {
-                foreach (var keyName in hkuClasses.GetSubKeyNames())
-                {
-                    var command = ResolveCommandForKey(keyName, hkuClasses, hklmClasses);
-                    if (TryMatchAndCache(exePath, keyName, command))
-                        foundKeys.Add(keyName);
-                }
+                if (foundKeys.Contains(keyName))
+                    continue;
+
+                var command = ResolveCommandForKey(keyName, accountClasses, hklmClasses);
+                if (TryMatchAndCache(exePath, keyName, command, accountSid, useLoadedAccountClasses))
+                    foundKeys.Add(keyName);
             }
+        }
 
-            if (!IsAppDataPath(exePath))
+        if (interactiveClasses != null)
+        {
+            foreach (var keyName in interactiveClasses.GetSubKeyNames())
             {
-                foreach (var keyName in AppHandlerRegistrationService.CommonAssociationSuggestions)
-                {
-                    if (foundKeys.Contains(keyName))
-                        continue;
+                if (foundKeys.Contains(keyName))
+                    continue;
 
-                    var command = ResolveCommandForKey(keyName, null, hklmClasses);
-                    if (TryMatchAndCache(exePath, keyName, command))
-                        foundKeys.Add(keyName);
-                }
+                var command = ResolveCommandForKey(keyName, interactiveClasses, hklmClasses);
+                if (TryMatchAndCache(exePath, keyName, command, accountSid, useLoadedAccountClasses))
+                    foundKeys.Add(keyName);
+            }
+        }
+
+        if (!IsAppDataPath(exePath))
+        {
+            foreach (var keyName in AppHandlerRegistrationService.CommonAssociationSuggestions)
+            {
+                if (foundKeys.Contains(keyName))
+                    continue;
+
+                var command = ResolveCommandForKey(keyName, null, hklmClasses);
+                if (TryMatchAndCache(exePath, keyName, command, accountSid, useLoadedAccountClasses))
+                    foundKeys.Add(keyName);
             }
         }
 
         var result = foundKeys.ToList();
-        _handleAssocCache[exePath] = result;
+        _handleAssocCache[associationCacheKey] = result;
         return result;
     }
 
-    public string? GetNonDefaultArguments(string exePath, string key)
+    public string? GetNonDefaultArguments(string exePath, string key, string? accountSid = null)
     {
-        var cacheKey = NormalizeCacheKey(exePath, key);
+        var interactiveSid = GetInteractiveSid();
+        var useLoadedAccountClasses = ShouldUseLoadedAccountClasses(accountSid, interactiveSid);
+        var cacheKey = NormalizeArgumentsCacheKey(exePath, key, accountSid, useLoadedAccountClasses);
         if (_argsCache.TryGetValue(cacheKey, out var cached))
             return cached;
 
-        // Full scan already done but this key wasn't matched — must be absent.
-        if (_handleAssocCache.ContainsKey(exePath))
+        if (_handleAssocCache.ContainsKey(NormalizeAssociationCacheKey(exePath, accountSid, useLoadedAccountClasses)))
         {
             _argsCache[cacheKey] = null;
             return null;
         }
 
-        var interactiveSid = GetInteractiveSid();
-        if (interactiveSid == null)
-        {
-            _argsCache[cacheKey] = null;
-            return null;
-        }
+        using var hiveHandle = interactiveSid != null
+            ? _hiveManager.EnsureHiveLoaded(interactiveSid)
+            : null;
 
-        using var hiveHandle = _hiveManager.EnsureHiveLoaded(interactiveSid);
+        using var accountClasses = OpenLoadedAccountClasses(accountSid, useLoadedAccountClasses);
+        using var interactiveClasses = interactiveSid != null
+            ? _hku.OpenSubKey($@"{interactiveSid}\Software\Classes")
+            : null;
+        using var hklmClasses = _hklm.OpenSubKey(@"Software\Classes");
 
-        using (var hkuClasses = _hku.OpenSubKey($@"{interactiveSid}\Software\Classes"))
-        using (var hklmClasses = _hklm.OpenSubKey(@"Software\Classes"))
+        if (accountClasses != null)
         {
-            // Try HKU first (with HKLM as ProgId fallback for extension resolution), then HKLM.
-            var hkuCommand = ResolveCommandForKey(key, hkuClasses, hklmClasses);
-            if (hkuCommand != null && TryMatchAndCache(exePath, key, hkuCommand))
+            var accountCommand = ResolveCommandForKey(key, accountClasses, hklmClasses);
+            if (accountCommand != null && TryMatchAndCache(exePath, key, accountCommand, accountSid, useLoadedAccountClasses))
                 return _argsCache[cacheKey];
+        }
 
-            // Try HKLM unless the exe is in AppData
-            if (!IsAppDataPath(exePath))
-            {
-                var hklmCommand = ResolveCommandForKey(key, null, hklmClasses);
-                if (hklmCommand != null && TryMatchAndCache(exePath, key, hklmCommand))
-                    return _argsCache[cacheKey];
-            }
+        if (interactiveClasses != null)
+        {
+            var hkuCommand = ResolveCommandForKey(key, interactiveClasses, hklmClasses);
+            if (hkuCommand != null && TryMatchAndCache(exePath, key, hkuCommand, accountSid, useLoadedAccountClasses))
+                return _argsCache[cacheKey];
+        }
+
+        if (!IsAppDataPath(exePath))
+        {
+            var hklmCommand = ResolveCommandForKey(key, null, hklmClasses);
+            if (hklmCommand != null && TryMatchAndCache(exePath, key, hklmCommand, accountSid, useLoadedAccountClasses))
+                return _argsCache[cacheKey];
         }
 
         _argsCache[cacheKey] = null;
@@ -144,40 +196,35 @@ public class ExeAssociationRegistryReader : IExeAssociationRegistryReader
     /// Pass <paramref name="hkuClasses"/> as null and <paramref name="hklmClasses"/> non-null
     /// to look up from HKLM only.
     /// </summary>
-    private string? ResolveCommandForKey(string key, RegistryKey? hkuClasses, RegistryKey? hklmClasses)
+    private string? ResolveCommandForKey(string key, IRegistryKey? hkuClasses, IRegistryKey? hklmClasses)
     {
         if (key.StartsWith('.'))
         {
-            // For extensions in HKU, pass hklmClasses as fallback so ProgId shell commands
-            // defined only in HKLM can still be resolved.
             var classesBase = hkuClasses ?? hklmClasses;
             var fallback = hkuClasses != null ? hklmClasses : null;
             return ResolveExtensionCommand(key, classesBase, fallback);
         }
 
-        // Protocol: read shell\open\command from whichever hive is provided
         if (hkuClasses == null && hklmClasses == null)
             return null;
 
         if (hkuClasses != null)
         {
             using var protocolSubKey = hkuClasses.OpenSubKey(key);
-            if (protocolSubKey?.GetValue("URL Protocol") != null)
+            if (_protocolMarkerReader.HasUrlProtocolMarker(protocolSubKey))
             {
-                using var cmdKey = protocolSubKey.OpenSubKey(@"shell\open\command");
+                using var cmdKey = protocolSubKey!.OpenSubKey(@"shell\open\command");
                 return cmdKey?.GetValue(null) as string;
             }
 
             return null;
         }
 
-        // HKLM-only protocol lookup (no URL Protocol marker check for HKLM suggestions).
-        // hklmClasses is non-null here: both-null case exits at line 159, hkuClasses-only exits at 168/171.
         using var hklmCmdKey = hklmClasses!.OpenSubKey(key + @"\shell\open\command");
         return hklmCmdKey?.GetValue(null) as string;
     }
 
-    private string? ResolveExtensionCommand(string extKeyName, RegistryKey? classesBase, RegistryKey? hklmClassesFallback)
+    private string? ResolveExtensionCommand(string extKeyName, IRegistryKey? classesBase, IRegistryKey? hklmClassesFallback)
     {
         using var extSubKey = classesBase?.OpenSubKey(extKeyName);
         if (extSubKey == null)
@@ -204,20 +251,32 @@ public class ExeAssociationRegistryReader : IExeAssociationRegistryReader
         return hklmCmd != null;
     }
 
-    private bool TryMatchAndCache(string exePath, string key, string? command)
+    private static bool CommandMatchesExe(string exePath, string? command)
     {
         if (command == null)
             return false;
 
         var cmdExe = AssociationRegistryCommandParser.ExtractExeFromCommand(command);
-        var expandedCmd = Environment.ExpandEnvironmentVariables(cmdExe ?? "");
-        var expandedExe = Environment.ExpandEnvironmentVariables(exePath);
-
-        if (!string.Equals(expandedCmd, expandedExe, StringComparison.OrdinalIgnoreCase))
+        if (cmdExe == null)
             return false;
 
-        _argsCache[NormalizeCacheKey(exePath, key)] =
-            AssociationRegistryCommandParser.ExtractNonDefaultArgs(command);
+        var expandedCmd = Environment.ExpandEnvironmentVariables(cmdExe);
+        var expandedExe = Environment.ExpandEnvironmentVariables(exePath);
+        return PathHelper.IsSamePath(expandedCmd, expandedExe);
+    }
+
+    private bool TryMatchAndCache(
+        string exePath,
+        string key,
+        string? command,
+        string? accountSid,
+        bool useLoadedAccountClasses)
+    {
+        if (!CommandMatchesExe(exePath, command))
+            return false;
+
+        _argsCache[NormalizeArgumentsCacheKey(exePath, key, accountSid, useLoadedAccountClasses)] =
+            AssociationRegistryCommandParser.ExtractNonDefaultArgs(command!);
         return true;
     }
 }

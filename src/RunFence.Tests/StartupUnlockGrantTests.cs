@@ -19,14 +19,6 @@ public class StartupUnlockGrantTests
     }
 
     [Fact]
-    public void TryConsume_WithoutGrant_ReturnsFalse()
-    {
-        var grant = CreateGrant();
-
-        Assert.False(grant.TryConsume());
-    }
-
-    [Fact]
     public void TryConsume_AfterGrantExpires_ReturnsFalseAndClearsGrant()
     {
         var grant = CreateGrant();

@@ -10,7 +10,7 @@ namespace RunFence.Groups.UI;
 /// async void that swallows exceptions.
 /// </summary>
 public class GroupRefreshController(
-    GroupGridPopulator gridPopulator,
+    IGroupGridPopulator gridPopulator,
     ILoggingService log) : IDisposable
 {
     private Timer? _refreshTimer;

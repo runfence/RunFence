@@ -18,7 +18,7 @@ namespace RunFence.Wizard.Templates;
 public class QuickElevationTemplate(
     EditAccountDialogCreateHandler createHandler,
     ILocalUserProvider localUserProvider,
-    ILocalGroupMembershipService groupMembershipService,
+    ILocalGroupQueryService groupMembershipService,
     IAccountLoginRestrictionService accountRestriction,
     IWizardSessionSaver sessionSaver,
     SessionContext session,
@@ -31,7 +31,7 @@ public class QuickElevationTemplate(
     public string DisplayName => "Quick Elevation (UAC)";
     public string Description => "Create a 1-character admin account for fast UAC prompts.";
     public string IconEmoji => "\U0001F510";
-    public Action<IWin32Window>? PostWizardAction => null;
+    public Func<IWin32Window, Task>? PostWizardAction => null;
 
     public void Cleanup()
     {

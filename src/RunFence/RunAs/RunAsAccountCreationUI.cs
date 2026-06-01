@@ -14,7 +14,7 @@ namespace RunFence.RunAs;
 /// <remarks>Asymmetric by design: account dialog needs post-creation credential flow (password entry → encrypt → save), container dialog does not (profile created by OS).</remarks>
 internal class RunAsAccountCreationUI(
     Func<EditAccountDialog> editAccountDialogFactory,
-    Func<AppContainerEditDialog> appContainerEditDialogFactory,
+    AppContainerEditDialogRunner appContainerDialogRunner,
     IModalCoordinator modalCoordinator) : IRunAsAccountCreationUI, IRunAsContainerCreationUI
 {
     /// <summary>
@@ -67,24 +67,7 @@ internal class RunAsAccountCreationUI(
     /// </summary>
     public AppContainerEntry? ShowCreateContainerDialog()
     {
-        modalCoordinator.BeginModal();
-        AppContainerEditDialog? dlg = null;
-        try
-        {
-            dlg = appContainerEditDialogFactory();
-            dlg.Initialize(existing: null);
-            dlg.StartPosition = FormStartPosition.CenterScreen;
-            dlg.Shown += (_, _) => { WindowForegroundHelper.ForceToForeground(dlg.Handle); dlg.BringToFront(); };
-            var result = dlg.ShowDialog();
-
-            if (result != DialogResult.OK)
-                return null;
-            return dlg.CreatedEntry;
-        }
-        finally
-        {
-            modalCoordinator.EndModal();
-            dlg?.Dispose();
-        }
+        var result = appContainerDialogRunner.CreateStandaloneContainer();
+        return result.DialogResult == DialogResult.OK ? result.CreatedEntry : null;
     }
 }

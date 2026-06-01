@@ -85,7 +85,6 @@ public class IpcAssociationHandler(
                 // Associations intentionally do not fall back to app.ArgumentsTemplate â€” they use only
                 // per-association templates. Null coalesces to "" so DetermineArguments replaces DefaultArguments.
                 var associationTemplate = resolution.Entry?.ArgumentsTemplate ?? string.Empty;
-
                 using var launch = entryLauncher.Launch(
                     resolution.App,
                     message.Arguments,
@@ -98,6 +97,10 @@ public class IpcAssociationHandler(
                 result = new IpcResponse { Success = true, WarningMessage = warning };
 
                 idleMonitor.ResetIdleTimer();
+            }
+            catch (OperationCanceledException)
+            {
+                result = new IpcResponse { Success = true };
             }
             catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
             {

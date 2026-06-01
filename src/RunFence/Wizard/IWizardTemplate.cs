@@ -49,11 +49,11 @@ public interface IWizardTemplate
     Task ExecuteAsync(IWizardProgressReporter progress);
 
     /// <summary>
-    /// Optional action to run on the UI thread after the wizard dialog closes.
+    /// Optional async action to run on the UI thread after the wizard dialog closes.
     /// Use for follow-up dialogs that should open after the wizard (e.g., firewall allowlist editor).
     /// Null if no post-wizard action is needed.
     /// </summary>
-    Action<IWin32Window>? PostWizardAction { get; }
+    Func<IWin32Window, Task>? PostWizardAction { get; }
 
     /// <summary>
     /// Called when the wizard dialog is closed (normally or via cancel) to release sensitive resources

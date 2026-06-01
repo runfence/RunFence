@@ -5,7 +5,9 @@ namespace RunFence.Acl;
 
 public readonly record struct AclTraversalEntry(string Path, bool IsDirectory, FileSystemSecurity Security);
 
-public class FileSystemAclTraverser(ILoggingService log, IAclAccessor aclAccessor) : IFileSystemAclTraverser
+public class FileSystemAclTraverser(
+    ILoggingService log,
+    IPathSecurityDescriptorAccessor aclAccessor) : IFileSystemAclTraverser
 {
     public IEnumerable<AclTraversalEntry> Traverse(
         IReadOnlyList<string> rootPaths,

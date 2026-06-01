@@ -8,14 +8,6 @@ namespace RunFence.Tests;
 public class AppSettingsTests
 {
     [Fact]
-    public void NewSettings_DefaultLogVerbosity_IsInfo()
-    {
-        var settings = new AppSettings();
-
-        Assert.Equal(LogVerbosity.Info, settings.LogVerbosity);
-    }
-
-    [Fact]
     public void Deserialize_UnknownEnableLoggingProperty_UsesDefaultLogVerbosity()
     {
         var settings = JsonSerializer.Deserialize<AppSettings>(

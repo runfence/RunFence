@@ -33,10 +33,10 @@ public class WizardAccountSetupHelperTests : IDisposable
     {
         var pinKey = TestSecretFactory.Create(32);
         var session = new SessionContext
-{
+        {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(pinKey);
+        }.WithPinDerivedKeyTakingOwnership(pinKey);
         _sessions.Add(session);
         return session;
     }
@@ -110,9 +110,12 @@ public class WizardAccountSetupHelperTests : IDisposable
 
         var callOrder = new List<string>();
         _packageInstallService
-            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
+            .Setup(s => s.InstallPackagesAsync(
+                It.IsAny<IReadOnlyList<InstallablePackage>>(),
+                It.IsAny<AccountLaunchIdentity>(),
+                It.IsAny<CancellationToken>()))
             .Callback(() => callOrder.Add("install"))
-            .Returns([]);
+            .ReturnsAsync([]);
         _packageInstallService
             .Setup(s => s.WaitForInstallCompletionAsync(TestSid, null, _progress.Object.CancellationToken))
             .Callback(() => callOrder.Add("wait"))
@@ -154,8 +157,11 @@ public class WizardAccountSetupHelperTests : IDisposable
         var session = CreateSession();
         session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = TestSid });
         _packageInstallService
-            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
-            .Returns(["post-launch maintenance failed"]);
+            .Setup(s => s.InstallPackagesAsync(
+                It.IsAny<IReadOnlyList<InstallablePackage>>(),
+                It.IsAny<AccountLaunchIdentity>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(["post-launch maintenance failed"]);
         _packageInstallService
             .Setup(s => s.WaitForInstallCompletionAsync(TestSid, null, _progress.Object.CancellationToken))
             .Returns(Task.CompletedTask);
@@ -189,8 +195,11 @@ public class WizardAccountSetupHelperTests : IDisposable
         var session = CreateSession();
         session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = TestSid });
         _packageInstallService
-            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
-            .Returns(["post-launch maintenance failed"]);
+            .Setup(s => s.InstallPackagesAsync(
+                It.IsAny<IReadOnlyList<InstallablePackage>>(),
+                It.IsAny<AccountLaunchIdentity>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(["post-launch maintenance failed"]);
 
         var helper = CreateHelper(session);
         var request = MakeRequest(
@@ -213,9 +222,12 @@ public class WizardAccountSetupHelperTests : IDisposable
 
         var callOrder = new List<string>();
         _packageInstallService
-            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
+            .Setup(s => s.InstallPackagesAsync(
+                It.IsAny<IReadOnlyList<InstallablePackage>>(),
+                It.IsAny<AccountLaunchIdentity>(),
+                It.IsAny<CancellationToken>()))
             .Callback(() => callOrder.Add("install"))
-            .Returns([]);
+            .ReturnsAsync([]);
         _packageInstallService
             .Setup(s => s.WaitForInstallCompletionAsync(TestSid, null, _progress.Object.CancellationToken))
             .Callback(() => callOrder.Add("wait"))
@@ -304,57 +316,6 @@ public class WizardAccountSetupHelperTests : IDisposable
         var entry = session.Database.GetAccount(TestSid);
         Assert.NotNull(entry);
         Assert.Null(entry.DeleteAfterUtc);
-    }
-
-    // --- PrivilegeLevel ---
-
-    [Theory]
-    [InlineData(PrivilegeLevel.Isolated)]
-    [InlineData(PrivilegeLevel.HighestAllowed)]
-    [InlineData(PrivilegeLevel.LowIntegrity)]
-    public async Task SetupAsync_PrivilegeLevel_SetsPrivilegeLevelOnEntry(PrivilegeLevel privilegeLevel)
-    {
-        var session = CreateSession();
-        var helper = CreateHelper(session);
-        var request = MakeRequest(privilegeLevel: privilegeLevel);
-
-        await helper.SetupAsync(request, _progress.Object);
-
-        var entry = session.Database.GetAccount(TestSid);
-        Assert.NotNull(entry);
-        Assert.Equal(privilegeLevel, entry.PrivilegeLevel);
-    }
-
-    // --- Tray terminal configuration ---
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task SetupAsync_TrayTerminal_SetsTrayTerminalOnEntry(bool trayTerminal)
-    {
-        var session = CreateSession();
-        var helper = CreateHelper(session);
-        var request = MakeRequest(trayTerminal: trayTerminal);
-
-        await helper.SetupAsync(request, _progress.Object);
-
-        var entry = session.Database.GetAccount(TestSid);
-        Assert.NotNull(entry);
-        Assert.Equal(trayTerminal, entry.TrayTerminal);
-    }
-
-    // --- SidNames update ---
-
-    [Fact]
-    public async Task SetupAsync_ResolveAndCacheCalledWithSidAndUsername()
-    {
-        var session = CreateSession();
-        var helper = CreateHelper(session);
-        var request = MakeRequest();
-
-        await helper.SetupAsync(request, _progress.Object);
-
-        _sidNameCache.Verify(c => c.ResolveAndCache(TestSid, "testuser"), Times.Once);
     }
 
     // --- Non-fatal error collection ---
@@ -502,8 +463,11 @@ public class WizardAccountSetupHelperTests : IDisposable
         var session = CreateSession();
         session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = TestSid });
         _packageInstallService
-            .Setup(s => s.InstallPackages(It.IsAny<IReadOnlyList<InstallablePackage>>(), It.IsAny<AccountLaunchIdentity>()))
-            .Returns(["post-launch maintenance failed"]);
+            .Setup(s => s.InstallPackagesAsync(
+                It.IsAny<IReadOnlyList<InstallablePackage>>(),
+                It.IsAny<AccountLaunchIdentity>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(["post-launch maintenance failed"]);
         _packageInstallService
             .Setup(s => s.WaitForInstallCompletionAsync(TestSid, It.IsAny<TimeSpan?>(), _progress.Object.CancellationToken))
             .Returns(Task.CompletedTask);

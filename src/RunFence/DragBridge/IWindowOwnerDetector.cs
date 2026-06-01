@@ -6,7 +6,8 @@ public readonly record struct WindowOwnerInfo(
     SecurityIdentifier Sid,
     int IntegrityLevel,
     bool IsInRestrictedJob,
-    SecurityIdentifier? AppContainerSid = null)
+    SecurityIdentifier? AppContainerSid = null,
+    bool? IsElevated = null)
 {
     public bool IsAppContainer => AppContainerSid != null;
 }

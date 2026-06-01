@@ -5,7 +5,7 @@ namespace RunFence.Account.UI;
 /// Owns start/stop lifecycle and visibility forwarding for the change-detection timer.
 /// Process timers are managed separately by <see cref="AccountProcessDisplayManager"/>.
 /// </summary>
-public class AccountsPanelTimerCoordinator(AccountCheckTimerService checkTimerService)
+public class AccountsPanelTimerCoordinator(AccountCheckTimerService checkTimerService) : IAccountsPanelTimerCoordinator
 {
     private bool _started;
 

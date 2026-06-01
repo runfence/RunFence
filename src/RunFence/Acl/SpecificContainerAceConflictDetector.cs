@@ -3,7 +3,7 @@ using System.Security.Principal;
 
 namespace RunFence.Acl;
 
-public class SpecificContainerAceConflictDetector(IAclAccessor aclAccessor) : ISpecificContainerAceConflictDetector
+public class SpecificContainerAceConflictDetector(IPathSecurityDescriptorAccessor aclAccessor) : ISpecificContainerAceConflictDetector
 {
     public bool HasExplicitSpecificContainerAce(string path)
     {

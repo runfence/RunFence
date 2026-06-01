@@ -10,7 +10,9 @@ namespace RunFence.Account.UI;
 public class PackageInstallService(
     IPackageInstallLauncher packageInstallLauncher,
     IPackageInstallScriptStore packageInstallScriptStore,
-    AccountToolResolver toolResolver)
+    AccountToolResolver toolResolver,
+    IWindowsTerminalAccountStateService windowsTerminalAccountStateService,
+    IWindowsTerminalDeploymentService windowsTerminalDeploymentService)
     : IPackageInstallService
 {
     private readonly object _pendingInstallLock = new();
@@ -18,6 +20,9 @@ public class PackageInstallService(
 
     public bool IsPackageInstalled(InstallablePackage package, string sid)
     {
+        if (package == KnownPackages.WindowsTerminal)
+            return windowsTerminalAccountStateService.IsInstalledForAccount(sid);
+
         if (package.DetectExeName != null)
             return toolResolver.ResolveWindowsAppsExe(sid, package.DetectExeName) != null;
 
@@ -30,23 +35,31 @@ public class PackageInstallService(
         return false;
     }
 
-    public IReadOnlyList<string> InstallPackages(IReadOnlyList<InstallablePackage> packages, AccountLaunchIdentity identity)
+    public async Task<IReadOnlyList<string>> InstallPackagesAsync(
+        IReadOnlyList<InstallablePackage> packages,
+        AccountLaunchIdentity identity,
+        CancellationToken cancellationToken)
     {
         if (packages.Count == 0)
             return [];
 
-        var operation = ReservePendingInstall(identity.Sid);
-        var packagesToInstall = KnownPackages.ExpandWithDependencies(packages);
-        var body = string.Join("\n", packagesToInstall.Select(p => p.PowerShellCommand));
-        var cmd = $"try {{\n{body}\n}} finally {{\n" +
-                  "Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n}";
-
         string? scriptPath = null;
+        var operation = ReservePendingInstall(identity.Sid);
         try
         {
+            var packagesToInstall = KnownPackages.ExpandWithDependencies(packages);
+            if (packagesToInstall.Contains(KnownPackages.WindowsTerminal))
+                await windowsTerminalDeploymentService.EnsureSharedDeploymentReadyAsync(cancellationToken).ConfigureAwait(false);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var body = string.Join("\n", packagesToInstall.Select(p => p.PowerShellCommand));
+            var cmd = $"try {{\n{body}\n}} finally {{\n" +
+                      "Remove-Item $PSCommandPath -Force -ErrorAction SilentlyContinue\n}";
+
             scriptPath = packageInstallScriptStore.CreateScript(cmd, identity.Sid);
             operation.AttachScriptPath(scriptPath);
 
+            cancellationToken.ThrowIfCancellationRequested();
             var launchResult = packageInstallLauncher.Launch(scriptPath, identity);
             operation.AttachProcess(launchResult.Process);
             return launchResult.MaintenanceWarnings;
@@ -59,7 +72,7 @@ public class PackageInstallService(
     }
 
     /// <summary>
-    /// Waits for the install script launched by <see cref="InstallPackages"/> to complete by polling
+    /// Waits for the install script launched by <see cref="InstallPackagesAsync"/> to complete by polling
     /// the launched PowerShell process. Returns when the process exits, when <paramref name="timeout"/> elapses (if specified), or when
     /// <paramref name="ct"/> is cancelled (user clicked Cancel on the progress form).
     /// </summary>
@@ -122,7 +135,7 @@ public class PackageInstallService(
     private void CompletePendingInstall(string sid, PendingInstallOperation operation)
     {
         if (RemovePendingInstallIfSame(sid, operation))
-            CompleteRemovedOperation(operation);
+            CompleteRemovedOperation(sid, operation);
     }
 
     private PendingInstallOperation ReservePendingInstall(string sid)
@@ -151,7 +164,7 @@ public class PackageInstallService(
         }
 
         if (completedOperation != null)
-            CompleteRemovedOperation(completedOperation);
+            CompleteRemovedOperation(sid, completedOperation);
 
         return reservation;
     }
@@ -161,7 +174,7 @@ public class PackageInstallService(
         if (!RemovePendingInstallIfSame(sid, operation))
             return;
 
-        CompleteRemovedOperation(operation, fallbackScriptPath);
+        CompleteRemovedOperation(sid, operation, fallbackScriptPath);
     }
 
     private bool RemovePendingInstallIfSame(string sid, PendingInstallOperation operation)
@@ -176,7 +189,7 @@ public class PackageInstallService(
         }
     }
 
-    private void CompleteRemovedOperation(PendingInstallOperation operation, string? fallbackScriptPath = null)
+    private void CompleteRemovedOperation(string sid, PendingInstallOperation operation, string? fallbackScriptPath = null)
     {
         operation.TryGetCompletionExitCode(out _);
         operation.Dispose();

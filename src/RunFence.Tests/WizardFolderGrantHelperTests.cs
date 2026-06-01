@@ -11,12 +11,12 @@ public class WizardFolderGrantHelperTests
 {
     private const string Sid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
 
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantMutatorService> _grantMutatorService = new();
     private readonly Mock<IQuickAccessPinService> _quickAccessPinService = new();
     private readonly Mock<IWizardProgressReporter> _progress = new();
 
     private WizardFolderGrantHelper CreateHelper() =>
-        new(_pathGrantService.Object, _quickAccessPinService.Object);
+        new(_grantMutatorService.Object, _quickAccessPinService.Object);
 
     // --- Empty path skipping ---
 
@@ -33,7 +33,7 @@ public class WizardFolderGrantHelperTests
         await helper.GrantFolderAccessAsync(paths, Sid, rights, _progress.Object);
 
         // Assert: no grant or pin interaction and no status progress
-        _pathGrantService.VerifyNoOtherCalls();
+        _grantMutatorService.VerifyNoOtherCalls();
         _quickAccessPinService.VerifyNoOtherCalls();
         _progress.VerifyNoOtherCalls();
     }
@@ -48,14 +48,14 @@ public class WizardFolderGrantHelperTests
         var tempDir = dir.Path;
         const string failingPath = @"C:\NonExistentPath\WillThrow";
         var rights = SavedRightsState.DefaultForMode(isDeny: false);
-        _pathGrantService
+        _grantMutatorService
             .Setup(s => s.EnsureAccess(Sid, failingPath, rights, null, false))
             .Throws(new GrantOperationException(
                 GrantApplyFailureStep.GrantAclApply,
                 failingPath,
                 null,
                 new UnauthorizedAccessException("Access denied")));
-        _pathGrantService
+        _grantMutatorService
             .Setup(s => s.EnsureAccess(Sid, tempDir, rights, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
@@ -83,7 +83,7 @@ public class WizardFolderGrantHelperTests
         using var dir = new TempDirectory("RunFenceTest");
         var tempDir = dir.Path;
         var rights = SavedRightsState.DefaultForMode(isDeny: false);
-        _pathGrantService
+        _grantMutatorService
             .Setup(s => s.EnsureAccess(Sid, tempDir, rights, null, false))
             .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 
@@ -114,7 +114,7 @@ public class WizardFolderGrantHelperTests
         using var dir = new TempDirectory("RunFenceTest");
         var tempDir = dir.Path;
         var rights = SavedRightsState.DefaultForMode(isDeny: false);
-        _pathGrantService
+        _grantMutatorService
             .Setup(s => s.EnsureAccess(Sid, tempDir, rights, null, false))
             .Returns(default(GrantApplyResult));
 
@@ -135,7 +135,7 @@ public class WizardFolderGrantHelperTests
         var rights = SavedRightsState.DefaultForMode(isDeny: false);
         try
         {
-            _pathGrantService
+            _grantMutatorService
                 .Setup(s => s.EnsureAccess(Sid, tempFile, rights, null, false))
                 .Returns(new GrantApplyResult(GrantApplied: true, DatabaseModified: true, DurableSaveCompleted: true));
 

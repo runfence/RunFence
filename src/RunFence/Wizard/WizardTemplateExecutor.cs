@@ -1,6 +1,6 @@
+using System.Runtime.ExceptionServices;
 using RunFence.Account;
 using RunFence.Account.UI;
-using RunFence.Acl;
 using RunFence.Apps;
 using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
@@ -19,9 +19,8 @@ public class WizardTemplateExecutor(
     EditAccountDialogCreateHandler createHandler,
     WizardAccountSetupHelperFactory setupHelperFactory,
     AppEntryBuilder appEntryBuilder,
-    AppEntryEnforcementHelper enforcementHelper,
+    AppEntryEnforcementCoordinator enforcementCoordinator,
     IShortcutDiscoveryService shortcutDiscovery,
-    IAclService aclService,
     IWizardSessionSaver sessionSaver,
     SessionContext session,
     WizardLicenseChecker licenseChecker)
@@ -174,44 +173,46 @@ public class WizardTemplateExecutor(
             // App entry build and enforcement
             if (createdApps.Count > 0)
             {
+                var requiresShortcutTraversalCache = createdApps.Any(app => app.ManageShortcuts);
                 ShortcutTraversalCache? shortcutCache = null;
                 HashSet<string>? managedSids = null;
-                foreach (var app in createdApps)
+                ExceptionDispatchInfo? managedSidCaptureFailure = null;
+                if (requiresShortcutTraversalCache)
                 {
                     try
                     {
-                        if (app.ManageShortcuts && shortcutCache == null)
-                            managedSids ??= shortcutDiscovery.CaptureManagedSids();
-
-                        var capturedManagedSids = managedSids;
-                        await Task.Run(() =>
-                        {
-                            var appShortcutCache = app.ManageShortcuts
-                                ? shortcutCache ??= shortcutDiscovery.CreateTraversalCache(capturedManagedSids)
-                                : new ShortcutTraversalCache([]);
-                            enforcementHelper.ApplyChanges(app, session.Database.Apps, appShortcutCache);
-                            if (executionPlan.CreateDesktopShortcut)
-                                enforcementHelper.CreateDesktopShortcut(app);
-                        });
+                        managedSids = shortcutDiscovery.CaptureManagedSids();
                     }
                     catch (Exception ex)
                     {
-                        progress.ReportError($"App entry for {app.Name}: {ex.Message}");
+                        managedSidCaptureFailure = ExceptionDispatchInfo.Capture(ex);
                     }
                 }
+
+                var enforcementResult = await Task.Run(() =>
+                    enforcementCoordinator.ApplyWizardChanges(
+                        createdApps,
+                        session.Database.Apps,
+                        app =>
+                        {
+                            if (!app.ManageShortcuts)
+                                return new ShortcutTraversalCache([]);
+
+                            managedSidCaptureFailure?.Throw();
+
+                            shortcutCache ??= shortcutDiscovery.CreateTraversalCache(managedSids);
+                            return shortcutCache;
+                        },
+                        executionPlan.CreateDesktopShortcut));
+
+                foreach (var failure in enforcementResult.AppFailures)
+                    progress.ReportError($"App entry for {failure.App.Name}: {failure.Exception.Message}");
 
                 if (createdApps.Count > 0)
-                {
                     progress.ReportStatus("Applying ACLs...");
-                    try
-                    {
-                        await Task.Run(() => aclService.RecomputeAllAncestorAcls(session.Database.Apps));
-                    }
-                    catch (Exception ex)
-                    {
-                        progress.ReportError($"ACL recompute: {ex.Message}");
-                    }
-                }
+
+                if (enforcementResult.AncestorAclRecomputeFailure != null)
+                    progress.ReportError($"ACL recompute: {enforcementResult.AncestorAclRecomputeFailure.Message}");
             }
 
             if (flowParams.PostEnforcementAction != null && createdApps.Count > 0)

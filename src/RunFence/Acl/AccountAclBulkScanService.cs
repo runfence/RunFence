@@ -1,5 +1,7 @@
 using System.Security.AccessControl;
 using System.Security.Principal;
+using RunFence.Core.Models;
+using RunFence.Persistence;
 
 namespace RunFence.Acl;
 
@@ -9,7 +11,9 @@ namespace RunFence.Acl;
 /// </summary>
 public class AccountAclBulkScanService(
     IFileSystemAclTraverser traverser,
-    IAclAccessor aclAccessor) : IAccountAclBulkScanService
+    IPathSecurityDescriptorAccessor aclAccessor,
+    IDatabaseProvider databaseProvider,
+    AppEntryManagedAclScanFilter managedAclScanFilter) : IAccountAclBulkScanService
 {
     /// <summary>
     /// Accumulated NTFS rights for a single path during a bulk ACL scan.
@@ -39,6 +43,9 @@ public class AccountAclBulkScanService(
         CancellationToken ct)
     {
         ValidateRootAccessibility(rootPath);
+        var apps = databaseProvider.GetDatabase().Apps
+            .Where(app => app is { RestrictAcl: true, IsUrlScheme: false })
+            .ToList();
 
         // Per-SID: accumulated rights per path (OR-merged across multiple ACEs for the same SID+path)
         var grantRights = new Dictionary<string, Dictionary<string, PathAclAccumulator>>(StringComparer.OrdinalIgnoreCase);
@@ -56,6 +63,7 @@ public class AccountAclBulkScanService(
         foreach (var (path, isDirectory, security) in traverser.Traverse([rootPath], progress, ct))
         {
             var rules = security.GetAccessRules(true, false, typeof(SecurityIdentifier));
+            var managedRuleFilter = managedAclScanFilter.Create(path, isDirectory, apps);
 
             // Determine owner SID for this path
             var ownerSid = security.GetOwner(typeof(SecurityIdentifier))?.Value;
@@ -64,6 +72,8 @@ public class AccountAclBulkScanService(
             {
                 var ruleSidValue = rule.IdentityReference.Value;
                 if (!knownSids.Contains(ruleSidValue))
+                    continue;
+                if (managedRuleFilter(rule))
                     continue;
 
                 bool isDeny = rule.AccessControlType == AccessControlType.Deny;

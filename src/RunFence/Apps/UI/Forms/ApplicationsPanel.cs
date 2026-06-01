@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using RunFence.Core;
-using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.UI;
@@ -8,7 +7,7 @@ using RunFence.UI.Forms;
 
 namespace RunFence.Apps.UI.Forms;
 
-public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, IApplicationsPanelState, IWizardRequestSource
+public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, IApplicationsPanelState, IWizardRequestSource, IApplicationsPanelCommandView, IApplicationsPanelRefreshView
 {
     private readonly AppGridDragDropHandler _dragDropHandler;
 
@@ -21,6 +20,8 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
     private readonly ApplicationsGridPopulator _gridPopulator;
     private readonly AppContextMenuOrchestrator _contextMenuHandler;
     private readonly ApplicationsHandlerSyncHelper? _handlerSyncHelper;
+    private readonly ApplicationsPanelCommandCoordinator _commandCoordinator;
+    private readonly ApplicationsPanelRefreshCoordinator _refreshCoordinator;
     private DropFilesInterceptor? _dropFilesInterceptor;
 
     // IApplicationsPanelContext explicit implementations
@@ -73,6 +74,8 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         ApplicationsPanelLaunchHandler launchHandler,
         ApplicationsPanelSaveHelper saveHelper,
         AppContextMenuOrchestrator contextMenuOrchestrator,
+        ApplicationsPanelCommandCoordinator commandCoordinator,
+        ApplicationsPanelRefreshCoordinator refreshCoordinator,
         ApplicationsHandlerSyncHelper? handlerSyncHelper = null)
         : base(modalCoordinator)
     {
@@ -82,6 +85,8 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         _launchHandler = launchHandler;
         _saveHelper = saveHelper;
         _contextMenuHandler = contextMenuOrchestrator;
+        _commandCoordinator = commandCoordinator;
+        _refreshCoordinator = refreshCoordinator;
         _handlerSyncHelper = handlerSyncHelper;
         InitializeComponent();
         BuildDynamicContent();
@@ -92,6 +97,8 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         _gridPopulator.Initialize(_grid, this, (items, key) => SortByActiveColumn(items, key));
         _crudHandler.Initialize(this);
         _dragDropHandler.Initialize(_grid, this, appId => SaveAndRefresh(appId));
+        _commandCoordinator.Initialize(this);
+        _refreshCoordinator.Initialize(this);
         _grid.HandleCreated += (_, _) =>
         {
             var old = _dropFilesInterceptor;
@@ -112,6 +119,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         _ctxEdit.Image = UiIconFactory.CreateToolbarIcon("\u270E", Color.FromArgb(0x33, 0x66, 0x99), 16);
         _ctxRemove.Image = UiIconFactory.CreateToolbarIcon("\u2715", Color.FromArgb(0xCC, 0x33, 0x33), 16);
         _ctxLaunch.Image = UiIconFactory.CreateToolbarIcon("\u25B6", Color.FromArgb(0x22, 0x8B, 0x22), 16);
+        _ctxRunAs.Image = UiIconFactory.CreateToolbarIcon("\u26A1", Color.FromArgb(0xCC, 0x77, 0x00), 16);
         _ctxOpenInFolderBrowser.Image = UiIconFactory.CreateToolbarIcon("\U0001F4C2", Color.FromArgb(0xCC, 0x88, 0x22), 16);
         _hdrAdd.Image = UiIconFactory.CreateToolbarIcon("+", Color.FromArgb(0x22, 0x8B, 0x22), 16);
         _associationsButton.Image = UiIconFactory.CreateToolbarIcon("\u21C4", Color.FromArgb(0x33, 0x66, 0x99), 42);
@@ -194,10 +202,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
 
     private void RefreshGrid()
     {
-        _gridPopulator.PopulateGrid(_dragDropHandler,
-            v => IsRefreshing = v,
-            () => ReapplyGlyphIfActive(_grid));
-        UpdateButtonState();
+        _ = _refreshCoordinator.RefreshAsync(CancellationToken.None);
     }
 
     public void SelectAppById(string? appId)
@@ -220,40 +225,22 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         => _crudHandler.OpenAddDialog(initialAccountSid: accountSid);
 
     private void OnAddClick(object? sender, EventArgs e)
-        => _crudHandler.OpenAddDialog();
+        => _commandCoordinator.HandleAdd();
 
     private void OnEditClick(object? sender, EventArgs e)
-        => _crudHandler.EditSelected();
+        => _commandCoordinator.HandleEditSelected();
 
     private async void OnRemoveClick(object? sender, EventArgs e)
-        => await _crudHandler.RemoveSelected();
+        => await _commandCoordinator.HandleDeleteSelected();
 
     private void OnLaunchClick(object? sender, EventArgs e)
-    {
-        if (_grid.SelectedRows.Count == 0)
-            return;
-        if (_grid.SelectedRows[0].Tag is not AppEntry app)
-            return;
-        LaunchApp(app, null);
-    }
+        => _commandCoordinator.HandleLaunchSelected();
 
     private void OnRunAsClick(object? sender, EventArgs e)
-    {
-        using var dlg = new OpenFileDialog
-        {
-            Title = "Run As - Select File",
-            Filter = "Programs (*.exe;*.cmd;*.bat;*.com;*.lnk)|*.exe;*.cmd;*.bat;*.com;*.lnk|All Files (*.*)|*.*"
-        };
-        FileDialogHelper.AddInteractiveUserCustomPlaces(dlg);
-        if (dlg.ShowDialog(FindForm()) != DialogResult.OK)
-            return;
-        _launchHandler.TriggerRunAs(dlg.FileName);
-    }
+        => _commandCoordinator.HandleRunAs();
 
     private void OnAssociationsClick(object? sender, EventArgs e)
-    {
-        _handlerSyncHelper?.OpenAssociationsDialog(this, () => SaveAndRefresh());
-    }
+        => _commandCoordinator.HandleManageHandlers();
 
     private void OnReapplyClick(object? sender, EventArgs e)
     {
@@ -262,7 +249,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
 
     private void OnContextMenuDataSaveAndRefresh()
     {
-        RefreshGrid();
+        _ = _refreshCoordinator.RefreshAsync(CancellationToken.None);
         DataChanged?.Invoke();
     }
 
@@ -289,6 +276,7 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         _ctxGoToAccount.Enabled = CredentialStore.Credentials.Any(c => string.Equals(c.Sid, app.AccountSid, StringComparison.OrdinalIgnoreCase));
 
         _ctxCopyPath.Text = app.IsFolder ? "Copy Folder Path" : "Copy Path";
+        _ctxRunAs.Visible = !app.IsFolder && !app.IsUrlScheme;
         _ctxOpenDir.Visible = !app.IsFolder;
         _ctxOpenFolder.Visible = app.IsFolder;
 
@@ -332,6 +320,12 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
             _contextMenuHandler.OpenFolder(app);
     }
 
+    private void OnContextMenuRunAsClick(object? sender, EventArgs e)
+    {
+        if (GetSelectedApp() is { IsFolder: false, IsUrlScheme: false } app)
+            _launchHandler.TriggerRunAs(app.ExePath);
+    }
+
     private void OnCopyPathClick(object? sender, EventArgs e)
     {
         if (GetSelectedApp() is { } app)
@@ -357,27 +351,24 @@ public partial class ApplicationsPanel : DataPanel, IApplicationsPanelContext, I
         => _launchHandler.LaunchApp(app, launcherArguments, FindForm());
 
     private void SaveAndRefresh(string? selectAppId = null, int fallbackIndex = -1, bool targetedSave = false)
-    {
-        // Remove handler mappings for deleted apps before saving
-        _handlerSyncHelper?.CleanupOrphanedMappings();
-
-        if (targetedSave && selectAppId != null)
-            _saveHelper.SaveForApp(selectAppId);
-        else
-            _saveHelper.SaveAll();
-
-        RefreshAfterInMemoryMutation(selectAppId, fallbackIndex);
-    }
+        => _ = _refreshCoordinator.SaveRefreshAndReselectAsync(
+            selectAppId,
+            fallbackIndex,
+            targetedSave,
+            CancellationToken.None);
 
     private void RefreshAfterInMemoryMutation(string? selectAppId = null, int fallbackIndex = -1)
-    {
-        RefreshGrid();
-        if (selectAppId != null)
-            SelectAppById(selectAppId);
-        else if (fallbackIndex >= 0)
-            SelectRowByIndex(fallbackIndex);
-        else
-            SelectFirstRow();
-        DataChanged?.Invoke();
-    }
+        => _refreshCoordinator.RefreshAfterInMemoryMutation(selectAppId, fallbackIndex);
+
+    AppEntry? IApplicationsPanelCommandView.GetSelectedApp() => GetSelectedApp();
+    IWin32Window IApplicationsPanelCommandView.GetOwner() => this;
+    void IApplicationsPanelCommandView.SaveAndRefresh() => SaveAndRefresh();
+
+    void IApplicationsPanelRefreshView.SetIsRefreshing(bool isRefreshing) => IsRefreshing = isRefreshing;
+    void IApplicationsPanelRefreshView.ReapplyGlyphIfActive() => ReapplyGlyphIfActive(_grid);
+    void IApplicationsPanelRefreshView.UpdateButtonState() => UpdateButtonState();
+    void IApplicationsPanelRefreshView.SelectAppById(string? appId) => SelectAppById(appId);
+    void IApplicationsPanelRefreshView.SelectRowByIndex(int rowIndex) => SelectRowByIndex(rowIndex);
+    void IApplicationsPanelRefreshView.SelectFirstRow() => SelectFirstRow();
+    void IApplicationsPanelRefreshView.PublishDataChanged() => DataChanged?.Invoke();
 }

@@ -7,14 +7,9 @@ namespace RunFence.SecurityScanner;
 
 /// <summary>
 /// Provides environmental context for the security scanner: user SIDs, profiles, admin members,
-/// group membership, and firewall/policy state.
+/// and group membership.
 /// </summary>
-/// <remarks>
-/// Depends on concrete <see cref="NativePolicyDataAccess"/> directly — acceptable for a standalone
-/// scanner tool without DI. If testability is needed in the future, extract an interface for the
-/// 3 methods used: <c>GetLocalDomainSid</c>, <c>ResolveLocalGroupNames</c>, <c>GetLocalGroupMemberSids</c>.
-/// </remarks>
-public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<string> logError, NTTranslateApi ntTranslate) : IEnvironmentDataAccess
+public class EnvironmentDataAccess(ILocalGroupPolicyNativeReader nativePolicy, Action<string> logError, NTTranslateApi ntTranslate) : IEnvironmentDataAccess
 {
     // Pre-populated by GetAdminMemberSids() to avoid re-opening a PrincipalContext for the same group.
     private readonly Dictionary<string, HashSet<string>> _directMembersCache = new(StringComparer.OrdinalIgnoreCase);
@@ -241,57 +236,4 @@ public class EnvironmentDataAccess(NativePolicyDataAccess nativePolicy, Action<s
         }
     }
 
-    public List<(string ProfileName, bool Enabled)>? GetFirewallProfileStates()
-    {
-        try
-        {
-            const string firewallPolicyKey = @"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy";
-            var profiles = new (string SubKey, string DisplayName)[]
-            {
-                ("DomainProfile", "Domain"),
-                ("StandardProfile", "Private"),
-                ("PublicProfile", "Public"),
-            };
-
-            var result = new List<(string, bool)>();
-            using var policyKey = Registry.LocalMachine.OpenSubKey(firewallPolicyKey);
-            if (policyKey == null)
-                return null;
-
-            foreach (var (subKey, displayName) in profiles)
-            {
-                using var profileKey = policyKey.OpenSubKey(subKey);
-                if (profileKey?.GetValue("EnableFirewall") is int enabled)
-                    result.Add((displayName, enabled != 0));
-            }
-
-            return result.Count > 0 ? result : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    public int? GetAccountLockoutThreshold() => nativePolicy.GetAccountLockoutThreshold();
-
-    public (bool IsDisabled, bool IsStopped)? GetWindowsFirewallServiceState() =>
-        nativePolicy.GetWindowsFirewallServiceState();
-
-    public bool? GetAdminAccountLockoutEnabled() => nativePolicy.GetAdminAccountLockoutEnabled();
-
-    public bool? GetBlankPasswordRestrictionEnabled()
-    {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Lsa");
-            if (key?.GetValue("LimitBlankPasswordUse") is int value)
-                return value != 0;
-            return null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
 }

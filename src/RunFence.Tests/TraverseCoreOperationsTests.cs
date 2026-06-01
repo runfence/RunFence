@@ -194,6 +194,43 @@ public class TraverseCoreOperationsTests
         Assert.Equal(TestPath, remaining.Path);
     }
 
+    [Fact]
+    public void ApplyTraverseAces_WhenChildPathFails_AppliesParentsFirst()
+    {
+        var parentPath = Path.GetDirectoryName(TestPath)!;
+        var rootPath = Path.GetPathRoot(TestPath)!;
+        var db = new AppDatabase();
+        var appliedPaths = new List<string>();
+        var traverseAcl = new Mock<ITraverseAcl>();
+        traverseAcl.Setup(mock => mock.AddAllowAce(It.IsAny<string>(), It.IsAny<SecurityIdentifier>()))
+            .Callback<string, SecurityIdentifier>((path, _) =>
+            {
+                appliedPaths.Add(path);
+                if (string.Equals(path, TestPath, StringComparison.OrdinalIgnoreCase))
+                    throw new UnauthorizedAccessException("locked child");
+            });
+        var aclPermission = new Mock<IAclPermissionService>();
+        var pathInfo = new TestFileSystemPathInfo()
+            .AddDirectory(TestPath)
+            .AddDirectory(parentPath)
+            .AddDirectory(rootPath);
+        var log = new Mock<ILoggingService>();
+        var service = new TraverseCoreOperations(
+            traverseAcl.Object,
+            new AncestorTraverseGranter(log.Object, aclPermission.Object, traverseAcl.Object, pathInfo),
+            aclPermission.Object,
+            new UiThreadDatabaseAccessor(new LambdaDatabaseProvider(() => db), () => SyncInvoker),
+            log.Object,
+            pathInfo,
+            new TraverseGrantOwnerResolver());
+
+        var ex = Assert.Throws<TraverseAclApplyException>(() =>
+            service.ApplyTraverseAces(UserSid, [TestPath, parentPath, rootPath]));
+
+        Assert.Equal([rootPath, parentPath, TestPath], appliedPaths);
+        Assert.Equal([parentPath, rootPath], ex.AppliedPaths);
+    }
+
     private sealed class ThrowOnCallDatabaseProvider(AppDatabase db, int failureCall) : IDatabaseProvider
     {
         private int _callCount;

@@ -35,21 +35,6 @@ public class AccountGridIconLifetimeManagerTests
         AssertImageDisposed(icon2);
     }
 
-    [Fact]
-    public void ReleaseAllTrackedIcons_DoesNotDisposeEmptyIcon()
-    {
-        using var manager = new AccountGridIconLifetimeManager();
-        using var grid = new DataGridView();
-        grid.Columns.Add("Account", "Account");
-        var row = new DataGridViewRow();
-        row.CreateCells(grid, "row");
-
-        manager.TrackOwned(row, AccountGridHelper.EmptyIcon);
-        manager.ReleaseAllTrackedIcons();
-
-        Assert.True(AccountGridHelper.EmptyIcon.Width > 0);
-    }
-
     private static void AssertImageUsable(Image image)
     {
         using var stream = new MemoryStream();

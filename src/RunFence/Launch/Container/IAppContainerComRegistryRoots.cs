@@ -1,9 +1,9 @@
-using Microsoft.Win32;
+using RunFence.Core;
 
 namespace RunFence.Launch.Container;
 
 public interface IAppContainerComRegistryRoots
 {
-    RegistryKey AppIdRoot { get; }
-    RegistryKey MachineRoot { get; }
+    IRegistryKey AppIdRoot { get; }
+    IRegistryKey MachineRoot { get; }
 }

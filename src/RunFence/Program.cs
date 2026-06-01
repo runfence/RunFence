@@ -51,9 +51,6 @@ public static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
-        if (EarlyExitArgsHandler.HandleEarlyExitArgs(args, new DefaultIpcClient()))
-            return 0;
-
         var unlockRequested = args.Contains("--unlock", StringComparer.OrdinalIgnoreCase);
         var operationUnlockRequested = args.Contains("--unlock-operation", StringComparer.OrdinalIgnoreCase);
         var isBackground = args.Contains("--background", StringComparer.OrdinalIgnoreCase);
@@ -61,6 +58,10 @@ public static class Program
 
         // Build the foundation container (pre-session). Side-effect-free — no I/O during Build().
         using var foundationContainer = ContainerRegistrationBuilder.BuildFoundationContainer();
+
+        var ipcClient = foundationContainer.Resolve<IIpcClient>();
+        if (EarlyExitArgsHandler.HandleEarlyExitArgs(args, ipcClient))
+            return 0;
 
         log = foundationContainer.Resolve<ILoggingService>();
         var configPaths = foundationContainer.Resolve<IConfigPaths>();
@@ -83,6 +84,7 @@ public static class Program
                      TokenPrivilegeHelper.SeImpersonatePrivilege,
                      TokenPrivilegeHelper.SeIncreaseQuotaPrivilege,
                      TokenPrivilegeHelper.SeDebugPrivilege,
+                     TokenPrivilegeHelper.SeTcbPrivilege,
                      TokenPrivilegeHelper.SeRelabelPrivilege,
                  })
         {
@@ -96,8 +98,8 @@ public static class Program
             }
         }
 
-        var singleInstance = new SingleInstanceService();
-        var sessionAcquisitionHandler = new SessionAcquisitionHandler(startupUi, configPaths, new DefaultIpcClient(), new RunningInstanceSidProvider());
+        using var singleInstance = foundationContainer.Resolve<ISingleInstanceService>();
+        var sessionAcquisitionHandler = foundationContainer.Resolve<SessionAcquisitionHandler>();
         if (unlockRequested || operationUnlockRequested)
         {
             var command = operationUnlockRequested ? IpcCommands.UnlockOperation : IpcCommands.Unlock;
@@ -114,14 +116,7 @@ public static class Program
                 .AcquireMutexOrTakeover(singleInstance, isBackground, log))
             return -3;
 
-        try
-        {
-            var orchestrator = foundationContainer.Resolve<StartupOrchestrator>();
-            return orchestrator.Run(isBackground, grantStartupRunAsUnlock);
-        }
-        finally
-        {
-            singleInstance.Dispose();
-        }
+        var orchestrator = foundationContainer.Resolve<StartupOrchestrator>();
+        return orchestrator.Run(isBackground, grantStartupRunAsUnlock);
     }
 }

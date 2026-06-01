@@ -25,34 +25,6 @@ public class AppContainerEditSubmitControllerTests
     }
 
     [Fact]
-    public async Task SubmitAsync_CreateAfterOsSaveFailure_ReturnsCloseResultWithPersistenceWarning()
-    {
-        var createdEntry = new AppContainerEntry { Name = "rfn_browser", DisplayName = "Browser" };
-        var service = new FakeAppContainerEditService
-        {
-            CreateNewContainerAsync = (_, _, _, _, _, _) => Task.FromResult(
-                new AppContainerCreateResult(
-                    AppContainerOperationStatus.SaveFailedAfterOs,
-                    createdEntry,
-                    "final save failed",
-                    []))
-        };
-        var controller = new AppContainerEditSubmitController(service);
-
-        var result = await controller.SubmitAsync(new AppContainerEditSubmitRequest
-        {
-            DisplayName = "Browser",
-            ProfileName = "rfn_browser",
-        });
-
-        Assert.Equal(DialogResult.OK, result.DialogResult);
-        Assert.Equal(AppContainerOperationStatus.SaveFailedAfterOs, result.OperationStatus);
-        Assert.Same(createdEntry, result.CreatedEntry);
-        Assert.Equal("Failed to create container: final save failed", result.PersistenceWarningText);
-        Assert.Null(result.OperationErrorText);
-    }
-
-    [Fact]
     public async Task SubmitAsync_EditCapabilityChangeSuccess_ReturnsRestartRequired()
     {
         var existing = new AppContainerEntry { Name = "rfn_browser", DisplayName = "Browser" };
@@ -79,23 +51,130 @@ public class AppContainerEditSubmitControllerTests
         Assert.Equal(DialogResult.OK, result.DialogResult);
         Assert.Equal(AppContainerOperationStatus.Succeeded, result.OperationStatus);
         Assert.True(result.RestartRequired);
+    }
+
+    [Fact]
+    public async Task SubmitAsync_CreateSuccess_ReturnsSuccessAndCreatedEntryWithoutWarningsOrErrors()
+    {
+        var createdEntry = new AppContainerEntry { Name = "rfn_browser", DisplayName = "Browser" };
+        var service = new FakeAppContainerEditService
+        {
+            CreateNewContainerAsync = (_, _, _, _, _, _) => Task.FromResult(new AppContainerCreateResult(
+                AppContainerOperationStatus.Succeeded,
+                createdEntry,
+                null,
+                ["Grant {CLSID-1}: granted"]))
+        };
+        var controller = new AppContainerEditSubmitController(service);
+
+        var result = await controller.SubmitAsync(new AppContainerEditSubmitRequest
+        {
+            ProfileName = "rfn_browser",
+            DisplayName = "Browser",
+            Capabilities = ["S-1-15-3-1"],
+        });
+
+        Assert.Equal(DialogResult.OK, result.DialogResult);
+        Assert.Same(createdEntry, result.CreatedEntry);
+        Assert.Equal(AppContainerOperationStatus.Succeeded, result.OperationStatus);
+        Assert.Equal(["Grant {CLSID-1}: granted"], result.ComAccessWarnings);
         Assert.Null(result.PersistenceWarningText);
         Assert.Null(result.OperationErrorText);
     }
 
     [Fact]
-    public async Task SubmitAsync_EditPreOsFailure_ReturnsBlockingOperationError()
+    public async Task SubmitAsync_CreateSaveFailedAfterOs_ReturnsSuccessWithPersistenceWarning()
+    {
+        var createdEntry = new AppContainerEntry { Name = "rfn_browser", DisplayName = "Browser" };
+        var service = new FakeAppContainerEditService
+        {
+            CreateNewContainerAsync = (_, _, _, _, _, _) => Task.FromResult(new AppContainerCreateResult(
+                AppContainerOperationStatus.SaveFailedAfterOs,
+                createdEntry,
+                "disk write failed",
+                []))
+        };
+        var controller = new AppContainerEditSubmitController(service);
+
+        var result = await controller.SubmitAsync(new AppContainerEditSubmitRequest
+        {
+            ProfileName = "rfn_browser",
+            DisplayName = "Browser",
+            Capabilities = ["S-1-15-3-1"],
+        });
+
+        Assert.Equal(DialogResult.OK, result.DialogResult);
+        Assert.Same(createdEntry, result.CreatedEntry);
+        Assert.Equal(AppContainerOperationStatus.SaveFailedAfterOs, result.OperationStatus);
+        Assert.Equal("Failed to create container: disk write failed", result.PersistenceWarningText);
+        Assert.Null(result.OperationErrorText);
+    }
+
+    [Fact]
+    public async Task SubmitAsync_CreateSaveFailedBeforeOs_ReturnsWarningAndNoCreatedEntry()
+    {
+        var service = new FakeAppContainerEditService
+        {
+            CreateNewContainerAsync = (_, _, _, _, _, _) => Task.FromResult(new AppContainerCreateResult(
+                AppContainerOperationStatus.SaveFailedBeforeOs,
+                null,
+                "db write failed",
+                []))
+        };
+        var controller = new AppContainerEditSubmitController(service);
+
+        var result = await controller.SubmitAsync(new AppContainerEditSubmitRequest
+        {
+            ProfileName = "rfn_browser",
+            DisplayName = "Browser",
+            Capabilities = ["S-1-15-3-1"],
+        });
+
+        Assert.Equal(DialogResult.None, result.DialogResult);
+        Assert.Null(result.CreatedEntry);
+        Assert.Equal(AppContainerOperationStatus.SaveFailedBeforeOs, result.OperationStatus);
+        Assert.Equal("Failed to create container: db write failed", result.PersistenceWarningText);
+        Assert.Null(result.OperationErrorText);
+    }
+
+    [Fact]
+    public async Task SubmitAsync_CreateSystemFailed_ReturnsOperationError()
+    {
+        var service = new FakeAppContainerEditService
+        {
+            CreateNewContainerAsync = (_, _, _, _, _, _) => Task.FromResult(new AppContainerCreateResult(
+                AppContainerOperationStatus.SystemFailed,
+                null,
+                "kernel panic",
+                []))
+        };
+        var controller = new AppContainerEditSubmitController(service);
+
+        var result = await controller.SubmitAsync(new AppContainerEditSubmitRequest
+        {
+            ProfileName = "rfn_browser",
+            DisplayName = "Browser",
+            Capabilities = ["S-1-15-3-1"],
+        });
+
+        Assert.Equal(DialogResult.None, result.DialogResult);
+        Assert.Equal(AppContainerOperationStatus.SystemFailed, result.OperationStatus);
+        Assert.Equal("Failed to create container: kernel panic", result.OperationErrorText);
+        Assert.Null(result.PersistenceWarningText);
+    }
+
+    [Fact]
+    public async Task SubmitAsync_EditSaveFailedAfterOs_ReturnsCloseWithoutRestartAndPersistenceWarning()
     {
         var existing = new AppContainerEntry { Name = "rfn_browser", DisplayName = "Browser" };
         var service = new FakeAppContainerEditService
         {
-            ApplyEditChangesAsync = (_, _, _, _, _, _) => Task.FromResult(
-                new AppContainerEditResult(
-                    AppContainerOperationStatus.SaveFailedBeforeOs,
-                    existing,
-                    CapabilitiesChanged: true,
-                    "save failed",
-                    []))
+            ApplyEditChangesAsync = (_, _, _, _, _, _) => Task.FromResult(new AppContainerEditResult(
+                AppContainerOperationStatus.SaveFailedAfterOs,
+                existing,
+                CapabilitiesChanged: false,
+                ErrorMessage: "post-os save failed",
+                []))
         };
         var controller = new AppContainerEditSubmitController(service);
 
@@ -104,31 +183,92 @@ public class AppContainerEditSubmitControllerTests
             Existing = existing,
             DisplayName = "Browser",
             ProfileName = existing.Name,
+            Capabilities = ["S-1-15-3-1"],
         });
 
-        Assert.Equal(DialogResult.None, result.DialogResult);
-        Assert.Equal(AppContainerOperationStatus.SaveFailedBeforeOs, result.OperationStatus);
+        Assert.Equal(DialogResult.OK, result.DialogResult);
+        Assert.Null(result.CreatedEntry);
+        Assert.Equal(AppContainerOperationStatus.SaveFailedAfterOs, result.OperationStatus);
         Assert.False(result.RestartRequired);
-        Assert.Equal("save failed", result.OperationErrorText);
+        Assert.Equal("post-os save failed", result.PersistenceWarningText);
+        Assert.Null(result.OperationErrorText);
     }
 
     [Fact]
-    public async Task SubmitAsync_CreateServiceThrows_ReturnsBlockingOperationError()
+    public async Task SubmitAsync_EditSaveFailedAfterOs_WithCapabilitiesChanged_ReturnsRestartRequired()
     {
-        var controller = new AppContainerEditSubmitController(new FakeAppContainerEditService
+        var existing = new AppContainerEntry { Name = "rfn_browser", DisplayName = "Browser" };
+        var service = new FakeAppContainerEditService
         {
-            CreateNewContainerAsync = (_, _, _, _, _, _) => throw new InvalidOperationException("boom"),
-        });
+            ApplyEditChangesAsync = (_, _, _, _, _, _) => Task.FromResult(new AppContainerEditResult(
+                AppContainerOperationStatus.SaveFailedAfterOs,
+                existing,
+                CapabilitiesChanged: true,
+                ErrorMessage: "post-os save failed",
+                []))
+        };
+        var controller = new AppContainerEditSubmitController(service);
 
         var result = await controller.SubmitAsync(new AppContainerEditSubmitRequest
         {
+            Existing = existing,
             DisplayName = "Browser",
-            ProfileName = "rfn_browser",
+            ProfileName = existing.Name,
+            Capabilities = ["S-1-15-3-1"],
+        });
+
+        Assert.Equal(DialogResult.OK, result.DialogResult);
+        Assert.True(result.RestartRequired);
+    }
+
+    [Fact]
+    public async Task SubmitAsync_EditSystemFailed_ReturnsOperationError()
+    {
+        var existing = new AppContainerEntry { Name = "rfn_browser", DisplayName = "Browser" };
+        var service = new FakeAppContainerEditService
+        {
+            ApplyEditChangesAsync = (_, _, _, _, _, _) => Task.FromResult(new AppContainerEditResult(
+                AppContainerOperationStatus.SystemFailed,
+                existing,
+                CapabilitiesChanged: false,
+                ErrorMessage: "edit failed",
+                []))
+        };
+        var controller = new AppContainerEditSubmitController(service);
+
+        var result = await controller.SubmitAsync(new AppContainerEditSubmitRequest
+        {
+            Existing = existing,
+            DisplayName = "Browser",
+            ProfileName = existing.Name,
+            Capabilities = ["S-1-15-3-1"],
         });
 
         Assert.Equal(DialogResult.None, result.DialogResult);
-        Assert.Equal("boom", result.OperationErrorText);
-        Assert.Null(result.OperationStatus);
+        Assert.Equal(AppContainerOperationStatus.SystemFailed, result.OperationStatus);
+        Assert.Equal("edit failed", result.OperationErrorText);
+        Assert.Null(result.PersistenceWarningText);
+    }
+
+    [Fact]
+    public async Task SubmitAsync_ServiceThrows_ReturnsExceptionMessageAsOperationError()
+    {
+        var service = new FakeAppContainerEditService
+        {
+            CreateNewContainerAsync = (_, _, _, _, _, _) =>
+                throw new InvalidOperationException("creation failed")
+        };
+        var controller = new AppContainerEditSubmitController(service);
+
+        var result = await controller.SubmitAsync(new AppContainerEditSubmitRequest
+        {
+            ProfileName = "rfn_browser",
+            DisplayName = "Browser",
+            Capabilities = ["S-1-15-3-1"],
+        });
+
+        Assert.Equal(DialogResult.None, result.DialogResult);
+        Assert.Equal("creation failed", result.OperationErrorText);
     }
 
     private sealed class FakeAppContainerEditService : IAppContainerEditService

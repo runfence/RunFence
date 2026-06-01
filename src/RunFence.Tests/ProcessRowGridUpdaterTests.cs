@@ -153,25 +153,6 @@ public class ProcessRowGridUpdaterTests
         });
     }
 
-    [Fact]
-    public void RestoreScrollPosition_HandlesValidAndInvalidRowIndexesWithoutVisibleGrid()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var grid = CreateGrid();
-            for (int i = 0; i < 40; i++)
-                AddParentRow(grid, $"S-1-5-21-1-2-3-{1000 + i}");
-
-            var updater = CreateUpdater();
-
-            updater.RestoreScrollPosition(grid, 10);
-            updater.RestoreScrollPosition(grid, -1);
-            updater.RestoreScrollPosition(grid, grid.Rows.Count);
-
-            Assert.Equal(40, grid.Rows.Count);
-        });
-    }
-
     private static ProcessRowGridUpdater CreateUpdater()
         => new(new ProcessCommandLineFormatter());
 

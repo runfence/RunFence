@@ -39,6 +39,9 @@ public class TraverseAutoManagerTests
     private readonly Mock<IAclPermissionService> _defaultAclPermission = new();
     private readonly TestFileSystemPathInfo _pathInfo = new();
 
+    private static AclTraversePendingChangesSnapshot GetTraverseSnapshot(AclManagerPendingChanges pending)
+        => pending.Traverse.GetSnapshot();
+
     private static GrantedPathEntry AllowEntry(string path) =>
         new() { Path = path, IsDeny = false, IsTraverseOnly = false };
 
@@ -77,8 +80,8 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(AppDir);
 
         // Assert
-        Assert.True(pending.IsPendingTraverseAdd(AppDir));
-        var entry = pending.PendingTraverseAdds[AppDir];
+        Assert.True(pending.Traverse.IsPendingTraverseAdd(AppDir));
+        var entry = GetTraverseSnapshot(pending).PendingAdds[AppDir];
         Assert.True(entry.IsTraverseOnly);
     }
 
@@ -86,13 +89,8 @@ public class TraverseAutoManagerTests
     public void AutoAdd_AlreadyPendingAdd_DoesNotDuplicate()
     {
         // Arrange — traverse already queued for add
-        var pending = new AclManagerPendingChanges
-        {
-            PendingTraverseAdds =
-            {
-                [AppDir] = TraverseEntry(AppDir)
-            }
-        };
+        var pending = new AclManagerPendingChanges();
+        pending.Traverse.AddTraverse(TraverseEntry(AppDir));
         var db = MakeDatabase();
         var mgr = CreateManager(pending, db);
 
@@ -100,7 +98,7 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(AppDir);
 
         // Assert — still exactly one entry, not duplicated
-        Assert.Single(pending.PendingTraverseAdds);
+        Assert.Single(GetTraverseSnapshot(pending).PendingAdds);
     }
 
     [Fact]
@@ -109,7 +107,7 @@ public class TraverseAutoManagerTests
         // Arrange — traverse was previously queued for removal
         var pending = new AclManagerPendingChanges();
         var existing = TraverseEntry(AppDir);
-        pending.PendingTraverseRemoves[AppDir] = existing;
+        pending.Traverse.MarkTraverseForRemoval(existing);
         var db = MakeDatabase();
         var mgr = CreateManager(pending, db);
 
@@ -117,8 +115,8 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(AppDir);
 
         // Assert — scheduled removal cancelled; no new pending add either
-        Assert.False(pending.IsPendingTraverseRemove(AppDir));
-        Assert.False(pending.IsPendingTraverseAdd(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseRemove(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseAdd(AppDir));
     }
 
     [Fact]
@@ -133,7 +131,7 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(AppDir);
 
         // Assert — no pending add since DB already covers it
-        Assert.False(pending.IsPendingTraverseAdd(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseAdd(AppDir));
     }
 
     [Fact]
@@ -146,7 +144,7 @@ public class TraverseAutoManagerTests
 
         mgr.AutoAddTraverseIfMissing(AppDir);
 
-        Assert.False(pending.IsPendingTraverseAdd(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseAdd(AppDir));
     }
 
     [Fact]
@@ -164,7 +162,7 @@ public class TraverseAutoManagerTests
 
         mgr.AutoAddTraverseIfMissing(AppDir);
 
-        Assert.True(pending.IsPendingTraverseAdd(AppDir));
+        Assert.True(pending.Traverse.IsPendingTraverseAdd(AppDir));
     }
 
     // --- AutoRemoveTraverseIfUnneeded ---
@@ -181,7 +179,7 @@ public class TraverseAutoManagerTests
         mgr.AutoRemoveTraverseIfUnneeded(AppDir);
 
         // Assert
-        Assert.True(pending.IsPendingTraverseRemove(AppDir));
+        Assert.True(pending.Traverse.IsPendingTraverseRemove(AppDir));
     }
 
     [Fact]
@@ -195,7 +193,7 @@ public class TraverseAutoManagerTests
 
         mgr.AutoRemoveTraverseIfUnneeded(AppDir);
 
-        Assert.False(pending.IsPendingTraverseRemove(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseRemove(AppDir));
     }
 
     [Fact]
@@ -210,8 +208,10 @@ public class TraverseAutoManagerTests
 
         mgr.AutoRemoveTraverseIfUnneeded(AppDir);
 
-        Assert.True(pending.PendingTraverseRemoves.TryGetValue(AppDir, out var queued));
-        Assert.Same(sharedEntry, queued);
+        Assert.True(GetTraverseSnapshot(pending).PendingRemoves.TryGetValue(AppDir, out var queued));
+        Assert.Equal(sharedEntry.Path, queued.Path);
+        Assert.Equal(sharedEntry.IsTraverseOnly, queued.IsTraverseOnly);
+        Assert.Equal(sharedEntry.SourceSids, queued.SourceSids);
     }
 
     [Fact]
@@ -229,7 +229,7 @@ public class TraverseAutoManagerTests
 
         mgr.AutoRemoveTraverseIfUnneeded(AppDir);
 
-        Assert.False(pending.IsPendingTraverseRemove(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseRemove(AppDir));
     }
 
     [Fact]
@@ -241,21 +241,15 @@ public class TraverseAutoManagerTests
             AllowEntry(@"C:\Apps\MyApp\other.exe"),
             TraverseEntry(AppDir)
         ]);
-        var pending = new AclManagerPendingChanges
-        {
-            PendingRemoves =
-            {
-                // Simulate removing the first grant (AppPath) as pending
-                [(AppPath, false)] = AllowEntry(AppPath)
-            }
-        };
+        var pending = new AclManagerPendingChanges();
+        pending.Grants.MarkGrantForRemoval(AllowEntry(AppPath));
         var mgr = CreateManager(pending, db);
 
         // Act — check if traverse is still needed after removing AppPath
         mgr.AutoRemoveTraverseIfUnneeded(AppDir);
 
         // Assert — second grant still depends on AppDir traverse; do not remove
-        Assert.False(pending.IsPendingTraverseRemove(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseRemove(AppDir));
     }
 
     [Fact]
@@ -263,21 +257,15 @@ public class TraverseAutoManagerTests
     {
         // Arrange — traverse in DB; a new (pending) allow grant depends on the parent
         var db = MakeDatabase([TraverseEntry(AppDir)]);
-        var pending = new AclManagerPendingChanges
-        {
-            PendingAdds =
-            {
-                // Pending allow grant for AppPath → AppDir is still needed
-                [(AppPath, false)] = AllowEntry(AppPath)
-            }
-        };
+        var pending = new AclManagerPendingChanges();
+        pending.Grants.AddGrant(AllowEntry(AppPath));
         var mgr = CreateManager(pending, db);
 
         // Act
         mgr.AutoRemoveTraverseIfUnneeded(AppDir);
 
         // Assert
-        Assert.False(pending.IsPendingTraverseRemove(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseRemove(AppDir));
     }
 
     [Fact]
@@ -290,22 +278,22 @@ public class TraverseAutoManagerTests
             allowEntry,
             TraverseEntry(AppDir)
         ]);
-        var pending = new AclManagerPendingChanges
-        {
-            PendingModifications =
-            {
-                // Simulate the allow entry having been mode-switched to Deny (pending, not yet applied).
-                [(AppPath, false)] = new PendingModification(
-                    allowEntry, WasIsDeny: false, WasOwn: false, NewIsDeny: true, NewRights: null)
-            }
-        };
+        var pending = new AclManagerPendingChanges();
+        pending.Grants.ModifyGrant(
+            allowEntry,
+            new PendingModification(
+                allowEntry,
+                WasIsDeny: false,
+                WasOwn: false,
+                NewIsDeny: true,
+                NewRights: null));
         var mgr = CreateManager(pending, db);
 
         // Act — the only allow grant is pending switch to Deny; AppDir traverse is no longer needed.
         mgr.AutoRemoveTraverseIfUnneeded(AppDir);
 
         // Assert — entry pending switch to Deny is not counted as an allow dependency; traverse removed.
-        Assert.True(pending.IsPendingTraverseRemove(AppDir));
+        Assert.True(pending.Traverse.IsPendingTraverseRemove(AppDir));
     }
 
     [Fact]
@@ -313,21 +301,16 @@ public class TraverseAutoManagerTests
     {
         // Arrange — traverse is only queued as a pending add (not yet in DB); removing grant cancels it
         var db = MakeDatabase();
-        var pending = new AclManagerPendingChanges
-        {
-            PendingTraverseAdds =
-            {
-                [AppDir] = TraverseEntry(AppDir)
-            }
-        };
+        var pending = new AclManagerPendingChanges();
+        pending.Traverse.AddTraverse(TraverseEntry(AppDir));
         var mgr = CreateManager(pending, db);
 
         // Act — the allow grant that required this traverse is being removed
         mgr.AutoRemoveTraverseIfUnneeded(AppDir);
 
         // Assert — pending add cancelled; no remove queued (nothing in DB to remove)
-        Assert.False(pending.IsPendingTraverseAdd(AppDir));
-        Assert.False(pending.IsPendingTraverseRemove(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseAdd(AppDir));
+        Assert.False(pending.Traverse.IsPendingTraverseRemove(AppDir));
     }
 
     // --- Multi-level ancestors ---
@@ -345,8 +328,8 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(ParentDir);
 
         // Assert — both queued
-        Assert.True(pending.IsPendingTraverseAdd(AppDir));
-        Assert.True(pending.IsPendingTraverseAdd(ParentDir));
+        Assert.True(pending.Traverse.IsPendingTraverseAdd(AppDir));
+        Assert.True(pending.Traverse.IsPendingTraverseAdd(ParentDir));
     }
 
     // --- GetTraversePath (folder vs file) ---
@@ -391,7 +374,7 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(traversePath!);
 
         // Assert — traverse entry is for the folder itself, not its parent
-        Assert.True(pending.IsPendingTraverseAdd(folderGrantPath));
+        Assert.True(pending.Traverse.IsPendingTraverseAdd(folderGrantPath));
     }
 
     [Fact]
@@ -409,7 +392,7 @@ public class TraverseAutoManagerTests
         var traversePath = mgr.GetTraversePath(folderGrantPath);
         mgr.AutoRemoveTraverseIfUnneeded(traversePath!);
 
-        Assert.True(pending.IsPendingTraverseRemove(folderGrantPath));
+        Assert.True(pending.Traverse.IsPendingTraverseRemove(folderGrantPath));
     }
 
     [Fact]
@@ -428,21 +411,15 @@ public class TraverseAutoManagerTests
             AllowEntry(folderGrantPath),
             existing
         ]);
-        var pending = new AclManagerPendingChanges
-        {
-            PendingRemoves =
-            {
-                // Simulate removing the folder grant
-                [(folderGrantPath, false)] = AllowEntry(folderGrantPath)
-            }
-        };
+        var pending = new AclManagerPendingChanges();
+        pending.Grants.MarkGrantForRemoval(AllowEntry(folderGrantPath));
         var mgr = CreateManager(pending, db);
 
         var traversePath = mgr.GetTraversePath(folderGrantPath);
         mgr.AutoRemoveTraverseIfUnneeded(traversePath!);
 
         // File grant still needs traverse on the folder → do not remove
-        Assert.False(pending.IsPendingTraverseRemove(folderGrantPath));
+        Assert.False(pending.Traverse.IsPendingTraverseRemove(folderGrantPath));
     }
 
     // --- Case insensitivity ---
@@ -459,7 +436,7 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(@"c:\apps\myapp");
 
         // Assert — DB entry recognised → no pending add
-        Assert.False(pending.IsPendingTraverseAdd(@"c:\apps\myapp"));
+        Assert.False(pending.Traverse.IsPendingTraverseAdd(@"c:\apps\myapp"));
     }
 
     // --- With mocked IAclPermissionService ---
@@ -489,7 +466,7 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(traversePath);
 
         // Assert — no pending add since traverse is already effective
-        Assert.False(pending.IsPendingTraverseAdd(traversePath));
+        Assert.False(pending.Traverse.IsPendingTraverseAdd(traversePath));
     }
 
     [Fact]
@@ -523,7 +500,7 @@ public class TraverseAutoManagerTests
 
         mgr.AutoAddTraverseIfMissing(traversePath);
 
-        Assert.False(pending.IsPendingTraverseAdd(traversePath));
+        Assert.False(pending.Traverse.IsPendingTraverseAdd(traversePath));
     }
 
     [Fact]
@@ -550,7 +527,7 @@ public class TraverseAutoManagerTests
         mgr.AutoAddTraverseIfMissing(traversePath);
 
         // Traverse is not yet effective → must be queued for add
-        Assert.True(pending.IsPendingTraverseAdd(traversePath));
+        Assert.True(pending.Traverse.IsPendingTraverseAdd(traversePath));
     }
 
     [Fact]
@@ -598,7 +575,7 @@ public class TraverseAutoManagerTests
 
         mgr.AutoAddTraverseIfMissing(traversePath);
 
-        Assert.True(pending.IsPendingTraverseAdd(traversePath));
+        Assert.True(pending.Traverse.IsPendingTraverseAdd(traversePath));
     }
 
     [Fact]
@@ -615,16 +592,23 @@ public class TraverseAutoManagerTests
 
         mgr.AutoAddTraverseIfMissing(traversePath);
 
-        Assert.False(pending.IsPendingTraverseAdd(traversePath));
+        Assert.False(pending.Traverse.IsPendingTraverseAdd(traversePath));
     }
 
     private static IAclPermissionService CreateRealAclPermissionService()
-        => new AclPermissionService(
+    {
+        var evaluator = new DeterministicAclAccessEvaluator();
+        var resolver = new AclGroupSidResolver(
             new NTTranslateApi(new Mock<ILoggingService>().Object),
             new GroupMembershipApi(new Mock<ILoggingService>().Object),
-            new Mock<ILocalGroupQueryService>().Object,
-            AclAccessorFactory.Create(),
-            new DeterministicAclAccessEvaluator());
+            new Mock<ILocalGroupQueryService>().Object);
+        var aclAccessor = AclAccessorFactory.Create();
+        return new AclPermissionService(
+            resolver,
+            new GrantableAncestorPolicy(resolver, aclAccessor, evaluator),
+            new AdminRestrictionAclWriter(aclAccessor),
+            evaluator);
+    }
 
     private static DirectorySecurity CreateDirectorySecurity(
         IEnumerable<(string Sid, FileSystemRights Rights)>? allowSids = null,
@@ -656,4 +640,3 @@ public class TraverseAutoManagerTests
         return security;
     }
 }
-

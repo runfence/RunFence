@@ -93,7 +93,7 @@ public class RunAsFlowHandlerTests
         _dosProtection,
         _authorizer.Object,
         _idleMonitor.Object,
-        new ShortcutTargetResolver(new Mock<IShortcutComHelper>().Object));
+        new ShortcutTargetResolver(new Mock<IShortcutGateway>().Object));
 
     private static IpcMessage MakeMessage(string appId) =>
         new() { Command = "RunAs", AppId = appId };
@@ -360,7 +360,7 @@ public class RunAsFlowHandlerTests
 {
             Database = _appState.Object.Database,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(pinKey);
+        }.WithClonedPinDerivedKey(pinKey);
         _appLock.Setup(l => l.IsUnlockPolling).Returns(true);
         _appLock.Setup(l => l.TryUnlockForOperationAsync(true)).ReturnsAsync(true);
         var handler = CreateHandler(CreateNoOpDialogPresenter(session));
@@ -381,6 +381,7 @@ public class RunAsFlowHandlerTests
                 _appState.Object,
                 session,
                 new ByteArrayCredentialEncryptionSpanAdapter(new Mock<IByteArrayCredentialEncryptionService>().Object),
+                new Mock<IDatabaseService>().Object,
                 new Mock<IDatabaseService>().Object,
                 _log.Object),
             _appState.Object,

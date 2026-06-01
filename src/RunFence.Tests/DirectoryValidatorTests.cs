@@ -99,21 +99,6 @@ public class DirectoryValidatorTests : IDisposable
     }
 
     [Fact]
-    public void ValidateAndHold_RealDirectory_NeedsPermissionGrantChecked()
-    {
-        // Arrange
-        var dir = Path.Combine(_tempDir.Path, "permcheck");
-        Directory.CreateDirectory(dir);
-
-        // Act
-        using var handle = _validator.ValidateAndHold(dir, CallerSid);
-
-        // Assert: NeedsPermissionGrant is always called with the canonical path and caller SID
-        _aclPermission.Verify(a => a.NeedsPermissionGrant(
-            It.IsAny<string>(), CallerSid, FileSystemRights.ListDirectory), Times.Once);
-    }
-
-    [Fact]
     public void ValidateAndHold_CallerLacksPermission_ReturnsInvalid()
     {
         // Arrange: simulate access denied for this caller

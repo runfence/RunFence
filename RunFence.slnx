@@ -13,6 +13,7 @@
   <Project Path="src\RunFence.JobKeeper\RunFence.JobKeeper.csproj" />
   <Project Path="src\RunFence.ProfileKeeper\RunFence.ProfileKeeper.csproj" />
   <Project Path="src\RunFence.PinHelper\RunFence.PinHelper.csproj" />
+  <Project Path="src\RunFence.AppxLauncher\RunFence.AppxLauncher.csproj" />
   <Folder Name="/lib/">
     <Project Path="lib\Autofac.Extras.Ordering\src\Autofac.Extras.Ordering\Autofac.Extras.Ordering.csproj" />
   </Folder>

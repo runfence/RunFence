@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
-using System.Security.Principal;
+using Moq;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.PrefTrans;
 using Xunit;
@@ -8,26 +9,37 @@ namespace RunFence.Tests;
 
 public class SettingsTransferStagingServiceTests
 {
-    private static readonly string SharedTempRoot = Path.Combine(PathConstants.ProgramDataDir, "temp");
-    private readonly SettingsTransferStagingService _service = new();
+    private const string InteractiveSid = "S-1-5-21-2222-2222-2222-2222";
+    private static readonly string SharedTempRoot = Path.Combine(PathConstants.ProgramDataDir, ProgramDataPolicies.Temp.RelativePath);
+    private readonly Mock<IProgramDataDirectoryProvisioningService> _programDataDirectorySecurityService;
+    private readonly Mock<IProgramDataObjectProvisioner> _programDataObjectProvisioner;
+    private readonly Mock<IProgramDataKnownPathResolver> _programDataKnownPathResolver;
+    private readonly SettingsTransferStagingService _service;
 
-    [Fact]
-    public void CreateSharedTempFilePath_CreatesPathInsideUniqueSharedTempDirectory()
+    public SettingsTransferStagingServiceTests()
     {
-        var path = _service.CreateSharedTempFilePath(".json");
+        _programDataDirectorySecurityService = new(MockBehavior.Strict);
+        _programDataObjectProvisioner = new(MockBehavior.Strict);
+        _programDataKnownPathResolver = new(MockBehavior.Strict);
+        _programDataKnownPathResolver
+            .Setup(resolver => resolver.GetDirectoryPath(ProgramDataPolicies.Temp))
+            .Returns(SharedTempRoot);
+        _programDataDirectorySecurityService
+            .Setup(s => s.EnsureRoot())
+            .Returns(PathConstants.ProgramDataDir);
+        _programDataDirectorySecurityService
+            .Setup(s => s.EnsureKnownDirectory(ProgramDataPolicies.Temp))
+            .Returns(SharedTempRoot);
+        _programDataDirectorySecurityService
+            .Setup(s => s.EnsureTraverseOnlyAccess(SharedTempRoot, InteractiveSid, ProgramDataDirectoryAclProfile.TrustedOnly));
+        _programDataObjectProvisioner
+            .Setup(p => p.CreateOrRepairDirectory(It.IsAny<ProgramDataExplicitDirectoryRequest>()))
+            .Callback<ProgramDataExplicitDirectoryRequest>(request => Directory.CreateDirectory(request.Path));
 
-        Assert.StartsWith(SharedTempRoot, path, StringComparison.OrdinalIgnoreCase);
-        Assert.EndsWith(".json", path, StringComparison.OrdinalIgnoreCase);
-        Assert.NotEqual(SharedTempRoot, Path.GetDirectoryName(path));
-    }
-
-    [Fact]
-    public void CreateSharedTempDirectoryPath_ReturnsUniqueSharedTempDirectoryPath()
-    {
-        var path = _service.CreateSharedTempDirectoryPath();
-
-        Assert.StartsWith(SharedTempRoot, path, StringComparison.OrdinalIgnoreCase);
-        Assert.NotEqual(SharedTempRoot, path);
+        _service = new SettingsTransferStagingService(
+            _programDataDirectorySecurityService.Object,
+            _programDataObjectProvisioner.Object,
+            _programDataKnownPathResolver.Object);
     }
 
     [Fact]
@@ -43,23 +55,26 @@ public class SettingsTransferStagingServiceTests
         var returned = _service.CopyImportFileToRestrictedTemp(
             sourceFile,
             destination,
-            "S-1-5-21-2222-2222-2222-2222");
+            InteractiveSid);
 
         Assert.Equal(destination, returned);
         Assert.Equal("{\"ok\":true}", File.ReadAllText(destination));
         Assert.True(Directory.Exists(destinationDir));
 
+        _programDataDirectorySecurityService.Verify(s => s.EnsureRoot(), Times.Once);
+        _programDataDirectorySecurityService.Verify(s => s.EnsureKnownDirectory(ProgramDataPolicies.Temp), Times.Once);
+        _programDataDirectorySecurityService.Verify(s => s.EnsureTraverseOnlyAccess(SharedTempRoot, InteractiveSid, ProgramDataDirectoryAclProfile.TrustedOnly), Times.Once);
+        _programDataObjectProvisioner.Verify(p => p.CreateOrRepairDirectory(
+            It.Is<ProgramDataExplicitDirectoryRequest>(request =>
+                request.Path == destinationDir &&
+                request.Profile == ProgramDataDirectoryAclProfile.CurrentProcessUserFullControl &&
+                request.ReplaceExistingSecurity &&
+                request.AdditionalAccess.Count == 1 &&
+                request.AdditionalAccess[0].Principal.Value == InteractiveSid &&
+                request.AdditionalAccess[0].Rights.HasFlag(FileSystemRights.Modify))),
+            Times.Once);
+
         _service.TryDeleteTempDirectory(destinationDir);
-    }
-
-    [Fact]
-    public void CreateRestrictedExportDirectory_CreatesDirectory()
-    {
-        var path = _service.CreateSharedTempDirectoryPath();
-        var created = _service.CreateRestrictedExportDirectory(path, "S-1-5-21-3333-3333-3333-3333");
-
-        Assert.Equal(Path.GetFullPath(path), created);
-        Assert.True(Directory.Exists(created));
     }
 
     [Fact]
@@ -78,63 +93,4 @@ public class SettingsTransferStagingServiceTests
         Assert.Equal(directory, deletedDir);
     }
 
-    [Fact]
-    public void BuildRestrictedDirectorySecurity_ContainsExpectedIdentities()
-    {
-        const string targetSid = "S-1-5-21-4444-4444-4444-4444";
-        var security = _service.BuildRestrictedDirectorySecurity(targetSid);
-        var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier));
-
-        var fileSystemRules = rules.Cast<FileSystemAccessRule>().ToList();
-        var identityReferences = fileSystemRules
-            .Select(rule => rule.IdentityReference.Value)
-            .ToList();
-
-        var currentSid = WindowsIdentity.GetCurrent().User?.Value;
-
-        Assert.Contains("S-1-5-32-544", identityReferences);
-        Assert.NotNull(currentSid);
-        Assert.Contains(currentSid, identityReferences);
-        Assert.Contains(fileSystemRules, rule =>
-            rule.IdentityReference.Value == targetSid &&
-            rule.FileSystemRights.HasFlag(FileSystemRights.Modify) &&
-            rule.AccessControlType == AccessControlType.Allow);
-    }
-
-    [Fact]
-    public void BuildRestrictedFileSecurity_ContainsTargetAccess()
-    {
-        var accountSid = "S-1-5-21-5555-5555-5555-5555";
-        var security = _service.BuildRestrictedFileSecurity(accountSid);
-        var rules = security.GetAccessRules(true, true, typeof(SecurityIdentifier));
-
-        Assert.Contains(rules.Cast<FileSystemAccessRule>(), rule =>
-            rule.IdentityReference.Value == accountSid &&
-            rule.FileSystemRights.HasFlag(FileSystemRights.Read) &&
-            rule.AccessControlType == AccessControlType.Allow);
-    }
-
-    [Fact]
-    public void TryDeleteTempFile_ReturnsNullWhenPathMissing()
-    {
-        var missingFile = Path.Combine(_service.CreateSharedTempDirectoryPath(), "missing.json");
-
-        var deleted = _service.TryDeleteTempFile(missingFile);
-
-        Assert.Null(deleted);
-    }
-
-    [Fact]
-    public void CopyExportFileToDestination_CopiesFileToRequestedPath()
-    {
-        using var sourceDir = new TempDirectory("SettingsTransferExportSource");
-        using var destinationDir = new TempDirectory("SettingsTransferExportDest");
-        var sourcePath = Path.Combine(sourceDir.Path, "settings.json");
-        var destinationPath = Path.Combine(destinationDir.Path, "copied.json");
-        File.WriteAllText(sourcePath, "{\"copied\":true}");
-
-        _service.CopyExportFileToDestination(sourcePath, destinationPath);
-
-        Assert.Equal("{\"copied\":true}", File.ReadAllText(destinationPath));
-    }
 }

@@ -1,10 +1,10 @@
 using RunFence.Account;
 using RunFence.Account.UI;
 using RunFence.Account.UI.Forms;
-using RunFence.Apps.Shortcuts;
-using RunFence.Apps.UI;
 using RunFence.Core;
 using RunFence.Core.Models;
+using RunFence.Apps.UI;
+using RunFence.Infrastructure;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -24,28 +24,24 @@ namespace RunFence.Wizard.Templates;
 /// </summary>
 public class GamingAccountTemplate(
     WizardTemplateExecutor executor,
-    WizardAccountSetupHelperFactory setupHelperFactory,
-    WizardFolderGrantHelper folderGrantHelper,
+    WizardTemplateSetupBuilder setupBuilder,
     SessionContext session,
     GamingExistingAccountPreparationService existingAccountPreparationService,
-    IWindowsAccountQueryService windowsAccountQueryService,
-    WizardAccountPickerStepFactory pickerStepFactory,
+    WizardAccountPickerService pickerStepService,
     WizardCredentialCollector credentialCollector,
-    IShortcutDiscoveryService discoveryService,
-    IShortcutIconHelper iconHelper)
+    GamingWizardStepBuilder stepBuilder)
     : IWizardTemplate
 {
-    private readonly CommitData _data = new();
+    private readonly GamingAccountTemplateState _data = new();
 
     public string DisplayName => "Gaming Account";
     public string Description => "Isolated gaming account with full access to game folders and launcher shortcuts";
     public string IconEmoji => "\U0001F3AE"; // 🎮
-    public Action<IWin32Window>? PostWizardAction => null;
+    public Func<IWin32Window, Task>? PostWizardAction => null;
 
     public void Cleanup()
     {
-        _data.Password?.Dispose();
-        _data.CollectedPassword?.Dispose();
+        _data.DisposeSecrets();
     }
 
     public IReadOnlyList<WizardStepPage> CreateSteps()
@@ -55,7 +51,7 @@ public class GamingAccountTemplate(
         string? interactiveSid = SidResolutionHelper.GetInteractiveUserSid();
         var data = _data;
 
-        var pickerStep = pickerStepFactory.CreatePickerStep(
+        var pickerStep = pickerStepService.CreatePickerStep(
             setSelection: (sid, isCreate) =>
             {
                 data.ExistingAccountSid = sid;
@@ -74,17 +70,15 @@ public class GamingAccountTemplate(
                 DefaultToCreateNew: true),
             followingStepsFactory: isCreate =>
             {
-                var instructionsStep = new GamingSetupInstructionsStep(isCreateNew: isCreate);
-                var foldersStep = new GamingFoldersStep(paths => data.GameFolders = paths);
-                var launchersStep = new GamingLaunchersStep(
+                var instructionsStep = stepBuilder.CreateInstructionsStep(isCreateNew: isCreate);
+                var foldersStep = stepBuilder.CreateFoldersStep(paths => data.GameFolders = paths);
+                var launchersStep = stepBuilder.CreateLaunchersStep(
                     launchers => data.GameLaunchers = launchers,
-                    discoveryService,
-                    iconHelper,
                     getSid: () => data.IsExistingAccount ? data.ExistingAccountSid : null);
 
                 if (isCreate)
                 {
-                    var nameStep = setupHelperFactory.CreateAccountNameStep(
+                    var nameStep = stepBuilder.CreateAccountNameStep(
                         (name, password) =>
                         {
                             data.Username = name;
@@ -130,54 +124,16 @@ public class GamingAccountTemplate(
         }
 
         progress.ReportStatus($"Creating account '{_data.Username}'...");
-
-        var request = new EditAccountDialogCreateHandler.CreateAccountRequest(
-            Username: _data.Username,
-            Password: _data.Password?.Copy() ?? ProtectedString.CreateEmpty(),
-            ConfirmPassword: _data.Password?.Copy() ?? ProtectedString.CreateEmpty(),
-            IsEphemeral: false,
-            CheckedGroups: [(GroupFilterHelper.UsersSid, "Users")],
-            UncheckedGroups: [],
-            AllowLogon: true,
-            AllowNetworkLogin: false,
-            AllowBgAutorun: false,
-            CurrentHiddenCount: 0);
-
-        using var defaults = setupHelperFactory.CreateAccountDefaults();
-        var setupOptions = new WizardSetupOptions(
-            StoreCredential: true,
-            IsEphemeral: false,
-            PrivilegeLevel: PrivilegeLevel.Isolated,
-            FirewallSettings: new FirewallAccountSettings { AllowLan = false, AllowLocalhost = false },
-            DesktopSettingsPath: defaults.DesktopSettingsPath,
-            InstallPackages: null,
-            TrayTerminal: false);
-
-        var gameFolders = _data.GameFolders;
-        var gameLaunchers = _data.GameLaunchers;
+        var flowParams = setupBuilder.BuildGamingNewAccountFlow(_data, progress);
 
         try
         {
-            await executor.ExecuteAsync(new WizardStandardFlowParams(
-                Request: request,
-                SetupOptions: setupOptions,
-                BuildOptionsFactory: sid => BuildLauncherOptions(sid, gameLaunchers, session),
-                PreEnforcementAction: async (sess, sid) =>
-                {
-                    var newFolders = FilterNewFolders(gameFolders, sess, sid);
-                    if (newFolders.Count == 0)
-                        return;
-                    await folderGrantHelper.GrantFolderAccessAsync(
-                        newFolders, sid,
-                        new SavedRightsState(Execute: true, Write: true, Read: true, Special: true, Own: true),
-                        progress);
-                },
-                CreateDesktopShortcut: true), progress);
+            await executor.ExecuteAsync(flowParams, progress);
         }
         finally
         {
-            request.Password.Dispose();
-            request.ConfirmPassword.Dispose();
+            flowParams.Request?.Password.Dispose();
+            flowParams.Request?.ConfirmPassword.Dispose();
         }
     }
 
@@ -197,130 +153,6 @@ public class GamingAccountTemplate(
                 progress))
             return;
 
-        var gameFolders = _data.GameFolders;
-        var gameLaunchers = _data.GameLaunchers;
-
-        await executor.ExecuteAsync(new WizardStandardFlowParams(
-            Request: null,
-            SetupOptions: null,
-            AccountSid: sid,
-            BuildOptionsFactory: resolvedSid => BuildLauncherOptions(resolvedSid, gameLaunchers, session),
-            PreEnforcementAction: async (sess, resolvedSid) =>
-            {
-                var newFolders = FilterNewFolders(gameFolders, sess, resolvedSid);
-                if (newFolders.Count == 0)
-                    return;
-                await folderGrantHelper.GrantFolderAccessAsync(
-                    newFolders, resolvedSid,
-                    new SavedRightsState(Execute: true, Write: true, Read: true, Special: true, Own: true),
-                    progress);
-            },
-            CreateDesktopShortcut: true), progress);
-    }
-
-    private IReadOnlyList<AppEntryBuildOptions> BuildLauncherOptions(
-        string sid, List<string> launchers, SessionContext sess)
-    {
-        var existingExePaths = sess.Database.Apps
-            .Where(a => string.Equals(a.AccountSid, sid, StringComparison.OrdinalIgnoreCase))
-            .Select(a => a.ExePath)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        string? profilePath = null;
-        try
-        {
-            profilePath = windowsAccountQueryService.GetProfilePath(sid).ProfilePath;
-        }
-        catch
-        {
-        }
-
-        return launchers
-            .Where(p => !string.IsNullOrEmpty(p) && !existingExePaths.Contains(p))
-            .Select(launcherPath =>
-            {
-                bool inProfile = profilePath != null && IsPathInsideFolder(launcherPath, profilePath);
-                return AppEntryBuildOptions.ForWizard(
-                    name: Path.GetFileNameWithoutExtension(launcherPath),
-                    exePath: launcherPath,
-                    accountSid: sid,
-                    restrictAcl: !inProfile,
-                    aclMode: AclMode.Deny,
-                    manageShortcuts: true,
-                    aclTarget: AclTarget.Folder);
-            })
-            .ToList();
-    }
-
-    private static bool IsPathInsideFolder(string path, string folder)
-    {
-        try
-        {
-            var fullPath = Path.GetFullPath(path);
-            var fullFolder = Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            return fullPath.StartsWith(fullFolder, StringComparison.OrdinalIgnoreCase);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static List<string> FilterNewFolders(List<string> folders, SessionContext sess, string sid)
-    {
-        var existingGrantPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var account = sess.Database.Accounts.FirstOrDefault(a => string.Equals(a.Sid, sid, StringComparison.OrdinalIgnoreCase));
-        if (account != null)
-        {
-            foreach (var g in account.Grants)
-            {
-                try
-                {
-                    existingGrantPaths.Add(Path.GetFullPath(g.Path));
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        return folders
-            .Where(f => !string.IsNullOrEmpty(f))
-            .Where(f =>
-            {
-                try
-                {
-                    return !existingGrantPaths.Contains(Path.GetFullPath(f));
-                }
-                catch
-                {
-                    return true;
-                }
-            })
-            .ToList();
-    }
-
-    private sealed class CommitData
-    {
-        public bool IsExistingAccount { get; set; }
-        public string? ExistingAccountSid { get; set; }
-        public ProtectedString? CollectedPassword { get; set; }
-        public string Username { get; set; } = string.Empty;
-        public ProtectedString? Password { get; set; }
-        public List<string> GameFolders { get; set; } = [];
-        public List<string> GameLaunchers { get; set; } = [];
-
-        public void Reset()
-        {
-            IsExistingAccount = false;
-            ExistingAccountSid = null;
-            CollectedPassword?.Dispose();
-            CollectedPassword = null;
-            Username = string.Empty;
-            Password?.Dispose();
-            Password = null;
-            GameFolders = [];
-            GameLaunchers = [];
-        }
+        await executor.ExecuteAsync(setupBuilder.BuildGamingExistingAccountFlow(_data, progress), progress);
     }
 }

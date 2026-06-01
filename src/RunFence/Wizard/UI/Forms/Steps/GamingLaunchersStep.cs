@@ -1,6 +1,7 @@
 using Microsoft.Win32;
 using RunFence.Apps.Shortcuts;
-using RunFence.Apps.UI.Forms;
+using RunFence.Apps.UI;
+using RunFence.Infrastructure;
 using RunFence.UI;
 
 namespace RunFence.Wizard.UI.Forms.Steps;
@@ -14,7 +15,9 @@ public class GamingLaunchersStep : WizardStepPage
 {
     private readonly Action<List<string>> _setLauncherPaths;
     private readonly IShortcutDiscoveryService _discoveryService;
+    private readonly IAppDiscoveryDialogService _appDiscoveryDialogService;
     private readonly IShortcutIconHelper _iconHelper;
+    private readonly IOpenFileDialogAdapterFactory _openFileDialogFactory;
     private readonly Func<string?>? _getAccountSid;
 
     private FolderListEditor _editor = null!;
@@ -123,12 +126,16 @@ public class GamingLaunchersStep : WizardStepPage
     public GamingLaunchersStep(
         Action<List<string>> setLauncherPaths,
         IShortcutDiscoveryService discoveryService,
+        IAppDiscoveryDialogService appDiscoveryDialogService,
         IShortcutIconHelper iconHelper,
+        IOpenFileDialogAdapterFactory openFileDialogFactory,
         Func<string?>? getSid = null)
     {
         _setLauncherPaths = setLauncherPaths;
         _discoveryService = discoveryService;
+        _appDiscoveryDialogService = appDiscoveryDialogService;
         _iconHelper = iconHelper;
+        _openFileDialogFactory = openFileDialogFactory;
         _getAccountSid = getSid;
         BuildContent();
     }
@@ -154,7 +161,7 @@ public class GamingLaunchersStep : WizardStepPage
         SuspendLayout();
         Padding = new Padding(8);
 
-        _editor = new FolderListEditor();
+        _editor = new FolderListEditor(_openFileDialogFactory);
         _editor.Initialize(
             "Specify the executables for your game launchers. Known launchers are detected automatically.",
             FolderBrowseDialogType.ExecutableFile,
@@ -217,9 +224,9 @@ public class GamingLaunchersStep : WizardStepPage
                 ShortcutClassificationHelper.ExcludeSystemExecutables(_discoveryService.DiscoverApps()));
             if (IsDisposed) return;
 
-            using var dlg = new AppDiscoveryDialog(apps, _iconHelper);
-            if (await dlg.ShowDialogAsync(this) == DialogResult.OK && dlg.SelectedPath != null)
-                _editor.AddItem(dlg.SelectedPath);
+            var selection = _appDiscoveryDialogService.ShowDialog(apps, _iconHelper, this);
+            if (selection != null)
+                _editor.AddItem(selection.Value.path);
         }
         finally
         {

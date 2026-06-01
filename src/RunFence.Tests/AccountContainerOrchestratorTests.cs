@@ -269,8 +269,8 @@ public class AccountContainerOrchestratorTests
         bool canCreateContainer = true)
     {
         var persistenceHelper = new SessionPersistenceHelper(
-            new Mock<ICredentialRepository>().Object,
-            new Mock<IConfigRepository>().Object,
+            new Mock<IConfigReencryptionPersistence>().Object,
+            new Mock<IMainConfigPersistence>().Object,
             new Mock<ISidNameCacheService>().Object,
             () => new InlineUiThreadInvoker(action => action()),
             new Mock<ILoggingService>().Object);
@@ -280,7 +280,7 @@ public class AccountContainerOrchestratorTests
 {
             Database = db,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32)));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32)));
 
         var effectiveAppContainerService = appContainerService ?? new Mock<IAppContainerService>();
         var log = new Mock<ILoggingService>();
@@ -304,7 +304,7 @@ public class AccountContainerOrchestratorTests
             .Setup(l => l.GetRestrictionMessage(EvaluationFeature.Containers, It.IsAny<int>()))
             .Returns("license blocked");
 
-        var enforcementHelper = new AppEntryEnforcementHelper(
+        var enforcementCoordinator = AppEntryEnforcementTestFactory.CreateCoordinator(
             new Mock<RunFence.Acl.IAclService>().Object,
             new Mock<IShortcutService>().Object,
             new Mock<IBesideTargetShortcutService>().Object,
@@ -312,9 +312,10 @@ public class AccountContainerOrchestratorTests
             new Mock<ISidNameCacheService>().Object,
             new Mock<IInteractiveUserDesktopProvider>().Object,
             new Mock<IInteractiveUserSidResolver>().Object,
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
             new Mock<ILoggingService>().Object);
         var cleanupHelper = new ContainerDeletionCleanupHelper(
-            enforcementHelper,
+            enforcementCoordinator,
             new Mock<RunFence.Acl.IAclService>().Object,
             new Mock<IIconService>().Object,
             new Mock<IShortcutDiscoveryService>().Object,

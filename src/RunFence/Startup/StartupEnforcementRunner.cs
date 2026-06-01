@@ -4,6 +4,7 @@ using RunFence.Account.Lifecycle;
 using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
+using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Helpers;
 using RunFence.Core.Models;
@@ -22,14 +23,15 @@ public class StartupEnforcementRunner(
     IStartupEnforcementService startupEnforcementService,
     ISessionProvider sessionProvider,
     ISessionSaver sessionSaver,
-    IPathGrantService pathGrantService,
+    IGrantMutatorService grantMutatorService,
     EphemeralAccountService ephemeralAccountService,
     EphemeralContainerService ephemeralContainerService,
     GrantReconciliationService reconciliationService,
     IAppContainerService appContainerService,
     IInteractiveUserResolver interactiveUserResolver,
     ILoggingService log,
-    EnforcementResultApplier enforcementResultApplier)
+    EnforcementResultApplier enforcementResultApplier,
+    AppEntryPathRepairCoordinator appEntryPathRepairCoordinator)
 {
     /// <summary>
     /// Re-derives container SIDs when the interactive user has changed since last startup.
@@ -99,6 +101,48 @@ public class StartupEnforcementRunner(
     }
 
     /// <summary>
+    /// Repairs missing trusted app entry paths on the live database before snapshotting or manual reapply.
+    /// Must run on the UI thread because repairs can mutate and persist the live session database.
+    /// </summary>
+    public StartupAppEntryPathRepairResult RepairMissingAppEntryPaths()
+    {
+        var database = sessionProvider.GetSession().Database;
+        var changedAppIds = new List<string>();
+        var warnings = new List<string>();
+
+        foreach (var app in database.Apps)
+        {
+            if (app.IsUrlScheme)
+                continue;
+
+            var repairResult = appEntryPathRepairCoordinator.RepairIfNeeded(app);
+            if (repairResult.SaveFailed)
+            {
+                return new StartupAppEntryPathRepairResult(
+                    Changed: changedAppIds.Count > 0,
+                    ChangedAppIds: changedAppIds,
+                    Warnings: warnings,
+                    SaveFailureMessage: BuildSaveFailureMessage(app, repairResult.WarningMessage));
+            }
+
+            if (!repairResult.Repaired)
+                continue;
+
+            if (!string.IsNullOrEmpty(repairResult.App.Id))
+                changedAppIds.Add(repairResult.App.Id);
+
+            if (!string.IsNullOrWhiteSpace(repairResult.WarningMessage))
+                warnings.Add($"{GetAppLabel(repairResult.App)}: {repairResult.WarningMessage}");
+        }
+
+        return new StartupAppEntryPathRepairResult(
+            Changed: changedAppIds.Count > 0,
+            ChangedAppIds: changedAppIds,
+            Warnings: warnings,
+            SaveFailureMessage: null);
+    }
+
+    /// <summary>
     /// Runs enforcement on a snapshot of the database. Safe to call on a background thread.
     /// </summary>
     public EnforcementResult EnforceOnSnapshot(AppDatabase snapshot)
@@ -139,11 +183,11 @@ public class StartupEnforcementRunner(
         if (string.IsNullOrEmpty(unlockDir))
             return;
 
-        _ = pathGrantService.EnsureAccess(interactiveSid, unlockDir,
+        _ = grantMutatorService.EnsureAccess(interactiveSid, unlockDir,
             FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
-        _ = pathGrantService.EnsureAccess(AclHelper.LowIntegritySid, unlockDir,
+        _ = grantMutatorService.EnsureAccess(AclHelper.LowIntegritySid, unlockDir,
             FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
-        _ = pathGrantService.EnsureAccess(AclHelper.AllApplicationPackagesSid, unlockDir,
+        _ = grantMutatorService.EnsureAccess(AclHelper.AllApplicationPackagesSid, unlockDir,
             FileSystemRights.ReadAndExecute, confirm: null, unelevated: true);
     }
 
@@ -152,4 +196,12 @@ public class StartupEnforcementRunner(
     /// </summary>
     public Task ProcessExpiredAccountsAsync()
         => ephemeralAccountService.ProcessExpiredAccountsAsync();
+
+    private static string BuildSaveFailureMessage(AppEntry app, string? detail)
+        => string.IsNullOrWhiteSpace(detail)
+            ? $"Application '{GetAppLabel(app)}' could not persist its repaired path."
+            : $"Application '{GetAppLabel(app)}' could not persist its repaired path:{Environment.NewLine}{Environment.NewLine}{detail}";
+
+    private static string GetAppLabel(AppEntry app)
+        => string.IsNullOrWhiteSpace(app.Name) ? app.Id : app.Name;
 }

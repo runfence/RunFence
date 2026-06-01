@@ -2,5 +2,5 @@ namespace RunFence.Launching.Resolution;
 
 public interface IWindowsAppsPackageIdentityResolver
 {
-    bool TryResolvePackageFamilyName(string exePath, out string packageFamilyName);
+    bool TryResolvePackageIdentity(string exePath, out WindowsAppsPackageIdentityResolution resolution);
 }

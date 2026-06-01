@@ -1,4 +1,5 @@
 using Moq;
+using RunFence.Acl;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
@@ -11,14 +12,24 @@ public class IconServiceTests : IDisposable
     private readonly IconService _service;
     private readonly TempDirectory _tempDir;
     private readonly string _iconDir;
+    private readonly string _managedIconDir;
 
     public IconServiceTests()
     {
         var log = new Mock<ILoggingService>();
         _tempDir = new TempDirectory("RunFence_IconTest");
-        _iconDir = Path.Combine(_tempDir.Path, "icons");
+        _iconDir = Path.Combine(_tempDir.Path, ProgramDataPolicies.Icons.RelativePath);
+        _managedIconDir = Path.Combine(_tempDir.Path, "managed", ProgramDataPolicies.Icons.RelativePath);
         Directory.CreateDirectory(_iconDir);
-        _service = new IconService(log.Object, iconDir: _iconDir, new AppIdValidator());
+        var pathResolver = new Mock<IProgramDataKnownPathResolver>(MockBehavior.Strict);
+        pathResolver
+            .Setup(resolver => resolver.GetDirectoryPath(ProgramDataPolicies.Icons))
+            .Returns(_iconDir);
+        _service = new IconService(
+            log.Object,
+            new AppIdValidator(),
+            Mock.Of<IProgramDataDirectoryProvisioningService>(),
+            pathResolver.Object);
     }
 
     public void Dispose()
@@ -150,20 +161,51 @@ public class IconServiceTests : IDisposable
     }
 
     [Fact]
-    public void GetIconPath_ValidId_ReturnsPathInsideIconDirectory()
-    {
-        var appId = AppEntry.GenerateId();
-
-        var iconPath = _service.GetIconPath(appId);
-
-        Assert.Equal(Path.Combine(_iconDir, $"{appId}.ico"), iconPath);
-    }
-
-    [Fact]
     public void GetIconPath_InvalidAppId_ThrowsInvalidAppIdException()
     {
         var ex = Assert.Throws<InvalidAppIdException>(() => _service.GetIconPath(@"..\escape"));
 
         Assert.Equal(@"..\escape", ex.AppId);
+    }
+
+    [Fact]
+    public void CreateBadgedIcon_ProgramDataIconPath_HardensDirectoriesAndWritesManagedFile()
+    {
+        var directoryService = new Mock<IProgramDataDirectoryProvisioningService>(MockBehavior.Strict);
+        var pathResolver = new Mock<IProgramDataKnownPathResolver>(MockBehavior.Strict);
+        var log = new Mock<ILoggingService>();
+        Directory.CreateDirectory(_managedIconDir);
+        pathResolver
+            .Setup(resolver => resolver.GetDirectoryPath(ProgramDataPolicies.Icons))
+            .Returns(_managedIconDir);
+        var service = new IconService(
+            log.Object,
+            new AppIdValidator(),
+            directoryService.Object,
+            pathResolver.Object);
+        var app = new AppEntry
+        {
+            Id = AppEntry.GenerateId(),
+            Name = "Test App",
+            AccountSid = "S-1-5-21-1-2-3-1001",
+            ExePath = Path.Combine(_tempDir.Path, "ignored.exe")
+        };
+        var customIconPath = Path.Combine(_tempDir.Path, "source.ico");
+        using (var iconStream = File.Create(customIconPath))
+        {
+            SystemIcons.Application.Save(iconStream);
+        }
+
+        var expectedIconPath = Path.Combine(_managedIconDir, app.Id + ".ico");
+
+        directoryService
+            .Setup(service => service.EnsureKnownDirectoryTreeInheritsFromRoot(ProgramDataPolicies.Icons));
+
+        var result = service.CreateBadgedIcon(app, customIconPath);
+
+        Assert.Equal(expectedIconPath, result);
+        Assert.True(new FileInfo(expectedIconPath).Length > 0);
+        pathResolver.VerifyAll();
+        directoryService.VerifyAll();
     }
 }

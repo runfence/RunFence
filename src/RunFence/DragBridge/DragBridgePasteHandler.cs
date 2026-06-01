@@ -5,7 +5,6 @@ using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
 
 namespace RunFence.DragBridge;
 
@@ -37,7 +36,9 @@ public class DragBridgePasteHandler(
     ILoggingService log,
     IUiThreadInvoker uiThreadInvoker,
     IAclPermissionService aclPermission,
-    IPathGrantService pathGrantService,
+    IGrantMutatorService grantMutatorService,
+    ITraverseService traverseService,
+    IGrantIntentSnapshotService grantIntentSnapshotService,
     SidDisplayNameResolver displayNameResolver,
     DragBridgeChoiceCache choiceCache) : IDragBridgePasteHandler
 {
@@ -265,11 +266,11 @@ public class DragBridgePasteHandler(
         var traversePath = Path.GetDirectoryName(Path.GetFullPath(path));
         foreach (var sid in targetSids.Where(targetSid => aclPermission.NeedsPermissionGrant(path, targetSid, FileSystemRights.Read)))
         {
-            var previousGrantState = pathGrantService.CaptureGrantRestoreSnapshot(sid, path, isDeny: false);
+            var previousGrantState = grantIntentSnapshotService.CaptureGrantRestoreSnapshot(sid, path, isDeny: false);
             var previousTraverseState = string.IsNullOrEmpty(traversePath)
                 ? new GrantIntentRestoreSnapshot(null, [])
-                : pathGrantService.CaptureTraverseRestoreSnapshot(sid, traversePath);
-            var result = pathGrantService.EnsureAccess(
+                : grantIntentSnapshotService.CaptureTraverseRestoreSnapshot(sid, traversePath);
+            var result = grantMutatorService.EnsureAccess(
                 sid,
                 path,
                 FileSystemRights.Read | FileSystemRights.Synchronize,
@@ -315,9 +316,9 @@ public class DragBridgePasteHandler(
         var normalizedDir = Path.GetFullPath(dir);
         foreach (var sid in targetSids)
         {
-            var previousGrantState = pathGrantService.CaptureGrantRestoreSnapshot(sid, normalizedDir, isDeny: false);
-            var previousTraverseState = pathGrantService.CaptureTraverseRestoreSnapshot(sid, normalizedDir);
-            var result = pathGrantService.EnsureAccess(
+            var previousGrantState = grantIntentSnapshotService.CaptureGrantRestoreSnapshot(sid, normalizedDir, isDeny: false);
+            var previousTraverseState = grantIntentSnapshotService.CaptureTraverseRestoreSnapshot(sid, normalizedDir);
+            var result = grantMutatorService.EnsureAccess(
                 sid,
                 dir,
                 FileSystemRights.ReadAndExecute,
@@ -352,7 +353,7 @@ public class DragBridgePasteHandler(
         {
             try
             {
-                pathGrantService.RestoreGrant(
+                grantMutatorService.RestoreGrant(
                     rollback.Sid,
                     rollback.Path,
                     isDeny: false,
@@ -368,7 +369,7 @@ public class DragBridgePasteHandler(
         {
             try
             {
-                pathGrantService.RestoreTraverse(
+                traverseService.RestoreTraverse(
                     traverseRollback.Sid,
                     traverseRollback.Path,
                     traverseRollback.PreviousState);

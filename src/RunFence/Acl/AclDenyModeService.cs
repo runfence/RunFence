@@ -16,7 +16,8 @@ public class AclDenyModeService(
     ILocalUserProvider localUserProvider,
     ContainerLookupHelper containerLookup,
     IInteractiveUserResolver interactiveUserResolver,
-    IAclAccessor aclAccessor)
+    IPathSecurityDescriptorAccessor aclAccessor,
+    IAppEntryAclTargetResolver aclTargetResolver)
     : IAclDenyModeService
 {
     /// <summary>
@@ -24,7 +25,7 @@ public class AclDenyModeService(
     /// For folder targets, also matches apps whose target or file path is at-or-below the target.
     /// </summary>
     private List<AppEntry> GetMatchingDenyApps(string targetPath, IReadOnlyList<AppEntry> allApps,
-        bool isFolderTarget, Func<AppEntry, string> resolveAclTargetPath)
+        bool isFolderTarget)
     {
         var normalizedTarget = AclHelper.NormalizePath(targetPath);
         var result = new List<AppEntry>();
@@ -37,7 +38,7 @@ public class AclDenyModeService(
             bool matches;
             if (isFolderTarget)
             {
-                var appTarget = AclHelper.NormalizePath(resolveAclTargetPath(app));
+                var appTarget = AclHelper.NormalizePath(aclTargetResolver.ResolveTargetPath(app));
                 var appExePath = AclHelper.NormalizePath(Path.GetFullPath(app.ExePath));
                 matches = appTarget.Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase)
                           || AclHelper.PathIsAtOrBelow(appTarget, normalizedTarget)
@@ -45,7 +46,7 @@ public class AclDenyModeService(
             }
             else
             {
-                var appTarget = AclHelper.NormalizePath(resolveAclTargetPath(app));
+                var appTarget = AclHelper.NormalizePath(aclTargetResolver.ResolveTargetPath(app));
                 matches = appTarget.Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase);
             }
 
@@ -57,10 +58,9 @@ public class AclDenyModeService(
     }
 
     public HashSet<string> GetAllowedSidsForPath(
-        string targetPath, IReadOnlyList<AppEntry> allApps, bool isFolderTarget,
-        Func<AppEntry, string> resolveAclTargetPath)
+        string targetPath, IReadOnlyList<AppEntry> allApps, bool isFolderTarget)
     {
-        var matchingApps = GetMatchingDenyApps(targetPath, allApps, isFolderTarget, resolveAclTargetPath);
+        var matchingApps = GetMatchingDenyApps(targetPath, allApps, isFolderTarget);
         return GetAllowedSidsFromApps(matchingApps);
     }
 
@@ -106,10 +106,9 @@ public class AclDenyModeService(
     /// allowed set, computes the maximum DeniedRights across all matching deny-mode apps.
     /// </summary>
     public Dictionary<string, DeniedRights> GetDeniedRightsPerSid(
-        string targetPath, IReadOnlyList<AppEntry> allApps, bool isFolderTarget,
-        Func<AppEntry, string> resolveAclTargetPath)
+        string targetPath, IReadOnlyList<AppEntry> allApps, bool isFolderTarget)
     {
-        var matchingApps = GetMatchingDenyApps(targetPath, allApps, isFolderTarget, resolveAclTargetPath);
+        var matchingApps = GetMatchingDenyApps(targetPath, allApps, isFolderTarget);
         var allowedSids = GetAllowedSidsFromApps(matchingApps);
         var localUsers = localUserProvider.GetLocalUserAccounts();
 
@@ -149,7 +148,7 @@ public class AclDenyModeService(
         if (!exists)
             return false;
 
-        return aclAccessor.ModifyAclWithFallback(path, isFolder, security =>
+        return aclAccessor.ModifyAclWithFallback(path, security =>
             ApplyDenyRules(security, localUserProvider.GetLocalUserAccounts(), allowedSids, isFolder, deniedRights));
     }
 
@@ -185,7 +184,7 @@ public class AclDenyModeService(
         foreach (var sid in deniedSidObjects)
             managedSidObjects.Add(sid);
 
-        return aclAccessor.ModifyAclWithFallback(folderPath, isFolder: true, security =>
+        return aclAccessor.ModifyAclWithFallback(folderPath, security =>
             AclHelper.ApplyAclDiff(security, desiredRules, rule =>
                 rule is { AccessControlType: AccessControlType.Deny, IdentityReference: SecurityIdentifier sid } &&
                 managedSidObjects.Contains(sid) &&
@@ -238,7 +237,7 @@ public class AclDenyModeService(
             if (!exists)
                 return;
 
-            aclAccessor.ModifyAclWithFallback(path, isFolder, security => AclHelper.RemoveManagedDenyAces(security, knownSids));
+            aclAccessor.ModifyAclWithFallback(path, security => AclHelper.RemoveManagedDenyAces(security, knownSids));
         }
         catch (Exception ex)
         {

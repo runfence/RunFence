@@ -12,7 +12,7 @@ namespace RunFence.UI;
 /// Implements <see cref="IElevatedUnlockRequestHandler"/> and <see cref="IShowWindowRequestHandler"/>
 /// so IPC callers and the tray handler can share a single resolved entry point.
 /// </summary>
-public class MainFormWindowRequestHandler(
+public sealed class MainFormWindowRequestHandler(
     LockManager lockManager,
     IConfigAvailabilityChecker configAvailabilityChecker,
     IShellHelper shellHelper,
@@ -35,6 +35,9 @@ public class MainFormWindowRequestHandler(
 
     public void Initialize(IMainFormVisibility form)
     {
+        if (_form != null)
+            throw new InvalidOperationException("MainFormWindowRequestHandler.Initialize can only be called once.");
+
         _form = form;
     }
 
@@ -51,13 +54,14 @@ public class MainFormWindowRequestHandler(
 
     public void ShowAndActivate()
     {
-        _form.ShowInTaskbar = true;
+        var form = GetForm();
+        form.ShowInTaskbar = true;
         IsShowingWindow = true;
         try
         {
             // Reset to Normal before Show so the form never appears in minimized state.
-            _form.WindowState = FormWindowState.Normal;
-            _form.Show();
+            form.WindowState = FormWindowState.Normal;
+            form.Show();
         }
         finally
         {
@@ -72,12 +76,13 @@ public class MainFormWindowRequestHandler(
         // Show before setting WindowState — prevents brief minimized flash when unlocking.
         // The IsShowingWindow guard prevents HandleResize from immediately hiding the form again
         // while it is transitioning out of the startup-minimized state.
-        _form.ShowInTaskbar = true;
+        var form = GetForm();
+        form.ShowInTaskbar = true;
         IsShowingWindow = true;
         try
         {
-            _form.Show();
-            _form.WindowState = FormWindowState.Normal;
+            form.Show();
+            form.WindowState = FormWindowState.Normal;
         }
         finally
         {
@@ -104,12 +109,16 @@ public class MainFormWindowRequestHandler(
 
     public void RequestShowWindow()
     {
-        _ = HandlePostedShowWindowRequestAsync();
+        _ = ExecutePostedRequestAsync(
+            requestName: "show window",
+            action: TryShowWindowWithLoggingAsync);
     }
 
     public void RequestOperationUnlock()
     {
-        _ = HandlePostedOperationUnlockRequestAsync();
+        _ = ExecutePostedRequestAsync(
+            requestName: "operation unlock",
+            action: TryOperationUnlockWithLoggingAsync);
     }
 
     public async Task<bool> HandleElevatedUnlockRequestAsync()
@@ -166,21 +175,6 @@ public class MainFormWindowRequestHandler(
         return completed;
     }
 
-    private async Task HandlePostedOperationUnlockRequestAsync()
-    {
-        try
-        {
-            if (!await WaitForStartupCompleteAsync())
-                return;
-
-            _form.BeginInvokeOnUiThread(() => _ = TryOperationUnlockWithLoggingAsync());
-        }
-        catch (Exception ex)
-        {
-            log.Error("Failed to queue posted operation unlock request", ex);
-        }
-    }
-
     private async Task TryOperationUnlockWithLoggingAsync()
     {
         try
@@ -197,27 +191,13 @@ public class MainFormWindowRequestHandler(
     {
         if (!licenseService.ShouldShowNag(DateTime.Now))
             return;
+        var form = GetForm();
         using var dlg = new EvaluationNagDialog(licenseService, shellHelper);
-        dlg.ShowDialog((Control)_form);
+        dlg.ShowDialog((Control)form);
         if (licenseService.IsLicensed)
             TitleUpdateNeeded?.Invoke();
         else
             licenseService.RecordNagShown(DateTime.Now);
-    }
-
-    private async Task HandlePostedShowWindowRequestAsync()
-    {
-        try
-        {
-            if (!await WaitForStartupCompleteAsync())
-                return;
-
-            _form.BeginInvokeOnUiThread(() => _ = TryShowWindowWithLoggingAsync());
-        }
-        catch (Exception ex)
-        {
-            log.Error("Failed to queue posted show window request", ex);
-        }
     }
 
     private async Task TryShowWindowWithLoggingAsync()
@@ -248,9 +228,28 @@ public class MainFormWindowRequestHandler(
         }
     }
 
+    private async Task ExecutePostedRequestAsync(string requestName, Func<Task> action)
+    {
+        try
+        {
+            if (!await WaitForStartupCompleteAsync())
+                return;
+
+            GetForm().BeginInvokeOnUiThread(() => _ = action());
+        }
+        catch (Exception ex)
+        {
+            log.Error($"Failed to queue posted {requestName} request", ex);
+        }
+    }
+
     private void ForceForeground()
     {
-        WindowForegroundHelper.ForceToForeground(_form.Handle);
-        _form.BringToFront();
+        var form = GetForm();
+        WindowForegroundHelper.ForceToForeground(form.Handle);
+        form.BringToFront();
     }
+
+    private IMainFormVisibility GetForm()
+        => _form ?? throw new InvalidOperationException("MainFormWindowRequestHandler must be initialized before use.");
 }

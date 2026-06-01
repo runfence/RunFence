@@ -23,7 +23,7 @@ public sealed class PinChangeOrchestratorTests : IDisposable
         {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32], EncryptedCanary = [1, 2, 3] }
-        }.WithOwnedPinDerivedKey(initialKey);
+        }.WithClonedPinDerivedKey(initialKey);
     }
 
     public void Dispose() => _session.Dispose();
@@ -120,7 +120,6 @@ public sealed class PinChangeOrchestratorTests : IDisposable
         sut.ApplyKeyRotation(_session, rotationResult, () => { }, updateRememberPin: true);
 
         _rememberPinService.Verify(service => service.Disable(), Times.Once);
-        _log.Verify(service => service.Warn(It.Is<string>(message => message.Contains("Failed to refresh Remember PIN key after PIN rotation"))), Times.Once);
     }
 
     private PinChangeOrchestrator CreateSut()

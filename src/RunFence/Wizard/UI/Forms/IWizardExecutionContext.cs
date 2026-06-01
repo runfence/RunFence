@@ -22,7 +22,7 @@ public interface IWizardExecutionContext
     bool IsExecuting { get; set; }
 
     /// <summary>Post-wizard actions accumulated from completed templates.</summary>
-    List<Action<IWin32Window>> PostWizardActions { get; }
+    List<Func<IWin32Window, Task>> PostWizardActions { get; }
 
     /// <summary>Number of templates completed during this wizard session.</summary>
     int TemplateCompletedCount { get; set; }

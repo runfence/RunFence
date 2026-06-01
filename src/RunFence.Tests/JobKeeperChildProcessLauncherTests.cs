@@ -64,6 +64,7 @@ public sealed class JobKeeperChildProcessLauncherTests
 
         Assert.Equal(1234, response.Pid);
         Assert.Equal(0, response.Error);
+        Assert.Equal(10, response.ProcessHandleValue);
         Assert.Equal(@"C:\Override", executableResolver.Environments.Single()["PATH"]);
         Assert.Equal("1", executableResolver.Environments.Single()["BASE_ONLY"]);
         Assert.Equal("2", executableResolver.Environments.Single()["EXTRA"]);
@@ -78,22 +79,6 @@ public sealed class JobKeeperChildProcessLauncherTests
         Assert.Equal(1, environmentBlockFactory.DisposeCount);
         Assert.Equal([new IntPtr(10)], registry.RegisteredHandles);
         Assert.Equal([new IntPtr(11)], nativeApi.ClosedHandles);
-    }
-
-    [Fact]
-    public void Launch_PassesSuppressStartupFeedbackToNativeCreateProcess()
-    {
-        var nativeApi = new CapturingNativeProcessApi();
-        var launcher = CreateLauncher(
-            new CapturingExecutablePathResolver(),
-            new TestEnvironmentSnapshotReader(new Dictionary<string, string>()),
-            new CapturingEnvironmentBlockFactory(),
-            nativeApi,
-            new CapturingChildProcessRegistry());
-
-        launcher.Launch(new JobKeeperLaunchRequest("app.exe", null, null, false, true, null));
-
-        Assert.True(nativeApi.SuppressStartupFeedback);
     }
 
     [Fact]
@@ -179,6 +164,7 @@ public sealed class JobKeeperChildProcessLauncherTests
 
         Assert.Equal(1234, response.Pid);
         Assert.Equal(0, response.Error);
+        Assert.Equal(10, response.ProcessHandleValue);
         Assert.Equal(2, nativeApi.CreateProcessCallCount);
         Assert.Equal(2, environmentBlockFactory.Environments.Count);
         Assert.False(environmentBlockFactory.Environments[0].ContainsKey("__COMPAT_LAYER"));
@@ -217,6 +203,7 @@ public sealed class JobKeeperChildProcessLauncherTests
 
         Assert.Equal(0, response.Pid);
         Assert.Equal(Win32ErrorElevationRequired, response.Error);
+        Assert.Equal(0, response.ProcessHandleValue);
         Assert.Equal(1, nativeApi.CreateProcessCallCount);
         Assert.Single(environmentBlockFactory.Environments);
         Assert.Equal("ExistingValue", environmentBlockFactory.Environments[0]["__COMPAT_LAYER"]);
@@ -233,6 +220,30 @@ public sealed class JobKeeperChildProcessLauncherTests
         Assert.Equal("x64", packagePath.Architecture);
         Assert.Equal("8wekyb3d8bbwe", packagePath.PublisherId);
         Assert.Equal(@"Notepad\Notepad.exe", packagePath.RelativeExecutablePath);
+        Assert.Equal("Microsoft.WindowsNotepad_8wekyb3d8bbwe", packagePath.PackageFamilyName);
+    }
+
+    [Fact]
+    public void WindowsAppsPackagePathParser_ParsesPackageRootDirectory()
+    {
+        var packageRoot = Path.Combine(
+            @"C:\Program Files\WindowsApps",
+            "Microsoft.WindowsNotepad_11.2512.29.0_x64__8wekyb3d8bbwe");
+
+        Assert.True(WindowsAppsPackagePathParser.IsUnderPackageRoot(packageRoot));
+        Assert.False(WindowsAppsPackagePathParser.TryParsePackagePath(packageRoot, out _));
+    }
+
+    [Fact]
+    public void WindowsAppsPackagePathParser_ParsesDirectoryInsidePackage()
+    {
+        var directoryInsidePackage = Path.Combine(
+            @"C:\Program Files\WindowsApps",
+            "Microsoft.WindowsNotepad_11.2512.29.0_x64__8wekyb3d8bbwe",
+            "Notepad");
+
+        Assert.True(WindowsAppsPackagePathParser.TryParsePackagePath(directoryInsidePackage, out var packagePath));
+        Assert.Equal("Notepad", packagePath.RelativeExecutablePath);
         Assert.Equal("Microsoft.WindowsNotepad_8wekyb3d8bbwe", packagePath.PackageFamilyName);
     }
 

@@ -22,6 +22,7 @@ public class PreparedTokenProcessLauncher(
         TokenPrivilegeHelper.SeTakeOwnershipPrivilege,
         TokenPrivilegeHelper.SeDebugPrivilege,
         TokenPrivilegeHelper.SeIncreaseQuotaPrivilege,
+        TokenPrivilegeHelper.SeTcbPrivilege,
         TokenPrivilegeHelper.SeRelabelPrivilege,
     ];
 

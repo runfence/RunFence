@@ -17,8 +17,8 @@ using RunFence.Licensing;
 using RunFence.Launch;
 using RunFence.Launching.Resolution;
 using RunFence.Persistence;
-using RunFence.RunAs.UI;
 using RunFence.Tests.Helpers;
+using RunFence.RunAs.UI;
 using RunFence.UI;
 using RunFence.UI.Forms;
 using System.Runtime.CompilerServices;
@@ -44,21 +44,77 @@ public class ApplicationsCrudOrchestratorTests
         };
         database.Apps.Add(app);
 
-        var context = new RecordingContext(database);
+        var context = new RecordingContext(database, new IOException("save failed"));
         var operationService = CreateOperationService(Mock.Of<IAclService>());
 
         var result = operationService.ApplyChanges(
             context,
             app,
             new ShortcutTraversalCache([]),
+            new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: false,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly),
             selectAppId: app.Id,
-            targetedSave: true);
+            fallbackIndex: -1);
 
         Assert.Equal(ApplicationsCrudOperationStatus.SaveFailed, result.Status);
         Assert.Equal("save failed", result.ErrorMessage);
         Assert.NotNull(app.EnforcementRetryStatus);
         Assert.Equal("existing", app.EnforcementRetryStatus.FailureMessage);
         Assert.Equal(retryStatus.FailureMessage, app.EnforcementRetryStatus!.FailureMessage);
+    }
+
+    [Fact]
+    public void ApplyChanges_PrivilegeOnlyEdit_SavesWithoutEnforcementWork()
+    {
+        var database = new AppDatabase();
+        var app = new AppEntry
+        {
+            Id = "app01",
+            Name = "Edited App",
+            ExePath = @"C:\app.exe"
+        };
+        database.Apps.Add(app);
+
+        var aclService = new Mock<IAclService>(MockBehavior.Strict);
+        var shortcutService = new Mock<IShortcutService>(MockBehavior.Strict);
+        var besideTargetShortcutService = new Mock<IBesideTargetShortcutService>(MockBehavior.Strict);
+        var iconService = new Mock<IIconService>(MockBehavior.Strict);
+        var operationService = new ApplicationsCrudOperationService(
+            aclService.Object,
+            AppEntryEnforcementTestFactory.CreateCoordinator(
+                aclService.Object,
+                shortcutService.Object,
+                besideTargetShortcutService.Object,
+                iconService.Object,
+                Mock.Of<ISidNameCacheService>(),
+                Mock.Of<IInteractiveUserDesktopProvider>(),
+                Mock.Of<IInteractiveUserSidResolver>(),
+                new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
+                Mock.Of<ILoggingService>()),
+            Mock.Of<ILoggingService>());
+
+        var context = new RecordingContext(database);
+        var result = operationService.ApplyChanges(
+            context,
+            app,
+            new ShortcutTraversalCache([]),
+            new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: false,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly),
+            selectAppId: app.Id);
+
+        Assert.Equal(ApplicationsCrudOperationStatus.Succeeded, result.Status);
+        Assert.Single(context.SaveCalls);
+        Assert.True(context.SaveCalls.Single().targetedSave);
     }
 
     [Fact]
@@ -227,7 +283,7 @@ public class ApplicationsCrudOrchestratorTests
             Assert.Single(context.SaveCalls);
             var saveCall = context.SaveCalls.Single();
             Assert.Equal("app01", saveCall.selectAppId);
-            Assert.False(saveCall.targetedSave);
+            Assert.True(saveCall.targetedSave);
             Assert.Single(context.RefreshCalls);
             Assert.Equal(("app01", 0), context.RefreshCalls.Single());
             aclService.Verify(s => s.ApplyAcl(It.Is<AppEntry>(a => a.Name == "Original"), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
@@ -475,6 +531,98 @@ public class ApplicationsCrudOrchestratorTests
     }
 
     [Fact]
+    public void OpenEditDialog_SwitchFromAccountToContainer_SavesContainerSelection()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            var database = new AppDatabase();
+            var original = new AppEntry
+            {
+                Id = "app01",
+                Name = "Original",
+                ExePath = @"C:\original.exe",
+                AccountSid = TestAccountSid
+            };
+            var container = new AppContainerEntry
+            {
+                Name = "ram_browser",
+                DisplayName = "Browser",
+                Sid = "S-1-15-2-42"
+            };
+            database.Apps.Add(original);
+            database.AppContainers.Add(container);
+
+            var context = new OrchestratorContext(database);
+            var aclService = new Mock<IAclService>(MockBehavior.Strict);
+            aclService
+                .Setup(service => service.RevertAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()));
+            aclService
+                .Setup(service => service.ApplyAcl(It.IsAny<AppEntry>(), It.IsAny<IReadOnlyList<AppEntry>>()));
+            aclService
+                .Setup(service => service.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()));
+            var shortcutService = new Mock<IShortcutService>(MockBehavior.Strict);
+            shortcutService
+                .Setup(service => service.RevertShortcuts(It.IsAny<AppEntry>(), It.IsAny<ShortcutTraversalCache>()));
+            shortcutService
+                .Setup(service => service.ReplaceShortcuts(
+                    It.IsAny<AppEntry>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<ShortcutTraversalCache>()));
+            var besideTargetShortcutService = new Mock<IBesideTargetShortcutService>(MockBehavior.Strict);
+            besideTargetShortcutService
+                .Setup(service => service.RemoveBesideTargetShortcut(It.IsAny<AppEntry>()));
+            besideTargetShortcutService
+                .Setup(service => service.CreateBesideTargetShortcut(
+                    It.IsAny<AppEntry>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>(),
+                    It.IsAny<string>()));
+            var operationService = CreateOperationService(
+                aclService.Object,
+                shortcutService.Object,
+                besideTargetShortcutService.Object);
+            var (orchestrator, appConfigService, _, _) = CreateOrchestrator(
+                context,
+                database,
+                operationService);
+            orchestrator.Initialize(context);
+
+            context.DialogFactory = () => CreateDialog(database, appConfigService.Object, original.Id);
+            context.ShowModal = d =>
+            {
+                StaTestHelper.CreateControlTree(d);
+                FindTextBoxBelowLabel(d, "Name:").Text = "Edited";
+                FindTextBoxBelowLabel(d, "File Path or URL:").Text = @"C:\edited.exe";
+                FindComboBoxBelowLabel(d, "Run As Account:").SelectedItem =
+                    FindControls<ComboBox>(d)
+                        .Single(combo => combo == FindComboBoxBelowLabel(d, "Run As Account:"))
+                        .Items
+                        .Cast<object>()
+                        .Single(item => string.Equals(item.ToString(), "Browser (container)", StringComparison.Ordinal));
+
+                StaTestHelper.RunAsyncWithMessagePump(() => InvokeHandleOkAsync(d));
+
+                Assert.False(d.HasUnsavedInMemoryMutations);
+                Assert.Equal(DialogResult.OK, d.DialogResult);
+            };
+
+            context.CredentialStore.Credentials.Add(new CredentialEntry { Sid = TestAccountSid });
+            orchestrator.EditApp(original);
+
+            var saved = Assert.Single(database.Apps);
+            Assert.Equal("Edited", saved.Name);
+            Assert.Equal(@"C:\edited.exe", saved.ExePath);
+            Assert.Equal(string.Empty, saved.AccountSid);
+            Assert.Equal("ram_browser", saved.AppContainerName);
+            Assert.Single(context.SaveCalls);
+            Assert.Empty(context.RefreshCalls);
+            aclService.Verify(service => service.RevertAcl(It.Is<AppEntry>(app => app.AccountSid == TestAccountSid), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
+            aclService.Verify(service => service.ApplyAcl(It.Is<AppEntry>(app => app.AppContainerName == "ram_browser"), It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
+        });
+    }
+
+    [Fact]
     public void OpenEditDialog_ShortcutCleanupWarning_SavesAndClosesDialog()
     {
         StaTestHelper.RunOnSta(() =>
@@ -491,7 +639,9 @@ public class ApplicationsCrudOrchestratorTests
             database.Apps.Add(original);
 
             var shortcutService = new Mock<IShortcutService>();
-            shortcutService.Setup(s => s.RevertShortcuts(original, It.IsAny<ShortcutTraversalCache>()))
+            shortcutService.Setup(s => s.RevertShortcuts(
+                    It.Is<AppEntry>(app => app.Id == original.Id && app.Name == original.Name),
+                    It.IsAny<ShortcutTraversalCache>()))
                 .Throws(new ShortcutEnforcementException("C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Firefox.lnk: Access denied"));
             var operationService = CreateOperationService(Mock.Of<IAclService>(), shortcutService.Object);
 
@@ -616,7 +766,7 @@ public class ApplicationsCrudOrchestratorTests
             var permissionPrompter = new AppEntryPermissionPrompter(
                 Mock.Of<ILoggingService>(),
                 Mock.Of<IAclPermissionService>(),
-                Mock.Of<IPathGrantService>(),
+                Mock.Of<IGrantMutatorService>(),
                 new LambdaDatabaseProvider(() => database),
                 Mock.Of<IQuickAccessPinService>());
 
@@ -690,7 +840,8 @@ public class ApplicationsCrudOrchestratorTests
         var result = operationService.RestoreEnforcementAfterFailedEdit(
             previousApp,
             database.Apps,
-            new ShortcutTraversalCache([]));
+            new ShortcutTraversalCache([]),
+            FullEnforcementChangeSet());
 
         Assert.Equal(ApplicationsCrudOperationStatus.SucceededWithEnforcementWarning, result.Status);
         Assert.Equal("recompute failed", result.WarningMessage);
@@ -779,10 +930,155 @@ public class ApplicationsCrudOrchestratorTests
             .Throws(new ShortcutEnforcementException("shortcut warning"));
         var operationService = CreateOperationService(Mock.Of<IAclService>(), shortcutService.Object);
 
-        var result = operationService.RevertChanges(new RecordingContext(database), app, new ShortcutTraversalCache([]));
+        var result = operationService.RevertChanges(
+            new RecordingContext(database),
+            app,
+            new ShortcutTraversalCache([]),
+            FullEnforcementChangeSet());
 
         Assert.Equal(ApplicationsCrudOperationStatus.EnforcementFailed, result.Status);
         Assert.Equal("shortcut warning", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void ApplyChanges_PathStyleRefresh_DoesNotReplaceManagedShortcuts()
+    {
+        var database = new AppDatabase();
+        var app = new AppEntry
+        {
+            Id = "app01",
+            Name = "App",
+            ExePath = @"C:\app.exe",
+            ManageShortcuts = true
+        };
+        database.Apps.Add(app);
+
+        var aclService = new Mock<IAclService>(MockBehavior.Strict);
+        var shortcutService = new Mock<IShortcutService>(MockBehavior.Strict);
+        var besideTargetShortcutService = new Mock<IBesideTargetShortcutService>();
+        var iconService = new Mock<IIconService>();
+        iconService.Setup(s => s.CreateBadgedIcon(app)).Returns(@"C:\icons\app.ico");
+
+        var operationService = new ApplicationsCrudOperationService(
+            aclService.Object,
+            AppEntryEnforcementTestFactory.CreateCoordinator(
+                aclService.Object,
+                shortcutService.Object,
+                besideTargetShortcutService.Object,
+                iconService.Object,
+                Mock.Of<ISidNameCacheService>(),
+                Mock.Of<IInteractiveUserDesktopProvider>(),
+                Mock.Of<IInteractiveUserSidResolver>(),
+                new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
+                Mock.Of<ILoggingService>()),
+            Mock.Of<ILoggingService>());
+
+        var result = operationService.ApplyChanges(
+            new RecordingContext(database),
+            app,
+            new ShortcutTraversalCache([]),
+            new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: true,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: false,
+                RequiresIconRefresh: true,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly),
+            selectAppId: app.Id);
+
+        Assert.Equal(ApplicationsCrudOperationStatus.Succeeded, result.Status);
+        shortcutService.Verify(
+            s => s.ReplaceShortcuts(It.IsAny<AppEntry>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<ShortcutTraversalCache>()),
+            Times.Never);
+        iconService.Verify(s => s.CreateBadgedIcon(app), Times.Once);
+    }
+
+    [Fact]
+    public void RevertChanges_ManagedShortcutOnlyRefresh_DoesNotRemoveBesideTargetShortcut()
+    {
+        var database = new AppDatabase();
+        var app = new AppEntry
+        {
+            Id = "app01",
+            Name = "App",
+            ExePath = @"C:\app.exe",
+            ManageShortcuts = true
+        };
+        database.Apps.Add(app);
+
+        var shortcutService = new Mock<IShortcutService>();
+        var besideTargetShortcutService = new Mock<IBesideTargetShortcutService>(MockBehavior.Strict);
+        var operationService = CreateOperationService(
+            Mock.Of<IAclService>(),
+            shortcutService.Object,
+            besideTargetShortcutService.Object);
+
+        var result = operationService.RevertChanges(
+            new RecordingContext(database),
+            app,
+            new ShortcutTraversalCache([]),
+            new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: true,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly));
+
+        Assert.Equal(ApplicationsCrudOperationStatus.Succeeded, result.Status);
+        shortcutService.Verify(s => s.RevertShortcuts(app, It.IsAny<ShortcutTraversalCache>()), Times.Once);
+        besideTargetShortcutService.Verify(
+            s => s.RemoveBesideTargetShortcut(It.IsAny<AppEntry>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public void ApplyChanges_ManagedShortcutOnlyRefresh_DoesNotRecreateIcon()
+    {
+        var database = new AppDatabase();
+        var app = new AppEntry
+        {
+            Id = "app01",
+            Name = "App",
+            ExePath = @"C:\app.exe",
+            ManageShortcuts = true
+        };
+        database.Apps.Add(app);
+
+        var aclService = new Mock<IAclService>(MockBehavior.Strict);
+        var shortcutService = new Mock<IShortcutService>();
+        var iconService = new Mock<IIconService>(MockBehavior.Strict);
+        iconService.Setup(s => s.GetIconPath(app.Id)).Returns(@"C:\icons\app.ico");
+        var operationService = new ApplicationsCrudOperationService(
+            aclService.Object,
+            AppEntryEnforcementTestFactory.CreateCoordinator(
+                aclService.Object,
+                shortcutService.Object,
+                Mock.Of<IBesideTargetShortcutService>(MockBehavior.Strict),
+                iconService.Object,
+                Mock.Of<ISidNameCacheService>(),
+                Mock.Of<IInteractiveUserDesktopProvider>(),
+                Mock.Of<IInteractiveUserSidResolver>(),
+                new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
+                Mock.Of<ILoggingService>()),
+            Mock.Of<ILoggingService>());
+
+        var result = operationService.ApplyChanges(
+            new RecordingContext(database),
+            app,
+            new ShortcutTraversalCache([]),
+            new AppEntryChangeSet(
+                RequiresAclReapply: false,
+                RequiresBesideTargetRefresh: false,
+                RequiresHandlerSync: false,
+                RequiresManagedShortcutRefresh: true,
+                RequiresIconRefresh: false,
+                ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly),
+            selectAppId: app.Id);
+
+        Assert.Equal(ApplicationsCrudOperationStatus.Succeeded, result.Status);
+        iconService.Verify(s => s.CreateBadgedIcon(It.IsAny<AppEntry>(), It.IsAny<string?>()), Times.Never);
+        iconService.Verify(s => s.GetIconPath(app.Id), Times.Once);
     }
 
     private static (ApplicationsCrudOrchestrator, Mock<IAppConfigService>, Mock<IMessageBoxService>, Mock<ILicenseService>) CreateOrchestrator(
@@ -798,7 +1094,7 @@ public class ApplicationsCrudOrchestratorTests
         var permissionPrompter = new AppEntryPermissionPrompter(
             Mock.Of<ILoggingService>(),
             Mock.Of<IAclPermissionService>(),
-            Mock.Of<IPathGrantService>(),
+            Mock.Of<IGrantMutatorService>(),
             new LambdaDatabaseProvider(() => database),
             Mock.Of<IQuickAccessPinService>());
 
@@ -810,12 +1106,17 @@ public class ApplicationsCrudOrchestratorTests
         licenseService.Setup(s => s.GetRestrictionMessage(EvaluationFeature.Apps, It.IsAny<int>()))
             .Returns("license message");
 
+        var shortcutDiscovery = new Mock<IShortcutDiscoveryService>();
+        shortcutDiscovery
+            .Setup(service => service.CreateTraversalCache(It.IsAny<HashSet<string>?>()))
+            .Returns(new ShortcutTraversalCache([]));
+
         var orchestrator = new ApplicationsCrudOrchestrator(
             () => context.DialogFactory?.Invoke() ?? CreateDialog(database, appConfigService.Object),
             new Mock<IIconService>().Object,
             appConfigService.Object,
             operationService,
-            new Mock<IShortcutDiscoveryService>().Object,
+            shortcutDiscovery.Object,
             permissionPrompter,
             messageBox.Object,
             licenseService.Object);
@@ -828,7 +1129,7 @@ public class ApplicationsCrudOrchestratorTests
         IShortcutService? shortcutService = null,
         IBesideTargetShortcutService? besideTargetShortcutService = null)
     {
-        var enforcementHelper = new AppEntryEnforcementHelper(
+        var enforcementCoordinator = AppEntryEnforcementTestFactory.CreateCoordinator(
             aclService,
             shortcutService ?? Mock.Of<IShortcutService>(),
             besideTargetShortcutService ?? Mock.Of<IBesideTargetShortcutService>(),
@@ -836,15 +1137,32 @@ public class ApplicationsCrudOrchestratorTests
             Mock.Of<ISidNameCacheService>(),
             Mock.Of<IInteractiveUserDesktopProvider>(),
             Mock.Of<IInteractiveUserSidResolver>(),
+            new TestRunFenceLauncherPathProvider(@"C:\RunFence\RunFence.Launcher.exe", exists: true),
             Mock.Of<ILoggingService>());
         return new ApplicationsCrudOperationService(
             aclService,
-            enforcementHelper,
+            enforcementCoordinator,
             Mock.Of<ILoggingService>());
     }
 
+    private static AppEntryChangeSet FullEnforcementChangeSet()
+        => new(
+            RequiresAclReapply: true,
+            RequiresBesideTargetRefresh: true,
+            RequiresHandlerSync: false,
+            RequiresManagedShortcutRefresh: true,
+            RequiresIconRefresh: true,
+            ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly);
+
     private static AppEditDialog CreateDialog(AppDatabase database, IAppConfigService appConfigService, string generatedId = "app1")
     {
+        var appConfig = new AppConfigTestContext();
+        foreach (var path in appConfigService.GetLoadedConfigPaths())
+            appConfig.AddLoadedConfig(path);
+        var configPath = appConfigService.GetConfigPath(generatedId);
+        if (configPath != null)
+            appConfig.Service.AssignApp(generatedId, configPath);
+
         var sidResolver = new Mock<ISidResolver>();
         sidResolver.Setup(s => s.TryResolveName(It.IsAny<string>())).Returns<string>(sid => sid);
         var profilePathResolver = new Mock<IProfilePathResolver>();
@@ -861,7 +1179,7 @@ public class ApplicationsCrudOrchestratorTests
             new AclAllowListGridHandler(),
             new AllowListEntryFactory(
                 Mock.Of<ILocalUserProvider>(),
-                Mock.Of<ILocalGroupMembershipService>(),
+                Mock.Of<ILocalGroupQueryService>(),
                 Mock.Of<ISidEntryHelper>(),
                 displayNameResolver),
             aclConfigValidator,
@@ -870,16 +1188,24 @@ public class ApplicationsCrudOrchestratorTests
         var browseHelper = new AppEditBrowseHelper(
             Mock.Of<IShortcutDiscoveryService>(),
             Mock.Of<IShortcutIconHelper>(),
-            new ShortcutTargetResolver(Mock.Of<IShortcutComHelper>()),
+            Mock.Of<IAppDiscoveryDialogService>(),
+            Mock.Of<IMessageBoxService>(),
+            new ShortcutTargetResolver(Mock.Of<IShortcutGateway>()),
             new LambdaSessionProvider(() => new SessionContext
 {
                 Database = database,
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32))),
-            Mock.Of<IExecutableKindService>());
+            }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32))),
+            Mock.Of<IExecutableKindService>(),
+            new AppEntryHandlerPathSuggestionService(Mock.Of<IHandlerCommandTargetReader>(), Mock.Of<IHandlerPathIconProbe>()),
+            Mock.Of<IOpenFileDialogAdapterFactory>(),
+            Mock.Of<IFolderBrowserDialogAdapterFactory>());
 
         var associationHandler = CreateAssociationHandler(database);
-        var saveHandler = new AppEditDialogSaveHandler(associationHandler, appConfigService);
+        var saveHandler = new AppEditDialogSaveHandler(
+            associationHandler,
+            appConfig.Service,
+            Mock.Of<ILoggingService>());
         var executablePathResolver = new Mock<IExecutablePathResolver>();
         executablePathResolver.Setup(r => r.TryResolvePath(It.IsAny<string>(), It.IsAny<ExecutablePathResolutionContext>()))
             .Returns<string, ExecutablePathResolutionContext>((path, _) => path);
@@ -891,38 +1217,58 @@ public class ApplicationsCrudOrchestratorTests
             new AppEditDialogAclConfigBuilder(aclConfigValidator));
         var submitController = new AppEditDialogSubmitController(
             controller,
-            saveHandler);
+            saveHandler,
+            associationHandler,
+            appConfig.Service,
+            new AppEntryChangeClassifier());
 
         var credentialDisplayItemFactory = new CredentialDisplayItemFactory(sidResolver.Object, profilePathResolver.Object);
         var populator = new AppEditDialogPopulator(
-            appConfigService,
+            appConfig.Service,
             credentialDisplayItemFactory,
             new CredentialFilterHelper(sidResolver.Object));
         var initializer = new AppEditDialogInitializer(
             new AppEditPopulator(),
             idGenerator.Object,
-            appConfigService,
+            appConfig.Service,
             associationHandler);
         var initializationBinder = new AppEditDialogInitializationBinder(
             populator,
             initializer,
             credentialDisplayItemFactory,
             () => new IpcCallerSection(
-                () => [],
+                Mock.Of<IWindowsAccountQueryService>(service => service.GetLocalUsers() == Array.Empty<LocalUserAccount>()),
                 Mock.Of<ISidEntryHelper>(),
-                displayNameResolver));
+                displayNameResolver,
+                Mock.Of<IIpcCallerModalService>()));
+        var programFilesProvider = new Mock<IProgramFilesPathProvider>();
+        programFilesProvider.Setup(provider => provider.GetProgramFilesRoots()).Returns([]);
+        var pathRepairSuggester = new AppEntryEditPathRepairSuggester(
+            new VersionedPathRepairer(new ExistingBackupIntentFileSystem()),
+            new VersionedPathAutoRepairTrustPolicy(programFilesProvider.Object, profilePathResolver.Object),
+            new VersionedPathRepairOptionsBuilder(profilePathResolver.Object),
+            Mock.Of<IMessageBoxService>());
 
         return new AppEditDialog(
-            appConfigService,
+            appConfig.Service,
             aclSection,
             browseHelper,
             new AppEditAccountSwitchHandler(),
-            controller,
             submitController,
+            Mock.Of<ILoggingService>(),
             executablePathResolver.Object,
             new HandlerAssociationsSection(),
             initializationBinder,
-            Mock.Of<IUserConfirmationService>(service => service.Confirm(It.IsAny<string>(), It.IsAny<string>()) == true));
+            Mock.Of<IUserConfirmationService>(service => service.Confirm(It.IsAny<string>(), It.IsAny<string>()) == true),
+            Mock.Of<IHandlerAssociationMutationService>(),
+            new HandlerAssociationsChildDialogCoordinator(
+                () => new HandlerAssociationEditDialog(),
+                Mock.Of<IExeAssociationRegistryReader>(),
+                Mock.Of<IMessageBoxService>(),
+                Mock.Of<IModalCoordinator>()),
+            Mock.Of<IUiIconService>(),
+            new AppEditDialogSnapshotProvider(),
+            pathRepairSuggester);
     }
 
     private static AppEditAssociationHandler CreateAssociationHandler(AppDatabase database)
@@ -962,6 +1308,17 @@ public class ApplicationsCrudOrchestratorTests
             .Single(control => string.Equals(control.Text, labelText, StringComparison.Ordinal));
 
         return FindControls<TextBox>(root)
+            .Where(control => control.Parent == label.Parent && control.Top > label.Top)
+            .OrderBy(control => control.Top - label.Top)
+            .First();
+    }
+
+    private static ComboBox FindComboBoxBelowLabel(Control root, string labelText)
+    {
+        var label = FindControls<Label>(root)
+            .Single(control => string.Equals(control.Text, labelText, StringComparison.Ordinal));
+
+        return FindControls<ComboBox>(root)
             .Where(control => control.Parent == label.Parent && control.Top > label.Top)
             .OrderBy(control => control.Top - label.Top)
             .First();
@@ -1026,17 +1383,39 @@ public class ApplicationsCrudOrchestratorTests
             => LaunchCalled = true;
     }
 
-    private sealed class RecordingContext(AppDatabase database) : IApplicationMutationContext
+    private sealed class RecordingContext(AppDatabase database, Exception? saveException = null) : IApplicationMutationContext
     {
         public AppDatabase Database { get; } = database;
+        public List<(string? selectAppId, int fallbackIndex, bool targetedSave)> SaveCalls { get; } = [];
 
         public void SaveAndRefresh(string? selectAppId = null, int fallbackIndex = -1, bool targetedSave = false)
         {
-            throw new IOException("save failed");
+            SaveCalls.Add((selectAppId, fallbackIndex, targetedSave));
+            if (saveException != null)
+                throw saveException;
         }
 
         public void RefreshAfterInMemoryMutation(string? selectAppId = null, int fallbackIndex = -1)
         {
+        }
+    }
+
+    private sealed class ExistingBackupIntentFileSystem : IBackupIntentFileSystem
+    {
+        public BackupIntentPathState GetFileState(string path) => BackupIntentPathState.Exists;
+
+        public BackupIntentPathState GetDirectoryState(string path) => BackupIntentPathState.Exists;
+
+        public bool TryEnumerateDirectories(string path, out IReadOnlyList<string> directories)
+        {
+            directories = [];
+            return true;
+        }
+
+        public bool TryGetDirectoryLastWriteTimeUtc(string path, out DateTime lastWriteTimeUtc)
+        {
+            lastWriteTimeUtc = default;
+            return false;
         }
     }
 }

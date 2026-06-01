@@ -91,16 +91,17 @@ public class AclManagerDragDropHandler(
         if (!draggedEntry.IsTraverseOnly)
         {
             var normalizedPath = Path.GetFullPath(draggedEntry.Path);
-            var configMoveKey = (normalizedPath, _pending.GetEffectiveIsDeny(draggedEntry));
-            var removeKey = (normalizedPath, draggedEntry.IsDeny);
-            _pending.PendingConfigMoves[configMoveKey] = new PendingConfigMove(draggedEntry, targetConfigPath);
-            _pending.PendingRemoves.Remove(removeKey);
+            var originalIsDeny = draggedEntry.IsDeny;
+            draggedEntry = draggedEntry.Clone();
+            draggedEntry.IsDeny = _pending.Grants.GetEffectiveIsDeny(draggedEntry);
+            _pending.Grants.MoveGrantConfig(draggedEntry, targetConfigPath);
+            _pending.Grants.CancelGrantRemoval(normalizedPath, originalIsDeny);
         }
         else
         {
             var path = Path.GetFullPath(draggedEntry.Path);
-            _pending.PendingTraverseConfigMoves[path] = new PendingConfigMove(draggedEntry, targetConfigPath);
-            _pending.PendingTraverseRemoves.Remove(path);
+            _pending.Traverse.MoveTraverseConfig(draggedEntry, targetConfigPath);
+            _pending.Traverse.CancelTraverseRemoval(path);
         }
 
         return true;
@@ -148,16 +149,16 @@ public class AclManagerDragDropHandler(
     {
         if (!entry.IsTraverseOnly)
         {
-            var key = (Path.GetFullPath(entry.Path), _pending.GetEffectiveIsDeny(entry));
-            if (_pending.PendingConfigMoves.TryGetValue(key, out var pendingMove))
-                return GetTargetStore(pendingMove.TargetConfigPath);
+            var key = (Path.GetFullPath(entry.Path), _pending.Grants.GetEffectiveIsDeny(entry));
+            if (_pending.Grants.TryGetPendingConfigMove(key.Item1, key.Item2, out var pendingMove))
+                return GetTargetStore(pendingMove!.TargetConfigPath);
 
             return grantIntentRepository.FindGrant(_sid, entry)?.Store ?? grantIntentStoreProvider.MainStore;
         }
 
         var normalizedPath = Path.GetFullPath(entry.Path);
-        if (_pending.PendingTraverseConfigMoves.TryGetValue(normalizedPath, out var pendingTraverseMove))
-            return GetTargetStore(pendingTraverseMove.TargetConfigPath);
+        if (_pending.Traverse.TryGetPendingTraverseConfigMove(normalizedPath, out var pendingTraverseMove))
+            return GetTargetStore(pendingTraverseMove!.TargetConfigPath);
 
         return grantIntentRepository.FindTraverse(GetTraverseLookupSid(entry), entry)?.Store
                ?? grantIntentStoreProvider.MainStore;

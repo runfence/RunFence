@@ -17,9 +17,9 @@ public class AccountGridSorter(
         _grid = grid;
     }
 
-    private int AppsColumnIndex => _grid.Columns["Apps"]?.Index ?? -1;
-    private int ProfilePathColumnIndex => _grid.Columns["ProfilePath"]?.Index ?? -1;
-    private int SidColumnIndex => _grid.Columns["Sid"]?.Index ?? -1;
+    private int AppsColumnIndex => _grid.Columns[AccountGridColumns.Apps]?.Index ?? -1;
+    private int ProfilePathColumnIndex => _grid.Columns[AccountGridColumns.ProfilePath]?.Index ?? -1;
+    private int SidColumnIndex => _grid.Columns[AccountGridColumns.Sid]?.Index ?? -1;
 
     public IEnumerable<CredentialEntry> SortCredentials(PopulateData data, IEnumerable<CredentialEntry> creds)
     {

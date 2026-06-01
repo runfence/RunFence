@@ -2,12 +2,15 @@ namespace RunFence.SecurityScanner;
 
 public static class Program
 {
+    internal static SecurityScanner CreateDefaultScanner()
+        => new SecurityScannerCompositionFactory().CreateDefaultScanner();
+
     [STAThread]
     static int Main(string[] _)
     {
         try
         {
-            var scanner = new SecurityScanner();
+            var scanner = CreateDefaultScanner();
             var findings = scanner.RunChecks();
             foreach (var f in findings)
             {

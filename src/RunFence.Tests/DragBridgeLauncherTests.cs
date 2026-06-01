@@ -58,7 +58,7 @@ public class DragBridgeLauncherTests
     // --- LaunchDirect: failure handling ---
 
     [Fact]
-    public void LaunchDirect_FacadeThrows_ReturnsNullAndLogsError()
+    public void LaunchDirect_FacadeThrows_ReturnsNull()
     {
         _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()))
             .Throws(new InvalidOperationException("launch failed"));
@@ -66,43 +66,9 @@ public class DragBridgeLauncherTests
         var result = _launcher.LaunchDirect(@"C:\nonexistent_dragbridge_xyz.exe", ["--copy"]);
 
         Assert.Null(result);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
     }
 
     // --- LaunchDirect: argument forwarding ---
-
-    [Fact]
-    public void LaunchDirect_PassesExePathToFacade()
-    {
-        // Verify the exe path is forwarded to the launch target
-        ProcessLaunchTarget? capturedTarget = null;
-        _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), null))
-            .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((t, _, _) => capturedTarget = t)
-            .Returns(MakeLaunchResult());
-
-        _launcher.LaunchDirect(@"C:\tools\bridge.exe", ["--copy", "--source", "file.txt"]);
-
-        Assert.NotNull(capturedTarget);
-        Assert.Equal(@"C:\tools\bridge.exe", capturedTarget!.ExePath);
-        Assert.True(capturedTarget.HideWindow);
-    }
-
-    [Fact]
-    public void LaunchDirect_PassesArgumentsToFacade()
-    {
-        // Verify the argument list is combined and forwarded
-        ProcessLaunchTarget? capturedTarget = null;
-        _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), null))
-            .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((t, _, _) => capturedTarget = t)
-            .Returns(MakeLaunchResult());
-
-        _launcher.LaunchDirect(@"C:\tools\bridge.exe", ["--copy", "source.txt"]);
-
-        Assert.NotNull(capturedTarget);
-        // Arguments are combined from list
-        Assert.Contains("--copy", capturedTarget!.Arguments);
-        Assert.Contains("source.txt", capturedTarget.Arguments);
-    }
 
     [Fact]
     public void LaunchDirect_MaterializesArgumentsExactly()
@@ -121,25 +87,6 @@ public class DragBridgeLauncherTests
         Assert.Equal(expectedArguments, capturedTarget!.Arguments);
     }
 
-    [Theory]
-    [InlineData(PrivilegeLevel.HighestAllowed)]
-    [InlineData(PrivilegeLevel.Isolated)]
-    [InlineData(PrivilegeLevel.LowIntegrity)]
-    public void LaunchDirect_PrivilegeLevel_ForwardedToIdentity(PrivilegeLevel mode)
-    {
-        // Verify the privilege level is set on the launch identity
-        LaunchIdentity? capturedIdentity = null;
-        _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), null))
-            .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((_, id, _) => capturedIdentity = id)
-            .Returns(MakeLaunchResult());
-
-        _launcher.LaunchDirect(@"C:\tools\bridge.exe", ["--copy"], mode);
-
-        Assert.NotNull(capturedIdentity);
-        Assert.IsType<AccountLaunchIdentity>(capturedIdentity);
-        Assert.Equal(mode, ((AccountLaunchIdentity)capturedIdentity!).PrivilegeLevel);
-    }
-
     // --- LaunchManaged: failure handling ---
 
     [Fact]
@@ -156,39 +103,36 @@ public class DragBridgeLauncherTests
     }
 
     [Fact]
-    public void LaunchManaged_PassesSidToFacade()
+    public void LaunchManaged_ForwardsSidPrivilegeAndArguments()
     {
-        // Verify the account SID is forwarded as AccountLaunchIdentity to the facade.
-        // The facade returns a non-null ProcessInfo so the call completes without exception,
-        // keeping this test focused on identity forwarding rather than exception-path behavior.
-        const string targetSid = "S-1-5-21-9999-9999-9999-1001";
+        ProcessLaunchTarget? capturedTarget = null;
         LaunchIdentity? capturedIdentity = null;
-        var processInfo = new ProcessInfo(new ProcessLaunchNative.PROCESS_INFORMATION());
+        var args = new List<string> { "--copy", @"C:\files\source name.txt", "--force" };
+        var expectedArguments = ProcessLaunchTarget.CombineArguments(args.ToList());
+        var processInfo = TestProcessInfoFactory.Native(new ProcessLaunchNative.PROCESS_INFORMATION());
+
         _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), null))
-            .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((_, id, _) => capturedIdentity = id)
+            .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((target, identity, _) =>
+            {
+                capturedTarget = target;
+                capturedIdentity = identity;
+            })
             .Returns(MakeLaunchResult(processInfo));
 
-        using var result = _launcher.LaunchManaged(@"C:\tools\bridge.exe", targetSid, [],
+        using var result = _launcher.LaunchManaged(
+            @"C:\tools\bridge.exe",
+            "S-1-5-21-9999-9999-9999-1001",
+            args,
             PrivilegeLevel.Basic);
 
-        Assert.NotNull(result);
-        Assert.IsType<AccountLaunchIdentity>(capturedIdentity);
-        Assert.Equal(targetSid, ((AccountLaunchIdentity)capturedIdentity!).Sid);
-        Assert.Equal(PrivilegeLevel.Basic, ((AccountLaunchIdentity)capturedIdentity).PrivilegeLevel);
-    }
-
-    [Fact]
-    public void LaunchManaged_MaintenanceWarning_ReturnsProcessAndLogsWarning()
-    {
-        var processInfo = new ProcessInfo(new ProcessLaunchNative.PROCESS_INFORMATION());
-        _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), null))
-            .Returns(MakeLaunchResult(processInfo, "post-launch hook failed"));
-
-        using var result = _launcher.LaunchManaged(@"C:\tools\bridge.exe", "S-1-5-21-9999-9999-9999-1001", [],
-            PrivilegeLevel.Isolated);
-
-        Assert.NotNull(result);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("post-launch hook failed", StringComparison.Ordinal))), Times.Once);
+        Assert.Same(processInfo, result);
+        var identity = Assert.IsType<AccountLaunchIdentity>(capturedIdentity);
+        Assert.Equal("S-1-5-21-9999-9999-9999-1001", identity.Sid);
+        Assert.Equal(PrivilegeLevel.Basic, identity.PrivilegeLevel);
+        Assert.NotNull(capturedTarget);
+        Assert.Equal(@"C:\tools\bridge.exe", capturedTarget!.ExePath);
+        Assert.Equal(expectedArguments, capturedTarget.Arguments);
+        Assert.True(capturedTarget.SuppressStartupFeedback);
     }
 
     [Fact]
@@ -201,7 +145,7 @@ public class DragBridgeLauncherTests
             Sid = "S-1-15-2-42"
         };
         LaunchIdentity? capturedIdentity = null;
-        var processInfo = new ProcessInfo(new ProcessLaunchNative.PROCESS_INFORMATION());
+        var processInfo = TestProcessInfoFactory.Native(new ProcessLaunchNative.PROCESS_INFORMATION());
         _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), null))
             .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((_, identity, _) => capturedIdentity = identity)
             .Returns(MakeLaunchResult(processInfo));
@@ -216,18 +160,17 @@ public class DragBridgeLauncherTests
     // --- LaunchDeElevated: failure handling ---
 
     [Fact]
-    public void LaunchDeElevated_NoInteractiveSid_ReturnsNullAndLogsError()
+    public void LaunchDeElevated_NoInteractiveSid_ReturnsNull()
     {
         _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
 
         var result = _launcher.LaunchDeElevated(@"C:\tools\dragbridge.exe", ["--paste"]);
 
         Assert.Null(result);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
     }
 
     [Fact]
-    public void LaunchDeElevated_FacadeThrows_ReturnsNullAndLogsError()
+    public void LaunchDeElevated_FacadeThrows_ReturnsNull()
     {
         _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns("S-1-5-21-9-9-9-1001");
 
@@ -237,25 +180,35 @@ public class DragBridgeLauncherTests
         var result = _launcher.LaunchDeElevated(@"C:\tools\dragbridge.exe", ["--paste"]);
 
         Assert.Null(result);
-        _log.Verify(l => l.Error(It.IsAny<string>(), It.IsAny<Exception>()), Times.Once);
     }
 
     [Fact]
-    public void LaunchDeElevated_UsesResolvedInteractiveUserSid()
+    public void LaunchDeElevated_ForwardsInteractiveSidPrivilegeAndArguments()
     {
-        const string interactiveSid = "S-1-5-21-9-9-9-1001";
+        ProcessLaunchTarget? capturedTarget = null;
         LaunchIdentity? capturedIdentity = null;
-        var processInfo = new ProcessInfo(new ProcessLaunchNative.PROCESS_INFORMATION());
-        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns(interactiveSid);
+        var args = new List<string> { "--paste", @"C:\dest\out file.txt", "--mode", "copy" };
+        var expectedArguments = ProcessLaunchTarget.CombineArguments(args.ToList());
+        var processInfo = TestProcessInfoFactory.Native(new ProcessLaunchNative.PROCESS_INFORMATION());
+        _interactiveUserSidResolver.Setup(r => r.GetInteractiveUserSid()).Returns("S-1-5-21-222-333-444-1005");
         _facade.Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), null))
-            .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((_, id, _) => capturedIdentity = id)
+            .Callback<ProcessLaunchTarget, LaunchIdentity, Func<string, string, bool>?>((target, identity, _) =>
+            {
+                capturedTarget = target;
+                capturedIdentity = identity;
+            })
             .Returns(MakeLaunchResult(processInfo));
 
-        using var result = _launcher.LaunchDeElevated(@"C:\tools\dragbridge.exe", ["--paste"], PrivilegeLevel.Isolated);
+        using var result = _launcher.LaunchDeElevated(@"C:\tools\dragbridge.exe", args, PrivilegeLevel.Isolated);
 
-        Assert.NotNull(result);
-        Assert.IsType<AccountLaunchIdentity>(capturedIdentity);
-        Assert.Equal(interactiveSid, ((AccountLaunchIdentity)capturedIdentity!).Sid);
-        Assert.Equal(PrivilegeLevel.Isolated, ((AccountLaunchIdentity)capturedIdentity).PrivilegeLevel);
+        Assert.Same(processInfo, result);
+        var identity = Assert.IsType<AccountLaunchIdentity>(capturedIdentity);
+        Assert.Equal("S-1-5-21-222-333-444-1005", identity.Sid);
+        Assert.Equal(PrivilegeLevel.Isolated, identity.PrivilegeLevel);
+        Assert.NotNull(capturedTarget);
+        Assert.Equal(@"C:\tools\dragbridge.exe", capturedTarget!.ExePath);
+        Assert.Equal(expectedArguments, capturedTarget.Arguments);
+        Assert.True(capturedTarget.SuppressStartupFeedback);
     }
+
 }

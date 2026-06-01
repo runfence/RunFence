@@ -36,10 +36,14 @@ public static class Program
             ?? throw new InvalidOperationException("ProfileKeeper could not resolve its token SID.");
         var processPath = Environment.ProcessPath
             ?? throw new InvalidOperationException("ProfileKeeper could not resolve its executable path.");
+        var processScanner = new ProcessSnapshotScanner();
+        IProcessSnapshotEnumerator processEnumerator = processScanner;
+        IProcessOwnerInfoReader processOwnerReader = processScanner;
+        IProcessExecutablePathReader processPathReader = processScanner;
         var runner = new ProfileKeeperRunner(
             new ProfileKeeperIdentity(Environment.ProcessId, sid, Path.GetFullPath(processPath)),
             ProfileKeeperOptions.Default,
-            new ProcessSnapshotReader(),
+            new ProcessSnapshotReader(processEnumerator, processOwnerReader, processPathReader),
             new ProfileKeeperStateEvaluator(),
             new ProfileKeeperProcessTerminator(),
             TimeProvider.System);

@@ -12,9 +12,9 @@ public class GroupActionOrchestrator(
     GroupDeletionService groupDeletionService,
     GroupBulkScanOrchestrator? bulkScanHandler,
     AccountAclManagerLauncher? aclManagerLauncher,
+    IGroupDeletePrompt deletePrompt,
     ISidNameCacheService sidNameCache,
-    ILoggingService log,
-    ISessionSaver? sessionSaver = null)
+    ILoggingService log)
 {
     public event Action<string?>? DataChanged;
 
@@ -32,20 +32,13 @@ public class GroupActionOrchestrator(
 
     public void DeleteGroup(string sid, string name)
     {
-        var confirm = MessageBox.Show(
-            $"Delete group '{name}'?\n\nThis will remove all ACL grants for this group.",
-            "Confirm Delete Group", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-        if (confirm != DialogResult.Yes)
+        if (!deletePrompt.ConfirmDelete(name))
             return;
 
         var result = groupDeletionService.DeleteGroup(sid);
         if (result.Status == GroupDeletionStatus.OsDeleteFailed)
         {
-            MessageBox.Show(
-                result.Errors.FirstOrDefault() ?? "Failed to delete group.",
-                "Error",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+            deletePrompt.ShowDeleteFailed(result.Errors.FirstOrDefault() ?? "Failed to delete group.");
             return;
         }
 
@@ -60,11 +53,7 @@ public class GroupActionOrchestrator(
         if (result.Status == GroupDeletionStatus.WindowsDeletedSaveFailed)
         {
             var displayName = result.GroupName ?? name;
-            MessageBox.Show(
-                $"Windows deleted group '{displayName}', but RunFence could not save the cleanup state:\n\n{result.SaveErrorMessage}",
-                "Saved State Failed",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+            deletePrompt.ShowSaveFailed(displayName, result.SaveErrorMessage ?? string.Empty);
         }
     }
 
@@ -77,15 +66,13 @@ public class GroupActionOrchestrator(
         aclManagerLauncher.OpenAclManager(sid, displayName, owner);
     }
 
-    public async Task ScanAcls(IWin32Window owner, Action<bool> setScanButtonEnabled, Action<string> setStatusText)
+    public async Task ScanAcls(IWin32Window owner, IGroupScanProgressPresenter progressPresenter)
     {
         if (bulkScanHandler == null)
             return;
 
         await bulkScanHandler.ScanAcls(
             owner,
-            setScanButtonEnabled,
-            setStatusText,
-            () => sessionSaver?.SaveConfig());
+            progressPresenter);
     }
 }

@@ -9,57 +9,50 @@ namespace RunFence.Acl.UI.Forms;
 /// </summary>
 public class AclConfigValidator(IAclService aclService, ILoggingService log)
 {
-    /// <summary>
-    /// Validates ACL settings for the given path and mode. Returns an error message or null if valid.
-    /// Blocking errors: blocked path, exact-path conflict (same path, mixed Allow/Deny), missing allow entries.
-    /// Parent-child overlap warnings are non-blocking; they are shown in the UI label but do not prevent save.
-    /// </summary>
-    public string? Validate(string exePath, bool isFolder, bool restrictAcl, bool isAllowMode,
-        AclTarget aclTarget, int depth, int allowEntryCount, Func<string?> checkPathConflict)
+    public AclConfigValidationState ValidateState(
+        string exePath,
+        bool isFolder,
+        bool restrictAcl,
+        bool isAllowMode,
+        AclTarget aclTarget,
+        int depth,
+        int allowEntryCount,
+        List<AppEntry> existingApps,
+        string? currentAppId)
     {
-        if (!restrictAcl || PathHelper.IsUrlScheme(exePath))
-            return null;
+        var selectedTarget = isFolder ? AclTarget.Folder : aclTarget;
+        var folderDepth = selectedTarget == AclTarget.Folder ? depth : 0;
+        var aclMode = isAllowMode ? AclMode.Allow : AclMode.Deny;
+        var normalizedRestrictAcl = restrictAcl && !PathHelper.IsUrlScheme(exePath);
+        var targetPath = TryResolveTargetPath(exePath, isFolder, selectedTarget, folderDepth);
+        var conflict = normalizedRestrictAcl
+            ? CheckPathConflict(targetPath, isAllowMode, existingApps, currentAppId)
+            : null;
+        var overlapWarning = normalizedRestrictAcl && conflict == null
+            ? CheckPathOverlapWarning(targetPath, isAllowMode, existingApps, currentAppId)
+            : null;
+        var error = Validate(targetPath, normalizedRestrictAcl, isAllowMode, allowEntryCount, conflict);
 
-        var targetPath = aclService.ResolveAclTargetPath(new AppEntry
-        {
-            ExePath = exePath, IsFolder = isFolder, AclTarget = aclTarget, FolderAclDepth = depth
-        });
-        if (aclService.IsBlockedPath(targetPath))
-            return $"Cannot restrict access on: {targetPath}";
-
-        var conflict = checkPathConflict();
-        if (conflict != null)
-            return conflict;
-
-        if (isAllowMode && allowEntryCount == 0)
-            return "Allow mode requires at least one entry.";
-
-        return null;
+        return new AclConfigValidationState(
+            IsValid: error == null,
+            SelectedAclTarget: selectedTarget,
+            FolderAclDepth: folderDepth,
+            AclMode: aclMode,
+            IsAllowMode: isAllowMode,
+            RestrictAcl: normalizedRestrictAcl,
+            ConflictMessage: error,
+            OverlapWarning: overlapWarning,
+            TargetPath: targetPath);
     }
 
-    /// <summary>
-    /// Checks for exact-path conflicts between the current app config and existing apps.
-    /// Returns a blocking error message or null if no error conflict.
-    /// </summary>
-    public string? CheckPathConflict(string exePath, bool isFolder, bool isAllowMode,
-        AclTarget aclTarget, int depth, List<AppEntry> existingApps, string? currentAppId)
+    private string? CheckPathConflict(
+        string? targetPath,
+        bool isAllowMode,
+        List<AppEntry> existingApps,
+        string? currentAppId)
     {
-        if (string.IsNullOrEmpty(exePath) || PathHelper.IsUrlScheme(exePath))
+        if (string.IsNullOrEmpty(targetPath) || PathHelper.IsUrlScheme(targetPath))
             return null;
-
-        string targetPath;
-        try
-        {
-            targetPath = aclService.ResolveAclTargetPath(new AppEntry
-            {
-                ExePath = exePath, IsFolder = isFolder, AclTarget = aclTarget, FolderAclDepth = depth
-            });
-        }
-        catch (Exception ex)
-        {
-            log.Debug($"CheckPathConflict: failed to resolve target path for '{exePath}': {ex.Message}");
-            return null;
-        }
 
         var normalizedTarget = AclHelper.NormalizePath(targetPath);
 
@@ -92,29 +85,14 @@ public class AclConfigValidator(IAclService aclService, ILoggingService log)
         return null;
     }
 
-    /// <summary>
-    /// Checks for parent-child path overlaps where Deny takes precedence over Allow, making the Allow
-    /// ineffective. Returns a non-blocking warning message or null if no overlap.
-    /// </summary>
-    public string? CheckPathOverlapWarning(string exePath, bool isFolder, bool isAllowMode,
-        AclTarget aclTarget, int depth, List<AppEntry> existingApps, string? currentAppId)
+    private string? CheckPathOverlapWarning(
+        string? targetPath,
+        bool isAllowMode,
+        List<AppEntry> existingApps,
+        string? currentAppId)
     {
-        if (string.IsNullOrEmpty(exePath) || PathHelper.IsUrlScheme(exePath))
+        if (string.IsNullOrEmpty(targetPath) || PathHelper.IsUrlScheme(targetPath))
             return null;
-
-        string targetPath;
-        try
-        {
-            targetPath = aclService.ResolveAclTargetPath(new AppEntry
-            {
-                ExePath = exePath, IsFolder = isFolder, AclTarget = aclTarget, FolderAclDepth = depth
-            });
-        }
-        catch (Exception ex)
-        {
-            log.Debug($"CheckPathOverlapWarning: failed to resolve target path for '{exePath}': {ex.Message}");
-            return null;
-        }
 
         var normalizedTarget = AclHelper.NormalizePath(targetPath);
 
@@ -156,5 +134,49 @@ public class AclConfigValidator(IAclService aclService, ILoggingService log)
         }
 
         return null;
+    }
+
+    private string? Validate(
+        string? targetPath,
+        bool restrictAcl,
+        bool isAllowMode,
+        int allowEntryCount,
+        string? conflict)
+    {
+        if (!restrictAcl)
+            return null;
+
+        if (!string.IsNullOrEmpty(targetPath) && aclService.IsBlockedPath(targetPath))
+            return $"Cannot restrict access on: {targetPath}";
+
+        if (conflict != null)
+            return conflict;
+
+        if (isAllowMode && allowEntryCount == 0)
+            return "Allow mode requires at least one entry.";
+
+        return null;
+    }
+
+    private string? TryResolveTargetPath(string exePath, bool isFolder, AclTarget aclTarget, int depth)
+    {
+        if (string.IsNullOrEmpty(exePath) || PathHelper.IsUrlScheme(exePath))
+            return string.IsNullOrEmpty(exePath) ? null : exePath;
+
+        try
+        {
+            return aclService.ResolveAclTargetPath(new AppEntry
+            {
+                ExePath = exePath,
+                IsFolder = isFolder,
+                AclTarget = aclTarget,
+                FolderAclDepth = depth
+            });
+        }
+        catch (Exception ex)
+        {
+            log.Debug($"TryResolveTargetPath: failed to resolve target path for '{exePath}': {ex.Message}");
+            return null;
+        }
     }
 }

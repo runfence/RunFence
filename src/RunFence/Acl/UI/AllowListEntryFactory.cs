@@ -12,7 +12,7 @@ namespace RunFence.Acl.UI;
 /// </summary>
 public class AllowListEntryFactory(
     ILocalUserProvider localUserProvider,
-    ILocalGroupMembershipService groupMembership,
+    ILocalGroupQueryService groupMembership,
     ISidEntryHelper sidEntryHelper,
     SidDisplayNameResolver displayNameResolver)
 {

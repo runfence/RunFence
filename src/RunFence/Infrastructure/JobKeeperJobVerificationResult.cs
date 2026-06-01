@@ -1,8 +1,11 @@
 namespace RunFence.Infrastructure;
 
-public readonly record struct JobKeeperJobVerificationResult(bool Succeeded, IntPtr JobHandle, string? FailureReason)
+public readonly record struct JobKeeperJobVerificationResult(
+    bool Succeeded,
+    OwnedJobHandle? JobHandle,
+    string? FailureReason)
 {
-    public static JobKeeperJobVerificationResult Success(IntPtr jobHandle) => new(true, jobHandle, null);
+    public static JobKeeperJobVerificationResult Success(OwnedJobHandle jobHandle) => new(true, jobHandle, null);
 
-    public static JobKeeperJobVerificationResult Failure(string reason) => new(false, IntPtr.Zero, reason);
+    public static JobKeeperJobVerificationResult Failure(string reason) => new(false, null, reason);
 }

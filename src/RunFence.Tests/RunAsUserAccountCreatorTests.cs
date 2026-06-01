@@ -489,7 +489,7 @@ public sealed class RunAsUserAccountCreatorTests : IDisposable
 {
             Database = database,
             CredentialStore = new CredentialStore { ArgonSalt = [1, 2, 3] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }

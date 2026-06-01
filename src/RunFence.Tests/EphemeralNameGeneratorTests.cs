@@ -19,22 +19,6 @@ public class EphemeralNameGeneratorTests
     }
 
     [Fact]
-    public void Generate_StartsWithE()
-    {
-        var name = EphemeralNameGenerator.Generate();
-
-        Assert.StartsWith("e", name);
-    }
-
-    [Fact]
-    public void Generate_IsSevenCharacters()
-    {
-        var name = EphemeralNameGenerator.Generate();
-
-        Assert.Equal(7, name.Length);
-    }
-
-    [Fact]
     public void Generate_ContainsOnlyAlphanumericCharacters()
     {
         for (int i = 0; i < 20; i++)

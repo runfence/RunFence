@@ -12,7 +12,7 @@ public class RestrictedProcessActivationGuardTests
     private static readonly IntPtr ProcessHandle = new(10);
     private static readonly IntPtr ThreadHandle = new(20);
 
-    private readonly Mock<IRestrictedProcessControl> _processControl = new();
+    private readonly Mock<IProcessControl> _processControl = new();
     private readonly RestrictedProcessActivationGuard _guard;
 
     public RestrictedProcessActivationGuardTests()
@@ -37,7 +37,7 @@ public class RestrictedProcessActivationGuardTests
             _guard.ThrowIfAssignmentFailed(ref processInfo, assignment, Sid, isLow: false));
 
         _processControl.Verify(c => c.ResumeThread(It.IsAny<IntPtr>(), out It.Ref<int>.IsAny), Times.Never);
-        _processControl.Verify(c => c.TerminateProcess(ProcessHandle), Times.Once);
+        _processControl.Verify(c => c.TerminateProcessBestEffort(ProcessHandle, 1), Times.Once);
         _processControl.Verify(c => c.CloseHandle(ThreadHandle), Times.Once);
         _processControl.Verify(c => c.CloseHandle(ProcessHandle), Times.Once);
         Assert.Equal(IntPtr.Zero, processInfo.hThread);
@@ -53,7 +53,7 @@ public class RestrictedProcessActivationGuardTests
             _guard.ResumeOrTerminate(ref processInfo, Sid, isLow: false, "job keeper"));
 
         _processControl.Verify(c => c.ResumeThread(It.IsAny<IntPtr>(), out It.Ref<int>.IsAny), Times.Never);
-        _processControl.Verify(c => c.TerminateProcess(ProcessHandle), Times.Once);
+        _processControl.Verify(c => c.TerminateProcessBestEffort(ProcessHandle, 1), Times.Once);
         _processControl.Verify(c => c.CloseHandle(ProcessHandle), Times.Once);
         Assert.Equal(IntPtr.Zero, processInfo.hProcess);
     }
@@ -70,24 +70,11 @@ public class RestrictedProcessActivationGuardTests
         Assert.Throws<LaunchFailedException>(() =>
             _guard.ResumeOrTerminate(ref processInfo, Sid, isLow: true, "direct fallback target"));
 
-        _processControl.Verify(c => c.TerminateProcess(ProcessHandle), Times.Once);
+        _processControl.Verify(c => c.TerminateProcessBestEffort(ProcessHandle, 1), Times.Once);
         _processControl.Verify(c => c.CloseHandle(ThreadHandle), Times.Once);
         _processControl.Verify(c => c.CloseHandle(ProcessHandle), Times.Once);
         Assert.Equal(IntPtr.Zero, processInfo.hThread);
         Assert.Equal(IntPtr.Zero, processInfo.hProcess);
-    }
-
-    [Fact]
-    public void CloseThreadHandle_ClosesOnlyThread()
-    {
-        var processInfo = ProcessInfo();
-
-        _guard.CloseThreadHandle(ref processInfo);
-
-        _processControl.Verify(c => c.CloseHandle(ThreadHandle), Times.Once);
-        _processControl.Verify(c => c.CloseHandle(ProcessHandle), Times.Never);
-        Assert.Equal(IntPtr.Zero, processInfo.hThread);
-        Assert.Equal(ProcessHandle, processInfo.hProcess);
     }
 
     private static ProcessLaunchNative.PROCESS_INFORMATION ProcessInfo() => new()

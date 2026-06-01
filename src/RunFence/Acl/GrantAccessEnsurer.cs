@@ -4,7 +4,6 @@ using RunFence.Acl.Traverse;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
-
 namespace RunFence.Acl;
 
 /// <summary>
@@ -13,7 +12,7 @@ namespace RunFence.Acl;
 public class GrantAccessEnsurer(
     IAclPermissionService aclPermission,
     UiThreadDatabaseAccessor dbAccessor,
-    IAclAccessor aclAccessor,
+    IPathSecurityDescriptorAccessor aclAccessor,
     IFileSystemPathInfo pathInfo,
     ITraverseCoreOperations traverseCore,
     GrantFileSystemOperations fileSystemOperations,
@@ -21,7 +20,9 @@ public class GrantAccessEnsurer(
     ITraverseGrantOwnerResolver traverseGrantOwnerResolver,
     Func<IGrantIntentRepository> grantIntentRepository,
     Func<IGrantIntentStore> mainGrantIntentStore,
-    IGrantIntentStoreSaveService grantIntentStoreSaveService)
+    IGrantIntentStoreSaveService grantIntentStoreSaveService,
+    GrantIntentMutationStateRestorer grantIntentMutationStateRestorer,
+    GrantRuntimeSnapshotService grantRuntimeSnapshotService)
 {
     private readonly record struct EnsureAccessPlan(
         string Normalized,
@@ -60,33 +61,18 @@ public class GrantAccessEnsurer(
         string OwnerSid,
         IReadOnlyList<IGrantIntentStore> Stores);
 
-    private readonly record struct RuntimeStateSnapshot(
-        string Sid,
-        string NormalizedPath,
-        bool IsDeny,
-        GrantedPathEntry? GrantEntry,
-        string? TraversePath,
-        GrantedPathEntry? TraverseEntry);
-
-    private readonly record struct StoreEntrySnapshot(
-        IGrantIntentStore Store,
-        string OwnerSid,
-        string TargetPath,
-        string? TraversePath,
-        bool IncludeDeny,
-        IReadOnlyList<GrantedPathEntry> Entries);
-
     private readonly record struct PersistedIdentityContext(
         EnsureIdentityPlan Plan,
         StoreSelection TargetSelection,
         StoreSelection? TraverseSelection,
-        RuntimeStateSnapshot RuntimeSnapshot,
-        IReadOnlyList<StoreEntrySnapshot> StoreSnapshots);
+        GrantRuntimeEntrySnapshot GrantSnapshot,
+        GrantRuntimeEntrySnapshot? TraverseSnapshot,
+        IReadOnlyList<GrantIntentStoreSnapshot> StoreSnapshots);
 
     private readonly record struct DenyConflictContext(
         DenyConflictPlan Plan,
-        RuntimeStateSnapshot RuntimeSnapshot,
-        IReadOnlyList<StoreEntrySnapshot> StoreSnapshots);
+        GrantRuntimeEntrySnapshot RuntimeSnapshot,
+        IReadOnlyList<GrantIntentStoreSnapshot> StoreSnapshots);
 
     private IGrantIntentRepository GrantIntentRepository => grantIntentRepository();
 
@@ -172,7 +158,7 @@ public class GrantAccessEnsurer(
                 AclHelper.IsSpecificContainerSid(identitySid) &&
                 !aclPermission.NeedsPermissionGrant(
                     normalized,
-                    traverseGrantOwnerResolver.ResolveAclSid(identitySid),
+                    TraverseEntryLookup.ResolveAclSid(identitySid),
                     requiredRights,
                     unelevated))
             {
@@ -210,7 +196,7 @@ public class GrantAccessEnsurer(
     {
         var dbState = dbAccessor.Read(db =>
         {
-            var existing = GrantCoreOperations.FindGrantEntryInDb(db, identitySid, normalized, isDeny: false);
+            var existing = GrantEntryLookup.FindGrantEntryInDb(db, identitySid, normalized, isDeny: false);
             var existingRights = existing?.SavedRights ?? SavedRightsState.DefaultForMode(isDeny: false);
             var expandedTargetRights = existing == null
                 ? requestedRights
@@ -229,7 +215,7 @@ public class GrantAccessEnsurer(
             var traverseDir = isFolder ? normalized : Path.GetDirectoryName(normalized);
             var hasTraverseEntry = !string.IsNullOrEmpty(traverseDir) &&
                                    traverseGrantOwnerResolver.FindTraverseEntry(db, identitySid, traverseDir) != null;
-            var denyEntry = GrantCoreOperations.FindGrantEntryInDb(db, identitySid, normalized, isDeny: true);
+            var denyEntry = GrantEntryLookup.FindGrantEntryInDb(db, identitySid, normalized, isDeny: true);
 
             return new
             {
@@ -253,7 +239,6 @@ public class GrantAccessEnsurer(
 
         var groupSids = aclPermission.ResolveAccountGroupSids(identitySid);
         var trackedGrantNeedsFix = false;
-        var trackedTraverseNeedsFix = false;
 
         if (dbState.ExistingTarget != null && pathExists)
         {
@@ -278,17 +263,6 @@ public class GrantAccessEnsurer(
                     trackedGrantNeedsFix = true;
             }
 
-            if (!string.IsNullOrEmpty(dbState.TraverseDir) &&
-                dbState.HasTraverseEntry &&
-                !TraverseRightsHelper.HasEffectiveTraverseForGrantSid(
-                    dbState.TraverseDir,
-                    identitySid,
-                    groupSids,
-                    aclPermission,
-                    pathInfo))
-            {
-                trackedTraverseNeedsFix = true;
-            }
         }
 
         var traverseCoveragePaths = string.IsNullOrEmpty(dbState.TraverseDir)
@@ -296,16 +270,16 @@ public class GrantAccessEnsurer(
             : traverseCore.CollectCoveragePaths(dbState.TraverseDir);
         var traversePathsToApply = string.IsNullOrEmpty(dbState.TraverseDir)
             ? []
-            : traverseCore.GetPathsNeedingTraverseAce(identitySid, traverseCoveragePaths);
+            : traverseCore.GetPathsNeedingTraverseAce(identitySid, traverseCoveragePaths, unelevated);
         var effectiveTraverseAccessSufficient = string.IsNullOrEmpty(dbState.TraverseDir) ||
                                                 traversePathsToApply.Count == 0;
         var targetGrantRequired = !effectiveTargetAccessSufficient || trackedGrantNeedsFix;
-        var traverseRequired = dbState.TraverseDir != null &&
-                               (targetGrantRequired || dbState.HasTraverseEntry) &&
-                               !effectiveTraverseAccessSufficient;
-        var traverseDbRequired = traverseRequired &&
-                                 (!dbState.HasTraverseEntry || trackedTraverseNeedsFix);
-        var traverseAceRequired = traverseRequired;
+        var traverseAceRequired = dbState.TraverseDir != null &&
+                                  !effectiveTraverseAccessSufficient;
+        var traverseDbRequired = dbState.TraverseDir != null &&
+                                 ((persistTargetGrantIntent && targetGrantRequired) ||
+                                  traverseAceRequired) &&
+                                 !dbState.HasTraverseEntry;
 
         return new EnsureIdentityPlan(
             Sid: identitySid,
@@ -372,11 +346,11 @@ public class GrantAccessEnsurer(
                 }
 
                 if (!confirm(plan.Normalized, identity.Sid))
-                    throw new OperationCanceledException($"User declined to resolve deny conflict on '{plan.Normalized}'.");
+                    throw new GrantAccessDeclinedException($"User declined to resolve deny conflict on '{plan.Normalized}'.");
             }
 
             if (identity.TargetGrantRequired && confirm != null && !confirm(plan.Normalized, identity.Sid))
-                throw new OperationCanceledException($"User declined to grant access to '{plan.Normalized}'.");
+                throw new GrantAccessDeclinedException($"User declined to grant access to '{plan.Normalized}'.");
         }
     }
 
@@ -389,11 +363,14 @@ public class GrantAccessEnsurer(
             if (identity.DenyConflict is not { } denyConflict)
                 continue;
 
-            var runtimeSnapshot = CaptureRuntimeSnapshot(denyConflict.Sid, denyConflict.Path, includeTraverse: false, isDeny: true);
+            var runtimeSnapshot = grantRuntimeSnapshotService.CaptureGrantSnapshot(
+                denyConflict.Sid,
+                denyConflict.Path,
+                isDeny: true);
             var locations = denyConflict.Locations.Count > 0
                 ? denyConflict.Locations
                 : CaptureFallbackDenyLocations(denyConflict.Sid, denyConflict.Path);
-            var storeSnapshots = CaptureStoreSnapshots(
+            var storeSnapshots = grantIntentMutationStateRestorer.CaptureStoreSnapshots(
                 locations.Select(location => (location.Store, OwnerSid: denyConflict.Sid)),
                 denyConflict.Path,
                 traversePath: null,
@@ -473,7 +450,7 @@ public class GrantAccessEnsurer(
             }
             catch (GrantOperationException ex)
             {
-                TryRollbackPreCompletionSaveFailure(plan, contexts, denyConflictContexts, modifiedStores, ex);
+                TryRollbackPreCompletionSaveFailure(plan, contexts, denyConflictContexts, ex);
                 throw;
             }
         }
@@ -484,8 +461,8 @@ public class GrantAccessEnsurer(
                 .Where(context =>
                     context.Plan.TargetAceRequired &&
                     context.TargetSelection.Stores.Count == 0 &&
-                    context.RuntimeSnapshot.GrantEntry == null)
-                .Select(context => context.RuntimeSnapshot)
+                    context.GrantSnapshot.Entry == null)
+                .Select(context => context.GrantSnapshot)
                 .ToList();
 
         var appliedTraverseBySid = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
@@ -501,7 +478,7 @@ public class GrantAccessEnsurer(
                     var applied = traverseCore.ApplyTraverseAces(context.Plan.Sid, context.Plan.TraversePathsToApply).ToList();
                     appliedTraverseBySid[context.Plan.Sid] = applied;
                     if (applied.Count > 0)
-                        traverseCore.VerifyEffectiveTraverse(context.Plan.Sid, context.Plan.TraverseCoveragePaths);
+                        traverseCore.VerifyEffectiveTraverse(context.Plan.Sid, context.Plan.TraverseCoveragePaths, unelevated);
                 }
 
                 if (!context.Plan.TargetAceRequired)
@@ -527,9 +504,9 @@ public class GrantAccessEnsurer(
                         if (grants == null)
                             continue;
 
-                        var currentGrant = GrantCoreOperations.FindGrantEntryInList(
+                        var currentGrant = GrantEntryLookup.FindGrantEntryInList(
                             grants,
-                            snapshot.NormalizedPath,
+                            snapshot.Path,
                             isDeny: false);
                         if (currentGrant != null)
                             grants.Remove(currentGrant);
@@ -552,7 +529,6 @@ public class GrantAccessEnsurer(
             TryRollbackAppliedAccess(
                 plan,
                 contexts,
-                modifiedStores,
                 appliedTraverseBySid,
                 appliedTargetSids,
                 operationException);
@@ -573,7 +549,7 @@ public class GrantAccessEnsurer(
 
         foreach (var identity in plan.Identities)
         {
-            if (!identity.TargetAceRequired && !identity.TraverseAceRequired)
+            if (!identity.TargetAceRequired && !identity.TraverseAceRequired && !identity.TraverseDbRequired)
                 continue;
 
             var targetSelection = persistTargetGrantIntent && identity.TargetGrantDbRequired
@@ -590,8 +566,15 @@ public class GrantAccessEnsurer(
                 identity,
                 targetSelection,
                 traverseSelection,
-                CaptureRuntimeSnapshot(identity.Sid, plan.Normalized, includeTraverse: true, isDeny: false),
-                CaptureStoreSnapshots(storeKeys, plan.Normalized, identity.TraverseDir, includeDeny: false)));
+                grantRuntimeSnapshotService.CaptureGrantSnapshot(identity.Sid, plan.Normalized, isDeny: false),
+                identity.TraverseDbRequired && !string.IsNullOrEmpty(identity.TraverseDir)
+                    ? grantRuntimeSnapshotService.CaptureTraverseSnapshot(identity.Sid, identity.TraverseDir)
+                    : null,
+                grantIntentMutationStateRestorer.CaptureStoreSnapshots(
+                    storeKeys,
+                    plan.Normalized,
+                    identity.TraverseDir,
+                    includeDeny: false)));
         }
 
         return contexts;
@@ -605,7 +588,7 @@ public class GrantAccessEnsurer(
         {
             if (context.Plan.TargetGrantDbRequired && context.TargetSelection.Stores.Count > 0)
             {
-                var targetEntry = BuildTargetEntry(plan, context.Plan, context.RuntimeSnapshot.GrantEntry);
+                var targetEntry = BuildTargetEntry(plan, context.Plan, context.GrantSnapshot.Entry);
                 foreach (var store in context.TargetSelection.Stores)
                 {
                     if (UpsertStoreEntry(store, context.TargetSelection.OwnerSid, targetEntry))
@@ -617,7 +600,7 @@ public class GrantAccessEnsurer(
                 context.TraverseSelection is { } traverseSelection &&
                 !string.IsNullOrEmpty(context.Plan.TraverseDir))
             {
-                var traverseEntry = BuildTraverseEntry(plan, context.Plan, context.RuntimeSnapshot.TraverseEntry);
+                var traverseEntry = BuildTraverseEntry(plan, context.Plan, context.TraverseSnapshot?.Entry);
                 foreach (var store in traverseSelection.Stores)
                 {
                     if (UpsertStoreEntry(store, traverseSelection.OwnerSid, traverseEntry))
@@ -637,7 +620,7 @@ public class GrantAccessEnsurer(
         {
             if (includeTargetGrant)
             {
-                var existingGrant = GrantCoreOperations.FindGrantEntryInDb(db, identity.Sid, plan.Normalized, isDeny: false);
+                var existingGrant = GrantEntryLookup.FindGrantEntryInDb(db, identity.Sid, plan.Normalized, isDeny: false);
                 if (existingGrant == null)
                 {
                     db.GetOrCreateAccount(identity.Sid).Grants.Add(BuildTargetEntry(plan, identity, existingEntry: null));
@@ -693,7 +676,7 @@ public class GrantAccessEnsurer(
         if (!identity.TraverseDbRequired || string.IsNullOrEmpty(identity.TraverseDir))
             return null;
 
-        var ownerSid = traverseGrantOwnerResolver.ResolveStorageOwnerSid(identity.Sid);
+        var ownerSid = TraverseEntryLookup.ResolveStorageOwnerSid(identity.Sid);
         var existingLocations = GrantIntentRepository.FindEntriesForSid(ownerSid)
             .Where(location =>
                 location.Entry.IsTraverseOnly &&
@@ -710,62 +693,10 @@ public class GrantAccessEnsurer(
         return new StoreSelection(ownerSid, [MainGrantIntentStore]);
     }
 
-    private RuntimeStateSnapshot CaptureRuntimeSnapshot(string sid, string normalizedPath, bool includeTraverse, bool isDeny)
-    {
-        return dbAccessor.Read(db =>
-        {
-            var grantEntry = GrantCoreOperations.FindGrantEntryInDb(db, sid, normalizedPath, isDeny)?.Clone();
-            string? traversePath = null;
-            GrantedPathEntry? traverseEntry = null;
-            if (includeTraverse)
-            {
-                traversePath = pathInfo.DirectoryExists(normalizedPath)
-                    ? normalizedPath
-                    : Path.GetDirectoryName(normalizedPath);
-                if (!string.IsNullOrEmpty(traversePath))
-                    traverseEntry = FindRuntimeTraverseEntry(db, sid, traversePath)?.Clone();
-            }
-
-            return new RuntimeStateSnapshot(sid, normalizedPath, isDeny, grantEntry, traversePath, traverseEntry);
-        });
-    }
-
-    private List<StoreEntrySnapshot> CaptureStoreSnapshots(
-        IEnumerable<(IGrantIntentStore Store, string OwnerSid)> storeKeys,
-        string normalizedPath,
-        string? traversePath,
-        bool includeDeny)
-    {
-        var result = new List<StoreEntrySnapshot>();
-        foreach (var group in storeKeys
-                     .Distinct()
-                     .GroupBy(key => new { key.Store, key.OwnerSid }))
-        {
-            var entries = group.Key.Store.GetEntries(group.Key.OwnerSid)
-                .Where(entry =>
-                    string.Equals(entry.Path, normalizedPath, StringComparison.OrdinalIgnoreCase) ||
-                    (entry.IsTraverseOnly &&
-                     !string.IsNullOrEmpty(traversePath) &&
-                     string.Equals(entry.Path, traversePath, StringComparison.OrdinalIgnoreCase)))
-                .Where(entry => includeDeny || !entry.IsDeny || entry.IsTraverseOnly)
-                .Select(entry => entry.Clone())
-                .ToList();
-            result.Add(new StoreEntrySnapshot(
-                group.Key.Store,
-                group.Key.OwnerSid,
-                normalizedPath,
-                traversePath,
-                includeDeny,
-                entries));
-        }
-
-        return result;
-    }
-
     private IReadOnlyList<GrantIntentLocation> CaptureFallbackDenyLocations(string sid, string path)
     {
         var normalizedPath = Path.GetFullPath(path);
-        var existing = dbAccessor.Read(db => GrantCoreOperations.FindGrantEntryInDb(db, sid, normalizedPath, isDeny: true)?.Clone());
+        var existing = dbAccessor.Read(db => GrantEntryLookup.FindGrantEntryInDb(db, sid, normalizedPath, isDeny: true)?.Clone());
         if (existing == null)
             return [];
 
@@ -812,7 +743,6 @@ public class GrantAccessEnsurer(
     private void TryRollbackAppliedAccess(
         EnsureAccessPlan plan,
         IReadOnlyList<PersistedIdentityContext> contexts,
-        IEnumerable<IGrantIntentStore> modifiedStores,
         IReadOnlyDictionary<string, List<string>> appliedTraverseBySid,
         IReadOnlySet<string> appliedTargetSids,
         GrantOperationException operationException)
@@ -823,7 +753,7 @@ public class GrantAccessEnsurer(
             {
                 try
                 {
-                    var previousGrant = context.RuntimeSnapshot.GrantEntry;
+                    var previousGrant = context.GrantSnapshot.Entry;
                     if (previousGrant == null)
                     {
                         fileSystemOperations.RemoveGrant(context.Plan.Sid, plan.Normalized, isDeny: false, updateFileSystem: true);
@@ -851,6 +781,9 @@ public class GrantAccessEnsurer(
 
             if (appliedTraverseBySid.TryGetValue(context.Plan.Sid, out var appliedTraverse) && appliedTraverse.Count > 0)
             {
+                if (operationException.Step == GrantApplyFailureStep.TraverseAclApply)
+                    continue;
+
                 try
                 {
                     traverseCore.RemoveTraverseAces(context.Plan.Sid, appliedTraverse);
@@ -866,20 +799,12 @@ public class GrantAccessEnsurer(
             }
         }
 
-        try
+        if (TryRestoreRuntimeSnapshots(contexts, plan.Normalized, operationException))
         {
-            RestoreRuntimeSnapshots(contexts.Select(context => context.RuntimeSnapshot));
-            RestoreStoreSnapshots(contexts.SelectMany(context => context.StoreSnapshots), plan.Normalized);
-            grantIntentStoreSaveService.Save(modifiedStores, GrantApplyFailureStep.RevertIntentSave, plan.Normalized);
-        }
-        catch (GrantOperationException ex)
-        {
-            operationException.AppendCleanupFailures(ex.CleanupFailures);
-            operationException.AppendCleanupFailure(GrantApplyFailureStep.RevertIntentSave, plan.Normalized, ex.ConfigPath, ex.Cause);
-        }
-        catch (Exception ex)
-        {
-            operationException.AppendCleanupFailure(GrantApplyFailureStep.RevertIntentSave, plan.Normalized, null, ex);
+            grantIntentMutationStateRestorer.TryRestoreStoreSnapshots(
+                contexts.SelectMany(context => context.StoreSnapshots).ToList(),
+                plan.Normalized,
+                operationException);
         }
     }
 
@@ -887,27 +812,14 @@ public class GrantAccessEnsurer(
         EnsureAccessPlan plan,
         IReadOnlyList<PersistedIdentityContext> contexts,
         IReadOnlyList<DenyConflictContext> denyConflictContexts,
-        IEnumerable<IGrantIntentStore> modifiedStores,
         GrantOperationException operationException)
     {
-        try
+        if (TryRestoreRuntimeSnapshots(contexts, plan.Normalized, operationException))
         {
-            RestoreRuntimeSnapshots(contexts.Select(context => context.RuntimeSnapshot));
-            RestoreStoreSnapshots(contexts.SelectMany(context => context.StoreSnapshots), plan.Normalized);
-            grantIntentStoreSaveService.Save(modifiedStores, GrantApplyFailureStep.RevertIntentSave, plan.Normalized);
-        }
-        catch (GrantOperationException ex)
-        {
-            operationException.AppendCleanupFailures(ex.CleanupFailures);
-            operationException.AppendCleanupFailure(GrantApplyFailureStep.RevertIntentSave, plan.Normalized, ex.ConfigPath, ex.Cause);
-        }
-        catch (Exception ex)
-        {
-            operationException.AppendCleanupFailure(
-                GrantApplyFailureStep.RevertIntentSave,
+            grantIntentMutationStateRestorer.TryRestoreStoreSnapshots(
+                contexts.SelectMany(context => context.StoreSnapshots).ToList(),
                 plan.Normalized,
-                grantIntentStoreSaveService.GetPrimaryConfigPath(modifiedStores),
-                ex);
+                operationException);
         }
 
         TryRollbackDenyConflicts(denyConflictContexts, operationException);
@@ -938,12 +850,17 @@ public class GrantAccessEnsurer(
                         context.Plan.OriginalRights);
                 }
 
-                RestoreRuntimeSnapshots([context.RuntimeSnapshot]);
-                RestoreStoreSnapshots(context.StoreSnapshots, context.Plan.Path);
-                grantIntentStoreSaveService.Save(
-                    context.StoreSnapshots.Select(snapshot => snapshot.Store),
+                grantRuntimeSnapshotService.RestoreGrantSnapshot(context.RuntimeSnapshot);
+                var rollbackException = new GrantOperationException(
                     GrantApplyFailureStep.DenyConflictRollback,
-                    context.Plan.Path);
+                    context.Plan.Path,
+                    grantIntentStoreSaveService.GetPrimaryConfigPath(context.StoreSnapshots.Select(snapshot => snapshot.Store)),
+                    new InvalidOperationException("Deny-conflict rollback failed."));
+                grantIntentMutationStateRestorer.TryRestoreStoreSnapshots(
+                    context.StoreSnapshots,
+                    context.Plan.Path,
+                    rollbackException);
+                operationException.AppendCleanupFailures(rollbackException.CleanupFailures);
             }
             catch (GrantOperationException ex)
             {
@@ -964,62 +881,30 @@ public class GrantAccessEnsurer(
         }
     }
 
-    private void RestoreRuntimeSnapshots(IEnumerable<RuntimeStateSnapshot> snapshots)
+    private bool TryRestoreRuntimeSnapshots(
+        IReadOnlyList<PersistedIdentityContext> contexts,
+        string normalizedPath,
+        GrantOperationException operationException)
     {
-        dbAccessor.Write(db =>
+        try
         {
-            foreach (var snapshot in snapshots)
+            foreach (var context in contexts)
             {
-                var account = db.GetAccount(snapshot.Sid);
-                var grants = account?.Grants;
-                if (grants != null)
-                {
-                    var currentGrant = GrantCoreOperations.FindGrantEntryInList(grants, snapshot.NormalizedPath, snapshot.IsDeny);
-                    if (currentGrant != null)
-                        grants.Remove(currentGrant);
-                    if (snapshot.GrantEntry != null)
-                        db.GetOrCreateAccount(snapshot.Sid).Grants.Add(snapshot.GrantEntry.Clone());
-                }
-                else if (snapshot.GrantEntry != null)
-                {
-                    db.GetOrCreateAccount(snapshot.Sid).Grants.Add(snapshot.GrantEntry.Clone());
-                }
-
-                if (!string.IsNullOrEmpty(snapshot.TraversePath))
-                {
-                    var traverseEntries = traverseGrantOwnerResolver.GetOrCreateTraverseStore(db, snapshot.Sid);
-                    var currentTraverse = traverseGrantOwnerResolver.FindTraverseEntry(
-                        db,
-                        snapshot.Sid,
-                        snapshot.TraversePath);
-                    if (currentTraverse != null)
-                        traverseEntries.Remove(currentTraverse);
-                    if (snapshot.TraverseEntry != null)
-                        traverseEntries.Add(snapshot.TraverseEntry.Clone());
-                }
-
-                db.RemoveAccountIfEmpty(snapshot.Sid);
+                grantRuntimeSnapshotService.RestoreGrantSnapshot(context.GrantSnapshot);
+                if (context.TraverseSnapshot != null)
+                    grantRuntimeSnapshotService.RestoreTraverseSnapshot(context.TraverseSnapshot);
             }
-        });
-    }
 
-    private void RestoreStoreSnapshots(IEnumerable<StoreEntrySnapshot> snapshots, string normalizedPath)
-    {
-        foreach (var snapshot in snapshots
-                     .DistinctBy(snapshot => new { snapshot.Store, snapshot.OwnerSid }))
+            return true;
+        }
+        catch (Exception ex)
         {
-            var current = snapshot.Store.GetEntries(snapshot.OwnerSid)
-                .Where(entry =>
-                    string.Equals(entry.Path, snapshot.TargetPath, StringComparison.OrdinalIgnoreCase) ||
-                    (entry.IsTraverseOnly &&
-                     !string.IsNullOrEmpty(snapshot.TraversePath) &&
-                     string.Equals(entry.Path, snapshot.TraversePath, StringComparison.OrdinalIgnoreCase)))
-                .Where(entry => snapshot.IncludeDeny || !entry.IsDeny || entry.IsTraverseOnly)
-                .ToList();
-            foreach (var entry in current)
-                snapshot.Store.RemoveEntry(snapshot.OwnerSid, entry);
-            foreach (var entry in snapshot.Entries)
-                snapshot.Store.AddEntry(snapshot.OwnerSid, entry);
+            operationException.AppendCleanupFailure(
+                GrantApplyFailureStep.RevertIntentSave,
+                normalizedPath,
+                null,
+                ex);
+            return false;
         }
     }
 
@@ -1110,7 +995,11 @@ public class GrantAccessEnsurer(
     }
 
     private GrantedPathEntry? FindRuntimeTraverseEntry(AppDatabase database, string sid, string path)
-        => traverseGrantOwnerResolver.FindTraverseEntry(database, sid, path);
+        => grantRuntimeSnapshotService.FindTraverseEntry(
+            database,
+            sid,
+            TraverseEntryLookup.NormalizePathForLookup(path),
+            includeManualSharedEntries: false);
 
     private static bool EntriesEquivalent(GrantedPathEntry left, GrantedPathEntry right)
     {

@@ -1,5 +1,6 @@
 using System.Security.AccessControl;
 using Moq;
+using RunFence.Acl;
 using RunFence.Acl.Permissions;
 using RunFence.Core;
 using RunFence.PrefTrans;
@@ -10,12 +11,12 @@ namespace RunFence.Tests;
 public class SettingsTransferServiceTests
 {
     private const string FakeInteractiveSid = "S-1-5-21-1000-2000-3000-1001";
-    private static readonly string SharedTempRoot = Path.Combine(PathConstants.ProgramDataDir, "temp");
-
     private readonly Mock<IPrefTransLauncher> _launcher;
     private readonly Mock<ISettingsTransferAccessGrantService> _accessGrantService;
     private readonly Mock<ISettingsTransferStagingService> _stagingService;
     private readonly Mock<IInteractiveUserResolver> _interactiveUserResolver;
+    private readonly Mock<IProgramDataPathPolicyService> _programDataPathPolicyService;
+    private readonly Mock<IProgramDataManagedObjectRepairService> _programDataManagedObjectRepairService;
     private readonly Mock<ILoggingService> _log;
 
     public SettingsTransferServiceTests()
@@ -25,6 +26,11 @@ public class SettingsTransferServiceTests
         _accessGrantService = new Mock<ISettingsTransferAccessGrantService>(MockBehavior.Strict);
         _stagingService = new Mock<ISettingsTransferStagingService>(MockBehavior.Strict);
         _interactiveUserResolver = new Mock<IInteractiveUserResolver>();
+        _programDataPathPolicyService = new Mock<IProgramDataPathPolicyService>(MockBehavior.Strict);
+        _programDataManagedObjectRepairService = new Mock<IProgramDataManagedObjectRepairService>(MockBehavior.Strict);
+        _programDataPathPolicyService
+            .Setup(s => s.IsUnderRoot(It.IsAny<string>()))
+            .Returns(false);
 
         _accessGrantService
             .Setup(g => g.CleanupTemporaryGrant());
@@ -55,17 +61,9 @@ public class SettingsTransferServiceTests
             () => _accessGrantService.Object,
             _stagingService.Object,
             _interactiveUserResolver.Object,
+            _programDataPathPolicyService.Object,
+            _programDataManagedObjectRepairService.Object,
             baseDirectory);
-    }
-
-    [Fact]
-    public void ValidatePrefTransExists_BuildsPathInBaseDirectory()
-    {
-        var service = CreateService(AppContext.BaseDirectory);
-        service.ValidatePrefTransExists(out var path);
-
-        Assert.Equal("preftrans.exe", Path.GetFileName(path));
-        Assert.Equal(AppContext.BaseDirectory, Path.GetDirectoryName(path) + Path.DirectorySeparatorChar);
     }
 
     [Fact]
@@ -210,17 +208,108 @@ public class SettingsTransferServiceTests
     }
 
     [Fact]
+    public void ExportDesktopSettings_ProgramDataDestination_UsesRestrictedStagingWhenInteractiveIsCurrent()
+    {
+        using var outputDirectory = new TempDirectory("SettingsTransferProgramDataOutput");
+        using var sharedTempDirectory = new TempDirectory("SettingsTransferSharedTemp");
+        var outputPath = Path.Combine(outputDirectory.Path, "settings.json");
+        var currentUserSid = SidResolutionHelper.GetCurrentUserSid()!;
+        var tempDirectory = Path.Combine(sharedTempDirectory.Path, "export-programdata");
+        var stagedFile = Path.Combine(tempDirectory, "settings.json");
+        string? temporaryPath = null;
+        string? tempCopySource = null;
+        string? tempCopyDestination = null;
+
+        _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns(currentUserSid);
+        _programDataPathPolicyService.Setup(s => s.IsUnderRoot(outputPath)).Returns(true);
+        _programDataManagedObjectRepairService.Setup(s => s.EnsureManagedFileOwner(stagedFile))
+            .Returns(false);
+
+        using var fx = CreateServiceWithFakePrefTrans();
+        var exeDirectory = Path.GetDirectoryName(fx.FakePrefTransPath)!;
+        _stagingService.Setup(s => s.CreateSharedTempDirectoryPath()).Returns(tempDirectory);
+        _stagingService
+            .Setup(s => s.CreateRestrictedExportDirectory(tempDirectory, currentUserSid))
+            .Returns(tempDirectory);
+        _stagingService
+            .Setup(s => s.CopyExportFileToDestination(stagedFile, outputPath))
+            .Callback<string, string>((source, destination) =>
+            {
+                tempCopySource = source;
+                tempCopyDestination = destination;
+                File.Copy(source, destination, overwrite: true);
+            });
+        _stagingService
+            .Setup(s => s.TryDeleteTempDirectory(tempDirectory))
+            .Returns(tempDirectory);
+
+        _accessGrantService
+            .Setup(g => g.TryEnsureDurableAccess(currentUserSid, exeDirectory, FileSystemRights.ReadAndExecute))
+            .Returns(new SettingsTransferGrantResult(true, true, null));
+
+        _launcher.Setup(l => l.RunAndWait(
+                fx.FakePrefTransPath,
+                "store",
+                stagedFile,
+                currentUserSid,
+                30_000,
+                null))
+            .Callback<string, string, string, string, int, Action?>((_, _, actualStagedPath, _, _, _) =>
+            {
+                temporaryPath = actualStagedPath;
+                Directory.CreateDirectory(Path.GetDirectoryName(stagedFile)!);
+                File.WriteAllText(stagedFile, "{\"ok\":true}");
+            })
+            .Returns(new SettingsTransferResult(true, ""));
+
+        var result = fx.Service.ExportDesktopSettings(outputPath);
+
+        Assert.True(result.Success);
+        Assert.NotNull(temporaryPath);
+        Assert.Equal(stagedFile, temporaryPath);
+        Assert.Equal(stagedFile, tempCopySource);
+        Assert.Equal(outputPath, tempCopyDestination);
+        Assert.Equal("{\"ok\":true}", File.ReadAllText(outputPath));
+        Assert.True(result.DatabaseModified);
+
+        _programDataPathPolicyService.Verify(s => s.IsUnderRoot(outputPath), Times.Once);
+        _programDataManagedObjectRepairService.Verify(s => s.EnsureManagedFileOwner(stagedFile), Times.Once);
+        _stagingService.Verify(s => s.CreateSharedTempDirectoryPath(), Times.Once);
+        _stagingService.Verify(s => s.CreateRestrictedExportDirectory(tempDirectory, currentUserSid), Times.Once);
+        _stagingService.Verify(s => s.CopyExportFileToDestination(stagedFile, outputPath), Times.Once);
+        _stagingService.Verify(s => s.TryDeleteTempDirectory(tempDirectory), Times.Once);
+        _stagingService.Verify(s => s.TryDeleteTempFile(stagedFile), Times.Never);
+        _accessGrantService.Verify(g => g.TryEnsureDurableAccess(
+            currentUserSid,
+            exeDirectory,
+            FileSystemRights.ReadAndExecute), Times.Once);
+        _accessGrantService.Verify(g => g.TryEnsureAccess(
+            currentUserSid,
+            outputPath,
+            FileSystemRights.Write | FileSystemRights.Synchronize,
+            false), Times.Never);
+        _accessGrantService.Verify(g => g.CleanupTemporaryGrant(), Times.Once);
+    }
+
+    [Fact]
     public void ExportDesktopSettings_TemporaryRoute_UsesRestrictedTempAndCopiesBack()
     {
         using var outputDirectory = new TempDirectory("SettingsTransferOutput");
+        using var sharedTempDirectory = new TempDirectory("SettingsTransferSharedTemp");
         var outputPath = Path.Combine(outputDirectory.Path, "settings-export.json");
         string? temporaryPath = null;
         string? tempCopySource = null;
         string? tempCopyDestination = null;
-        var tempDirectory = Path.Combine(SharedTempRoot, "export-case");
+        var tempDirectory = Path.Combine(sharedTempDirectory.Path, "export-case");
         var stagedFile = Path.Combine(tempDirectory, "settings.json");
 
         _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns(FakeInteractiveSid);
+        _programDataPathPolicyService
+            .Setup(s => s.IsUnderRoot(outputPath))
+            .Returns(true);
+        _programDataManagedObjectRepairService
+            .Setup(s => s.EnsureManagedFileOwner(stagedFile))
+            .Returns(false);
         using var fx = CreateServiceWithFakePrefTrans();
         var exeDirectory = Path.GetDirectoryName(fx.FakePrefTransPath)!;
 
@@ -273,6 +362,7 @@ public class SettingsTransferServiceTests
         _stagingService.Verify(s => s.CopyExportFileToDestination(stagedFile, outputPath), Times.Once);
         _stagingService.Verify(s => s.TryDeleteTempDirectory(tempDirectory), Times.Once);
         _stagingService.Verify(s => s.TryDeleteTempFile(stagedFile), Times.Never);
+        _programDataManagedObjectRepairService.Verify(s => s.EnsureManagedFileOwner(stagedFile), Times.Once);
         _accessGrantService.Verify(g => g.TryEnsureDurableAccess(
             FakeInteractiveSid,
             exeDirectory,
@@ -289,7 +379,8 @@ public class SettingsTransferServiceTests
     public void ExportDesktopSettings_TemporaryRoute_WhenAccessPreparationFails_ReturnsFailureWithoutLaunching()
     {
         const string outputPath = "C:\\settings.json";
-        var tempDirectory = Path.Combine(SharedTempRoot, "export-failure");
+        using var sharedTempDirectory = new TempDirectory("SettingsTransferSharedTemp");
+        var tempDirectory = Path.Combine(sharedTempDirectory.Path, "export-failure");
 
         _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns(FakeInteractiveSid);
         using var fx = CreateServiceWithFakePrefTrans();
@@ -422,7 +513,8 @@ public class SettingsTransferServiceTests
     public void Import_TemporaryRoute_UsesRestrictedTempCopy()
     {
         const string accountSid = "S-1-5-21-5555-5555-5555-5000";
-        var stagedFile = Path.Combine(SharedTempRoot, "import-case", "settings.json");
+        using var sharedTempDirectory = new TempDirectory("SettingsTransferSharedTemp");
+        var stagedFile = Path.Combine(sharedTempDirectory.Path, "import-case", "settings.json");
         var stagedDirectory = Path.GetDirectoryName(stagedFile)!;
         string? capturedPath = null;
         var settingsFile = string.Empty;
@@ -496,7 +588,8 @@ public class SettingsTransferServiceTests
     public void Import_TemporaryRoute_WhenCleanupAccessPreparationFails_ReturnsFailureWithoutLaunching()
     {
         const string accountSid = "S-1-5-21-5555-5555-5555-5000";
-        var stagedFile = Path.Combine(SharedTempRoot, "cleanup-failure", "settings.json");
+        using var sharedTempDirectory = new TempDirectory("SettingsTransferSharedTemp");
+        var stagedFile = Path.Combine(sharedTempDirectory.Path, "cleanup-failure", "settings.json");
         var stagedDirectory = Path.GetDirectoryName(stagedFile)!;
 
         _interactiveUserResolver.Setup(r => r.GetInteractiveUserSid()).Returns(FakeInteractiveSid);

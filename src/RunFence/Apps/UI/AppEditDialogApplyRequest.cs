@@ -8,4 +8,4 @@ public sealed record AppEditDialogApplyRequest(
     AppDatabase? Database,
     string? SelectedConfigPath,
     IReadOnlyList<HandlerAssociationItem> CurrentAssociations,
-    Func<Task> ApplyAsync);
+    Func<AppEditDialogApplyContext, Task> ApplyAsync);

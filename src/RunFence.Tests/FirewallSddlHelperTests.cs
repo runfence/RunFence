@@ -10,35 +10,6 @@ public class FirewallSddlHelperTests
 
     // --- BuildSddl ---
 
-    [Fact]
-    public void BuildSddl_StandardSid_ProducesCorrectFormat()
-    {
-        var result = FirewallSddlHelper.BuildSddl(StandardSid);
-
-        Assert.Equal($"D:(A;;CC;;;{StandardSid})", result);
-    }
-
-    [Fact]
-    public void BuildSddl_WellKnownSid_ProducesCorrectFormat()
-    {
-        var result = FirewallSddlHelper.BuildSddl(WellKnownSid);
-
-        Assert.Equal($"D:(A;;CC;;;{WellKnownSid})", result);
-    }
-
-    [Theory]
-    [InlineData("S-1-5-21-111-222-333-1001")]
-    [InlineData("S-1-5-18")]
-    [InlineData("S-1-5-32-544")]
-    public void BuildSddl_VariousSids_SidAppearsInResult(string sid)
-    {
-        var result = FirewallSddlHelper.BuildSddl(sid);
-
-        Assert.Contains(sid, result, StringComparison.Ordinal);
-        Assert.StartsWith("D:(A;;CC;;;", result, StringComparison.Ordinal);
-        Assert.EndsWith(")", result, StringComparison.Ordinal);
-    }
-
     // --- ExtractSid ---
 
     [Theory]

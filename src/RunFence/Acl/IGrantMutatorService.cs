@@ -5,7 +5,7 @@ using RunFence.Persistence;
 namespace RunFence.Acl;
 
 /// <summary>
-/// Operations that write ACEs or trigger grants: add/remove/update grant, ensure access, fix, and remove all.
+/// Operations that write ACEs or trigger grants: add/remove/update grant, ensure access, and fix.
 /// Focused interface for consumers that only need to mutate grants.
 /// </summary>
 public interface IGrantMutatorService
@@ -68,10 +68,6 @@ public interface IGrantMutatorService
     GrantApplyResult RestoreGrant(string accountSid, string path, bool isDeny,
         GrantIntentRestoreSnapshot previousState);
 
-    GrantApplyResult RemoveAll(string accountSid);
-
-    GrantApplyResult UntrackAll(string accountSid);
-
     /// <summary>
     /// Updates an existing grant's <see cref="GrantedPathEntry.SavedRights"/> and re-applies the
     /// NTFS ACE.
@@ -90,9 +86,4 @@ public interface IGrantMutatorService
     void FixGrant(string sid, string path, bool isDeny);
 
     GrantApplyResult FixGrantAcl(string accountSid, string path, bool isDeny);
-
-    /// <summary>
-    /// Removes all grant and traverse entries for <paramref name="sid"/>, reverts tracked NTFS
-    /// ACEs, and cleans up the database.
-    /// </summary>
 }

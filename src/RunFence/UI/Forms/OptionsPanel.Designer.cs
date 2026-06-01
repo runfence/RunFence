@@ -39,6 +39,7 @@ partial class OptionsPanel
     private GroupBox _autoLockGroup;
     private GroupBox _idleTimeoutGroup;
     private GroupBox _contextMenuGroup;
+    private GroupBox _windowMarkerGroup;
     private GroupBox _folderBrowserGroup;
     private GroupBox _desktopSettingsGroup;
     private Label _lockTimeoutLabel;
@@ -50,16 +51,20 @@ partial class OptionsPanel
     private TableLayoutPanel _autoLockDragBridgeContainer;
     private TableLayoutPanel _dragBridgeFirewallContainer;
     private TableLayoutPanel _idleCtxContainer;
+    private TableLayoutPanel _explorerMarkerContainer;
     private TableLayoutPanel _folderSettingsContainer;
     private TableLayoutPanel _mainFillPanel;
     private GroupBox _firewallGroup;
     private CheckBox _blockIcmpCheckBox;
+    private CheckBox _foregroundPrivilegeMarkerCheckBox;
+    private CheckBox _foregroundPrivilegeMarkerFullscreenCheckBox;
     private Panel _spacer1;
     private Panel _spacer2;
     private Panel _spacer3;
     private TableLayoutPanel _folderBrowserExePanel;
     private TableLayoutPanel _folderBrowserArgsPanel;
     private TableLayoutPanel _desktopSettingsPathPanel;
+    private FlowLayoutPanel _foregroundPrivilegeMarkerOptionsPanel;
 
     private OptionsPanel() { InitializeComponent(); }
 
@@ -107,6 +112,7 @@ partial class OptionsPanel
         _autoLockGroup = new GroupBox();
         _idleTimeoutGroup = new GroupBox();
         _contextMenuGroup = new GroupBox();
+        _windowMarkerGroup = new GroupBox();
         _folderBrowserGroup = new GroupBox();
         _desktopSettingsGroup = new GroupBox();
         _lockTimeoutLabel = new Label();
@@ -118,16 +124,20 @@ partial class OptionsPanel
         _autoLockDragBridgeContainer = new TableLayoutPanel();
         _dragBridgeFirewallContainer = new TableLayoutPanel();
         _idleCtxContainer = new TableLayoutPanel();
+        _explorerMarkerContainer = new TableLayoutPanel();
         _folderSettingsContainer = new TableLayoutPanel();
         _mainFillPanel = new TableLayoutPanel();
         _firewallGroup = new GroupBox();
         _blockIcmpCheckBox = new CheckBox();
+        _foregroundPrivilegeMarkerCheckBox = new CheckBox();
+        _foregroundPrivilegeMarkerFullscreenCheckBox = new CheckBox();
         _spacer1 = new Panel();
         _spacer2 = new Panel();
         _spacer3 = new Panel();
         _folderBrowserExePanel = new TableLayoutPanel();
         _folderBrowserArgsPanel = new TableLayoutPanel();
         _desktopSettingsPathPanel = new TableLayoutPanel();
+        _foregroundPrivilegeMarkerOptionsPanel = new FlowLayoutPanel();
 
         ((ISupportInitialize)_idleTimeoutUpDown).BeginInit();
         ((ISupportInitialize)_autoLockTimeoutUpDown).BeginInit();
@@ -141,6 +151,8 @@ partial class OptionsPanel
         _autoLockDragBridgeContainer.SuspendLayout();
         _idleTimeoutGroup.SuspendLayout();
         _contextMenuGroup.SuspendLayout();
+        _windowMarkerGroup.SuspendLayout();
+        _explorerMarkerContainer.SuspendLayout();
         _idleCtxContainer.SuspendLayout();
         _folderBrowserExePanel.SuspendLayout();
         _folderBrowserArgsPanel.SuspendLayout();
@@ -321,7 +333,8 @@ partial class OptionsPanel
 
         // --- Idle Timeout group ---
         _idleTimeoutGroup.Text = "Idle Timeout";
-        _idleTimeoutGroup.Dock = DockStyle.Fill;
+        _idleTimeoutGroup.Dock = DockStyle.Top;
+        _idleTimeoutGroup.Height = 52;
 
         _idleTimeoutCheckBox.Text = "Exit after app idle";
         _idleTimeoutCheckBox.Location = new Point(15, 25);
@@ -343,12 +356,49 @@ partial class OptionsPanel
 
         // --- Explorer Integration group ---
         _contextMenuGroup.Text = "Explorer Integration";
-        _contextMenuGroup.Dock = DockStyle.Fill;
+        _contextMenuGroup.Dock = DockStyle.Top;
+        _contextMenuGroup.Height = 52;
 
         _contextMenuCheckBox.Text = "Enable 'RunFence...' context menu for files";
         _contextMenuCheckBox.Location = new Point(15, 25);
         _contextMenuCheckBox.AutoSize = true;
         _contextMenuGroup.Controls.Add(_contextMenuCheckBox);
+
+        // --- Window Marker group ---
+        _windowMarkerGroup.Text = "Window Indication";
+        _windowMarkerGroup.Dock = DockStyle.Top;
+        _windowMarkerGroup.Height = 52;
+
+        _foregroundPrivilegeMarkerOptionsPanel.AutoSize = true;
+        _foregroundPrivilegeMarkerOptionsPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _foregroundPrivilegeMarkerOptionsPanel.Location = new Point(15, 22);
+        _foregroundPrivilegeMarkerOptionsPanel.Margin = Padding.Empty;
+        _foregroundPrivilegeMarkerOptionsPanel.Padding = Padding.Empty;
+        _foregroundPrivilegeMarkerOptionsPanel.WrapContents = false;
+
+        _foregroundPrivilegeMarkerCheckBox.Name = "ForegroundPrivilegeMarkerCheckBox";
+        _foregroundPrivilegeMarkerCheckBox.Text = "Border highlight";
+        _foregroundPrivilegeMarkerCheckBox.AutoSize = true;
+        _foregroundPrivilegeMarkerCheckBox.Margin = new Padding(0, 3, 12, 0);
+        _foregroundPrivilegeMarkerOptionsPanel.Controls.Add(_foregroundPrivilegeMarkerCheckBox);
+
+        _foregroundPrivilegeMarkerFullscreenCheckBox.Name = "ForegroundPrivilegeMarkerFullscreenCheckBox";
+        _foregroundPrivilegeMarkerFullscreenCheckBox.Text = "Full screen";
+        _foregroundPrivilegeMarkerFullscreenCheckBox.AutoSize = true;
+        _foregroundPrivilegeMarkerFullscreenCheckBox.Margin = new Padding(0, 3, 0, 0);
+        _foregroundPrivilegeMarkerOptionsPanel.Controls.Add(_foregroundPrivilegeMarkerFullscreenCheckBox);
+
+        _windowMarkerGroup.Controls.Add(_foregroundPrivilegeMarkerOptionsPanel);
+
+        _explorerMarkerContainer.Dock = DockStyle.Fill;
+        _explorerMarkerContainer.ColumnCount = 2;
+        _explorerMarkerContainer.RowCount = 1;
+        _explorerMarkerContainer.Margin = Padding.Empty;
+        _explorerMarkerContainer.Padding = Padding.Empty;
+        _explorerMarkerContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _explorerMarkerContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        _explorerMarkerContainer.Controls.Add(_contextMenuGroup, 0, 0);
+        _explorerMarkerContainer.Controls.Add(_windowMarkerGroup, 1, 0);
 
         _idleCtxContainer.Dock = DockStyle.Top;
         _idleCtxContainer.Height = 60;
@@ -359,7 +409,7 @@ partial class OptionsPanel
         _idleCtxContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         _idleCtxContainer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         _idleCtxContainer.Controls.Add(_idleTimeoutGroup, 0, 0);
-        _idleCtxContainer.Controls.Add(_contextMenuGroup, 1, 0);
+        _idleCtxContainer.Controls.Add(_explorerMarkerContainer, 1, 0);
 
         // --- Folder Browser group ---
         _folderBrowserGroup.Text = "Folder Browser";
@@ -520,6 +570,9 @@ partial class OptionsPanel
         _autoLockDragBridgeContainer.PerformLayout();
         _idleTimeoutGroup.ResumeLayout(false);
         _contextMenuGroup.ResumeLayout(false);
+        _windowMarkerGroup.ResumeLayout(false);
+        _windowMarkerGroup.PerformLayout();
+        _explorerMarkerContainer.ResumeLayout(false);
         _idleCtxContainer.ResumeLayout(false);
         _idleCtxContainer.PerformLayout();
         _folderBrowserExePanel.ResumeLayout(false);

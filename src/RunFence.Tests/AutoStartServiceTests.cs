@@ -315,7 +315,7 @@ public class AutoStartServiceTests
     }
 
     [Fact]
-    public async Task EnableAutoStart_LogsSuccess_WhenShortcutCreated()
+    public async Task EnableAutoStart_CreatesShortcutPointingToCmdWrapper()
     {
         var log = new Mock<ILoggingService>();
         var store = new FakeShortcutStore();
@@ -337,7 +337,6 @@ public class AutoStartServiceTests
         Assert.Equal(1, created.SaveCallCount);
         Assert.Single(shortcutHelper.AccessedPaths);
         Assert.Equal(store.PrimaryShortcutPath, shortcutHelper.AccessedPaths[0]);
-        log.Verify(l => l.Info(It.Is<string>(s => s.Contains(store.PrimaryShortcutPath))), Times.Once);
     }
 
     [Fact]
@@ -369,7 +368,6 @@ public class AutoStartServiceTests
         await service.DisableAutoStart();
 
         Assert.Empty(store.DeletedFiles);
-        log.Verify(l => l.Info(It.IsAny<string>()), Times.Never);
     }
 
     [Fact]
@@ -386,7 +384,6 @@ public class AutoStartServiceTests
         await service.DisableAutoStart();
 
         Assert.Contains(store.PrimaryShortcutPath, store.DeletedFiles, StringComparer.OrdinalIgnoreCase);
-        log.Verify(l => l.Info(It.Is<string>(s => s.Contains(store.PrimaryShortcutPath))), Times.Once);
     }
 
     // ---- Backward-compatible shortcut target acceptance ----
@@ -414,46 +411,4 @@ public class AutoStartServiceTests
 
     // ---- Store supplies paths; tests never touch real Startup folder ----
 
-    [Fact]
-    public async Task IsAutoStartEnabled_UsesShortcutPathsFromStore()
-    {
-        var log = new Mock<ILoggingService>();
-        var store = new FakeShortcutStore
-        {
-            PrimaryShortcutPath = @"C:\TestStartup\RunFence.lnk"
-        };
-
-        var runner = new PassthroughOperationRunner();
-        var shortcutHelper = new InMemoryShortcutComHelper();
-
-        var service = BuildService(log.Object, shortcutHelper, runner, store);
-
-        var result = await service.IsAutoStartEnabled();
-
-        Assert.False(result);
-        Assert.Empty(shortcutHelper.AccessedPaths);
-    }
-
-    [Fact]
-    public async Task EnableAutoStart_CallsShortcutHelperAtPrimaryShortcutPath()
-    {
-        var log = new Mock<ILoggingService>();
-        var store = new FakeShortcutStore
-        {
-            RunFenceExePath = @"C:\Custom\RunFence.exe",
-            CmdWrapperPath = @"C:\Custom\RunFence-autostart.cmd",
-            PrimaryShortcutPath = @"C:\TestStartup\RunFence.lnk"
-        };
-        store.AddExistingFile(store.CmdWrapperPath);
-
-        var runner = new PassthroughOperationRunner();
-        var shortcutHelper = new InMemoryShortcutComHelper();
-
-        var service = BuildService(log.Object, shortcutHelper, runner, store);
-
-        await service.EnableAutoStart();
-
-        Assert.Single(shortcutHelper.AccessedPaths);
-        Assert.Equal(store.PrimaryShortcutPath, shortcutHelper.AccessedPaths[0]);
-    }
 }

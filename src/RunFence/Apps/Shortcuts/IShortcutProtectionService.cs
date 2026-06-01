@@ -2,7 +2,10 @@ namespace RunFence.Apps.Shortcuts;
 
 public interface IShortcutProtectionService
 {
-    void ProtectShortcut(string shortcutPath, bool allowAdministratorsDelete = false);
-    void UnprotectShortcut(string shortcutPath);
-    void ProtectInternalShortcut(string shortcutPath, string accountSid);
+    void ProtectShortcut(
+        string appId,
+        string shortcutPath,
+        bool allowAdministratorsDelete = false);
+    void UnprotectShortcut(string appId, string shortcutPath);
+    void ProtectInternalShortcut(string appId, string shortcutPath, string accountSid);
 }

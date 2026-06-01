@@ -30,7 +30,7 @@ public class WizardLauncher(Func<WizardDialog> dialogFactory) : IWizardLauncher
         await dlg.ShowDialogAsync(owner);
 
         foreach (var action in dlg.PostWizardActions)
-            action(owner);
+            await action(owner);
 
         // Only notify if at least one template was completed; avoids spurious save/refresh on Cancel.
         if (dlg.TemplateCompletedCount > 0)

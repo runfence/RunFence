@@ -10,6 +10,7 @@ using RunFence.Firewall.UI;
 using RunFence.Infrastructure;
 using RunFence.Launch;
 using RunFence.Licensing;
+using RunFence.Persistence;
 using RunFence.PrefTrans;
 using RunFence.Tests.Helpers;
 using RunFence.UI;
@@ -34,7 +35,7 @@ public class AccountCreationOrchestratorTests : IDisposable
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(_pinKey);
+            }.WithClonedPinDerivedKey(_pinKey);
 
             var commitService = new Mock<IAccountCreationCommitService>();
             commitService.Setup(s => s.Commit(It.IsAny<AccountCreationData>(), session.Database))
@@ -118,7 +119,7 @@ public class AccountCreationOrchestratorTests : IDisposable
                     }
                 },
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(_pinKey);
+            }.WithClonedPinDerivedKey(_pinKey);
 
             var commitService = new Mock<IAccountCreationCommitService>();
             commitService.Setup(s => s.Commit(It.IsAny<AccountCreationData>(), session.Database))
@@ -191,7 +192,7 @@ public class AccountCreationOrchestratorTests : IDisposable
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(_pinKey);
+            }.WithClonedPinDerivedKey(_pinKey);
 
             var commitService = new Mock<IAccountCreationCommitService>();
             commitService.Setup(s => s.Commit(It.IsAny<AccountCreationData>(), session.Database))
@@ -277,7 +278,7 @@ public class AccountCreationOrchestratorTests : IDisposable
                     }
                 },
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(_pinKey);
+            }.WithClonedPinDerivedKey(_pinKey);
 
             var commitService = new Mock<IAccountCreationCommitService>();
             commitService.Setup(s => s.Commit(It.IsAny<AccountCreationData>(), session.Database))
@@ -365,7 +366,7 @@ public class AccountCreationOrchestratorTests : IDisposable
                     }
                 },
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(_pinKey);
+            }.WithClonedPinDerivedKey(_pinKey);
 
             var credId = Guid.NewGuid();
             var commitService = new Mock<IAccountCreationCommitService>();
@@ -448,7 +449,7 @@ public class AccountCreationOrchestratorTests : IDisposable
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(_pinKey);
+            }.WithClonedPinDerivedKey(_pinKey);
 
             var commitService = new Mock<IAccountCreationCommitService>();
             commitService.Setup(s => s.Commit(It.IsAny<AccountCreationData>(), session.Database))
@@ -504,7 +505,7 @@ public class AccountCreationOrchestratorTests : IDisposable
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(_pinKey);
+            }.WithClonedPinDerivedKey(_pinKey);
 
             var commitService = new Mock<IAccountCreationCommitService>(MockBehavior.Strict);
             var rollbackService = CreateRollbackService();
@@ -578,7 +579,9 @@ public class AccountCreationOrchestratorTests : IDisposable
             new PackageInstallService(
                 Mock.Of<IPackageInstallLauncher>(),
                 Mock.Of<IPackageInstallScriptStore>(),
-                new AccountToolResolver(Mock.Of<IProfilePathResolver>())),
+                new AccountToolResolver(Mock.Of<IProfilePathResolver>()),
+                Mock.Of<IWindowsTerminalAccountStateService>(),
+                Mock.Of<IWindowsTerminalDeploymentService>()),
             sessionProvider.Object,
             new ImmediateAccountCreationProgressRunner(),
             Mock.Of<ILoggingService>());
@@ -586,10 +589,16 @@ public class AccountCreationOrchestratorTests : IDisposable
         var launchService = new ToolLauncher(
             Mock.Of<ILaunchFacade>(),
             new AccountToolResolver(Mock.Of<IProfilePathResolver>()),
+            Mock.Of<IWindowsTerminalAccountStateService>(),
+            new TerminalLaunchIdentitySelector(Mock.Of<IDatabaseProvider>(), new WindowsTerminalDeploymentPaths(new TestProgramDataKnownPathResolver(Path.GetTempPath()))),
             new PackageInstallService(
                 Mock.Of<IPackageInstallLauncher>(),
                 Mock.Of<IPackageInstallScriptStore>(),
-                new AccountToolResolver(Mock.Of<IProfilePathResolver>())),
+                new AccountToolResolver(Mock.Of<IProfilePathResolver>()),
+                Mock.Of<IWindowsTerminalAccountStateService>(),
+                Mock.Of<IWindowsTerminalDeploymentService>()),
+            Mock.Of<IWindowsTerminalDeploymentProgressRunner>(),
+            Mock.Of<IWindowsTerminalLaunchRefreshService>(),
             Mock.Of<ILaunchFeedbackPresenter>(),
             Mock.Of<ILoggingService>());
 

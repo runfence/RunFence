@@ -3,9 +3,11 @@ namespace RunFence.Firewall.Wfp;
 public interface IWfpIcmpBlocker
 {
     /// <summary>
-    /// Registers or unregisters the account SID for ICMP blocking. A shared protocol-only
-    /// WFP BLOCK filter at ALE_AUTH_CONNECT is installed when ≥1 account needs ICMP blocked,
-    /// and removed when none do. The filter blocks all outbound ICMP on the machine.
+    /// Registers or unregisters the account SID for the per-user raw-socket ICMP blocker.
+    /// A shared protocol-only WFP BLOCK filter at ALE_AUTH_CONNECT is installed when at least
+    /// one account needs this per-user ICMP block, and removed when none do. This filter is
+    /// separate from <see cref="IWfpGlobalIcmpBlocker"/>, which enforces the global CIDR-based
+    /// ICMP policy for internet-blocked accounts.
     ///
     /// Per-user filtering is impossible because IcmpSendEcho2 (kernel IOCTL path used by
     /// non-admin ping) carries SYSTEM/Everyone identity at ALE, not the calling user's SID.

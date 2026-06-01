@@ -6,9 +6,9 @@ public sealed class MockLocalGroupMutationService : ILocalGroupMutationService
 {
     private readonly NonElevatedMockStore _store;
 
-    public MockLocalGroupMutationService(ILocalGroupMutationService localGroupMutationService, NonElevatedMockStore store)
+    public MockLocalGroupMutationService(NonElevatedMockStore store)
     {
-        ArgumentNullException.ThrowIfNull(localGroupMutationService);
+        ArgumentNullException.ThrowIfNull(store);
         _store = store;
     }
 
@@ -32,7 +32,7 @@ public sealed class MockLocalGroupMutationService : ILocalGroupMutationService
 
     public string CreateGroup(string groupName, string? description)
     {
-        var sid = _store.DeriveFakeSid(groupName, ridBase: 30001);
+        var sid = _store.CreateGroupSid(groupName);
         _store.AddGroup(sid, groupName, description);
         return sid;
     }

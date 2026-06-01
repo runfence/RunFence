@@ -19,12 +19,13 @@ public class EphemeralAccountServiceTests
 {
     private record ServiceScope(
         EphemeralAccountService Service,
-        Mock<ICredentialRepository> CredRepo,
+        Mock<IConfigReencryptionPersistence> CredRepo,
         Mock<ILocalUserProvider> LocalUserProvider,
         Mock<ILoggingService> Log,
         Mock<ITrayBalloonService> TrayBalloon,
         Mock<IAccountDeletionService> AccountDeletion,
-        Mock<IPathGrantService> PathGrantService,
+        Mock<IGrantAccountCleanupService> PathGrantService,
+        Mock<ITrackingJobStateStore> TrackingJobStateStore,
         SecureSecret PinKey) : IDisposable
     {
         public void Dispose()
@@ -37,10 +38,10 @@ public class EphemeralAccountServiceTests
     private static ServiceScope BuildService(AppDatabase database, CredentialStore store,
         IAccountValidationService? accountValidation = null,
         Mock<IAccountDeletionService>? accountDeletion = null,
-        Mock<IPathGrantService>? pathGrantService = null)
+        Mock<IGrantAccountCleanupService>? pathGrantService = null)
     {
-        var credRepo = new Mock<ICredentialRepository>();
-        var configRepo = new Mock<IConfigRepository>();
+        var credRepo = new Mock<IConfigReencryptionPersistence>();
+        var configRepo = new Mock<IMainConfigPersistence>();
         var windowsService = new Mock<IWindowsAccountService>();
         var localUserProvider = new Mock<ILocalUserProvider>();
         var orphanedProfiles = new Mock<IOrphanedProfileService>();
@@ -86,7 +87,7 @@ public class EphemeralAccountServiceTests
         {
             Database = database,
             CredentialStore = store
-        }.WithOwnedPinDerivedKey(pinKey);
+        }.WithClonedPinDerivedKey(pinKey);
 
         IAccountValidationService resolvedValidation;
         if (accountValidation != null)
@@ -100,15 +101,35 @@ public class EphemeralAccountServiceTests
             resolvedValidation = defaultValidation.Object;
         }
 
-        pathGrantService ??= new Mock<IPathGrantService>();
+        pathGrantService ??= new Mock<IGrantAccountCleanupService>();
+        var trackingJobStateStore = CreateTrackingJobStateStore(database);
         var service = new EphemeralAccountService(
             accountDeletion.Object, persistenceHelper, localUserProvider.Object, log.Object, resolvedValidation,
             new LambdaSessionProvider(() => session), new InlineUiThreadInvoker(a => a()), trayBalloon.Object,
             sidResolver.Object,
-            pathGrantService.Object);
+            pathGrantService.Object,
+            trackingJobStateStore.Object);
         service.Start();
 
-        return new ServiceScope(service, credRepo, localUserProvider, log, trayBalloon, accountDeletion, pathGrantService, pinKey);
+        return new ServiceScope(service, credRepo, localUserProvider, log, trayBalloon, accountDeletion, pathGrantService,
+            trackingJobStateStore, pinKey);
+    }
+
+    private static Mock<ITrackingJobStateStore> CreateTrackingJobStateStore(AppDatabase database)
+    {
+        var store = new Mock<ITrackingJobStateStore>();
+        store.Setup(s => s.RemoveTrackingJobSid(It.IsAny<string>(), It.IsAny<bool>()))
+            .Callback<string, bool>((sid, _) =>
+            {
+                if (database.TrackingJobSids == null)
+                    return;
+
+                database.TrackingJobSids.RemoveAll(existing =>
+                    string.Equals(existing, sid, StringComparison.OrdinalIgnoreCase));
+                if (database.TrackingJobSids.Count == 0)
+                    database.TrackingJobSids = null;
+            });
+        return store;
     }
 
     [Fact]
@@ -186,6 +207,7 @@ public class EphemeralAccountServiceTests
         var store = new CredentialStore();
         const string orphanSid = "S-1-5-21-0-0-0-9902";
         database.GetOrCreateAccount(orphanSid).DeleteAfterUtc = DateTime.UtcNow.AddHours(24);
+        database.TrackingJobSids = [orphanSid];
 
         using var scope = BuildService(database, store);
         bool accountsChangedRaised = false;
@@ -201,6 +223,8 @@ public class EphemeralAccountServiceTests
             It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<CredentialStore>(), It.IsAny<bool>()), Times.Never);
         scope.PathGrantService.Verify(p => p.UntrackAll(orphanSid), Times.Once);
+        scope.TrackingJobStateStore.Verify(store => store.RemoveTrackingJobSid(orphanSid, false), Times.Once);
+        Assert.Null(database.TrackingJobSids);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
             It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Once);
     }
@@ -215,6 +239,7 @@ public class EphemeralAccountServiceTests
         store.Credentials.Add(new CredentialEntry { Sid = sid, EncryptedPassword = [1] });
         var entry = database.GetOrCreateAccount(sid);
         entry.DeleteAfterUtc = DateTime.UtcNow.AddHours(-1);
+        database.TrackingJobSids = [sid];
         // SidNames and sidResolver both return null → username unresolvable
 
         using var scope = BuildService(database, store);
@@ -228,6 +253,8 @@ public class EphemeralAccountServiceTests
         Assert.Null(database.GetAccount(sid));
         Assert.True(accountsChangedRaised);
         scope.PathGrantService.Verify(p => p.UntrackAll(sid), Times.Once);
+        scope.TrackingJobStateStore.Verify(store => store.RemoveTrackingJobSid(sid, false), Times.Once);
+        Assert.Null(database.TrackingJobSids);
         scope.AccountDeletion.Verify(d => d.DeleteAccountAsync(
             It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<CredentialStore>(), It.IsAny<bool>()), Times.Never);
@@ -248,7 +275,7 @@ public class EphemeralAccountServiceTests
             @"C:\Untracked",
             null,
             new InvalidOperationException("temporary warning"));
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantAccountCleanupService>();
         pathGrantService.Setup(p => p.UntrackAll(sid))
             .Returns(new GrantApplyResult(
                 DatabaseModified: true,
@@ -356,39 +383,6 @@ public class EphemeralAccountServiceTests
         Assert.Single(store.Credentials);
         scope.CredRepo.Verify(r => r.SaveCredentialStoreAndConfig(
             It.IsAny<CredentialStore>(), It.IsAny<AppDatabase>(), It.IsAny<ISecureSecretSnapshotSource>()), Times.Never);
-    }
-
-    // ── Profile cleanup ownership moved into AccountDeletionService ──────────
-
-    [Fact]
-    public async Task ProcessExpiredAccounts_DoesNotDeleteProfileDirectly()
-    {
-        var database = new AppDatabase();
-        var store = new CredentialStore();
-        const string sid = "S-1-5-21-0-0-0-9920";
-        const string username = "testeph_profile";
-        database.SidNames[sid] = username;
-        store.Credentials.Add(new CredentialEntry { Sid = sid, EncryptedPassword = [1] });
-        database.GetOrCreateAccount(sid).DeleteAfterUtc = DateTime.UtcNow.AddHours(-1);
-
-        var accountDeletion = new Mock<IAccountDeletionService>();
-        accountDeletion.Setup(d => d.DeleteAccountAsync(
-                sid, username, It.IsAny<CredentialStore>(), It.IsAny<bool>()))
-            .Callback<string, string, CredentialStore, bool>((s, _, cs, _) =>
-            {
-                var entry = database.GetAccount(s);
-                if (entry != null) database.Accounts.Remove(entry);
-                cs.Credentials.RemoveAll(c => string.Equals(c.Sid, s, StringComparison.OrdinalIgnoreCase));
-            })
-            .ReturnsAsync(AccountDeletionCleanupResult.Success());
-
-        using var scope = BuildService(database, store, accountDeletion: accountDeletion);
-
-        await scope.Service.ProcessExpiredAccountsAsync();
-
-        Assert.Null(database.GetAccount(sid));
-        Assert.Empty(store.Credentials);
-        accountDeletion.Verify(d => d.DeleteAccountAsync(sid, username, store, true), Times.Once);
     }
 
     [Fact]

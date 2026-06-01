@@ -13,7 +13,7 @@ public class FileSystemAclTraverserTests
     {
         const string root = @"C:\DeniedRoot";
         var log = new Mock<ILoggingService>();
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         bool isDirectory = true;
         aclAccessor.Setup(a => a.PathExists(root, out isDirectory)).Returns(true);
         aclAccessor.Setup(a => a.GetSecurity(root)).Returns(new DirectorySecurity());
@@ -33,7 +33,7 @@ public class FileSystemAclTraverserTests
     {
         const string root = @"C:\DeniedRoot\tool.exe";
         var log = new Mock<ILoggingService>();
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         bool isDirectory = false;
         aclAccessor.Setup(a => a.PathExists(root, out isDirectory)).Returns(true);
         aclAccessor.Setup(a => a.GetSecurity(root)).Returns(new FileSecurity());

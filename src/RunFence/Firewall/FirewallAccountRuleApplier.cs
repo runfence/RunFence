@@ -3,7 +3,9 @@ using RunFence.Core.Models;
 namespace RunFence.Firewall;
 
 public class FirewallAccountRuleApplier(
-    IFirewallComRuleApplier comApplier,
+    IFirewallRuleQueryService ruleQueryService,
+    FirewallRulePairSynchronizer ruleSynchronizer,
+    FirewallRuleRollbackCoordinator rollbackCoordinator,
     IFirewallWfpRuleApplier wfpApplier)
     : IFirewallAccountRuleApplier
 {
@@ -17,23 +19,23 @@ public class FirewallAccountRuleApplier(
         IReadOnlyList<FirewallRuleInfo>? capturedRules = null;
         try
         {
-            capturedRules = comApplier.GetExistingRulesBySid(sid);
+            capturedRules = ruleQueryService.GetExistingRulesBySid(sid);
             var pendingDomains = new List<FirewallPendingDomainResolution>();
             var pendingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             // Internet rules (COM + WFP ICMP)
             FirewallPendingDomainHelper.AddUnique(pendingDomains, pendingKeys,
-                comApplier.ApplyInternetRules(sid, username, settings, capturedRules, resolvedDomainsCache));
+                ruleSynchronizer.ApplyInternetRules(sid, username, settings, capturedRules, resolvedDomainsCache));
             wfpApplier.ApplyIcmpRules(sid, !settings.AllowInternet);
 
             // Localhost rules (WFP localhost + COM local address + remove legacy COM localhost rules)
             wfpApplier.ApplyLocalhostRules(sid, settings);
-            comApplier.RemoveLocalhostLegacyRules(username, capturedRules);
-            comApplier.ApplyLocalAddressRules(sid, username, settings, capturedRules);
+            ruleSynchronizer.RemoveLocalhostLegacyRules(username, capturedRules);
+            ruleSynchronizer.ApplyLocalAddressRules(sid, username, settings, capturedRules);
 
             // LAN rules (COM)
             FirewallPendingDomainHelper.AddUnique(pendingDomains, pendingKeys,
-                comApplier.ApplyLanRules(sid, username, settings, capturedRules, resolvedDomainsCache));
+                ruleSynchronizer.ApplyLanRules(sid, username, settings, capturedRules, resolvedDomainsCache));
 
             return new FirewallAccountRuleApplyResult(true, pendingDomains);
         }
@@ -42,7 +44,7 @@ public class FirewallAccountRuleApplier(
             if (capturedRules != null)
             {
                 var rollbackSettings = previousSettings ?? new FirewallAccountSettings();
-                comApplier.RollBackAccountRules(sid, capturedRules);
+                rollbackCoordinator.RestoreWindowsFirewallRules(sid, capturedRules);
                 wfpApplier.RollBackWfpRules(sid, rollbackSettings);
             }
 
@@ -59,10 +61,22 @@ public class FirewallAccountRuleApplier(
         string username,
         FirewallAccountSettings settings,
         IReadOnlyDictionary<string, IReadOnlyList<string>> resolvedDomainsCache)
-        => comApplier.RefreshAllowlistRules(sid, username, settings, resolvedDomainsCache);
+    {
+        if (settings is { AllowInternet: true, AllowLan: true })
+            return false;
+
+        var existing = ruleQueryService.GetExistingRulesBySid(sid);
+        return ruleSynchronizer.RefreshAllowlistRules(sid, username, settings, resolvedDomainsCache, existing);
+    }
 
     public bool RefreshLocalAddressRules(string sid, string username, FirewallAccountSettings settings)
-        => comApplier.RefreshLocalAddressRules(sid, username, settings);
+    {
+        if (settings.AllowLocalhost)
+            return false;
+
+        var existing = ruleQueryService.GetExistingRulesBySid(sid);
+        return ruleSynchronizer.RefreshLocalAddressRules(sid, username, settings, existing);
+    }
 
     private static bool IsWfpFailure(Exception ex)
         => ex is Wfp.WfpFilterHelperException

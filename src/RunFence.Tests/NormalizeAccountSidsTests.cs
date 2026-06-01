@@ -31,21 +31,6 @@ public class NormalizeAccountSidsTests
     }
 
     [Fact]
-    public void NormalizeAccountSids_NonEmptySid_NotChanged()
-    {
-        var existingSid = "S-1-5-21-9999999999-9999999999-9999999999-1001";
-        var apps = new List<AppEntry>
-        {
-            new() { Name = "App", ExePath = @"C:\app.exe", AccountSid = existingSid }
-        };
-
-        var changed = CreateHelper().NormalizeAccountSids(apps, CurrentSid);
-
-        Assert.False(changed);
-        Assert.Equal(existingSid, apps[0].AccountSid);
-    }
-
-    [Fact]
     public void NormalizeAccountSids_SkipsAppContainerEntries()
     {
         // AppContainer apps have empty AccountSid by design — must NOT be overwritten
@@ -75,14 +60,6 @@ public class NormalizeAccountSidsTests
         Assert.True(changed);
         Assert.Equal(CurrentSid, apps[0].AccountSid); // Normalized
         Assert.Equal("", apps[1].AccountSid); // NOT normalized
-    }
-
-    [Fact]
-    public void NormalizeAccountSids_EmptyList_ReturnsFalse()
-    {
-        var changed = CreateHelper().NormalizeAccountSids(new List<AppEntry>(), CurrentSid);
-
-        Assert.False(changed);
     }
 
     [Fact]

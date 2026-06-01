@@ -38,10 +38,11 @@ This tab is managed automatically</value></data>
   <data name="Firewall_ScopeLoopbackFilter" xml:space="preserve"><value>When ephemeral ports 49152-65535 are whitelisted, they are periodically scanned and ports opened under other Windows accounts are blocked. This works for ranges but not for individual ports in the whitelist.</value></data>
   <data name="Launcher_LauncherAccessGlobal" xml:space="preserve"><value>When this list is non-empty, only listed accounts can launch configured apps (including through the associations mechanism)</value></data>
   <data name="Launch_Arguments" xml:space="preserve"><value>If the app should receive the opened item at a specific position, place %1 there; if omitted, forwarded file/URL arguments are appended after the specified text.</value></data>
-  <data name="Launch_PrivilegeLevel" xml:space="preserve"><value>Highest Allowed - elevate if possible
-Basic - remove admin privileges and set medium integrity
-Isolated - run in restricted job
-Low Integrity - de-elevate and set low integrity level + run in restricted job</value></data>
+  <data name="Launch_PrivilegeLevel" xml:space="preserve"><value>Highest Allowed - elevate if admin account
+  High Integrity - remove admin privileges but set high integrity
+  Basic - normal user: remove admin privileges and set medium integrity
+  Isolated - run in restricted job, which prevent it from controlling via WM_* messages (or even seeing) other processes, but often breaks compatibility
+  Low Integrity - de-elevate and set low integrity level + run in restricted job</value></data>
   <data name="Options_DesktopSettingsTransfer" xml:space="preserve"><value>Save Explorer, Start Menu, and other preference data so that it can be imported into another account</value></data>
   <data name="Options_DragBridge" xml:space="preserve"><value>Enable cross-account drag and drop using a hotkey for controlled file transfer between accounts</value></data>
   <data name="Options_FirewallIcmp" xml:space="preserve"><value>ICMP tunneling can potentially be used to escape Internet restrictions. It is not possible to block it per account, so the only option is to block it globally when Internet blocking is configured for at least one account.</value></data>

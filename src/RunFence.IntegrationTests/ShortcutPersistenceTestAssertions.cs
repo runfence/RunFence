@@ -54,8 +54,7 @@ internal static class ShortcutPersistenceTestAssertions
     {
         try
         {
-            if (File.Exists(shortcutPath))
-                native.DeleteExistingDestination(shortcutPath);
+            native.DeleteExistingDestination(shortcutPath);
         }
         catch
         {

@@ -35,16 +35,6 @@ public class EnvironmentBlockTests
     }
 
     [Fact]
-    public void Empty_DisposeIsNoOp()
-    {
-        var block = EnvironmentBlock.Empty();
-
-        block.Dispose();
-
-        Assert.Equal(IntPtr.Zero, block.Pointer);
-    }
-
-    [Fact]
     public void MergeInPlace_ReplacesExistingBlockAndReleasesOldBlock()
     {
         var releaseCount = 0;

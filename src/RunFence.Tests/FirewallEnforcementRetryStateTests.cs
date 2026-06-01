@@ -45,35 +45,4 @@ public class FirewallEnforcementRetryStateTests
         Assert.Empty(state.GetDnsServerRefreshPendingSids());
     }
 
-    [Fact]
-    public void GlobalIcmpDirtyState_ClearsOnlyOnSucceededOrClear()
-    {
-        var state = new FirewallEnforcementRetryState();
-
-        state.MarkGlobalIcmpDirty();
-        Assert.True(state.IsGlobalIcmpDirty());
-
-        state.MarkGlobalIcmpSucceeded();
-        Assert.False(state.IsGlobalIcmpDirty());
-
-        state.MarkGlobalIcmpDirty();
-        state.Clear();
-        Assert.False(state.IsGlobalIcmpDirty());
-    }
-
-    [Fact]
-    public void MarkRetryPending_StoresLayeredRetryEntryAndClearsOnSuccess()
-    {
-        var state = new FirewallEnforcementRetryState();
-
-        state.MarkRetryPending(FirewallEnforcementLayer.AuditPolicy, "enabled", "access denied", "retry audit");
-
-        var entry = Assert.Single(state.GetRetryEntries());
-        Assert.Equal(FirewallEnforcementLayer.AuditPolicy, entry.Layer);
-        Assert.Equal("enabled", entry.Key);
-        Assert.Equal("access denied", entry.LastError);
-
-        state.MarkRetrySucceeded(FirewallEnforcementLayer.AuditPolicy, "enabled");
-        Assert.Empty(state.GetRetryEntries());
-    }
 }

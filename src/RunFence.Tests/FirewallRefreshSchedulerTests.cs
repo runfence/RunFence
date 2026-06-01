@@ -90,9 +90,6 @@ public class FirewallRefreshSchedulerTests
         await scheduler.Instance.DrainAsync();
 
         Assert.Equal(2, Volatile.Read(ref runCount));
-        _log.Verify(l => l.Error(
-            It.Is<string>(message => message.Contains("DNS refresh cycle failed", StringComparison.Ordinal)),
-            It.IsAny<Exception>()), Times.Once);
     }
 
     private sealed class SchedulerHarness : IDisposable

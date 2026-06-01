@@ -11,5 +11,4 @@
     <ItemGroup>
         <InternalsVisibleTo Include="RunFence.Tests"/>
     </ItemGroup>
-
 </Project>

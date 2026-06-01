@@ -36,57 +36,26 @@ public class SidMigrationSelectionCollectorTests
     }
 
     [Fact]
-    public void TryCollect_DeleteBlockedByOwnerReferences_FailsInsteadOfDroppingDelete()
+    public void TryCollect_DeleteWithOwnerReferences_RemainsAllowed()
     {
-        var messageBoxService = new Mock<IMessageBoxService>();
-        messageBoxService
-            .Setup(s => s.Show(
-                It.Is<string>(text => text.Contains(OldSidToDelete, StringComparison.Ordinal)),
-                "Owner Migration Required",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning))
-            .Returns(DialogResult.OK);
-        var collector = CreateCollector(
-            messageBoxService.Object,
-            orphanedBySid: new Dictionary<string, OrphanedSid>(StringComparer.OrdinalIgnoreCase)
-            {
-                [OldSidToDelete] = new()
-                {
-                    Sid = OldSidToDelete,
-                    Classification = OrphanedSidClassification.ConfirmedOrphaned,
-                    OwnerCount = 1
-                }
-            });
+        var messageBoxService = new Mock<IMessageBoxService>(MockBehavior.Strict);
+        var collector = CreateCollector(messageBoxService.Object);
 
         var result = collector.Collect(
             [new SidMigrationSelectionRow(0, "Delete", OldSidToDelete, "", "Orphaned User")],
             _ => true);
 
-        Assert.False(result.Success);
+        Assert.True(result.Success);
         Assert.Empty(result.Mappings);
-        Assert.Empty(result.DeleteSids);
-        messageBoxService.VerifyAll();
+        Assert.Equal([OldSidToDelete], result.DeleteSids);
+        messageBoxService.VerifyNoOtherCalls();
     }
 
     [Fact]
     public void TryCollect_UnresolvedMigrateAndDelete_PromptsOnceForCombinedSelection()
     {
         var messageBoxService = new Mock<IMessageBoxService>(MockBehavior.Strict);
-        var collector = CreateCollector(
-            messageBoxService.Object,
-            orphanedBySid: new Dictionary<string, OrphanedSid>(StringComparer.OrdinalIgnoreCase)
-            {
-                [OldSidToMigrate] = new()
-                {
-                    Sid = OldSidToMigrate,
-                    Classification = OrphanedSidClassification.Unresolved
-                },
-                [OldSidToDelete] = new()
-                {
-                    Sid = OldSidToDelete,
-                    Classification = OrphanedSidClassification.Unresolved
-                }
-            });
+        var collector = CreateCollector(messageBoxService.Object);
 
         var confirmCalls = 0;
         var result = collector.Collect(
@@ -111,8 +80,7 @@ public class SidMigrationSelectionCollectorTests
     }
 
     private static SidMigrationSelectionCollector CreateCollector(
-        IMessageBoxService messageBoxService,
-        IReadOnlyDictionary<string, OrphanedSid>? orphanedBySid = null)
+        IMessageBoxService messageBoxService)
     {
         var validator = new SidMigrationMappingValidator(Mock.Of<IProfilePathResolver>());
         return new SidMigrationSelectionCollector(
@@ -121,7 +89,6 @@ public class SidMigrationSelectionCollectorTests
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 [NewSid] = $"Replacement User ({NewSid})"
-            },
-            orphanedBySid ?? new Dictionary<string, OrphanedSid>(StringComparer.OrdinalIgnoreCase));
+            });
     }
 }

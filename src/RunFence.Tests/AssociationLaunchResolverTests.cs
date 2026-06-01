@@ -96,4 +96,61 @@ public class AssociationLaunchResolverTests
         Assert.Same(explicitApp, result.App);
         Assert.Equal("explicit", result.Entry?.AppId);
     }
+
+    [Fact]
+    public void Resolve_UrlAppMatchesOnlyWhenUrlUnderSavedPrefix()
+    {
+        var database = new AppDatabase();
+        var app = new AppEntry
+        {
+            Id = "url-app",
+            IsUrlScheme = true,
+            AccountSid = "S-1-5-21-1",
+            ExePath = "https://example.com",
+            PathPrefixes = ["https://example.com/allowed/"]
+        };
+        database.Apps.Add(app);
+
+        var handlerMappingService = new Mock<IHandlerMappingService>();
+        handlerMappingService
+            .Setup(s => s.GetAllHandlerMappings(database))
+            .Returns(new Dictionary<string, IReadOnlyList<HandlerMappingEntry>>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["http"] = [new HandlerMappingEntry(app.Id)]
+            });
+
+        var authorizer = new Mock<IIpcCallerAuthorizer>();
+        authorizer
+            .Setup(a => a.IsCallerAuthorizedForAssociation(
+                It.IsAny<string?>(),
+                It.IsAny<string?>(),
+                It.IsAny<AppEntry>(),
+                database,
+                It.IsAny<bool>()))
+            .Returns(true);
+        authorizer
+            .Setup(a => a.HasExplicitPerAppAuthorization(It.IsAny<string?>(), app, database))
+            .Returns(false);
+
+        var resolver = new AssociationLaunchResolver(() => handlerMappingService.Object, authorizer.Object);
+
+        var matchingResult = resolver.Resolve(
+            database,
+            AssociationLaunchResolver.BuildRequest("http", "https://example.com/allowed/doc.pdf"),
+            callerIdentity: null,
+            callerSid: "S-1-5-21-caller",
+            identityFromImpersonation: true);
+
+        Assert.Equal(AssociationLaunchResolutionStatus.Success, matchingResult.Status);
+        Assert.Same(app, matchingResult.App);
+
+        var mismatchingResult = resolver.Resolve(
+            database,
+            AssociationLaunchResolver.BuildRequest("http", "https://example.com/blocked/doc.pdf"),
+            callerIdentity: null,
+            callerSid: "S-1-5-21-caller",
+            identityFromImpersonation: true);
+
+        Assert.Equal(AssociationLaunchResolutionStatus.PathPrefixMismatch, mismatchingResult.Status);
+    }
 }

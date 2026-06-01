@@ -1,31 +1,16 @@
 using Moq;
 using RunFence.Apps;
 using RunFence.Apps.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Persistence;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
 
 public class AppEditDialogSaveHandlerTests
 {
-    [Fact]
-    public async Task TrySaveAndApply_SaveSucceeds_ReturnsSaved()
-    {
-        var appConfigService = new Mock<IAppConfigService>();
-        var sut = new AppEditDialogSaveHandler(CreateAssociationHandler(), appConfigService.Object);
-
-        var result = await sut.TrySaveAndApply(
-            new AppEntry { Id = "app1", Name = "App" },
-            selectedConfigPath: null,
-            database: null,
-            currentAssociations: [],
-            applyAsync: () => Task.CompletedTask);
-
-        Assert.Equal(AppEditSaveStatus.Saved, result.Status);
-        Assert.Null(result.SaveError);
-    }
-
     [Fact]
     public async Task TrySaveAndApply_SaveThrows_RollsBackConfigAndAssociations()
     {
@@ -37,22 +22,26 @@ public class AppEditDialogSaveHandlerTests
 
         var handlerMappingService = new InMemoryHandlerMappingService(database);
         var associationHandler = CreateAssociationHandler(database, handlerMappingService: handlerMappingService);
-        var appConfigService = new Mock<IAppConfigService>();
-        appConfigService.Setup(s => s.GetConfigPath("app1")).Returns(@"C:\original.rfn");
+        var appConfig = new AppConfigTestContext();
+        appConfig.Service.AssignApp("app1", @"C:\original.rfn");
 
-        var sut = new AppEditDialogSaveHandler(associationHandler, appConfigService.Object);
+        var sut = new AppEditDialogSaveHandler(
+            associationHandler,
+            appConfig.Service,
+            Mock.Of<ILoggingService>());
 
         var result = await sut.TrySaveAndApply(
-            new AppEntry { Id = "app1", Name = "App" },
-            selectedConfigPath: @"C:\extra.rfn",
             database: database,
-            currentAssociations: [new HandlerAssociationItem("ftp", null, null, false)],
-            applyAsync: () => throw new IOException("disk full"));
+            applyContext: CreateApplyContext(
+                changeSet: CreateChangeSet(requiresHandlerSync: true),
+                previousConfigPath: @"C:\original.rfn",
+                selectedConfigPath: @"C:\extra.rfn",
+                currentAssociations: [new HandlerAssociationItem("ftp", null, null, false)]),
+            applyAsync: _ => throw new IOException("disk full"));
 
         Assert.Equal(AppEditSaveStatus.SaveFailed, result.Status);
         Assert.Equal("disk full", result.SaveError);
-        appConfigService.Verify(s => s.AssignApp("app1", @"C:\extra.rfn"), Times.Once);
-        appConfigService.Verify(s => s.AssignApp("app1", @"C:\original.rfn"), Times.Once);
+        Assert.Equal(@"C:\original.rfn", appConfig.Service.GetConfigPath("app1"));
         Assert.Equal(["http"], associationHandler.GetCurrentAssociations("app1")!.Select(a => a.Key));
     }
 
@@ -60,29 +49,31 @@ public class AppEditDialogSaveHandlerTests
     public async Task TrySaveAndApply_OperationCanceled_ReturnsCanceledAndRollsBackPreSaveMutations()
     {
         var database = new AppDatabase();
-        var appConfigService = new Mock<IAppConfigService>();
-        appConfigService.Setup(s => s.GetConfigPath("app1")).Returns(@"C:\original.rfn");
-        var sut = new AppEditDialogSaveHandler(CreateAssociationHandler(database), appConfigService.Object);
+        var appConfig = new AppConfigTestContext();
+        appConfig.Service.AssignApp("app1", @"C:\original.rfn");
+        var sut = new AppEditDialogSaveHandler(
+            CreateAssociationHandler(database),
+            appConfig.Service,
+            Mock.Of<ILoggingService>());
 
         var result = await sut.TrySaveAndApply(
-            new AppEntry { Id = "app1", Name = "App" },
-            selectedConfigPath: @"C:\extra.rfn",
             database: database,
-            currentAssociations: [],
-            applyAsync: () => throw new OperationCanceledException("blocked"));
+            applyContext: CreateApplyContext(
+                previousConfigPath: @"C:\original.rfn",
+                selectedConfigPath: @"C:\extra.rfn"),
+            applyAsync: _ => throw new OperationCanceledException("blocked"));
 
         Assert.Equal(AppEditSaveStatus.Canceled, result.Status);
         Assert.Equal("blocked", result.SaveError);
-        appConfigService.Verify(s => s.AssignApp("app1", @"C:\extra.rfn"), Times.Once);
-        appConfigService.Verify(s => s.AssignApp("app1", @"C:\original.rfn"), Times.Once);
+        Assert.Equal(@"C:\original.rfn", appConfig.Service.GetConfigPath("app1"));
     }
 
     [Fact]
     public async Task TrySaveAndApply_PreSaveApplyFails_RestoresOriginalConfigAssignment()
     {
         var database = new AppDatabase();
-        var appConfigService = new Mock<IAppConfigService>();
-        appConfigService.Setup(s => s.GetConfigPath("app1")).Returns(@"C:\original.rfn");
+        var appConfig = new AppConfigTestContext();
+        appConfig.Service.AssignApp("app1", @"C:\original.rfn");
 
         var associationHandler = CreateAssociationHandler(
             database,
@@ -93,41 +84,103 @@ public class AppEditDialogSaveHandlerTests
                         It.IsAny<HandlerMappingEntry>(),
                         database))
                     .Throws(new InvalidOperationException("apply failed")));
-        var sut = new AppEditDialogSaveHandler(associationHandler, appConfigService.Object);
+        var sut = new AppEditDialogSaveHandler(
+            associationHandler,
+            appConfig.Service,
+            Mock.Of<ILoggingService>());
 
         var result = await sut.TrySaveAndApply(
-            new AppEntry { Id = "app1", Name = "App" },
-            selectedConfigPath: @"C:\extra.rfn",
             database: database,
-            currentAssociations: [new HandlerAssociationItem("http", null, null, false)],
-            applyAsync: () => Task.CompletedTask);
+            applyContext: CreateApplyContext(
+                changeSet: CreateChangeSet(requiresHandlerSync: true),
+                previousConfigPath: @"C:\original.rfn",
+                selectedConfigPath: @"C:\extra.rfn",
+                currentAssociations: [new HandlerAssociationItem("http", null, null, false)]),
+            applyAsync: _ => Task.CompletedTask);
 
         Assert.Equal(AppEditSaveStatus.ValidationOrSystemFailed, result.Status);
         Assert.Equal("apply failed", result.SaveError);
-        appConfigService.Verify(s => s.AssignApp("app1", @"C:\extra.rfn"), Times.Once);
-        appConfigService.Verify(s => s.AssignApp("app1", @"C:\original.rfn"), Times.Once);
+        Assert.Equal(@"C:\original.rfn", appConfig.Service.GetConfigPath("app1"));
     }
 
     [Fact]
     public async Task TrySaveAndApply_RegistrySyncThrows_ReturnsSavedWithRegistryWarning()
     {
         var database = new AppDatabase();
-        var appConfigService = new Mock<IAppConfigService>();
         var associationHandler = CreateAssociationHandler(
             database,
             registrationSyncException: new InvalidOperationException("sync failed"));
-        var sut = new AppEditDialogSaveHandler(associationHandler, appConfigService.Object);
+        var appConfig = new AppConfigTestContext();
+        var sut = new AppEditDialogSaveHandler(
+            associationHandler,
+            appConfig.Service,
+            Mock.Of<ILoggingService>());
 
         var result = await sut.TrySaveAndApply(
-            new AppEntry { Id = "app1", Name = "App" },
-            selectedConfigPath: null,
             database: database,
-            currentAssociations: [new HandlerAssociationItem("http", null, null, false)],
-            applyAsync: () => Task.CompletedTask);
+            applyContext: CreateApplyContext(
+                changeSet: CreateChangeSet(requiresHandlerSync: true),
+                currentAssociations: [new HandlerAssociationItem("http", null, null, false)]),
+            applyAsync: _ => Task.CompletedTask);
 
         Assert.Equal(AppEditSaveStatus.SavedWithRegistryWarning, result.Status);
         Assert.Equal("sync failed", result.RegistrySyncWarning);
     }
+
+    [Fact]
+    public async Task TrySaveAndApply_WhenHandlerSyncNotRequired_DoesNotApplyOrSyncAssociations()
+    {
+        var database = new AppDatabase();
+        var associationHandler = CreateAssociationHandler(
+            database,
+            registrationSyncException: new InvalidOperationException("sync should not run"),
+            handlerMappingSetup: handlerMappingService =>
+            {
+                handlerMappingService
+                    .Setup(s => s.SetHandlerMapping(
+                        It.IsAny<string>(),
+                        It.IsAny<HandlerMappingEntry>(),
+                        It.IsAny<AppDatabase>()))
+                    .Throws(new InvalidOperationException("apply should not run"));
+            });
+        var appConfig = new AppConfigTestContext();
+        var sut = new AppEditDialogSaveHandler(
+            associationHandler,
+            appConfig.Service,
+            Mock.Of<ILoggingService>());
+
+        var result = await sut.TrySaveAndApply(
+            database: database,
+            applyContext: CreateApplyContext(
+                changeSet: CreateChangeSet(requiresHandlerSync: false),
+                currentAssociations: [new HandlerAssociationItem("http", null, null, false)]),
+            applyAsync: _ => Task.CompletedTask);
+
+        Assert.Equal(AppEditSaveStatus.Saved, result.Status);
+    }
+
+    private static AppEntryChangeSet CreateChangeSet(bool requiresHandlerSync = false)
+        => new(
+            RequiresAclReapply: false,
+            RequiresBesideTargetRefresh: false,
+            RequiresHandlerSync: requiresHandlerSync,
+            RequiresManagedShortcutRefresh: false,
+            RequiresIconRefresh: false,
+            ConfigSaveScope: AppEditConfigSaveScope.CurrentAppConfigOnly);
+
+    private static AppEditDialogApplyContext CreateApplyContext(
+        AppEntry? result = null,
+        AppEntryChangeSet? changeSet = null,
+        string? previousConfigPath = null,
+        string? selectedConfigPath = null,
+        IReadOnlyList<HandlerAssociationItem>? currentAssociations = null)
+        => new(
+            result ?? new AppEntry { Id = "app1", Name = "App" },
+            PreviousApp: null,
+            changeSet ?? CreateChangeSet(),
+            PreviousConfigPath: previousConfigPath,
+            SelectedConfigPath: selectedConfigPath,
+            CurrentAssociations: currentAssociations ?? []);
 
     private static AppEditAssociationHandler CreateAssociationHandler(
         AppDatabase? database = null,

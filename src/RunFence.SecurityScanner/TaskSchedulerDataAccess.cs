@@ -3,7 +3,7 @@ using System.Security.Principal;
 
 namespace RunFence.SecurityScanner;
 
-public class TaskSchedulerDataAccess
+public class TaskSchedulerDataAccess : ITaskSchedulerDataAccess
 {
     private const int TaskActionExecute = 0;
     private const int TaskSecurityInformationOwnerGroupDacl = 0x07;

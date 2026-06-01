@@ -10,17 +10,7 @@ internal static class GrantMutatorTestExtensions
         string sid,
         string path,
         bool isDeny,
-        SavedRightsState? savedRights = null,
-        string? ownerSid = null)
-        => service.AddGrant(sid, path, isDeny, savedRights, confirm: isDeny ? static () => true : null);
-
-    public static GrantApplyResult AddGrant(
-        this PathGrantService service,
-        string sid,
-        string path,
-        bool isDeny,
-        SavedRightsState? savedRights = null,
-        string? ownerSid = null)
+        SavedRightsState? savedRights = null)
         => service.AddGrant(sid, path, isDeny, savedRights, confirm: isDeny ? static () => true : null);
 
     public static GrantApplyResult UpdateGrant(
@@ -28,16 +18,7 @@ internal static class GrantMutatorTestExtensions
         string sid,
         string path,
         bool isDeny,
-        SavedRightsState savedRights,
-        string? ownerSid = null)
+        SavedRightsState savedRights)
         => service.UpdateGrant(sid, path, isDeny, savedRights, confirm: isDeny ? static () => true : null);
 
-    public static GrantApplyResult UpdateGrant(
-        this PathGrantService service,
-        string sid,
-        string path,
-        bool isDeny,
-        SavedRightsState savedRights,
-        string? ownerSid = null)
-        => service.UpdateGrant(sid, path, isDeny, savedRights, confirm: isDeny ? static () => true : null);
 }

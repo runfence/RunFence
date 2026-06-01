@@ -7,22 +7,25 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch.Tokens;
+using RunFence.Persistence;
 
 namespace RunFence.Launch.Container;
 
 public class AppContainerService(
     ILoggingService log,
-    IPathGrantService pathGrantService,
+    ITraverseService traverseService,
+    IGrantAccountCleanupService grantAccountCleanupService,
     IAppContainerProfileSetup appContainerProfileSetup,
     IAppContainerDataFolderService dataFolderService,
     IAppContainerComAccessService comService,
     IExplorerTokenProvider explorerTokenProvider,
     IAppContainerSidProvider sidProvider,
     IAppContainerUserRegistryRoot userRegistryRoot,
-    IAppContainerPathProvider pathProvider)
+    IAppContainerPathProvider pathProvider,
+    ITrackingJobStateStore? trackingJobStateStore = null)
     : IAppContainerService
 {
-    private readonly RegistryKey _usersRoot = userRegistryRoot.UsersRoot;
+    private readonly IRegistryKey _usersRoot = userRegistryRoot.UsersRoot;
     private readonly IAppContainerPathProvider _pathProvider = pathProvider;
 
     public AppContainerProfileSetupResult CreateProfile(AppContainerEntry entry)
@@ -89,6 +92,7 @@ public class AppContainerService(
                 $"DeleteAppContainerProfile returned HRESULT 0x{hr:X8} for '{name}'.");
 
         var containerSid = GetSid(name);
+        trackingJobStateStore?.RemoveTrackingJobSid(containerSid, saveImmediately: false);
         RemoveContainerStateFromLoadedHives(containerSid);
 
         var dataPath = _pathProvider.GetContainerDataPath(name);
@@ -180,7 +184,7 @@ public class AppContainerService(
     public (bool Modified, List<string> AppliedPaths) EnsureTraverseAccess(AppContainerEntry entry, string path)
     {
         var containerSid = GetSid(entry.Name);
-        var result = pathGrantService.AddTraverse(containerSid, path);
+        var result = traverseService.AddTraverse(containerSid, path);
         return (
             result.DatabaseModified || result.TraverseApplied,
             CollectTraverseCoveragePaths(path));
@@ -192,7 +196,7 @@ public class AppContainerService(
         var containerSid = !string.IsNullOrWhiteSpace(entry.Sid)
             ? entry.Sid
             : GetSid(entry.Name);
-        return pathGrantService.RemoveAll(containerSid);
+        return grantAccountCleanupService.RemoveAll(containerSid);
     }
 
     private static List<string> CollectTraverseCoveragePaths(string path)

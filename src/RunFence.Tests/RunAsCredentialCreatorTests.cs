@@ -23,7 +23,7 @@ public class RunAsCredentialCreatorTests : IDisposable
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
 
         var encryptionService = new Mock<IByteArrayCredentialEncryptionService>();
         encryptionService.Setup(s => s.Encrypt(It.IsAny<ProtectedString>(), It.IsAny<byte[]>()))
@@ -76,7 +76,7 @@ public class RunAsCredentialCreatorTests : IDisposable
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(roundTripPinKey);
+        }.WithClonedPinDerivedKey(roundTripPinKey);
 
         var encryptionService = new CredentialEncryptionService(new NativeDpapiProtector());
         var databaseService = new Mock<IDatabaseService>();

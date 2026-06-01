@@ -32,12 +32,6 @@ public static class ProcessLaunchHelper
         return psi;
     }
 
-    private static readonly HashSet<string> ScriptExtensions = new(StringComparer.OrdinalIgnoreCase)
-        { ".cmd", ".bat" };
-
-    private static readonly HashSet<string> ExeExtensions = new(StringComparer.OrdinalIgnoreCase)
-        { ".exe", ".com", ".scr", ".pif", ".cpl" };
-
     /// <summary>
     /// Returns the effective working directory for a launch: <paramref name="workingDirectory"/>
     /// when non-empty, otherwise the directory containing <paramref name="filePath"/>.
@@ -60,7 +54,7 @@ public static class ProcessLaunchHelper
             : extension;
         var filePath = target.ExePath;
 
-        if (ScriptExtensions.Contains(ext))
+        if (LaunchFileExtensionRules.IsCmdScriptExtension(ext))
         {
             if (!PathHelper.IsPathSafeForCmd(filePath))
                 throw new InvalidOperationException("File path contains characters unsafe for cmd.exe execution.");
@@ -86,7 +80,7 @@ public static class ProcessLaunchHelper
             );
         }
 
-        if (string.Equals(ext, ".ps1", StringComparison.OrdinalIgnoreCase))
+        if (LaunchFileExtensionRules.IsPowerShellScriptExtension(ext))
         {
             // PowerShell is launched directly via CreateProcess — not through cmd.exe.
             // Arguments are parsed by PowerShell's own parser; cmd.exe escaping/validation must not be applied.
@@ -111,12 +105,12 @@ public static class ProcessLaunchHelper
     }
 
     /// <summary>
-    /// Returns <c>true</c> when the target can be launched directly — i.e. it is a native
-    /// executable or a script (.cmd, .bat, .ps1) that is wrapped by <see cref="TryWrapForScriptLaunch"/>.
-    /// Returns <c>false</c> for all other file types that require Windows association resolution.
+    /// Returns <c>true</c> when the target extension is a native executable that can be launched
+    /// directly. Script extensions return <c>false</c> here and are handled by
+    /// <see cref="TryWrapForScriptLaunch"/>.
     /// </summary>
     public static bool CanLaunchDirect(ProcessLaunchTarget target, string? extension = null)
-        => ExeExtensions.Contains(string.IsNullOrEmpty(extension)
+        => LaunchFileExtensionRules.CanLaunchDirectExtension(string.IsNullOrEmpty(extension)
             ? Path.GetExtension(target.ExePath)
             : extension);
 

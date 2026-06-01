@@ -100,7 +100,10 @@ public class PrepareSystemTemplateTests
         IQuickAccessPinService? quickAccessPinService = null,
         IPrepareSystemDriveInfoSource? driveInfoSource = null)
     {
-        replacer ??= new DriveAclReplacer(Mock.Of<IPathGrantService>(), Mock.Of<ILoggingService>());
+        replacer ??= new DriveAclReplacer(
+            Mock.Of<IGrantSyncService>(),
+            Mock.Of<ILoggingService>(),
+            AclAccessorFactory.Create());
         sessionSaver ??= Mock.Of<IWizardSessionSaver>();
         quickAccessPinService ??= Mock.Of<IQuickAccessPinService>();
         driveInfoSource ??= Mock.Of<IPrepareSystemDriveInfoSource>();
@@ -112,7 +115,7 @@ public class PrepareSystemTemplateTests
 {
                 Database = new AppDatabase(),
                 CredentialStore = new CredentialStore(),
-            }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32)),
+            }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32)),
             quickAccessPinService,
             driveInfoSource,
             Mock.Of<ILoggingService>());

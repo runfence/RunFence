@@ -22,7 +22,7 @@ public class AccountsPanelRefreshOrchestrator(AccountGridRefreshHandler refreshH
         refreshHandler.Initialize(grid, sortState, callbacks);
     }
 
-    public void RefreshGrid(Action? afterPopulate = null)
+    public Task RefreshGridAsync(Action? afterPopulate = null, CancellationToken cancellationToken = default)
     {
         Dictionary<string, IReadOnlyList<ProcessInfo>>? prefetchedData = null;
 
@@ -39,8 +39,8 @@ public class AccountsPanelRefreshOrchestrator(AccountGridRefreshHandler refreshH
             ? _grid.SelectedRows[0].Tag as ProcessRow
             : null;
 
-        Func<Task>? beforePopulate = expandedSids?.Count > 0
-            ? async () => { prefetchedData = await _processDisplayManager.FetchRefreshDataAsync(expandedSids)!; }
+        Func<CancellationToken, Task>? beforePopulate = expandedSids?.Count > 0
+            ? async ct => { prefetchedData = await _processDisplayManager.FetchRefreshDataAsync(expandedSids, ct)!; }
             : null;
 
         Action combinedAfterPopulate = () =>
@@ -63,9 +63,9 @@ public class AccountsPanelRefreshOrchestrator(AccountGridRefreshHandler refreshH
         };
 
         if (beforePopulate != null)
-            refreshHandler.RefreshGridWithPreFetch(beforePopulate, afterPopulate: combinedAfterPopulate);
-        else
-            refreshHandler.RefreshGrid(afterPopulate: combinedAfterPopulate);
+            return refreshHandler.RefreshGridWithPreFetchAsync(beforePopulate, afterPopulate: combinedAfterPopulate, cancellationToken);
+
+        return refreshHandler.RefreshGridAsync(afterPopulate: combinedAfterPopulate, cancellationToken);
     }
 
     public async Task InitialRefreshAsync()
@@ -85,7 +85,7 @@ public class AccountsPanelRefreshOrchestrator(AccountGridRefreshHandler refreshH
             {
                 _grid.ClearSelection();
                 row.Selected = true;
-                _grid.CurrentCell = row.Cells["Account"];
+                _grid.CurrentCell = row.Cells[AccountGridColumns.Account];
                 return;
             }
         }

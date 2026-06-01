@@ -8,6 +8,7 @@ using RunFence.SidMigration;
 using RunFence.SidMigration.UI;
 using RunFence.SidMigration.UI.Forms;
 using RunFence.Tests.Helpers;
+using RunFence.UI.Controls;
 using RunFence.UI.Forms;
 using Xunit;
 
@@ -52,25 +53,6 @@ public class SidMigrationContextHelpTests
         });
     }
 
-    [Theory]
-    [InlineData(typeof(SidMigrationDiscoveryProgressStep), "The scan is collecting the old security identities that appear on the selected paths. This does not change disk state yet; it only builds the list you will review next. Use this phase to wait for scope discovery, not to judge final replacement decisions.")]
-    [InlineData(typeof(SidMigrationDiskScanProgressStep), "The selected paths are now being scanned for real filesystem matches to the replacements and removals you approved. This is still a read-only phase, but it is no longer discovering candidate identities; it is finding the exact files and folders that would be changed by the next step. Use this phase to wait for the apply preview, not to choose new mappings.")]
-    [InlineData(typeof(SidMigrationDiskApplyProgressStep), "The approved filesystem changes are now being written to disk. Permissions and ownership references are being replaced or removed according to the review step, so this is no longer a dry run. Let this finish before closing the wizard, or disk state and saved settings will be left out of sync.")]
-    public void MigrationProgressSteps_KeepVisibleDesignerOwnedDescription(Type stepType, string expectedDescription)
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using MigrationProgressStep step = stepType.Name switch
-            {
-                nameof(SidMigrationDiscoveryProgressStep) => new SidMigrationDiscoveryProgressStep(),
-                nameof(SidMigrationDiskScanProgressStep) => new SidMigrationDiskScanProgressStep(),
-                nameof(SidMigrationDiskApplyProgressStep) => new SidMigrationDiskApplyProgressStep(),
-                _ => throw new ArgumentOutOfRangeException(nameof(stepType))
-            };
-            Assert.Equal(expectedDescription, GetDescriptionLabel(step).Text);
-        });
-    }
-
     [Fact]
     public void MigrationMappingStep_BeginAsync_DoesNotRegisterRedundantContextHelpForRuntimeBuiltContent()
     {
@@ -98,7 +80,7 @@ public class SidMigrationContextHelpTests
             StaTestHelper.PumpUntil(() => ready, timeoutMessage: "Timed out waiting for mapping content.");
 
             var mappingRoot = step.Controls.OfType<Panel>().Single();
-            var mappingGrid = FindControl<DataGridView>(mappingRoot);
+            var mappingGrid = FindControl<StyledDataGridView>(mappingRoot);
             var detailsList = FindControl<ListBox>(mappingRoot);
             var toolStrip = FindControl<ToolStrip>(mappingRoot);
 
@@ -132,7 +114,7 @@ public class SidMigrationContextHelpTests
                     new CredentialEntry { Sid = "S-1-5-21-old" }
                 ]
             },
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         session.Database.SidNames["S-1-5-21-old"] = "old-user";
         var sidMigrationService = new Mock<ISidMigrationService>();
         sidMigrationService.Setup(s => s.BuildMappings(

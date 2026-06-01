@@ -123,17 +123,6 @@ public class WindowsAccountServiceTests
         _localAccountProvisioning.Verify(p => p.DeleteLocalUserBySid(sid), Times.Once);
     }
 
-    [Fact]
-    public void DeleteUser_Success_DeletesOnlyLocalSamAccount()
-    {
-        var sid = "S-1-5-21-0-0-0-9999";
-
-        _service.DeleteSamAccount(sid);
-
-        _localAccountProvisioning.Verify(p => p.DeleteLocalUserBySid(sid), Times.Once);
-        _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Never);
-    }
-
     // RenameAccount must always call IsAccountHidden exactly once before the rename attempt
     // (the prior hidden state is needed to restore it after a successful rename), and must
     // never call SetAccountHidden when the rename fails or when the account is not hidden.
@@ -151,6 +140,17 @@ public class WindowsAccountServiceTests
 
         _restrictions.Verify(r => r.IsAccountHidden(oldName), Times.Once);
         _restrictions.Verify(r => r.SetAccountHidden(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
+    }
+
+    [Fact]
+    public void DeleteUser_Success_DeletesOnlyLocalSamAccount()
+    {
+        var sid = "S-1-5-21-0-0-0-9999";
+
+        _service.DeleteSamAccount(sid);
+
+        _localAccountProvisioning.Verify(p => p.DeleteLocalUserBySid(sid), Times.Once);
+        _log.Verify(l => l.Warn(It.IsAny<string>()), Times.Never);
     }
 
     [Fact]
@@ -232,9 +232,7 @@ public class WindowsAccountServiceTests
         var sid = _service.CreateLocalUser(username, password);
 
         Assert.Equal(localSid, sid);
-        _localAccountProvisioning.Verify(p => p.DeleteLocalUserByName(It.IsAny<string>()), Times.Never);
         _localAccountProvisioning.Verify(p => p.DeleteLocalUserBySid(It.IsAny<string>()), Times.Never);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("NetUserSetInfo(1011)") && s.Contains("2221"))), Times.Once);
     }
 
     [Fact]
@@ -256,6 +254,5 @@ public class WindowsAccountServiceTests
         Assert.Equal(localSid, sid);
         _localAccountProvisioning.Verify(p => p.DeleteLocalUserByName(It.IsAny<string>()), Times.Never);
         _localAccountProvisioning.Verify(p => p.DeleteLocalUserBySid(It.IsAny<string>()), Times.Never);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("NetUserSetInfo(1011)") && s.Contains("display name unavailable"))), Times.Once);
     }
 }

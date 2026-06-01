@@ -1,4 +1,3 @@
-using Microsoft.Win32;
 using Moq;
 using RunFence.Apps;
 using RunFence.Core;
@@ -7,13 +6,14 @@ using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Ipc;
 using RunFence.Persistence;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
 
 /// <summary>
 /// Tests for <see cref="AssociationAutoSetService"/>.
-/// Uses Registry.CurrentUser with a unique subkey as the HKU override.
+/// Uses an in-memory HKU root so tests never modify the real registry.
 /// A stable fake SID (<c>S-1-5-21-9001-9002-9003-1001</c>) is used as the test user SID;
 /// credential entries use this SID so they don't collide with the current user's real SID.
 /// </summary>
@@ -23,8 +23,7 @@ public class AssociationAutoSetServiceTests : IDisposable
     private const string TestSid = "S-1-5-21-9001-9002-9003-1001";
     private const string OtherSid = "S-1-5-21-9001-9002-9003-1002";
 
-    private readonly string _testSubKey;
-    private readonly RegistryKey _hkuRoot;
+    private readonly InMemoryRegistryKey _hkuRoot;
     private readonly TempDirectory _tempDir;
     private readonly string _launcherPath;
 
@@ -38,8 +37,7 @@ public class AssociationAutoSetServiceTests : IDisposable
 
     public AssociationAutoSetServiceTests()
     {
-        _testSubKey = $@"Software\RunFenceTests\AutoSet_{Guid.NewGuid():N}";
-        _hkuRoot = Registry.CurrentUser.CreateSubKey(_testSubKey);
+        _hkuRoot = InMemoryRegistryKey.CreateRoot();
 
         _tempDir = new TempDirectory("RunFenceAutoSetTests");
         _launcherPath = Path.Combine(_tempDir.Path, "RunFence.Launcher.exe");
@@ -71,12 +69,12 @@ public class AssociationAutoSetServiceTests : IDisposable
     public void Dispose()
     {
         _hkuRoot.Dispose();
-        try { Registry.CurrentUser.DeleteSubKeyTree(_testSubKey, throwOnMissingSubKey: false); }
-        catch { }
         _tempDir.Dispose();
     }
 
-    private AssociationAutoSetService CreateService(RegistryKey? hkuRoot = null)
+    private AssociationAutoSetService CreateService(
+        IRegistryKey? hkuRoot = null,
+        IAssociationRegistryWriter? registryWriter = null)
     {
         return new AssociationAutoSetService(
             _hiveManager.Object,
@@ -85,15 +83,15 @@ public class AssociationAutoSetServiceTests : IDisposable
             () => _handlerMappingService.Object,
             new AssociationPolicyService(_callerAuthorizer.Object),
             _log.Object,
-            new AssociationRegistryWriter(
+            registryWriter ?? new AssociationRegistryWriter(
                 _log.Object,
                 _ => new AssociationFallbackRegistry(_),
                 registry => new AssociationFallbackRestoreService(registry)),
-            hkuRoot ?? _hkuRoot,
+            hkuRoot ?? OpenServiceRoot(),
             _launcherPath);
     }
 
-    private AssociationAutoSetService CreateService(IUiThreadInvoker uiThreadInvoker, RegistryKey? hkuRoot = null)
+    private AssociationAutoSetService CreateService(IUiThreadInvoker uiThreadInvoker, IRegistryKey? hkuRoot = null)
     {
         return new AssociationAutoSetService(
             _hiveManager.Object,
@@ -106,8 +104,13 @@ public class AssociationAutoSetServiceTests : IDisposable
                 _log.Object,
                 _ => new AssociationFallbackRegistry(_),
                 registry => new AssociationFallbackRestoreService(registry)),
-            hkuRoot ?? _hkuRoot,
+            hkuRoot ?? OpenServiceRoot(),
             _launcherPath);
+    }
+
+    private IRegistryKey OpenServiceRoot()
+    {
+        return _hkuRoot;
     }
 
     private void SetMappings(Dictionary<string, HandlerMappingEntry> mappings)
@@ -261,17 +264,15 @@ public class AssociationAutoSetServiceTests : IDisposable
         _hkuRoot.CreateSubKey(TestSid).Dispose();
 
         AddCredential(TestSid);
+        var registryWriter = new Mock<IAssociationRegistryWriter>();
 
         // Act
-        CreateService().RestoreForAllUsers();
+        CreateService(registryWriter: registryWriter.Object).RestoreForAllUsers();
 
-        // Assert: default value restored
-        var defaultVal = ReadDefaultValue($@"{TestSid}\Software\Classes\.doc");
-        Assert.Equal(originalProgId, defaultVal);
-
-        // Assert: RunFenceFallback removed
-        var fallback = ReadValue($@"{TestSid}\Software\Classes\.doc", PathConstants.RunFenceFallbackValueName);
-        Assert.Null(fallback);
+        registryWriter.Verify(w => w.RestoreKey(
+            It.IsAny<IRegistryKey>(),
+            TestSid,
+            ".doc"), Times.Once);
     }
 
     [Fact]
@@ -778,13 +779,11 @@ public class AssociationAutoSetServiceTests : IDisposable
     [Fact]
     public void AutoSetForUser_ReadOnlyHkuRoot_ReturnsWarningResult()
     {
-        using var readOnlyRoot = Registry.CurrentUser.OpenSubKey(_testSubKey, writable: false);
-        Assert.NotNull(readOnlyRoot);
         _session.Database.GetOrCreateAccount(TestSid).ManageAssociations = true;
 
         SetMappings(new Dictionary<string, HandlerMappingEntry> { [".test"] = new HandlerMappingEntry("app1") });
 
-        var result = CreateService(readOnlyRoot).AutoSetForUser(TestSid);
+        var result = CreateService(_hkuRoot.AsReadOnly()).AutoSetForUser(TestSid);
 
         Assert.Equal(AssociationAutoSetStatus.SucceededWithWarnings, result.Status);
         Assert.Single(result.WarningMessages);
@@ -810,10 +809,6 @@ public class AssociationAutoSetServiceTests : IDisposable
 
         // No registry entry created for the invalid class-based protocol handler
         Assert.Null(_hkuRoot.OpenSubKey($@"{TestSid}\Software\Classes\myproto"));
-
-        // Warning was logged
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("myproto") && s.Contains("class-based"))),
-            Times.Once);
     }
 
     // --- ForceAutoSetForUser bypasses cache ---

@@ -9,7 +9,7 @@ namespace RunFence.Persistence;
 /// <see cref="AppDatabase"/>.
 /// <para>
 /// App-to-config assignments and loaded-path ordering are owned by <see cref="AppConfigIndex"/>,
-/// which is injected as the authoritative source and updated by <see cref="AppConfigService"/> directly.
+/// which is injected as the authoritative source and updated through the focused AppConfig services.
 /// </para>
 /// </summary>
 public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMappingService
@@ -120,7 +120,7 @@ public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMapp
 
     public Dictionary<string, HandlerMappingEntry>? GetHandlerMappingsForConfig(string configPath)
     {
-        var normalized = Path.GetFullPath(configPath);
+        var normalized = AppConfigPathHelper.NormalizePath(configPath);
         if (_extraHandlerMappings.TryGetValue(normalized, out var mappings) && mappings.Count > 0)
             return mappings;
         return null;
@@ -154,7 +154,7 @@ public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMapp
 
     public void RenameAppIdInConfigMappings(string configPath, string oldAppId, string newAppId)
     {
-        var normalized = Path.GetFullPath(configPath);
+        var normalized = AppConfigPathHelper.NormalizePath(configPath);
         if (!_extraHandlerMappings.TryGetValue(normalized, out var mappings) || mappings.Count == 0)
             return;
 
@@ -173,13 +173,13 @@ public class HandlerMappingService(AppConfigIndex appConfigIndex) : IHandlerMapp
 
     public void RegisterConfigMappings(string configPath, Dictionary<string, HandlerMappingEntry> mappings)
     {
-        var normalized = Path.GetFullPath(configPath);
+        var normalized = AppConfigPathHelper.NormalizePath(configPath);
         _extraHandlerMappings[normalized] = new Dictionary<string, HandlerMappingEntry>(mappings, StringComparer.OrdinalIgnoreCase);
     }
 
     public void UnregisterConfigMappings(string configPath)
     {
-        var normalized = Path.GetFullPath(configPath);
+        var normalized = AppConfigPathHelper.NormalizePath(configPath);
         _extraHandlerMappings.Remove(normalized);
     }
 

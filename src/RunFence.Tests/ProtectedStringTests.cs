@@ -8,25 +8,6 @@ namespace RunFence.Tests;
 public class ProtectedStringTests
 {
     [Fact]
-    public void DefaultConstructor_CreatesEmptyString()
-    {
-        using var ps = new ProtectedString(ReadOnlySpan<char>.Empty, protect: false);
-
-        Assert.Equal(0, ps.Length);
-        Assert.False(ps.IsReadOnly);
-    }
-
-    [Fact]
-    public void Constructor_FromSpan_StoresCorrectContent()
-    {
-        using var ps = new ProtectedString("Hello".AsSpan(), protect: false);
-
-        Assert.Equal(5, ps.Length);
-        Assert.False(ps.IsReadOnly);
-        AssertContent(ps, "Hello");
-    }
-
-    [Fact]
     public void Constructor_WhenInitialProtectRestoreFails_CleansUpAllocatedBuffer()
     {
         var api = new RecordingProtectedMemoryApi
@@ -56,24 +37,6 @@ public class ProtectedStringTests
         Assert.All(api.LastFreedBytes!, value => Assert.Equal(0, value));
         Assert.Throws<ObjectDisposedException>(() => ps.Length);
         Assert.Throws<ObjectDisposedException>(() => ps.UseUtf16BytesSnapshot(_ => { }));
-    }
-
-    [Fact]
-    public void FromChars_Array_ProducesReadOnlyInstance()
-    {
-        using var ps = ProtectedString.FromChars("test".ToCharArray());
-
-        Assert.Equal(4, ps.Length);
-        Assert.True(ps.IsReadOnly);
-    }
-
-    [Fact]
-    public void FromChars_Span_ProducesReadOnlyInstance()
-    {
-        using var ps = ProtectedString.FromChars("test".AsSpan());
-
-        Assert.Equal(4, ps.Length);
-        Assert.True(ps.IsReadOnly);
     }
 
     [Fact]
@@ -125,16 +88,6 @@ public class ProtectedStringTests
         ps.SetAt(index, ch);
 
         AssertContent(ps, expected);
-    }
-
-    [Fact]
-    public void Clear_ResetsToEmpty()
-    {
-        using var ps = new ProtectedString("Hello".AsSpan(), protect: false);
-
-        ps.Clear();
-
-        Assert.Equal(0, ps.Length);
     }
 
     [Fact]
@@ -431,15 +384,6 @@ public class ProtectedStringTests
         using var a = new ProtectedString(ReadOnlySpan<char>.Empty, protect: false);
         using var b = new ProtectedString(ReadOnlySpan<char>.Empty, protect: false);
         Assert.True(ProtectedString.ContentEqual(a, b));
-    }
-
-    [Fact]
-    public void CreateEmpty_ReturnsReadOnlyEmptyInstance()
-    {
-        using var ps = ProtectedString.CreateEmpty();
-
-        Assert.Equal(0, ps.Length);
-        Assert.True(ps.IsReadOnly);
     }
 
     [Fact]

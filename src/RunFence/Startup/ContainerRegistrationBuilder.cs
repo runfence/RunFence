@@ -1,6 +1,7 @@
 using Autofac;
 using Autofac.Extras.Ordering;
 using RunFence.Core.Models;
+using RunFence.ForegroundMarker;
 using RunFence.Startup.Modules;
 
 namespace RunFence.Startup;
@@ -47,6 +48,7 @@ public static class ContainerRegistrationBuilder
             builder.RegisterModule(new DragBridgeModule());
             builder.RegisterModule(new WizardModule());
             builder.RegisterModule(new SidMigrationModule());
+            builder.RegisterModule(new ForegroundMarkerModule());
             builder.RegisterModule(new UiModule());
         });
 

@@ -112,6 +112,7 @@ public class AccountDeletionPreflightService(
         {
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, PathConstants.JobKeeperExeName)),
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, PathConstants.ProfileKeeperExeName)),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, PathConstants.AppxLauncherExeName)),
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, PathConstants.DragBridgeExeName)),
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, PathConstants.PinHelperExeName)),
             Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, PathConstants.LauncherExeName)),

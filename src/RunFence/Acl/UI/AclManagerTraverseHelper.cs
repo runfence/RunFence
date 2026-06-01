@@ -15,7 +15,6 @@ namespace RunFence.Acl.UI;
 /// </summary>
 public class AclManagerTraverseHelper(
     IAppConfigService appConfigService,
-    IAclPermissionService aclPermission,
     IGrantIntentRepository grantIntentRepository,
     IGrantIntentStoreProvider grantIntentStoreProvider,
     IDatabaseProvider databaseProvider,
@@ -28,13 +27,16 @@ public class AclManagerTraverseHelper(
     private bool _isContainer;
     private AclManagerPendingChanges _pending = null!;
     private GridSortHelper? _sortHelper;
-    private Lazy<IReadOnlyList<string>> _groupSids = null!;
+    private IReadOnlyList<string> _groupSids = null!;
+    private AclManagerSectionHeaderFactory _sectionHeaderFactory = null!;
 
     public void Initialize(
         DataGridView traverseGrid,
         string sid,
         bool isContainer,
         AclManagerPendingChanges pending,
+        IReadOnlyList<string> groupSids,
+        AclManagerSectionHeaderFactory sectionHeaderFactory,
         GridSortHelper? sortHelper = null)
     {
         _traverseGrid = traverseGrid;
@@ -42,9 +44,10 @@ public class AclManagerTraverseHelper(
         _isContainer = isContainer;
         _pending = pending;
         _sortHelper = sortHelper;
-        _groupSids = new Lazy<IReadOnlyList<string>>(() => aclPermission.ResolveAccountGroupSids(sid));
-        rowBuilder.Initialize(traverseGrid, sid, pending, _groupSids);
-        traverseOperations.Initialize(sid, pending, _groupSids, PopulateTraverseGrid);
+        _groupSids = groupSids;
+        _sectionHeaderFactory = sectionHeaderFactory;
+        rowBuilder.Initialize(traverseGrid, sid, pending, groupSids);
+        traverseOperations.Initialize(sid, pending, groupSids, PopulateTraverseGrid);
     }
 
     public HashSet<GrantedPathEntry> FixableEntries => rowBuilder.FixableEntries;
@@ -62,7 +65,7 @@ public class AclManagerTraverseHelper(
         var dbGrants = GetDbTraverseEntries(database);
         if (dbGrants == null)
         {
-            if (!hasLoadedConfigs && _pending.PendingTraverseAdds.Count == 0)
+            if (!hasLoadedConfigs && _pending.Traverse.GetPendingAddsSnapshot().Count == 0)
                 return;
             traverseEntries = [];
         }
@@ -71,15 +74,15 @@ public class AclManagerTraverseHelper(
             // Exclude entries that are pending removal or untrack — they will be gone after Apply.
             traverseEntries = dbGrants
                 .Where(e => e.IsTraverseOnly &&
-                            !_pending.IsPendingTraverseRemove(Path.GetFullPath(e.Path)) &&
-                            !_pending.IsUntrackTraverse(Path.GetFullPath(e.Path)))
+                            !_pending.Traverse.IsPendingTraverseRemove(Path.GetFullPath(e.Path)) &&
+                            !_pending.Traverse.IsUntrackTraverse(Path.GetFullPath(e.Path)))
                 .ToList();
-            if (traverseEntries.Count == 0 && !hasLoadedConfigs && _pending.PendingTraverseAdds.Count == 0)
+            if (traverseEntries.Count == 0 && !hasLoadedConfigs && _pending.Traverse.GetPendingAddsSnapshot().Count == 0)
                 return;
         }
 
         // Merge pending traverse adds (those not already represented in DB entries).
-        var pendingNewAdds = _pending.PendingTraverseAdds.Values
+        var pendingNewAdds = _pending.Traverse.GetPendingAddsSnapshot().Values
             .Where(e => !traverseEntries.Any(existing =>
                 string.Equals(existing.Path, e.Path, StringComparison.OrdinalIgnoreCase)))
             .ToList();
@@ -87,9 +90,10 @@ public class AclManagerTraverseHelper(
         var allEntriesToShow = traverseEntries.Concat(pendingNewAdds).ToList();
 
         var mainEntries = allEntriesToShow
-            .Where(e => GetEffectiveConfigPath(e) == null)
+            .Where(e => _pending.Traverse.GetEffectiveConfigPath(e, grantIntentRepository, grantIntentStoreProvider, _sid) == null)
             .ToList();
-        bool hasPendingForMain = pendingNewAdds.Any(e => GetEffectiveConfigPath(e) == null);
+        bool hasPendingForMain = pendingNewAdds.Any(e =>
+            _pending.Traverse.GetEffectiveConfigPath(e, grantIntentRepository, grantIntentStoreProvider, _sid) == null);
         AddTraverseRows(mainEntries, "Main Config", configPath: null,
             showIfEmpty: hasLoadedConfigs || hasPendingForMain);
 
@@ -97,7 +101,9 @@ public class AclManagerTraverseHelper(
         {
             var configEntries = allEntriesToShow
                 .Where(e => string.Equals(
-                    GetEffectiveConfigPath(e), configPath, StringComparison.OrdinalIgnoreCase))
+                    _pending.Traverse.GetEffectiveConfigPath(e, grantIntentRepository, grantIntentStoreProvider, _sid),
+                    configPath,
+                    StringComparison.OrdinalIgnoreCase))
                 .ToList();
             AddTraverseRows(configEntries, Path.GetFileName(configPath), configPath, showIfEmpty: true);
         }
@@ -114,7 +120,7 @@ public class AclManagerTraverseHelper(
         if (_sortHelper?.IsSortActive == true)
             entries = _sortHelper.SortByActiveColumn(entries, e => e.Path).ToList();
 
-        var headerRow = AclManagerSectionHeader.CreateSectionHeaderRow(_traverseGrid, sectionTitle, configPath, titleCellIndex: 1);
+        var headerRow = _sectionHeaderFactory.CreateSectionHeaderRow(_traverseGrid, sectionTitle, configPath, titleCellIndex: 1);
         _traverseGrid.Rows.Add(headerRow);
 
         foreach (var entry in entries)
@@ -141,17 +147,4 @@ public class AclManagerTraverseHelper(
 
     private string GetTraverseLookupSid()
         => traverseGrantOwnerResolver.ResolveStorageOwnerSid(_sid);
-
-    private string? GetEffectiveConfigPath(GrantedPathEntry entry)
-    {
-        var normalizedPath = Path.GetFullPath(entry.Path);
-        if (_pending.PendingTraverseConfigMoves.TryGetValue(normalizedPath, out var pendingTarget))
-            return NormalizeConfigPath(pendingTarget.TargetConfigPath);
-
-        var lookupSid = GetTraverseLookupSid();
-        return grantIntentRepository.FindTraverse(lookupSid, entry)?.Store.ConfigPath;
-    }
-
-    private string? NormalizeConfigPath(string? configPath)
-        => grantIntentStoreProvider.ResolveStore(configPath).ConfigPath;
 }

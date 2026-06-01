@@ -3,6 +3,7 @@ using Moq;
 using RunFence.Account;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Launching.Processes;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -81,6 +82,6 @@ public class ProcessTerminationServiceTests
     private static ProcessTerminationService CreateService()
     {
         var log = new Mock<ILoggingService>();
-        return new ProcessTerminationService(log.Object);
+        return new ProcessTerminationService(log.Object, new ProcessSnapshotScanner());
     }
 }

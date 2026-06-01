@@ -1,20 +1,17 @@
 using RunFence.Account;
 using RunFence.Core;
 using RunFence.Infrastructure;
-using RunFence.Persistence;
 
 namespace RunFence.Acl.UI;
 
 public sealed class AclBulkScanWorkflow(
     IAccountAclBulkScanService bulkScan,
-    IAclService aclService,
     ILoggingService log,
     ISidNameCacheService sidNameCache,
     IAclBulkScanResultProcessor resultProcessor,
     IAclBulkScanWarningPresenter warningPresenter,
     IAclBulkScanResultDialogFactory bulkScanResultDialogFactory,
-    IFolderBrowserDialogAdapterFactory folderBrowserDialogFactory,
-    IDatabaseProvider databaseProvider)
+    IFolderBrowserDialogAdapterFactory folderBrowserDialogFactory)
 {
     public async Task RunAsync(IAclBulkScanWorkflowContext context)
     {
@@ -57,8 +54,6 @@ public sealed class AclBulkScanWorkflow(
             context.SetStatusText("Ready");
         }
 
-        var database = databaseProvider.GetDatabase();
-        scanResults = resultProcessor.FilterManagedPaths(scanResults, database.Apps, aclService);
         if (scanResults.Count == 0)
         {
             context.ShowNoResults();

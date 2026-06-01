@@ -14,6 +14,46 @@ public class AclApplyPostProcessorTests
 {
     private const string TestSid = "S-1-5-21-111-222-333-1001";
     private const string ContainerSid = "S-1-15-2-99-1-2-3-4-5-6";
+    private static readonly AclApplyPhaseCatalog PhaseCatalog = new();
+
+    private static AclGrantPendingChangesSnapshot GetGrantSnapshot(AclManagerPendingChanges pending)
+        => pending.Grants.GetSnapshot();
+
+    private static AclTraversePendingChangesSnapshot GetTraverseSnapshot(AclManagerPendingChanges pending)
+        => pending.Traverse.GetSnapshot();
+
+    private static void AddPendingGrant(AclManagerPendingChanges pending, GrantedPathEntry entry)
+        => pending.Grants.AddGrant(entry);
+
+    private static void AddPendingRemoval(AclManagerPendingChanges pending, GrantedPathEntry entry)
+        => pending.Grants.MarkGrantForRemoval(entry);
+
+    private static void AddPendingModification(AclManagerPendingChanges pending, GrantedPathEntry entry, PendingModification modification)
+        => pending.Grants.ModifyGrant(entry, modification);
+
+    private static void AddPendingGrantFix(AclManagerPendingChanges pending, GrantedPathEntry entry)
+        => pending.Grants.AddGrantFix(entry);
+
+    private static void AddPendingTraverse(AclManagerPendingChanges pending, GrantedPathEntry entry)
+        => pending.Traverse.AddTraverse(entry);
+
+    private static void AddPendingTraverseRemoval(AclManagerPendingChanges pending, GrantedPathEntry entry)
+        => pending.Traverse.MarkTraverseForRemoval(entry);
+
+    private static void AddPendingTraverseFix(AclManagerPendingChanges pending, GrantedPathEntry entry)
+        => pending.Traverse.AddTraverseFix(entry);
+
+    private static void AddPendingUntrackGrant(AclManagerPendingChanges pending, GrantedPathEntry entry)
+        => pending.Grants.UntrackGrant(entry);
+
+    private static void AddPendingUntrackTraverse(AclManagerPendingChanges pending, GrantedPathEntry entry)
+        => pending.Traverse.UntrackTraverse(entry);
+
+    private static void AddPendingGrantConfigMove(AclManagerPendingChanges pending, GrantedPathEntry entry, string? targetConfigPath)
+        => pending.Grants.MoveGrantConfig(entry, targetConfigPath);
+
+    private static void AddPendingTraverseConfigMove(AclManagerPendingChanges pending, GrantedPathEntry entry, string? targetConfigPath)
+        => pending.Traverse.MoveTraverseConfig(entry, targetConfigPath);
 
     [Fact]
     public void Apply_AllSuccess_ClearsPending_PinsUnpins_WithoutRepeatedStoreSave()
@@ -23,17 +63,17 @@ public class AclApplyPostProcessorTests
             quickAccessPinService: quickAccess.Object);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(@"C:\Add", false)] = new GrantedPathEntry
+        AddPendingGrant(pending, new GrantedPathEntry
         {
             Path = @"C:\Add",
             IsDeny = false,
             SavedRights = SavedRightsState.DefaultForMode(false)
-        };
-        pending.PendingRemoves[(@"C:\Remove", false)] = new GrantedPathEntry
+        });
+        AddPendingRemoval(pending, new GrantedPathEntry
         {
             Path = @"C:\Remove",
             IsDeny = false
-        };
+        });
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var outcome = sut.Apply(plan, CreateExecutionResultWithCompletedPlanOperations(plan), pending, TestSid, isContainer: false);
@@ -51,10 +91,9 @@ public class AclApplyPostProcessorTests
         var sut = CreateSut(out _, out _, out _);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(@"C:\Fail", false)] = new GrantedPathEntry { Path = @"C:\Fail", IsDeny = false };
-        pending.PendingAdds[(@"C:\Ok", false)] = new GrantedPathEntry { Path = @"C:\Ok", IsDeny = false };
-        pending.PendingConfigMoves[(@"C:\Ok", false)] =
-            new PendingConfigMove(new GrantedPathEntry { Path = @"C:\Ok", IsDeny = false }, "extra.rfn");
+        AddPendingGrant(pending, new GrantedPathEntry { Path = @"C:\Fail", IsDeny = false });
+        AddPendingGrant(pending, new GrantedPathEntry { Path = @"C:\Ok", IsDeny = false });
+        AddPendingGrantConfigMove(pending, new GrantedPathEntry { Path = @"C:\Ok", IsDeny = false }, "extra.rfn");
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var execution = new AclApplyExecutionResult();
@@ -68,9 +107,9 @@ public class AclApplyPostProcessorTests
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.True(pending.IsPendingAdd(@"C:\Fail", false));
-        Assert.False(pending.IsPendingAdd(@"C:\Ok", false));
-        Assert.False(pending.PendingConfigMoves.ContainsKey((@"C:\Ok", false)));
+        Assert.True(pending.Grants.IsPendingAdd(@"C:\Fail", false));
+        Assert.False(pending.Grants.IsPendingAdd(@"C:\Ok", false));
+        Assert.False(pending.Grants.TryGetPendingConfigMove(@"C:\Ok", false, out _));
         Assert.Single(outcome.Errors);
     }
 
@@ -85,7 +124,7 @@ public class AclApplyPostProcessorTests
             new InvalidOperationException("save warning"));
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingRemoves[(@"C:\Warning", false)] = new GrantedPathEntry { Path = @"C:\Warning", IsDeny = false };
+        AddPendingRemoval(pending, new GrantedPathEntry { Path = @"C:\Warning", IsDeny = false });
         var plan = new AclApplyPlanBuilder().Build(pending);
         var execution = new AclApplyExecutionResult();
         execution.MarkCompleted(AclPendingOperationKind.GrantRemove, @"C:\Warning", false);
@@ -125,12 +164,10 @@ public class AclApplyPostProcessorTests
         };
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(completedEntry.Path, completedEntry.IsDeny)] = completedEntry;
-        pending.PendingAdds[(untouchedEntry.Path, untouchedEntry.IsDeny)] = untouchedEntry;
-        pending.PendingConfigMoves[(completedEntry.Path, completedEntry.IsDeny)] =
-            new PendingConfigMove(completedEntry, @"C:\Configs\extra.rfn");
-        pending.PendingConfigMoves[(pureMoveEntry.Path, pureMoveEntry.IsDeny)] =
-            new PendingConfigMove(pureMoveEntry, @"C:\Configs\extra.rfn");
+        AddPendingGrant(pending, completedEntry);
+        AddPendingGrant(pending, untouchedEntry);
+        AddPendingGrantConfigMove(pending, completedEntry, @"C:\Configs\extra.rfn");
+        AddPendingGrantConfigMove(pending, pureMoveEntry, @"C:\Configs\extra.rfn");
         var plan = new AclApplyPlanBuilder().Build(pending);
         var execution = new AclApplyExecutionResult
         {
@@ -141,10 +178,10 @@ public class AclApplyPostProcessorTests
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.False(pending.PendingAdds.ContainsKey((completedEntry.Path, completedEntry.IsDeny)));
-        Assert.True(pending.PendingAdds.ContainsKey((untouchedEntry.Path, untouchedEntry.IsDeny)));
-        Assert.False(pending.PendingConfigMoves.ContainsKey((completedEntry.Path, completedEntry.IsDeny)));
-        Assert.True(pending.PendingConfigMoves.ContainsKey((pureMoveEntry.Path, pureMoveEntry.IsDeny)));
+        Assert.False(GetGrantSnapshot(pending).PendingAdds.ContainsKey((completedEntry.Path, completedEntry.IsDeny)));
+        Assert.True(GetGrantSnapshot(pending).PendingAdds.ContainsKey((untouchedEntry.Path, untouchedEntry.IsDeny)));
+        Assert.False(pending.Grants.TryGetPendingConfigMove(completedEntry.Path, completedEntry.IsDeny, out _));
+        Assert.True(pending.Grants.TryGetPendingConfigMove(pureMoveEntry.Path, pureMoveEntry.IsDeny, out _));
         quickAccess.Verify(
             x => x.PinFolders(TestSid, It.Is<IReadOnlyList<string>>(paths => paths.Count == 1 && paths.Contains(completedEntry.Path))),
             Times.Once);
@@ -167,12 +204,10 @@ public class AclApplyPostProcessorTests
         };
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingGrantFixes[(grantEntry.Path, grantEntry.IsDeny)] = grantEntry;
-        pending.PendingTraverseFixes[traverseEntry.Path] = traverseEntry;
-        pending.PendingConfigMoves[(grantEntry.Path, grantEntry.IsDeny)] =
-            new PendingConfigMove(grantEntry, @"C:\Configs\extra.rfn");
-        pending.PendingTraverseConfigMoves[traverseEntry.Path] =
-            new PendingConfigMove(traverseEntry, @"C:\Configs\extra.rfn");
+        AddPendingGrantFix(pending, grantEntry);
+        AddPendingTraverseFix(pending, traverseEntry);
+        AddPendingGrantConfigMove(pending, grantEntry, @"C:\Configs\extra.rfn");
+        AddPendingTraverseConfigMove(pending, traverseEntry, @"C:\Configs\extra.rfn");
         var plan = new AclApplyPlanBuilder().Build(pending);
         var execution = new AclApplyExecutionResult
         {
@@ -184,10 +219,10 @@ public class AclApplyPostProcessorTests
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.False(pending.PendingGrantFixes.ContainsKey((grantEntry.Path, grantEntry.IsDeny)));
-        Assert.False(pending.PendingTraverseFixes.ContainsKey(traverseEntry.Path));
-        Assert.True(pending.PendingConfigMoves.ContainsKey((grantEntry.Path, grantEntry.IsDeny)));
-        Assert.True(pending.PendingTraverseConfigMoves.ContainsKey(traverseEntry.Path));
+        Assert.False(GetGrantSnapshot(pending).PendingGrantFixes.ContainsKey((grantEntry.Path, grantEntry.IsDeny)));
+        Assert.False(GetTraverseSnapshot(pending).PendingFixes.ContainsKey(traverseEntry.Path));
+        Assert.True(pending.Grants.TryGetPendingConfigMove(grantEntry.Path, grantEntry.IsDeny, out _));
+        Assert.True(pending.Traverse.TryGetPendingTraverseConfigMove(traverseEntry.Path, out _));
         Assert.Empty(outcome.Errors);
         Assert.Empty(outcome.Warnings);
     }
@@ -204,15 +239,14 @@ public class AclApplyPostProcessorTests
         };
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingModifications[(entry.Path, entry.IsDeny)] = new PendingModification(
+        AddPendingModification(pending, entry, new PendingModification(
             entry,
             WasIsDeny: false,
             WasOwn: false,
             NewIsDeny: false,
             NewRights: entry.SavedRights,
-            WasRights: entry.SavedRights);
-        pending.PendingConfigMoves[(entry.Path, entry.IsDeny)] =
-            new PendingConfigMove(entry, @"C:\Configs\extra.rfn");
+            WasRights: entry.SavedRights));
+        AddPendingGrantConfigMove(pending, entry, @"C:\Configs\extra.rfn");
         var plan = new AclApplyPlanBuilder().Build(pending);
         var execution = new AclApplyExecutionResult
         {
@@ -223,8 +257,8 @@ public class AclApplyPostProcessorTests
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.False(pending.PendingModifications.ContainsKey((entry.Path, entry.IsDeny)));
-        Assert.False(pending.PendingConfigMoves.ContainsKey((entry.Path, entry.IsDeny)));
+        Assert.False(GetGrantSnapshot(pending).PendingModifications.ContainsKey((entry.Path, entry.IsDeny)));
+        Assert.False(pending.Grants.TryGetPendingConfigMove(entry.Path, entry.IsDeny, out _));
         Assert.Empty(outcome.Errors);
         Assert.Empty(outcome.Warnings);
     }
@@ -244,15 +278,14 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingConfigMoves[(entry.Path, entry.IsDeny)] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
-        pending.PendingModifications[(entry.Path, entry.IsDeny)] = new PendingModification(
+        AddPendingGrantConfigMove(pending, entry, additionalStore.ConfigPath);
+        AddPendingModification(pending, entry, new PendingModification(
             entry,
             WasIsDeny: false,
             WasOwn: false,
             NewIsDeny: false,
             NewRights: entry.SavedRights! with { Execute = true },
-            WasRights: entry.SavedRights);
+            WasRights: entry.SavedRights));
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var execution = new AclApplyExecutionResult();
@@ -265,7 +298,7 @@ public class AclApplyPostProcessorTests
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.True(pending.PendingConfigMoves.ContainsKey((entry.Path, entry.IsDeny)));
+        Assert.True(pending.Grants.TryGetPendingConfigMove(entry.Path, entry.IsDeny, out _));
         Assert.Equal(0, mainStore.SaveCount);
         Assert.Equal(0, additionalStore.SaveCount);
         Assert.Single(mainStore.GetEntries(TestSid));
@@ -287,15 +320,14 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingConfigMoves[(entry.Path, entry.IsDeny)] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
-        pending.PendingModifications[(entry.Path, entry.IsDeny)] = new PendingModification(
+        AddPendingGrantConfigMove(pending, entry, additionalStore.ConfigPath);
+        AddPendingModification(pending, entry, new PendingModification(
             entry,
             WasIsDeny: true,
             WasOwn: false,
             NewIsDeny: true,
             NewRights: SavedRightsState.DefaultForMode(true),
-            WasRights: entry.SavedRights);
+            WasRights: entry.SavedRights));
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var execution = new AclApplyExecutionResult();
@@ -308,8 +340,8 @@ public class AclApplyPostProcessorTests
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.True(pending.PendingModifications.ContainsKey((entry.Path, entry.IsDeny)));
-        Assert.True(pending.PendingConfigMoves.ContainsKey((entry.Path, entry.IsDeny)));
+        Assert.True(GetGrantSnapshot(pending).PendingModifications.ContainsKey((entry.Path, entry.IsDeny)));
+        Assert.True(pending.Grants.TryGetPendingConfigMove(entry.Path, entry.IsDeny, out _));
         Assert.Equal(0, mainStore.SaveCount);
         Assert.Equal(0, additionalStore.SaveCount);
         Assert.Single(mainStore.GetEntries(TestSid));
@@ -330,9 +362,8 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingTraverseConfigMoves[entry.Path] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
-        pending.PendingTraverseFixes[entry.Path] = entry;
+        AddPendingTraverseConfigMove(pending, entry, additionalStore.ConfigPath);
+        AddPendingTraverseFix(pending, entry);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var execution = new AclApplyExecutionResult();
@@ -345,8 +376,8 @@ public class AclApplyPostProcessorTests
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.True(pending.PendingTraverseConfigMoves.ContainsKey(entry.Path));
-        Assert.True(pending.PendingTraverseFixes.ContainsKey(entry.Path));
+        Assert.True(pending.Traverse.TryGetPendingTraverseConfigMove(entry.Path, out _));
+        Assert.True(GetTraverseSnapshot(pending).PendingFixes.ContainsKey(entry.Path));
         Assert.Equal(0, mainStore.SaveCount);
         Assert.Equal(0, additionalStore.SaveCount);
         Assert.Single(mainStore.GetEntries(TestSid));
@@ -368,9 +399,8 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingConfigMoves[(entry.Path, entry.IsDeny)] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
-        pending.PendingGrantFixes[(entry.Path, entry.IsDeny)] = entry;
+        AddPendingGrantConfigMove(pending, entry, additionalStore.ConfigPath);
+        AddPendingGrantFix(pending, entry);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var execution = new AclApplyExecutionResult();
@@ -383,8 +413,8 @@ public class AclApplyPostProcessorTests
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.True(pending.PendingConfigMoves.ContainsKey((entry.Path, entry.IsDeny)));
-        Assert.True(pending.PendingGrantFixes.ContainsKey((entry.Path, entry.IsDeny)));
+        Assert.True(pending.Grants.TryGetPendingConfigMove(entry.Path, entry.IsDeny, out _));
+        Assert.True(GetGrantSnapshot(pending).PendingGrantFixes.ContainsKey((entry.Path, entry.IsDeny)));
         Assert.Equal(0, mainStore.SaveCount);
         Assert.Equal(0, additionalStore.SaveCount);
         Assert.Single(mainStore.GetEntries(TestSid));
@@ -405,9 +435,8 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingTraverseConfigMoves[entry.Path] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
-        pending.PendingTraverseFixes[entry.Path] = entry;
+        AddPendingTraverseConfigMove(pending, entry, additionalStore.ConfigPath);
+        AddPendingTraverseFix(pending, entry);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var outcome = sut.Apply(plan, CreateExecutionResultWithCompletedPlanOperations(plan), pending, TestSid, isContainer: false);
@@ -436,9 +465,8 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingConfigMoves[(entry.Path, entry.IsDeny)] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
-        pending.PendingGrantFixes[(entry.Path, entry.IsDeny)] = entry;
+        AddPendingGrantConfigMove(pending, entry, additionalStore.ConfigPath);
+        AddPendingGrantFix(pending, entry);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var outcome = sut.Apply(plan, CreateExecutionResultWithCompletedPlanOperations(plan), pending, TestSid, isContainer: false);
@@ -466,8 +494,7 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingConfigMoves[(entry.Path, entry.IsDeny)] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
+        AddPendingGrantConfigMove(pending, entry, additionalStore.ConfigPath);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var outcome = sut.Apply(plan, CreateExecutionResultWithCompletedPlanOperations(plan), pending, TestSid, isContainer: false);
@@ -502,8 +529,7 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, targetEntry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingConfigMoves[(targetEntry.Path, targetEntry.IsDeny)] =
-            new PendingConfigMove(targetEntry, additionalStore.ConfigPath);
+        AddPendingGrantConfigMove(pending, targetEntry, additionalStore.ConfigPath);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var outcome = sut.Apply(plan, CreateExecutionResultWithCompletedPlanOperations(plan), pending, TestSid, isContainer: false);
@@ -531,8 +557,7 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(WellKnownSecuritySids.AllApplicationPackagesSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingTraverseConfigMoves[entry.Path] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
+        AddPendingTraverseConfigMove(pending, entry, additionalStore.ConfigPath);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var outcome = sut.Apply(plan, CreateExecutionResultWithCompletedPlanOperations(plan), pending, ContainerSid, isContainer: true);
@@ -567,8 +592,7 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(WellKnownSecuritySids.AllApplicationPackagesSid, otherEntry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingTraverseConfigMoves[currentEntry.Path] =
-            new PendingConfigMove(currentEntry, additionalStore.ConfigPath);
+        AddPendingTraverseConfigMove(pending, currentEntry, additionalStore.ConfigPath);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var outcome = sut.Apply(plan, CreateExecutionResultWithCompletedPlanOperations(plan), pending, ContainerSid, isContainer: true);
@@ -601,15 +625,14 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, entry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingConfigMoves[(entry.Path, entry.IsDeny)] =
-            new PendingConfigMove(entry, additionalStore.ConfigPath);
+        AddPendingGrantConfigMove(pending, entry, additionalStore.ConfigPath);
         var plan = new AclApplyPlanBuilder().Build(pending);
 
         var outcome = sut.Apply(plan, new AclApplyExecutionResult(), pending, TestSid, isContainer: false);
 
         var error = Assert.Single(outcome.Errors);
         Assert.False(outcome.Succeeded);
-        Assert.True(pending.PendingConfigMoves.ContainsKey((entry.Path, entry.IsDeny)));
+        Assert.True(pending.Grants.TryGetPendingConfigMove(entry.Path, entry.IsDeny, out _));
         Assert.Equal(GrantApplyFailureStep.GrantIntentSave, error.Step);
         Assert.Equal(additionalStore.ConfigPath, error.ConfigPath);
         Assert.Empty(outcome.Warnings);
@@ -626,14 +649,14 @@ public class AclApplyPostProcessorTests
             quickAccessPinService: quickAccess.Object);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(@"C:\Cancel", false)] = new GrantedPathEntry { Path = @"C:\Cancel", IsDeny = false };
+        AddPendingGrant(pending, new GrantedPathEntry { Path = @"C:\Cancel", IsDeny = false });
         var plan = new AclApplyPlanBuilder().Build(pending);
         var execution = new AclApplyExecutionResult { WasCanceled = true };
 
         var outcome = sut.Apply(plan, execution, pending, TestSid, isContainer: false);
 
         Assert.False(outcome.Succeeded);
-        Assert.True(pending.IsPendingAdd(@"C:\Cancel", false));
+        Assert.True(pending.Grants.IsPendingAdd(@"C:\Cancel", false));
         quickAccess.Verify(x => x.PinFolders(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()), Times.Never);
         quickAccess.Verify(x => x.UnpinFolders(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()), Times.Never);
     }
@@ -665,14 +688,11 @@ public class AclApplyPostProcessorTests
         mainStore.AddEntry(TestSid, pureMoveEntry);
 
         var pending = new AclManagerPendingChanges();
-        pending.PendingAdds[(completedEntry.Path, completedEntry.IsDeny)] = completedEntry;
-        pending.PendingAdds[(fatalEntry.Path, fatalEntry.IsDeny)] = fatalEntry;
-        pending.PendingConfigMoves[(completedEntry.Path, completedEntry.IsDeny)] =
-            new PendingConfigMove(completedEntry, additionalStore.ConfigPath);
-        pending.PendingConfigMoves[(fatalEntry.Path, fatalEntry.IsDeny)] =
-            new PendingConfigMove(fatalEntry, additionalStore.ConfigPath);
-        pending.PendingConfigMoves[(pureMoveEntry.Path, pureMoveEntry.IsDeny)] =
-            new PendingConfigMove(pureMoveEntry, additionalStore.ConfigPath);
+        AddPendingGrant(pending, completedEntry);
+        AddPendingGrant(pending, fatalEntry);
+        AddPendingGrantConfigMove(pending, completedEntry, additionalStore.ConfigPath);
+        AddPendingGrantConfigMove(pending, fatalEntry, additionalStore.ConfigPath);
+        AddPendingGrantConfigMove(pending, pureMoveEntry, additionalStore.ConfigPath);
         var plan = new AclApplyPlanBuilder().Build(pending);
         var execution = new AclApplyExecutionResult();
         execution.MarkCompleted(AclPendingOperationKind.GrantAdd, completedEntry.Path, completedEntry.IsDeny);
@@ -687,11 +707,11 @@ public class AclApplyPostProcessorTests
         var error = Assert.Single(outcome.Errors);
         Assert.False(outcome.Succeeded);
         Assert.Equal(fatalEntry.Path, error.Path);
-        Assert.False(pending.PendingAdds.ContainsKey((completedEntry.Path, completedEntry.IsDeny)));
-        Assert.True(pending.PendingAdds.ContainsKey((fatalEntry.Path, fatalEntry.IsDeny)));
-        Assert.False(pending.PendingConfigMoves.ContainsKey((completedEntry.Path, completedEntry.IsDeny)));
-        Assert.True(pending.PendingConfigMoves.ContainsKey((fatalEntry.Path, fatalEntry.IsDeny)));
-        Assert.True(pending.PendingConfigMoves.ContainsKey((pureMoveEntry.Path, pureMoveEntry.IsDeny)));
+        Assert.False(GetGrantSnapshot(pending).PendingAdds.ContainsKey((completedEntry.Path, completedEntry.IsDeny)));
+        Assert.True(GetGrantSnapshot(pending).PendingAdds.ContainsKey((fatalEntry.Path, fatalEntry.IsDeny)));
+        Assert.False(pending.Grants.TryGetPendingConfigMove(completedEntry.Path, completedEntry.IsDeny, out _));
+        Assert.True(pending.Grants.TryGetPendingConfigMove(fatalEntry.Path, fatalEntry.IsDeny, out _));
+        Assert.True(pending.Grants.TryGetPendingConfigMove(pureMoveEntry.Path, pureMoveEntry.IsDeny, out _));
         Assert.Equal(0, mainStore.SaveCount);
         Assert.Equal(0, additionalStore.SaveCount);
     }
@@ -706,12 +726,15 @@ public class AclApplyPostProcessorTests
         mainStore = new TestGrantIntentStore { OwnershipProjectionService = ownershipProjection };
         stores = new TestGrantIntentStoreProvider(mainStore, ownershipProjection);
         log = new Mock<ILoggingService>();
+        var postProcessingPolicy = new AclApplyPostProcessingPolicy(PhaseCatalog);
         return new AclApplyPostProcessor(
             log.Object,
             new GrantIntentRepository(stores),
             stores,
             quickAccessPinService ?? new Mock<IQuickAccessPinService>().Object,
-            new TraverseGrantOwnerResolver());
+            new TraverseGrantOwnerResolver(),
+            PhaseCatalog,
+            postProcessingPolicy);
     }
 
     private static GrantOperationException CreateGrantOperationException(
@@ -724,32 +747,50 @@ public class AclApplyPostProcessorTests
     {
         var result = new AclApplyExecutionResult();
 
-        foreach (var entry in plan.PendingAdds)
-            result.MarkCompleted(AclPendingOperationKind.GrantAdd, entry.Path, entry.IsDeny);
-
-        foreach (var entry in plan.PendingRemoves)
-            result.MarkCompleted(AclPendingOperationKind.GrantRemove, entry.Path, entry.IsDeny);
-
-        foreach (var modification in plan.PendingModifications)
-            result.MarkCompleted(AclPendingOperationKind.GrantModification, modification.Entry.Path, modification.Entry.IsDeny);
-
-        foreach (var entry in plan.PendingGrantFixes)
-            result.MarkCompleted(AclPendingOperationKind.GrantFix, entry.Path, entry.IsDeny);
-
-        foreach (var entry in plan.PendingTraverseAdds)
-            result.MarkCompleted(AclPendingOperationKind.TraverseAdd, entry.Path, null);
-
-        foreach (var entry in plan.PendingTraverseRemoves)
-            result.MarkCompleted(AclPendingOperationKind.TraverseRemove, entry.Path, null);
-
-        foreach (var entry in plan.PendingTraverseFixes)
-            result.MarkCompleted(AclPendingOperationKind.TraverseFix, entry.Path, null);
-
-        foreach (var entry in plan.PendingUntrackGrants)
-            result.MarkCompleted(AclPendingOperationKind.GrantUntrack, entry.Path, entry.IsDeny);
-
-        foreach (var entry in plan.PendingUntrackTraverse)
-            result.MarkCompleted(AclPendingOperationKind.TraverseUntrack, entry.Path, null);
+        foreach (var descriptor in PhaseCatalog.OrderedPhases)
+        {
+            switch (descriptor.Phase)
+            {
+                case AclApplyPhase.GrantAdd:
+                    foreach (var entry in plan.PendingAdds)
+                        result.MarkCompleted(descriptor.OperationKind, entry.Path, entry.IsDeny);
+                    break;
+                case AclApplyPhase.GrantRemove:
+                    foreach (var entry in plan.PendingRemoves)
+                        result.MarkCompleted(descriptor.OperationKind, entry.Path, entry.IsDeny);
+                    break;
+                case AclApplyPhase.GrantModification:
+                    foreach (var modification in plan.PendingModifications)
+                        result.MarkCompleted(descriptor.OperationKind, modification.Entry.Path, modification.Entry.IsDeny);
+                    break;
+                case AclApplyPhase.GrantFix:
+                    foreach (var entry in plan.PendingGrantFixes)
+                        result.MarkCompleted(descriptor.OperationKind, entry.Path, entry.IsDeny);
+                    break;
+                case AclApplyPhase.TraverseAdd:
+                    foreach (var entry in plan.PendingTraverseAdds)
+                        result.MarkCompleted(descriptor.OperationKind, entry.Path, null);
+                    break;
+                case AclApplyPhase.TraverseRemove:
+                    foreach (var entry in plan.PendingTraverseRemoves)
+                        result.MarkCompleted(descriptor.OperationKind, entry.Path, null);
+                    break;
+                case AclApplyPhase.TraverseFix:
+                    foreach (var entry in plan.PendingTraverseFixes)
+                        result.MarkCompleted(descriptor.OperationKind, entry.Path, null);
+                    break;
+                case AclApplyPhase.GrantUntrack:
+                    foreach (var entry in plan.PendingUntrackGrants)
+                        result.MarkCompleted(descriptor.OperationKind, entry.Path, entry.IsDeny);
+                    break;
+                case AclApplyPhase.TraverseUntrack:
+                    foreach (var entry in plan.PendingUntrackTraverse)
+                        result.MarkCompleted(descriptor.OperationKind, entry.Path, null);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+        }
 
         return result;
     }

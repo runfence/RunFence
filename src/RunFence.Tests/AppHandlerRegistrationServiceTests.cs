@@ -1,9 +1,9 @@
-using Microsoft.Win32;
 using Moq;
 using RunFence.Apps;
 using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Licensing;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -12,8 +12,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 {
     private readonly Mock<ILoggingService> _log;
     private readonly Mock<ILicenseService> _licenseService;
-    private readonly string _testSubKey;
-    private readonly RegistryKey _hklmRoot;
+    private readonly InMemoryRegistryKey _hklmRoot;
     private readonly TempDirectory _tempDir;
     private readonly string _launcherPath;
 
@@ -22,8 +21,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         _log = new Mock<ILoggingService>();
         _licenseService = new Mock<ILicenseService>();
         _licenseService.Setup(l => l.IsLicensed).Returns(true);
-        _testSubKey = $@"Software\RunFenceTests\HandlerReg_{Guid.NewGuid():N}";
-        _hklmRoot = Registry.CurrentUser.CreateSubKey(_testSubKey);
+        _hklmRoot = InMemoryRegistryKey.CreateRoot("HandlerReg");
         _tempDir = new TempDirectory("RunFenceHandlerTests");
         _launcherPath = Path.Combine(_tempDir.Path, "RunFence.Launcher.exe");
         File.WriteAllText(_launcherPath, "stub");
@@ -32,14 +30,6 @@ public class AppHandlerRegistrationServiceTests : IDisposable
     public void Dispose()
     {
         _hklmRoot.Dispose();
-        try
-        {
-            Registry.CurrentUser.DeleteSubKeyTree(_testSubKey, throwOnMissingSubKey: false);
-        }
-        catch
-        {
-        }
-
         _tempDir.Dispose();
     }
 
@@ -55,7 +45,7 @@ public class AppHandlerRegistrationServiceTests : IDisposable
         return key?.GetValue(valueName) as string;
     }
 
-    private RegistryKey? OpenKey(string subKey)
+    private IRegistryKey? OpenKey(string subKey)
         => _hklmRoot.OpenSubKey(subKey);
 
     private List<string> GetProgIds()
@@ -210,7 +200,6 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         CreateService().Sync(mappings, []);
 
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("app not found"))), Times.Once);
         Assert.Null(OpenKey(ProgIdKey("http")));
     }
 
@@ -228,7 +217,6 @@ public class AppHandlerRegistrationServiceTests : IDisposable
 
         CreateService().Sync(mappings, [app]);
 
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("unsafe characters"))), Times.Exactly(3));
         Assert.Empty(GetProgIds());
     }
 

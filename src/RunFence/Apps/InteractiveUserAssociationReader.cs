@@ -14,12 +14,13 @@ namespace RunFence.Apps;
 public class InteractiveUserAssociationReader(
     IUserHiveManager hiveManager,
     IInteractiveUserResolver interactiveUserResolver,
-    RegistryKey? hkuOverride = null,
-    RegistryKey? hklmOverride = null)
+    IAssociationRegistryProtocolMarkerReader protocolMarkerReader,
+    IRegistryKey? hkuOverride = null,
+    IRegistryKey? hklmOverride = null)
     : IInteractiveUserAssociationReader
 {
-    private readonly RegistryKey _hku = hkuOverride ?? Registry.Users;
-    private readonly RegistryKey _hklm = hklmOverride ?? Registry.LocalMachine;
+    private readonly IRegistryKey _hku = hkuOverride ?? new WindowsRegistryKey(Registry.Users);
+    private readonly IRegistryKey _hklm = hklmOverride ?? new WindowsRegistryKey(Registry.LocalMachine);
     private IReadOnlyList<InteractiveAssociationEntry>? _cache;
 
     public IReadOnlyList<InteractiveAssociationEntry> GetInteractiveUserAssociations()
@@ -55,10 +56,10 @@ public class InteractiveUserAssociationReader(
                 else
                 {
                     using var protocolSubKey = hkuClasses.OpenSubKey(keyName);
-                    if (protocolSubKey?.GetValue("URL Protocol") == null)
+                    if (!protocolMarkerReader.HasUrlProtocolMarker(protocolSubKey))
                         continue;
 
-                    using var cmdKey = protocolSubKey.OpenSubKey(@"shell\open\command");
+                    using var cmdKey = protocolSubKey!.OpenSubKey(@"shell\open\command");
                     var command = cmdKey?.GetValue(null) as string;
                     if (string.IsNullOrEmpty(command))
                         continue;
@@ -114,10 +115,10 @@ public class InteractiveUserAssociationReader(
         }
 
         using var protocolKey = hkuClasses?.OpenSubKey(key);
-        if (protocolKey?.GetValue("URL Protocol") == null)
+        if (!protocolMarkerReader.HasUrlProtocolMarker(protocolKey))
             return null;
 
-        using var cmdKey = protocolKey.OpenSubKey(@"shell\open\command");
+        using var cmdKey = protocolKey!.OpenSubKey(@"shell\open\command");
         var command = cmdKey?.GetValue(null) as string;
         if (string.IsNullOrEmpty(command) || IsRunFenceCommand(command))
             return null;
@@ -126,7 +127,7 @@ public class InteractiveUserAssociationReader(
     }
 
     private DirectHandlerEntry? ResolveExtension(string key, string sid,
-        RegistryKey? hkuClasses, RegistryKey? hklmClasses)
+        IRegistryKey? hkuClasses, IRegistryKey? hklmClasses)
     {
         // Step 1: direct HKCU default value
         string? progId = null;
@@ -151,7 +152,7 @@ public class InteractiveUserAssociationReader(
     }
 
     private DirectHandlerEntry? ResolveProgId(string progId,
-        RegistryKey? hkuClasses, RegistryKey? hklmClasses)
+        IRegistryKey? hkuClasses, IRegistryKey? hklmClasses)
     {
         // Check if progId exists as class in HKLM (stable, machine-wide)
         using var hklmProgIdKey = hklmClasses?.OpenSubKey($@"{progId}\shell\open\command");

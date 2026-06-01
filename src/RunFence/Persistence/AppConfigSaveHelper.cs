@@ -3,11 +3,6 @@ using RunFence.Core.Models;
 
 namespace RunFence.Persistence;
 
-/// <summary>
-/// Encapsulates all save operations for app config files (main and additional).
-/// Extracted from <see cref="AppConfigService"/> to keep that class focused on
-/// load/unload/mapping state management.
-/// </summary>
 public class AppConfigSaveHelper(
     Func<IGrantIntentStoreProvider> grantIntentStoreProvider,
     IHandlerMappingService handlerMappings,
@@ -50,7 +45,7 @@ public class AppConfigSaveHelper(
     public void SaveImportedConfig(string path, AppConfig config,
         ISecureSecretSnapshotSource pinDerivedKey, byte[] argonSalt)
     {
-        var normalized = Path.GetFullPath(path);
+        var normalized = AppConfigPathHelper.NormalizePath(path);
         databaseService.SaveAppConfig(config, normalized, pinDerivedKey, argonSalt);
     }
 
@@ -111,7 +106,7 @@ public class AppConfigSaveHelper(
         var store = grantIntentStoreProvider().ResolveStore(configPath);
         return new AppConfig
         {
-            Apps = apps,
+            Apps = apps.Select(app => app.Clone()).ToList(),
             Accounts = GrantIntentStoreConfigDataBuilder.BuildAccounts(store, database),
             HandlerMappings = handlerMappings.GetHandlerMappingsForConfig(configPath)
         };

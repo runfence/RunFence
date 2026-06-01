@@ -36,7 +36,7 @@ public class RunAsResultProcessor(
         dosProtection.Reset();
 
         // Grant container SID access — same permission dialog flow as user accounts.
-        // PathGrantService handles: ACE grant + AddGrant + traverse on ancestor directories
+        // Grant services handle: ACE grant + AddGrant + traverse on ancestor directories
         // + container auto-grant for interactive user (AppContainer dual access check step 1).
         if (result.PermissionGrant != null)
             ApplyGrantWithUserMessage(() =>

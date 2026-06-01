@@ -14,6 +14,8 @@ public class SidAclScanServiceTests
     private const string OldSidToMigrate = "S-1-5-21-1000000001-1000000002-1000000003-1001";
     private const string OldSidToDelete = "S-1-5-21-1000000001-1000000002-1000000003-1002";
     private const string NewSid = "S-1-5-21-2000000001-2000000002-2000000003-1001";
+    private static readonly string AdministratorsSid =
+        new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value;
 
     [Fact]
     public async Task ScanAsync_MixedMigrateAndDelete_IncludesDeleteSidAceMatches()
@@ -84,7 +86,7 @@ public class SidAclScanServiceTests
             .Returns([new AclTraversalEntry(@"C:\scan-root", true, security)]);
         var sidResolver = new Mock<ISidResolver>();
         sidResolver.Setup(r => r.TryResolveName(OldSidToDelete)).Returns((string?)null);
-        var service = new SidAclScanService(Mock.Of<ILoggingService>(), sidResolver.Object, traverser.Object, Mock.Of<IAclAccessor>());
+        var service = new SidAclScanService(Mock.Of<ILoggingService>(), sidResolver.Object, traverser.Object, Mock.Of<IPathSecurityDescriptorAccessor>());
 
         var results = await service.DiscoverOrphanedSidsAsync(
             [@"C:\scan-root"],
@@ -109,7 +111,7 @@ public class SidAclScanServiceTests
             .Returns([new AclTraversalEntry(@"C:\scan-root", true, security)]);
         var sidResolver = new Mock<ISidResolver>();
         sidResolver.Setup(r => r.TryResolveName(OldSidToDelete)).Throws(new TimeoutException("dc timeout"));
-        var service = new SidAclScanService(Mock.Of<ILoggingService>(), sidResolver.Object, traverser.Object, Mock.Of<IAclAccessor>());
+        var service = new SidAclScanService(Mock.Of<ILoggingService>(), sidResolver.Object, traverser.Object, Mock.Of<IPathSecurityDescriptorAccessor>());
 
         var results = await service.DiscoverOrphanedSidsAsync(
             [@"C:\scan-root"],
@@ -118,6 +120,35 @@ public class SidAclScanServiceTests
 
         var result = Assert.Single(results);
         Assert.Equal(OrphanedSidClassification.Unresolved, result.Classification);
+    }
+
+    [Fact]
+    public async Task DiscoverOrphanedSidsAsync_OwnerOnlyMatch_RecordsOwnerReferencePath()
+    {
+        var security = new DirectorySecurity();
+        security.SetOwner(new SecurityIdentifier(OldSidToDelete));
+        var traverser = new Mock<IFileSystemAclTraverser>();
+        traverser
+            .Setup(t => t.Traverse(
+                It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<IProgress<long>>(),
+                It.IsAny<CancellationToken>()))
+            .Returns([new AclTraversalEntry(@"C:\owner-only", true, security)]);
+        var sidResolver = new Mock<ISidResolver>();
+        sidResolver.Setup(r => r.TryResolveName(OldSidToDelete)).Returns((string?)null);
+        var service = new SidAclScanService(Mock.Of<ILoggingService>(), sidResolver.Object, traverser.Object, Mock.Of<IPathSecurityDescriptorAccessor>());
+
+        var results = await service.DiscoverOrphanedSidsAsync(
+            [@"C:\owner-only"],
+            new Progress<(long scanned, long sidsFound)>(),
+            CancellationToken.None);
+
+        var result = Assert.Single(results);
+        Assert.Equal(OrphanedSidClassification.ConfirmedOrphaned, result.Classification);
+        Assert.Equal(0, result.AceCount);
+        Assert.Equal(1, result.OwnerCount);
+        Assert.Empty(result.AceSamplePaths);
+        Assert.Equal([@"C:\owner-only"], result.OwnerSamplePaths);
     }
 
     [Fact]
@@ -168,7 +199,7 @@ public class SidAclScanServiceTests
     [Fact]
     public async Task ApplyAsync_UsesAclAccessorOwnerAndAclFallbackMutation()
     {
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         var security = new DirectorySecurity();
         security.AddAccessRule(CreateRule(OldSidToMigrate, FileSystemRights.Read));
         security.SetOwner(new SecurityIdentifier(OldSidToMigrate));
@@ -176,9 +207,8 @@ public class SidAclScanServiceTests
         aclAccessor
             .Setup(a => a.ModifyOwnerAndAclWithFallback(
                 @"C:\scan-root",
-                true,
                 It.IsAny<Func<FileSystemSecurity, bool>>()))
-            .Returns<string, bool, Func<FileSystemSecurity, bool>>((_, _, modify) => modify(security));
+            .Returns<string, Func<FileSystemSecurity, bool>>((_, modify) => modify(security));
 
         var service = CreateService(Mock.Of<IFileSystemAclTraverser>(), aclAccessor.Object);
         var hit = new SidMigrationMatch
@@ -204,7 +234,6 @@ public class SidAclScanServiceTests
         Assert.Equal(0, result.errors);
         aclAccessor.Verify(a => a.ModifyOwnerAndAclWithFallback(
             @"C:\scan-root",
-            true,
             It.IsAny<Func<FileSystemSecurity, bool>>()), Times.Once);
 
         var resultingSids = security
@@ -218,7 +247,42 @@ public class SidAclScanServiceTests
         Assert.Equal(NewSid, ownerSid.Value);
     }
 
-    private static SidAclScanService CreateService(IFileSystemAclTraverser traverser, IAclAccessor? aclAccessor = null)
+    [Fact]
+    public async Task ApplyAsync_DeleteOwnerMatch_ReplacesOwnerWithAdministrators()
+    {
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
+        var security = new DirectorySecurity();
+        security.SetOwner(new SecurityIdentifier(OldSidToDelete));
+
+        aclAccessor
+            .Setup(a => a.ModifyOwnerAndAclWithFallback(
+                @"C:\scan-root",
+                It.IsAny<Func<FileSystemSecurity, bool>>()))
+            .Returns<string, Func<FileSystemSecurity, bool>>((_, modify) => modify(security));
+
+        var service = CreateService(Mock.Of<IFileSystemAclTraverser>(), aclAccessor.Object);
+        var hit = new SidMigrationMatch
+        {
+            Path = @"C:\scan-root",
+            IsDirectory = true,
+            MatchType = SidMigrationMatchType.Owner,
+            OwnerOldSid = OldSidToDelete
+        };
+
+        var result = await service.ApplyAsync(
+            [hit],
+            [],
+            [OldSidToDelete],
+            new Progress<MigrationProgress>(),
+            CancellationToken.None);
+
+        Assert.Equal(1, result.applied);
+        Assert.Equal(0, result.errors);
+        var ownerSid = Assert.IsType<SecurityIdentifier>(security.GetOwner(typeof(SecurityIdentifier)));
+        Assert.Equal(AdministratorsSid, ownerSid.Value);
+    }
+
+    private static SidAclScanService CreateService(IFileSystemAclTraverser traverser, IPathSecurityDescriptorAccessor? aclAccessor = null)
         => new(Mock.Of<ILoggingService>(), Mock.Of<ISidResolver>(), traverser, aclAccessor ?? AclAccessorFactory.Create());
 
     private static FileSystemAccessRule CreateRule(string sid, FileSystemRights rights)
@@ -235,7 +299,7 @@ public class SidAclScanServiceTests
                 It.IsAny<CancellationToken>()))
             .Returns([]);
 
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         bool isFolder = true;
         aclAccessor.Setup(a => a.PathExists(root, out isFolder)).Returns(true);
         aclAccessor.Setup(a => a.GetSecurity(root)).Throws(new UnauthorizedAccessException("denied"));

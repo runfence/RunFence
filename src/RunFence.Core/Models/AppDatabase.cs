@@ -27,6 +27,13 @@ public class AppDatabase
     public Dictionary<string, JobKeeperInstanceIdentity>? JobKeeperInstances { get; set; }
 
     /// <summary>
+    /// Durable list of SIDs whose unrestricted tracking jobs are known to exist.
+    /// Entries are stored case-insensitively and de-duplicated by callers that mutate the list.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? TrackingJobSids { get; set; }
+
+    /// <summary>
     /// Snapshot of each known SID's local group memberships at the last reconciliation check.
     /// Used to detect group membership changes between sessions and re-apply traverse ACEs
     /// when a user is added to or removed from a group. Keys are SIDs (case-insensitive).
@@ -91,6 +98,7 @@ public class AppDatabase
         SidNames = new Dictionary<string, string>(SidNames, StringComparer.OrdinalIgnoreCase),
         JobKeeperInstances = JobKeeperInstances?.ToDictionary(
             kvp => kvp.Key, kvp => kvp.Value with { }, StringComparer.OrdinalIgnoreCase),
+        TrackingJobSids = TrackingJobSids?.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
         Accounts = Accounts.Select(a => a.Clone()).ToList(),
         AccountGroupSnapshots = AccountGroupSnapshots?.ToDictionary(
             kvp => kvp.Key, kvp => kvp.Value.ToList(), StringComparer.OrdinalIgnoreCase),
@@ -113,6 +121,7 @@ public class AppDatabase
             kvp => kvp.Key,
             kvp => kvp.Value with { },
             StringComparer.OrdinalIgnoreCase);
+        TrackingJobSids = snapshot.TrackingJobSids?.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         AccountGroupSnapshots = snapshot.AccountGroupSnapshots?.ToDictionary(
             kvp => kvp.Key,
             kvp => kvp.Value.ToList(),

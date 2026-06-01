@@ -35,7 +35,7 @@ public class LoggingService(string? logFilePath = null, long? maxFileSizeBytes =
 
     public void Error(string message, Exception? ex = null)
     {
-        var logMessage = ex != null ? $"{message} | {ex.GetType().Name}: {ex.Message}" : message;
+        var logMessage = ex != null ? $"{message} | {ex}" : message;
         Log(LogVerbosity.Error, "ERROR", logMessage);
     }
 

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using RunFence.Acl.UI;
 using RunFence.Core.Models;
 using RunFence.Launch;
+using RunFence.UI;
 
 namespace RunFence.Account.UI;
 
@@ -22,6 +23,7 @@ public class AccountContextMenuOrchestrator
     private readonly ToolLauncher _launchService;
     private readonly AccountTrayToggleService _trayToggleService;
     private readonly ISidNameCacheService _sidNameCache;
+    private readonly FullModeAccountLaunchIdentityFactory _fullModeIdentityFactory;
 
     private DataGridView _grid = null!;
     private ContextMenuStrip _contextMenu = null!;
@@ -40,7 +42,8 @@ public class AccountContextMenuOrchestrator
         AccountProcessMenuHandler processMenuHandler,
         ToolLauncher launchService,
         AccountTrayToggleService trayToggleService,
-        ISidNameCacheService sidNameCache)
+        ISidNameCacheService sidNameCache,
+        FullModeAccountLaunchIdentityFactory fullModeIdentityFactory)
     {
         _accountHandler = accountHandler;
         _containerHandler = containerHandler;
@@ -49,6 +52,7 @@ public class AccountContextMenuOrchestrator
         _launchService = launchService;
         _trayToggleService = trayToggleService;
         _sidNameCache = sidNameCache;
+        _fullModeIdentityFactory = fullModeIdentityFactory;
 
         _accountHandler.AppNavigationRequested += sid => AppNavigationRequested?.Invoke(sid);
         _accountHandler.NewAppRequested += sid => NewAppRequested?.Invoke(sid);
@@ -82,7 +86,7 @@ public class AccountContextMenuOrchestrator
     {
         Items.AclManager.Click += (_, _) => OpenAclManager();
         Items.FolderBrowser.Click += (_, _) => OpenFolderBrowser();
-        Items.Cmd.Click += (_, _) => OpenCmd();
+        Items.Cmd.Click += async (_, _) => await OpenCmdWithTerminalLaunchRefreshAsync();
         Items.EnvironmentVariables.Click += (_, _) => OpenEnvironmentVariables();
         Items.KillAllProcesses.Click += async (_, _) =>
         {
@@ -128,27 +132,36 @@ public class AccountContextMenuOrchestrator
         foreach (var (package, item) in Items.InstallItems)
         {
             var capturedPackage = package;
-            item.Click += (_, _) => HandleInstallRequest(capturedPackage);
+            item.Click += async (_, _) => await HandleInstallRequestAsync(capturedPackage);
         }
     }
 
-    public void OpenCmd()
+    public async Task OpenCmdAsync()
     {
-        if (_grid.SelectedRows.Count == 0)
+        if (!TryCreateSelectedCmdLaunchRequest(null, out var request))
             return;
-        if (_grid.SelectedRows[0].Tag is ContainerRow containerRow)
+
+        await _launchService.OpenCmdAsync(request.Identity);
+    }
+
+    public async Task OpenCmdWithTerminalLaunchRefreshAsync()
+        => await OpenCmdWithTerminalLaunchRefreshAsync(null);
+
+    public async Task OpenCmdWithTerminalLaunchRefreshAsync(PrivilegeLevel? explicitPrivilegeLevel)
+    {
+        if (!TryCreateSelectedCmdLaunchRequest(explicitPrivilegeLevel, out var request))
+            return;
+
+        await ExecuteBusyAccountActionAsync(_panelContext, Items, async () =>
         {
-            _launchService.OpenCmd(new AppContainerLaunchIdentity(containerRow.Container));
-            return;
-        }
-        if (_grid.SelectedRows[0].Tag is not AccountRow accountRow)
-            return;
-        var shift = (Control.ModifierKeys & Keys.Shift) != 0;
-        _launchService.OpenCmd(new AccountLaunchIdentity(accountRow.Sid)
-            { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null });
+            await _launchService.OpenCmdAsync(request.Identity, request.RequestTerminalRefresh);
+        }, refreshAfter: false);
     }
 
     public void OpenFolderBrowser()
+        => OpenFolderBrowser(null);
+
+    public void OpenFolderBrowser(PrivilegeLevel? explicitPrivilegeLevel)
     {
         if (_grid.SelectedRows.Count == 0)
             return;
@@ -160,9 +173,7 @@ public class AccountContextMenuOrchestrator
         }
         if (_grid.SelectedRows[0].Tag is not AccountRow accountRow)
             return;
-        var shift = (Control.ModifierKeys & Keys.Shift) != 0;
-        _launchService.OpenFolderBrowser(new AccountLaunchIdentity(accountRow.Sid)
-            { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null }, permissionPrompt);
+        _launchService.OpenFolderBrowser(CreateAccountLaunchIdentity(accountRow, explicitPrivilegeLevel), permissionPrompt);
     }
 
     public void OpenEnvironmentVariables()
@@ -174,15 +185,13 @@ public class AccountContextMenuOrchestrator
             { PrivilegeLevel = shift ? PrivilegeLevel.HighestAllowed : null });
     }
 
-    public void HandleInstallRequest(InstallablePackage package)
+    public async Task HandleInstallRequestAsync(InstallablePackage package)
     {
         if (GetSelectedAccountRow() is not { } ar)
             return;
+
         var identity = new AccountLaunchIdentity(ar.Sid);
-        if (package == KnownPackages.WindowsTerminal && !_launchService.IsPackageInstalled(KnownPackages.Winget, ar.Sid))
-            _launchService.InstallPackages([KnownPackages.Winget, package], identity);
-        else
-            _launchService.InstallPackage(package, identity);
+        await ExecuteBusyAccountActionAsync(_panelContext, Items, () => _launchService.InstallPackageAsync(package, identity));
     }
 
     public void ToggleFolderBrowserTray()
@@ -225,6 +234,40 @@ public class AccountContextMenuOrchestrator
 
     private ContainerRow? GetSelectedContainerRow()
         => _grid.SelectedRows.Count > 0 ? _grid.SelectedRows[0].Tag as ContainerRow : null;
+
+    private bool TryCreateSelectedCmdLaunchRequest(PrivilegeLevel? explicitPrivilegeLevel, out CmdLaunchRequest request)
+    {
+        request = default;
+        if (_grid.SelectedRows.Count == 0)
+            return false;
+
+        if (_grid.SelectedRows[0].Tag is ContainerRow containerRow)
+        {
+            if (explicitPrivilegeLevel != null)
+                return false;
+
+            request = new CmdLaunchRequest(new AppContainerLaunchIdentity(containerRow.Container), RequestTerminalRefresh: false);
+            return true;
+        }
+
+        if (_grid.SelectedRows[0].Tag is not AccountRow accountRow)
+            return false;
+
+        var accountIdentity = CreateAccountLaunchIdentity(accountRow, explicitPrivilegeLevel);
+        request = new CmdLaunchRequest(
+            accountIdentity,
+            RequestTerminalRefresh: true);
+        return true;
+    }
+
+    private AccountLaunchIdentity CreateAccountLaunchIdentity(AccountRow accountRow, PrivilegeLevel? explicitPrivilegeLevel)
+    {
+        if (explicitPrivilegeLevel != null)
+            return new AccountLaunchIdentity(accountRow.Sid) { PrivilegeLevel = explicitPrivilegeLevel };
+
+        var shift = (Control.ModifierKeys & Keys.Shift) != 0;
+        return _fullModeIdentityFactory.Create(accountRow.Sid, fullMode: shift);
+    }
 
     public void HandleContextMenuOpening(CancelEventArgs e)
     {
@@ -311,7 +354,8 @@ public class AccountContextMenuOrchestrator
     private static async Task ExecuteBusyAccountActionAsync(
         IAccountsPanelOperationContext panelContext,
         AccountContextMenuItems items,
-        Func<Task> action)
+        Func<Task> action,
+        bool refreshAfter = true)
     {
         SetBusyAccountActions(items, enabled: false);
         panelContext.SetControlsEnabled(false);
@@ -326,9 +370,12 @@ public class AccountContextMenuOrchestrator
             panelContext.SetControlsEnabled(true);
             SetBusyAccountActions(items, enabled: true);
             panelContext.UpdateButtonState();
-            panelContext.RefreshGrid();
-            var generation = panelContext.BeginProcessRefreshGeneration();
-            panelContext.TriggerProcessRefresh(generation, 1000);
+            if (refreshAfter)
+            {
+                panelContext.RefreshGrid();
+                var generation = panelContext.BeginProcessRefreshGeneration();
+                panelContext.TriggerProcessRefresh(generation, 1000);
+            }
         }
     }
 
@@ -344,4 +391,6 @@ public class AccountContextMenuOrchestrator
         items.ManageAssociations.Enabled = enabled;
         items.ReceiveInjectedInput.Enabled = enabled;
     }
+
+    private readonly record struct CmdLaunchRequest(LaunchIdentity Identity, bool RequestTerminalRefresh);
 }

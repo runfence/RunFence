@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
 using RunFence.Acl;
 using RunFence.Infrastructure;
 using Xunit;
@@ -122,6 +123,37 @@ public class BackupPrivilegeSecurityDescriptorAccessorTests
     }
 
     [Fact]
+    public void ModifyDacl_WithSafeFileHandle_WhenModifierReturnsFalse_DoesNotWriteAndReturnsFalse()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false));
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+        using var handle = new SafeFileHandle(new IntPtr(1111), ownsHandle: false);
+
+        bool result = accessor.ModifyDacl(handle, isDirectory: false, _ => false);
+
+        Assert.False(result);
+        Assert.Empty(native.SetSecurityInfoCalls);
+        Assert.Empty(native.CreateFileCalls);
+        Assert.Single(native.LocalFreedDescriptors);
+        Assert.Single(native.AllocatedDescriptors);
+    }
+
+    [Fact]
+    public void ModifyDacl_WithPath_WhenModifierReturnsFalse_DoesNotWriteAndReturnsFalse()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false));
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+
+        bool result = accessor.ModifyDacl(@"C:\test.txt", isDirectory: false, _ => false);
+
+        Assert.False(result);
+        Assert.Empty(native.SetSecurityInfoCalls);
+        Assert.Single(native.CreateFileCalls);
+        Assert.Equal([native.Handle], native.ClosedHandles);
+        Assert.Single(native.LocalFreedDescriptors);
+    }
+
+    [Fact]
     public void ModifyOwnerAndDacl_ProtectedDescriptor_UsesProtectedDaclSecurityInformation()
     {
         var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: true, protectDacl: true));
@@ -138,6 +170,53 @@ public class BackupPrivilegeSecurityDescriptorAccessorTests
             FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION |
             FileSecurityNative.SECURITY_INFORMATION.PROTECTED_DACL_SECURITY_INFORMATION,
             call.SecurityInformation);
+    }
+
+    [Fact]
+    public void SetOwner_Path_UsesOwnerOnlySecurityInfoAndClosesHandle()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false));
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+
+        accessor.SetOwner(@"C:\owned", isDirectory: false, UsersSid);
+
+        var call = Assert.Single(native.SetSecurityInfoCalls);
+        Assert.Equal(FileSecurityNative.SECURITY_INFORMATION.OWNER_SECURITY_INFORMATION, call.SecurityInformation);
+        Assert.NotEqual(IntPtr.Zero, call.Owner);
+        Assert.Equal(IntPtr.Zero, call.Dacl);
+        Assert.Equal(IntPtr.Zero, call.Group);
+        Assert.Equal(IntPtr.Zero, call.Sacl);
+        var createCall = Assert.Single(native.CreateFileCalls);
+        Assert.Equal(@"C:\owned", createCall.Path);
+        Assert.Equal(
+            FileSecurityNative.READ_CONTROL | FileSecurityNative.WRITE_OWNER,
+            createCall.DesiredAccess);
+        Assert.Equal(
+            FileSecurityNative.FILE_SHARE_READ | FileSecurityNative.FILE_SHARE_WRITE,
+            createCall.ShareMode);
+        Assert.Equal(FileSecurityNative.OPEN_EXISTING, createCall.CreationDisposition);
+        Assert.Equal(FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS, createCall.FlagsAndAttributes);
+        Assert.Equal([native.Handle], native.ClosedHandles);
+    }
+
+    [Fact]
+    public void SetOwner_WithSafeFileHandle_UsesOwnerOnlySecurityInfoAndDoesNotOpenPath()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false));
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+        using var handle = new SafeFileHandle(new IntPtr(7777), ownsHandle: false);
+
+        accessor.SetOwner(handle, UsersSid);
+
+        var call = Assert.Single(native.SetSecurityInfoCalls);
+        Assert.Equal(new IntPtr(7777), call.Handle);
+        Assert.Equal(FileSecurityNative.SECURITY_INFORMATION.OWNER_SECURITY_INFORMATION, call.SecurityInformation);
+        Assert.NotEqual(IntPtr.Zero, call.Owner);
+        Assert.Equal(IntPtr.Zero, call.Dacl);
+        Assert.Equal(IntPtr.Zero, call.Group);
+        Assert.Equal(IntPtr.Zero, call.Sacl);
+        Assert.Empty(native.CreateFileCalls);
+        Assert.Empty(native.ClosedHandles);
     }
 
     [Fact]
@@ -233,6 +312,131 @@ public class BackupPrivilegeSecurityDescriptorAccessorTests
         Assert.Equal(FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS, createCall.FlagsAndAttributes);
     }
 
+    [Fact]
+    public void WriteDaclNonPropagating_UsesMaximumAllowedHandleAccess()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: true));
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+
+        accessor.WriteDaclNonPropagating(@"C:\tree", CreateSecurity(isDirectory: true));
+
+        var call = Assert.Single(native.SetSecurityInfoCalls);
+        Assert.Equal(
+            FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION |
+            FileSecurityNative.SECURITY_INFORMATION.UNPROTECTED_DACL_SECURITY_INFORMATION,
+            call.SecurityInformation);
+        Assert.Equal(IntPtr.Zero, call.Owner);
+        Assert.NotEqual(IntPtr.Zero, call.Dacl);
+        var createCall = Assert.Single(native.CreateFileCalls);
+        Assert.Equal(@"C:\tree", createCall.Path);
+        Assert.Equal(FileSecurityNative.MAXIMUM_ALLOWED, createCall.DesiredAccess);
+        Assert.Equal(
+            FileSecurityNative.FILE_SHARE_READ | FileSecurityNative.FILE_SHARE_WRITE,
+            createCall.ShareMode);
+        Assert.Equal(FileSecurityNative.OPEN_EXISTING, createCall.CreationDisposition);
+        Assert.Equal(FileSecurityNative.FILE_FLAG_BACKUP_SEMANTICS, createCall.FlagsAndAttributes);
+    }
+
+    [Fact]
+    public void ReadOwnerAndDacl_WithSafeFileHandle_DoesNotOpenOrCloseNativePathAndStillFreesDescriptor()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false));
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+        using var handle = new SafeFileHandle(new IntPtr(2222), ownsHandle: false);
+
+        FileSystemSecurity security = accessor.ReadOwnerAndDacl(handle, isDirectory: false);
+
+        Assert.IsType<FileSecurity>(security);
+        Assert.Empty(native.CreateFileCalls);
+        Assert.Empty(native.ClosedHandles);
+        Assert.Single(native.LocalFreedDescriptors);
+        Assert.Equal(native.AllocatedDescriptors, native.LocalFreedDescriptors);
+    }
+
+    [Fact]
+    public void ReadOwnerAndDacl_WithSafeFileHandle_WhenGetSecurityInfoFails_DoesNotCloseHandleAndPropagates()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false))
+        {
+            GetSecurityInfoError = 5
+        };
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+        using var handle = new SafeFileHandle(new IntPtr(3333), ownsHandle: false);
+
+        var ex = Assert.Throws<Win32Exception>(() => accessor.ReadOwnerAndDacl(handle, isDirectory: false));
+
+        Assert.Equal(5, ex.NativeErrorCode);
+        Assert.Empty(native.CreateFileCalls);
+        Assert.Empty(native.ClosedHandles);
+        Assert.Empty(native.LocalFreedDescriptors);
+    }
+
+    [Fact]
+    public void WriteOwnerAndDacl_WithSafeFileHandle_UsesOwnerAndDaclSecurityInformation()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false));
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+        using var handle = new SafeFileHandle(new IntPtr(4444), ownsHandle: false);
+        var security = CreateSecurity(isDirectory: false, protectDacl: false);
+
+        accessor.WriteOwnerAndDacl(handle, security);
+
+        var call = Assert.Single(native.SetSecurityInfoCalls);
+        Assert.Equal(
+            FileSecurityNative.SECURITY_INFORMATION.OWNER_SECURITY_INFORMATION |
+            FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION |
+            FileSecurityNative.SECURITY_INFORMATION.UNPROTECTED_DACL_SECURITY_INFORMATION,
+            call.SecurityInformation);
+        Assert.Equal(new IntPtr(4444), call.Handle);
+        Assert.NotEqual(IntPtr.Zero, call.Owner);
+        Assert.NotEqual(IntPtr.Zero, call.Dacl);
+        Assert.Empty(native.CreateFileCalls);
+        Assert.Empty(native.ClosedHandles);
+    }
+
+    [Fact]
+    public void WriteOwnerAndDacl_WithSafeFileHandle_PreservesProtectedDacl()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false, protectDacl: true));
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+        using var handle = new SafeFileHandle(new IntPtr(5555), ownsHandle: false);
+        var security = CreateSecurity(isDirectory: false, protectDacl: true);
+
+        accessor.WriteOwnerAndDacl(handle, security);
+
+        var call = Assert.Single(native.SetSecurityInfoCalls);
+        Assert.Equal(
+            FileSecurityNative.SECURITY_INFORMATION.OWNER_SECURITY_INFORMATION |
+            FileSecurityNative.SECURITY_INFORMATION.DACL_SECURITY_INFORMATION |
+            FileSecurityNative.SECURITY_INFORMATION.PROTECTED_DACL_SECURITY_INFORMATION,
+            call.SecurityInformation);
+        Assert.Equal(new IntPtr(5555), call.Handle);
+        Assert.NotEqual(IntPtr.Zero, call.Owner);
+        Assert.NotEqual(IntPtr.Zero, call.Dacl);
+        Assert.Empty(native.CreateFileCalls);
+        Assert.Empty(native.ClosedHandles);
+    }
+
+    [Fact]
+    public void WriteOwnerAndDacl_WithSafeFileHandle_WhenSetSecurityInfoFails_Propagates()
+    {
+        var native = new FakeBackupPrivilegeSecurityNative(CreateDescriptorBytes(isDirectory: false, protectDacl: true))
+        {
+            SetSecurityInfoError = 5
+        };
+        var accessor = new BackupPrivilegeSecurityDescriptorAccessor(native);
+        using var handle = new SafeFileHandle(new IntPtr(6666), ownsHandle: false);
+
+        var ex = Assert.Throws<Win32Exception>(() =>
+            accessor.WriteOwnerAndDacl(handle, CreateSecurity(isDirectory: false)));
+
+        Assert.Equal(5, ex.NativeErrorCode);
+        Assert.Single(native.SetSecurityInfoCalls);
+        Assert.Equal(new IntPtr(6666), native.SetSecurityInfoCalls[0].Handle);
+        Assert.Empty(native.CreateFileCalls);
+        Assert.Empty(native.ClosedHandles);
+    }
+
     private static FileSystemSecurity CreateSecurity(bool isDirectory, bool protectDacl = false)
     {
         if (isDirectory)
@@ -321,7 +525,7 @@ public class BackupPrivilegeSecurityDescriptorAccessorTests
             IntPtr dacl,
             IntPtr sacl)
         {
-            SetSecurityInfoCalls.Add(new SetSecurityInfoCall(handle, securityInformation, owner, dacl));
+            SetSecurityInfoCalls.Add(new SetSecurityInfoCall(handle, securityInformation, owner, group, dacl, sacl));
             return SetSecurityInfoError;
         }
 
@@ -379,7 +583,9 @@ public class BackupPrivilegeSecurityDescriptorAccessorTests
         IntPtr Handle,
         FileSecurityNative.SECURITY_INFORMATION SecurityInformation,
         IntPtr Owner,
-        IntPtr Dacl);
+        IntPtr Group,
+        IntPtr Dacl,
+        IntPtr Sacl);
 
     private sealed record CreateFileCall(
         string Path,

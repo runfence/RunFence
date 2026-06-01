@@ -30,7 +30,7 @@ public partial class WizardDialog : RunFence.UI.Forms.ContextHelpForm, IWizardEx
     private bool _isTemplateWarmupInProgress;
 
     // Post-wizard actions accumulated from completed templates
-    private readonly List<Action<IWin32Window>> _postWizardActions = [];
+    private readonly List<Func<IWin32Window, Task>> _postWizardActions = [];
 
     private readonly WizardExecutionHandler _executionHandler;
     private readonly WizardNavigationHandler _navigationHandler;
@@ -39,7 +39,7 @@ public partial class WizardDialog : RunFence.UI.Forms.ContextHelpForm, IWizardEx
     /// Post-wizard actions queued by completed templates during this session.
     /// <see cref="WizardLauncher"/> executes these after <see cref="Form.ShowDialog()"/> returns.
     /// </summary>
-    public IReadOnlyList<Action<IWin32Window>> PostWizardActions => _postWizardActions;
+    public IReadOnlyList<Func<IWin32Window, Task>> PostWizardActions => _postWizardActions;
 
     /// <summary>Number of templates that completed execution during this wizard session.</summary>
     public int TemplateCompletedCount { get; private set; }
@@ -51,6 +51,7 @@ public partial class WizardDialog : RunFence.UI.Forms.ContextHelpForm, IWizardEx
     {
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
+        Disposed += OnDialogDisposed;
         WizardStylingHelper.ApplyModernStyling(
             this, _headerPanel, _contentPanel, _footerPanel, _progressPanel,
             _titleLabel, _statusLabel, _errorLabel);
@@ -90,7 +91,7 @@ public partial class WizardDialog : RunFence.UI.Forms.ContextHelpForm, IWizardEx
     IReadOnlyList<IWizardTemplate> IWizardExecutionContext.Templates => _allTemplates;
     bool IWizardExecutionContext.IsExecuting { get; set; }
 
-    List<Action<IWin32Window>> IWizardExecutionContext.PostWizardActions => _postWizardActions;
+    List<Func<IWin32Window, Task>> IWizardExecutionContext.PostWizardActions => _postWizardActions;
 
     int IWizardExecutionContext.TemplateCompletedCount
     {
@@ -294,6 +295,22 @@ public partial class WizardDialog : RunFence.UI.Forms.ContextHelpForm, IWizardEx
     {
         _errorLabel.Visible = false;
         _errorLabel.Text = string.Empty;
+    }
+
+    private void OnDialogDisposed(object? sender, EventArgs e)
+        => DisposeDynamicSteps();
+
+    private void DisposeDynamicSteps()
+    {
+        WizardStepPage? hostedStep = _currentStepIndex >= 0 && _currentStepIndex < _steps.Count
+            ? _steps[_currentStepIndex]
+            : null;
+
+        foreach (var step in _steps)
+        {
+            if (!ReferenceEquals(step, hostedStep))
+                step.Dispose();
+        }
     }
 
     // -----------------------------------------------------------------------------------------

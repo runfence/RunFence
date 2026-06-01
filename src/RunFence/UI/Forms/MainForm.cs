@@ -12,11 +12,13 @@ using RunFence.TrayIcon;
 
 namespace RunFence.UI.Forms;
 
-public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMainFormVisibility,
-    IMainFormDataRefreshTarget, IMainFormLockTarget, IStartupFormLifetime, IStartupIpcHost
+public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMainFormVisibility, IMainFormContentView,
+    IMainFormDataRefreshTarget, IMainFormLockTarget, IStartupFormLifetime, IStartupIpcHost, IDeferredStartupMainForm
 {
     private static readonly int WmTaskbarCreated = (int)WindowNative.RegisterWindowMessage("TaskbarCreated");
     private const int WM_ACTIVATEAPP = 0x001C;
+    internal static int TaskbarCreatedMessage => WmTaskbarCreated;
+    internal static int ActivateAppMessage => WM_ACTIVATEAPP;
     private readonly ApplicationsPanel _appsPanel;
     private readonly AccountsPanel _accountsPanel;
     private readonly GroupsPanel _groupsPanel;
@@ -30,11 +32,14 @@ public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMa
     private readonly MainFormWindowRequestHandler _windowRequestHandler;
     private readonly MainFormBackgroundAutoLockCoordinator _autoLockCoordinator;
     private readonly ApplicationState _applicationState;
+    private readonly MainFormContentCoordinator _contentCoordinator;
+    private readonly MainFormMessageRouter _messageRouter;
+    private event EventHandler? ActivationRefreshRequested;
 
     private bool _suppressInitialVisibility;
     private bool _wasStartedInBackground;
 
-    // Reviewed: 12 deps are justified — each is an already-extracted independent handler with
+    // Reviewed: 14 deps are justified — each is an already-extracted independent handler with
     // no overlap in responsibility. MainForm is the composition root for the main window.
     public MainForm(
         SessionContext session,
@@ -48,6 +53,8 @@ public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMa
         MainFormTrayHandler trayHandler,
         MainFormWindowRequestHandler windowRequestHandler,
         MainFormBackgroundAutoLockCoordinator autoLockCoordinator,
+        MainFormContentCoordinator contentCoordinator,
+        MainFormMessageRouter messageRouter,
         AboutPanel aboutPanel)
     {
         _session = session;
@@ -61,6 +68,9 @@ public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMa
         _trayHandler = trayHandler;
         _windowRequestHandler = windowRequestHandler;
         _autoLockCoordinator = autoLockCoordinator;
+        _contentCoordinator = contentCoordinator;
+        _messageRouter = messageRouter;
+        _contentCoordinator.Initialize(this);
 
         _trayHandler.LicenseChangedRefreshNeeded += () => _optionsPanel.SetData(_session);
 
@@ -68,66 +78,12 @@ public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMa
 
         InitializeComponent();
         Icon = AppIcons.GetAppIcon();
-
-        BuildDynamicContent(aboutPanel);
-
-        SetData();
-
-        if (_session.Database.Apps.Count == 0)
-            _tabControl.SelectedTab = _accountsTab;
-    }
-
-    private void BuildDynamicContent(AboutPanel aboutPanel)
-    {
-        _appsPanel.DataChanged += HandleDataChanged;
-        _appsPanel.EnforcementRequested += OnEnforcementRequested;
-        _appsPanel.AccountNavigationRequested += OnNavigateToAccount;
-        _applicationsTab.Controls.Add(_appsPanel);
-        _appsPanel.Dock = DockStyle.Fill;
-
-        _accountsPanel.DataChanged += HandleDataChanged;
-        _accountsPanel.AppNavigationRequested += OnNavigateToApp;
-        _accountsPanel.NewAppRequested += OnNewAppForAccount;
-        _accountsTab.Controls.Add(_accountsPanel);
-        _accountsPanel.Dock = DockStyle.Fill;
-        _accountsPanel.RegisterContextHelp(this);
-
-        _groupsPanel.GroupsChanged += OnGroupsChanged;
-        _groupsTab.Controls.Add(_groupsPanel);
-        _groupsPanel.Dock = DockStyle.Fill;
-
-        _optionsPanel.SettingsChanged += OnOptionsSettingsChanged;
-        _optionsPanel.PinDerivedKeyChanged += OnPinDerivedKeyChanged;
-        _optionsPanel.DataChanged += HandleDataChanged;
-        _optionsPanel.CleanupRequested += OnCleanupRequested;
-        _optionsPanel.MigrationExitRequested += () => Application.Exit();
-        _optionsPanel.ConfigLoadRequested += path =>
-        {
-            var result = _configHandler.LoadApps(path);
-            HandleConfigLoadResult(path, result);
-        };
-        _optionsPanel.ConfigUnloadRequested += path => _configHandler.UnloadApps(path);
-        _optionsTab.Controls.Add(_optionsPanel);
-        _optionsPanel.Dock = DockStyle.Fill;
-        _optionsPanel.RegisterContextHelp(this);
-
-        _aboutTab.Controls.Add(aboutPanel);
-        aboutPanel.Dock = DockStyle.Fill;
-
-        _tabControl.SelectedIndexChanged += (_, _) =>
-        {
-            ScheduleAvailabilityCheck();
-            QueueSelectedTabRefresh();
-        };
-        _trayHandler.Initialize(this, this);
-        _trayHandler.UpdateTitleAndTooltip();
-
-        Activated += (_, _) =>
-        {
-            ScheduleAvailabilityCheck();
-            QueueSelectedTabRefresh();
-        };
+        _tabControl.SelectedIndexChanged += OnActivationRefreshRequested;
+        Activated += OnActivationRefreshRequested;
         Resize += OnResize;
+
+        _contentCoordinator.BuildTabs(aboutPanel);
+        SetData();
     }
 
     private void HandleConfigLoadResult(string path, LoadAppsResult result, bool allowBackupRestore = true)
@@ -178,6 +134,8 @@ public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMa
     void IMainFormVisibility.BeginInvokeOnUiThread(Action action) => BeginInvoke(action);
     void IMainFormVisibility.InvokeOnUiThread(Action action) => Invoke(action);
     void IStartupIpcHost.BeginInvokeOnUiThread(Action action) => BeginInvoke(action);
+    bool IDeferredStartupMainForm.IsDisposed => IsDisposed;
+    void IDeferredStartupMainForm.BeginInvokeOnUiThread(Action action) => BeginInvoke(action);
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public bool SuppressInitialVisibility
@@ -276,64 +234,25 @@ public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMa
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == WmTaskbarCreated)
-            _trayHandler.RestoreIconVisibility();
-        if (m.Msg == WM_ACTIVATEAPP)
-        {
-            if (m.WParam == IntPtr.Zero)
-                _autoLockCoordinator.HandleAppDeactivated();
-            else
-                _autoLockCoordinator.HandleAppActivated();
-        }
+        _messageRouter.HandleWndProc(m);
         base.WndProc(ref m);
     }
 
     bool IMainFormVisibility.IsModalActive => _applicationState.IsModalOpen;
     bool IMainFormVisibility.HasOtherWindowsOpen => Application.OpenForms.OfType<Form>().Any(f => f != this && f.Visible);
 
-    public bool PreFilterMessage(ref Message m)
-    {
-        const int WM_KEYDOWN = 0x0100;
-        const int WM_MOUSEMOVE = 0x0200;
-        const int WM_LBUTTONDOWN = 0x0201;
-        const int WM_RBUTTONDOWN = 0x0204;
-        const int WM_MOUSEWHEEL = 0x020A;
-
-        var msg = m.Msg;
-        if (msg is WM_KEYDOWN or WM_MOUSEMOVE or WM_LBUTTONDOWN or WM_RBUTTONDOWN or WM_MOUSEWHEEL)
-        {
-            _trayHandler.ResetIdleTimer();
-        }
-
-        return false;
-    }
+    public bool PreFilterMessage(ref Message m) => _messageRouter.PreFilterMessage(ref m);
 
     // --- Data flow ---
 
     public void SetData()
     {
-        _appsPanel.SetData(_session);
-        _accountsPanel.SetData(_session);
-        _groupsPanel.SetData(_session);
-        _optionsPanel.SetData(_session);
+        _contentCoordinator.SetData(_session.Database);
     }
 
     public void HandleDataChanged()
     {
-        _trayHandler.UpdateTray();
-        _appsPanel.SetData(_session);
-        _accountsPanel.SetData(_session);
-        _groupsPanel.SetData(_session);
-        _optionsPanel.SetData(_session);
-        _trayHandler.ScheduleDiscoveryRefresh();
-    }
-
-    private void OnGroupsChanged()
-    {
-        _trayHandler.UpdateTray();
-        _accountsPanel.SetData(_session);
-        _groupsPanel.SetData(_session);
-        _trayHandler.ScheduleDiscoveryRefresh();
+        _contentCoordinator.HandleDataChanged();
     }
 
     // --- Navigation ---
@@ -356,11 +275,6 @@ public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMa
     }
 
     // --- Event handlers ---
-
-    private void OnPinDerivedKeyChanged()
-    {
-        SetData();
-    }
 
     private void OnOptionsSettingsChanged()
     {
@@ -435,4 +349,66 @@ public partial class MainForm : ContextHelpForm, IMessageFilter, ITrayOwner, IMa
     // --- Event handler methods for AppLifecycleStarter wiring ---
     public void UpdateTray() => _trayHandler.UpdateTray();
     public Control GuardOwner => _tabControl;
+
+    event EventHandler IMainFormContentView.ActivationRefreshRequested
+    {
+        add => ActivationRefreshRequested += value;
+        remove => ActivationRefreshRequested -= value;
+    }
+
+    Control IMainFormContentView.FormControl => this;
+
+    void IMainFormContentView.AttachApplicationsPanel(ApplicationsPanel panel)
+    {
+        _applicationsTab.Controls.Add(panel);
+        panel.Dock = DockStyle.Fill;
+    }
+
+    void IMainFormContentView.AttachAccountsPanel(AccountsPanel panel)
+    {
+        _accountsTab.Controls.Add(panel);
+        panel.Dock = DockStyle.Fill;
+        panel.RegisterContextHelp(this);
+    }
+
+    void IMainFormContentView.AttachGroupsPanel(GroupsPanel panel)
+    {
+        _groupsTab.Controls.Add(panel);
+        panel.Dock = DockStyle.Fill;
+    }
+
+    void IMainFormContentView.AttachOptionsPanel(OptionsPanel panel)
+    {
+        _optionsTab.Controls.Add(panel);
+        panel.Dock = DockStyle.Fill;
+        panel.RegisterContextHelp(this);
+    }
+
+    void IMainFormContentView.AttachAboutPanel(AboutPanel panel)
+    {
+        _aboutTab.Controls.Add(panel);
+        panel.Dock = DockStyle.Fill;
+    }
+
+    void IMainFormContentView.SelectAccountsTab() => _tabControl.SelectedTab = _accountsTab;
+    void IMainFormContentView.ScheduleAvailabilityCheck() => ScheduleAvailabilityCheck();
+    void IMainFormContentView.QueueSelectedTabRefresh() => QueueSelectedTabRefresh();
+    void IMainFormContentView.NavigateToAccount(string accountSid) => OnNavigateToAccount(accountSid);
+    void IMainFormContentView.NavigateToApp(string appId) => OnNavigateToApp(appId);
+    void IMainFormContentView.OpenAddDialogForAccount(string accountSid) => OnNewAppForAccount(accountSid);
+    void IMainFormContentView.HandleOptionsSettingsChanged() => OnOptionsSettingsChanged();
+    void IMainFormContentView.RequestCleanup() => OnCleanupRequested();
+    void IMainFormContentView.RequestMigrationExit() => Application.Exit();
+    void IMainFormContentView.RequestConfigLoad(string path)
+    {
+        var result = _configHandler.LoadApps(path);
+        HandleConfigLoadResult(path, result);
+    }
+    void IMainFormContentView.RequestConfigUnload(string path) => _configHandler.UnloadApps(path);
+    void IMainFormContentView.RequestEnforcement() => OnEnforcementRequested();
+
+    private void OnActivationRefreshRequested(object? sender, EventArgs e)
+    {
+        ActivationRefreshRequested?.Invoke(this, EventArgs.Empty);
+    }
 }

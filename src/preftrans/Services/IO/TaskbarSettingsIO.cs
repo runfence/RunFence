@@ -1,7 +1,3 @@
-using System.Runtime.InteropServices;
-using System.Text;
-using Microsoft.Win32;
-using PrefTrans.Native;
 using PrefTrans.Settings;
 
 namespace PrefTrans.Services.IO;
@@ -24,7 +20,12 @@ namespace PrefTrans.Services.IO;
 /// sufficient for a single-threaded CLI tool that never spawns background COM callers.
 /// </para>
 /// </summary>
-public class TaskbarSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast, IUserProfileFilter userProfileFilter) : ISettingsIO
+public class TaskbarSettingsIO(
+    ITaskbarRegistryStore registryStore,
+    IPinnedShortcutTransferService pinnedShortcutTransferService,
+    TaskbarLegacyOwnershipDetector legacyOwnershipDetector,
+    TaskbarProfilePathPatcher profilePathPatcher,
+    IBroadcastHelper broadcast) : ISettingsIO
 {
     public TaskbarSettings Read()
     {
@@ -32,340 +33,74 @@ public class TaskbarSettingsIO(ISafeExecutor safe, IBroadcastHelper broadcast, I
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (!string.IsNullOrEmpty(userProfile))
             taskbar.SourceProfilePath = userProfile;
-        safe.Try(() =>
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(Constants.RegExplorerAdvanced);
-            if (key == null)
-                return;
-            taskbar.SmallIcons = key.GetValue("TaskbarSmallIcons") as int?;
-            taskbar.ShowTaskViewButton = key.GetValue("ShowTaskViewButton") as int?;
-            taskbar.TaskbarAlignment = key.GetValue("TaskbarAl") as int?;
-            taskbar.ShowWidgets = key.GetValue("TaskbarDa") as int?;
-            taskbar.ButtonCombine = key.GetValue("TaskbarGlomLevel") as int?;
-            taskbar.MultiMonitorButtonCombine = key.GetValue("MMTaskbarGlomLevel") as int?;
-            taskbar.VirtualDesktopTaskbarFilter = key.GetValue("VirtualDesktopTaskbarFilter") as int?;
-        }, "reading");
-        safe.Try(() =>
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(Constants.RegTaskband);
-            if (key == null)
-                return;
-            taskbar.Favorites = key.GetValue("Favorites") as byte[];
-            taskbar.FavoritesResolve = key.GetValue("FavoritesResolve") as byte[];
-        }, "reading");
-        safe.Try(() =>
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(Constants.RegSearch);
-            taskbar.SearchboxTaskbarMode = key?.GetValue("SearchboxTaskbarMode") as int?;
-        }, "reading");
-        safe.Try(() =>
-        {
-            var pinnedFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                @"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
-            if (!Directory.Exists(pinnedFolder))
-                return;
 
-            var profilePaths = userProfileFilter.GetUserProfilePaths();
-            var lnkFiles = Directory.GetFiles(pinnedFolder, "*.lnk");
-            if (lnkFiles.Length == 0)
-                return;
+        var explorerAdvanced = registryStore.ReadExplorerAdvancedValues();
+        taskbar.SmallIcons = explorerAdvanced.TaskbarSmallIcons;
+        taskbar.ShowTaskViewButton = explorerAdvanced.ShowTaskViewButton;
+        taskbar.TaskbarAlignment = explorerAdvanced.TaskbarAlignment;
+        taskbar.ShowWidgets = explorerAdvanced.ShowWidgets;
+        taskbar.ButtonCombine = explorerAdvanced.ButtonCombine;
+        taskbar.MultiMonitorButtonCombine = explorerAdvanced.MultiMonitorButtonCombine;
+        taskbar.VirtualDesktopTaskbarFilter = explorerAdvanced.VirtualDesktopTaskbarFilter;
 
-            var shellType = Type.GetTypeFromProgID("WScript.Shell");
-            if (shellType == null)
-                return;
-            dynamic? shell = null;
-            try
-            {
-                shell = Activator.CreateInstance(shellType);
-                if (shell == null)
-                    return;
-                var shortcuts = new List<string>();
-                var shortcutFiles = new Dictionary<string, byte[]>();
-                foreach (var lnkPath in lnkFiles)
-                {
-                    safe.Try(() =>
-                    {
-                        dynamic lnk = shell.CreateShortcut(lnkPath);
-                        try
-                        {
-                            var target = lnk.TargetPath as string;
-                            // Skip Store apps (no target path), user-profile-specific targets,
-                            // and UWP package paths (Program Files\WindowsApps\)
-                            if (string.IsNullOrEmpty(target))
-                                return;
-                            if (userProfileFilter.ContainsUserProfilePath(target, profilePaths))
-                                return;
-                            if (userProfileFilter.ContainsWindowsAppsPath(target))
-                                return;
-                            var fileName = Path.GetFileName(lnkPath);
-                            shortcuts.Add(fileName);
-                            // Also capture the raw .lnk bytes so the target account can recreate
-                            // the shortcut file even without access to the source account's AppData.
-                            safe.Try(() => shortcutFiles[fileName] = File.ReadAllBytes(lnkPath), "reading");
-                        }
-                        finally
-                        {
-                            Marshal.ReleaseComObject(lnk);
-                        }
-                    }, "reading");
-                }
-
-                if (shortcuts.Count > 0)
-                    taskbar.PinnedShortcuts = shortcuts;
-                if (shortcutFiles.Count > 0)
-                    taskbar.PinnedShortcutFiles = shortcutFiles;
-            }
-            finally
-            {
-                if (shell != null)
-                    Marshal.ReleaseComObject(shell);
-            }
-        }, "reading");
+        var taskband = registryStore.ReadTaskbandValues();
+        taskbar.Favorites = taskband.Favorites;
+        taskbar.FavoritesResolve = taskband.FavoritesResolve;
+        taskbar.SearchboxTaskbarMode = registryStore.ReadSearchboxTaskbarMode();
+        pinnedShortcutTransferService.ReadPinnedShortcuts(taskbar);
         return taskbar;
     }
 
     public void Write(TaskbarSettings taskbar)
     {
         bool changed = false;
-        safe.Try(() =>
+        changed |= registryStore.WriteExplorerAdvancedValues(new TaskbarExplorerAdvancedRegistryValues
         {
-            using var key = Registry.CurrentUser.CreateSubKey(Constants.RegExplorerAdvanced);
-
-            void Set(string name, int? val)
-            {
-                if (val.HasValue)
-                {
-                    key.SetValue(name, val.Value, RegistryValueKind.DWord);
-                    changed = true;
-                }
-            }
-
-            Set("TaskbarSmallIcons", taskbar.SmallIcons);
-            Set("ShowTaskViewButton", taskbar.ShowTaskViewButton);
-            Set("TaskbarAl", taskbar.TaskbarAlignment);
-            Set("TaskbarDa", taskbar.ShowWidgets);
-            Set("TaskbarGlomLevel", taskbar.ButtonCombine);
-            Set("MMTaskbarGlomLevel", taskbar.MultiMonitorButtonCombine);
-            Set("VirtualDesktopTaskbarFilter", taskbar.VirtualDesktopTaskbarFilter);
-        }, "writing");
-        safe.Try(() =>
-        {
-            if (taskbar.Favorites == null && taskbar.FavoritesResolve == null)
-                return;
-
-            var targetProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            if (string.IsNullOrEmpty(targetProfile))
-                return;
-
-            byte[]? favorites = taskbar.Favorites;
-            byte[]? favoritesResolve = taskbar.FavoritesResolve;
-
-            var sourceProfile = taskbar.SourceProfilePath;
-            if (!string.IsNullOrEmpty(sourceProfile) &&
-                !string.Equals(sourceProfile, targetProfile, StringComparison.OrdinalIgnoreCase))
-            {
-                // Cross-account import: patch binary blobs to replace the source user's profile path
-                // with the target user's profile path. Both Favorites and FavoritesResolve embed
-                // CountedString-prefixed paths to .lnk files in the source user's TaskBar folder.
-                favorites = PatchProfilePath(favorites, sourceProfile, targetProfile);
-                favoritesResolve = PatchProfilePath(favoritesResolve, sourceProfile, targetProfile);
-            }
-            else if (string.IsNullOrEmpty(sourceProfile))
-            {
-                // Legacy JSON (no SourceProfilePath): fall back to ownership check — if neither blob
-                // contains the current user's profile path it was exported by a different account and
-                // cannot be safely patched without knowing the source path.
-                bool ownedByCurrentUser =
-                    ContainsPathUtf16(taskbar.Favorites, targetProfile) ||
-                    ContainsPathUtf16(taskbar.FavoritesResolve, targetProfile);
-                if (!ownedByCurrentUser)
-                    return;
-            }
-
-            using var key = Registry.CurrentUser.CreateSubKey(Constants.RegTaskband);
-            if (favorites != null)
-                key.SetValue("Favorites", favorites, RegistryValueKind.Binary);
-            if (favoritesResolve != null)
-                key.SetValue("FavoritesResolve", favoritesResolve, RegistryValueKind.Binary);
-            changed = true;
-        }, "writing");
-        safe.Try(() =>
-        {
-            var taskBarFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                @"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar");
-
-            if (taskbar.PinnedShortcutFiles != null)
-            {
-                // Write .lnk files captured at export time into the target account's TaskBar folder.
-                // When transferring across accounts, patch the source profile path embedded in the
-                // .lnk binary content with the target profile path so shortcuts remain functional.
-                Directory.CreateDirectory(taskBarFolder);
-                var targetProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-                var sourceProfile = taskbar.SourceProfilePath;
-                bool shouldPatch = !string.IsNullOrEmpty(sourceProfile) &&
-                                   !string.IsNullOrEmpty(targetProfile) &&
-                                   !string.Equals(sourceProfile, targetProfile, StringComparison.OrdinalIgnoreCase);
-                bool wroteShortcut = false;
-                foreach (var (fileName, content) in taskbar.PinnedShortcutFiles)
-                {
-                    safe.Try(() =>
-                    {
-                        if (!TryResolvePinnedShortcutDestinationPath(taskBarFolder, fileName, out var destinationPath))
-                        {
-                            Console.Error.WriteLine($"Warning: skipped invalid pinned shortcut name: {fileName}");
-                            return;
-                        }
-
-                        var patched = shouldPatch
-                            ? PatchProfilePath(content, sourceProfile!, targetProfile) ?? content
-                            : content;
-                        File.WriteAllBytes(destinationPath, patched);
-                        wroteShortcut = true;
-                    }, "writing");
-                }
-
-                changed |= wroteShortcut;
-            }
-            else if (taskbar.PinnedShortcuts != null)
-            {
-                // Legacy JSON (no PinnedShortcutFiles): log missing shortcuts for diagnostics.
-                if (!Directory.Exists(taskBarFolder))
-                    return;
-                foreach (var name in taskbar.PinnedShortcuts)
-                {
-                    if (!TryResolvePinnedShortcutDestinationPath(taskBarFolder, name, out var destinationPath))
-                    {
-                        Console.Error.WriteLine($"Warning: skipped invalid pinned shortcut name: {name}");
-                        continue;
-                    }
-
-                    if (!File.Exists(destinationPath))
-                        Console.Error.WriteLine($"Warning: pinned shortcut not found: {name}");
-                }
-            }
-        }, "writing");
-        safe.Try(() =>
-        {
-            if (taskbar.SearchboxTaskbarMode.HasValue)
-            {
-                using var key = Registry.CurrentUser.CreateSubKey(Constants.RegSearch);
-                key.SetValue("SearchboxTaskbarMode", taskbar.SearchboxTaskbarMode.Value, RegistryValueKind.DWord);
-                changed = true;
-            }
-        }, "writing");
+            TaskbarSmallIcons = taskbar.SmallIcons,
+            ShowTaskViewButton = taskbar.ShowTaskViewButton,
+            TaskbarAlignment = taskbar.TaskbarAlignment,
+            ShowWidgets = taskbar.ShowWidgets,
+            ButtonCombine = taskbar.ButtonCombine,
+            MultiMonitorButtonCombine = taskbar.MultiMonitorButtonCombine,
+            VirtualDesktopTaskbarFilter = taskbar.VirtualDesktopTaskbarFilter
+        });
+        changed |= registryStore.WriteTaskbandValues(CreateWritableTaskbandValues(taskbar));
+        changed |= pinnedShortcutTransferService.WritePinnedShortcuts(taskbar);
+        if (taskbar.SearchboxTaskbarMode.HasValue)
+            changed |= registryStore.WriteSearchboxTaskbarMode(taskbar.SearchboxTaskbarMode.Value);
         if (changed)
             broadcast.Broadcast();
     }
 
-    // Patches all occurrences of sourceProfile (UTF-16 LE) in the binary blob with targetProfile,
-    // updating the preceding 2-byte LE CountedString character-count field when detected.
-    // Returns the patched blob, or the original blob unchanged when no match is found.
-    private static byte[]? PatchProfilePath(byte[]? blob, string sourceProfile, string targetProfile)
+    private TaskbarTaskbandRegistryValues CreateWritableTaskbandValues(TaskbarSettings taskbar)
     {
-        if (blob == null)
-            return null;
+        if (taskbar.Favorites == null && taskbar.FavoritesResolve == null)
+            return new TaskbarTaskbandRegistryValues();
 
-        var sourceBytes = Encoding.Unicode.GetBytes(sourceProfile);
-        var targetBytes = Encoding.Unicode.GetBytes(targetProfile);
-        int bytesDelta = targetBytes.Length - sourceBytes.Length; // always a multiple of 2
-        int charsDelta = bytesDelta / 2;
+        var targetProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrEmpty(targetProfile))
+            return new TaskbarTaskbandRegistryValues();
 
-        // Quick exit when source is not present at all (common same-user path).
-        if (IndexOfBytes(blob, sourceBytes, 0) < 0)
-            return blob;
+        byte[]? favorites = taskbar.Favorites;
+        byte[]? favoritesResolve = taskbar.FavoritesResolve;
 
-        var result = new List<byte>(blob.Length + Math.Max(0, bytesDelta) * 8);
-        int pos = 0;
-
-        while (pos < blob.Length)
+        if (!string.IsNullOrEmpty(taskbar.SourceProfilePath) &&
+            !string.Equals(taskbar.SourceProfilePath, targetProfile, StringComparison.OrdinalIgnoreCase))
         {
-            int matchPos = IndexOfBytes(blob, sourceBytes, pos);
-            if (matchPos < 0)
-            {
-                result.AddRange(new ArraySegment<byte>(blob, pos, blob.Length - pos));
-                break;
-            }
-
-            int bytesToCopy = matchPos - pos;
-            result.AddRange(new ArraySegment<byte>(blob, pos, bytesToCopy));
-
-            // When the path length changes we try to update the 2-byte LE CountedString length
-            // field that immediately precedes the string in the blob (FavoritesResolve uses this
-            // format; Favorites may too). The field encodes the character count of the full string
-            // that starts with sourceProfile, so it must be adjusted by charsDelta.
-            // Guard: we need at least 2 bytes copied from blob in this iteration so the last 2 bytes
-            // in result are blob[matchPos-2] and blob[matchPos-1] (the actual count field), not bytes
-            // from a prior replacement.
-            if (bytesDelta != 0 && matchPos >= 2 && bytesToCopy >= 2)
-            {
-                int oldCharCount = blob[matchPos - 2] | (blob[matchPos - 1] << 8);
-                int newCharCount = oldCharCount + charsDelta;
-                // Sanity: old count must cover at least the source profile length and be plausible.
-                if (oldCharCount >= sourceProfile.Length && oldCharCount <= 4096 &&
-                    newCharCount is > 0 and <= 4096)
-                {
-                    int ri = result.Count;
-                    result[ri - 2] = (byte)(newCharCount & 0xFF);
-                    result[ri - 1] = (byte)((newCharCount >> 8) & 0xFF);
-                }
-            }
-
-            result.AddRange(targetBytes);
-            pos = matchPos + sourceBytes.Length;
+            favorites = profilePathPatcher.PatchProfilePath(favorites, taskbar.SourceProfilePath, targetProfile);
+            favoritesResolve = profilePathPatcher.PatchProfilePath(favoritesResolve, taskbar.SourceProfilePath, targetProfile);
+        }
+        else if (string.IsNullOrEmpty(taskbar.SourceProfilePath) &&
+                 !legacyOwnershipDetector.IsOwnedByCurrentProfile(taskbar.Favorites, taskbar.FavoritesResolve, targetProfile))
+        {
+            return new TaskbarTaskbandRegistryValues();
         }
 
-        return result.ToArray();
-    }
-
-    private static int IndexOfBytes(byte[] data, byte[] pattern, int startPos)
-    {
-        int end = data.Length - pattern.Length;
-        for (int i = startPos; i <= end; i++)
+        return new TaskbarTaskbandRegistryValues
         {
-            // LINQ in loop is acceptable — no highload scenarios in this tool.
-            if (!pattern.Where((t, j) => data[i + j] != t).Any())
-                return i;
-        }
-
-        return -1;
-    }
-
-    // Used only for the legacy fallback path (JSON without SourceProfilePath).
-    private static bool ContainsPathUtf16(byte[]? data, string path)
-    {
-        if (data == null || data.Length < 2 || string.IsNullOrEmpty(path))
-            return false;
-        var text = Encoding.Unicode.GetString(data);
-        return text.Contains(path, StringComparison.OrdinalIgnoreCase);
-    }
-
-    internal static bool TryResolvePinnedShortcutDestinationPath(string taskBarFolder, string importedName, out string destinationPath)
-    {
-        destinationPath = string.Empty;
-
-        var fileName = importedName.Trim();
-        if (fileName.Length == 0)
-            return false;
-        if (Path.IsPathRooted(fileName))
-            return false;
-        if (fileName.IndexOf(Path.DirectorySeparatorChar) >= 0 || fileName.IndexOf(Path.AltDirectorySeparatorChar) >= 0)
-            return false;
-        if (fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-            return false;
-        if (!string.Equals(Path.GetExtension(fileName), ".lnk", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        var fullTaskbarFolder = Path.GetFullPath(taskBarFolder)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var candidatePath = Path.GetFullPath(Path.Combine(fullTaskbarFolder, fileName));
-        var folderPrefix = fullTaskbarFolder + Path.DirectorySeparatorChar;
-        if (!candidatePath.StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        destinationPath = candidatePath;
-        return true;
+            Favorites = favorites,
+            FavoritesResolve = favoritesResolve
+        };
     }
 
     void ISettingsIO.ReadInto(UserSettings s) => s.Taskbar = Read();

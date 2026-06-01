@@ -1,5 +1,4 @@
 using Microsoft.Win32;
-using RunFence.Core;
 using RunFence.Infrastructure;
 
 namespace RunFence.Startup;
@@ -7,7 +6,7 @@ namespace RunFence.Startup;
 public class SessionSwitchStartupEventWirer(
     ISessionSwitchEventSource sessionSwitchEventSource,
     IStartupFormLifetime formLifetime,
-    IInteractiveUserDesktopProvider interactiveUserDesktopProvider) : IStartupEventWirer
+    InteractiveUserRefreshCoordinator interactiveUserRefreshCoordinator) : IStartupEventWirer
 {
     public void WireEvents()
     {
@@ -25,7 +24,6 @@ public class SessionSwitchStartupEventWirer(
             or SessionSwitchReason.RemoteDisconnect))
             return;
 
-        SidResolutionHelper.ReinitializeInteractiveUserSid();
-        interactiveUserDesktopProvider.InvalidateCache();
+        interactiveUserRefreshCoordinator.Refresh();
     }
 }

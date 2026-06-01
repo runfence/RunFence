@@ -87,16 +87,18 @@ public partial class SidMigrationInAppStep : UserControl, ISidMigrationInAppStep
         _resultLabel.Text = "Applying...";
         _resultLabel.Visible = true;
 
-        var (messages, success, saveError) = await _inAppMigrationHandler.ApplyAsync(_filteredMappings, _filteredDeletes, _session);
+        var result = await _inAppMigrationHandler.ApplyAsync(_filteredMappings, _filteredDeletes, _session);
 
         if (IsDisposed)
             return;
 
-        if (!success)
+        if (!result.Success)
         {
             _applyButton.Enabled = true;
             _resultLabel.ForeColor = Color.Red;
-            _resultLabel.Text = messages.Count > 0 ? messages[0] : "Migration failed.";
+            _resultLabel.Text = result.Messages.Count > 0
+                ? string.Join("\n", result.Messages)
+                : "Migration failed.";
             return;
         }
 
@@ -104,16 +106,16 @@ public partial class SidMigrationInAppStep : UserControl, ISidMigrationInAppStep
 
         if (!IsDisposed)
         {
-            if (saveError != null)
+            if (result.SaveError != null)
             {
                 _resultLabel.ForeColor = Color.OrangeRed;
-                _resultLabel.Text = string.Join("\n", messages) +
-                                    $"\nSave failed: {saveError}. Please restart the application.";
+                _resultLabel.Text = string.Join("\n", result.Messages) +
+                                    $"\nSave failed: {result.SaveError}. Please restart the application.";
             }
             else
             {
                 _resultLabel.ForeColor = Color.DarkGreen;
-                _resultLabel.Text = string.Join("\n", messages);
+                _resultLabel.Text = string.Join("\n", result.Messages);
             }
         }
     }

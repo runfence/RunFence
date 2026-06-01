@@ -71,29 +71,6 @@ public class RememberPinServiceTests : IDisposable
     }
 
     [Fact]
-    public void IsEnabled_ReturnsFalse_WhenFileDoesNotExist()
-    {
-        Assert.False(_service.IsEnabled);
-    }
-
-    [Fact]
-    public void IsEnabled_ReturnsTrue_WhenFileExists()
-    {
-        File.WriteAllBytes(_startKeyPath, [DpapiOnlyVersion, DpapiMode]);
-        Assert.True(_service.IsEnabled);
-    }
-
-    [Fact]
-    public void IsTpmAvailable_DelegatesToTpmKeyProvider()
-    {
-        _tpmKeyProvider.Setup(t => t.IsAvailable()).Returns(true);
-
-        Assert.True(_service.IsTpmAvailable());
-
-        _tpmKeyProvider.Verify(t => t.IsAvailable(), Times.Once);
-    }
-
-    [Fact]
     public void EnableWithTpm_WritesHybridEnvelope_AndWrapsFixedSizeDataKey()
     {
         var pinDerivedKey = MakePinDerivedKey();

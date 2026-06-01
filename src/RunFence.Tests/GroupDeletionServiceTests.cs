@@ -116,12 +116,12 @@ public class GroupDeletionServiceTests
         db.GetOrCreateAccount(GroupSid).Grants.Add(new GrantedPathEntry { Path = @"C:\x", IsTraverseOnly = true });
         db.SidNames[GroupSid] = "Group";
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<ITraverseService>();
         pathGrantService
             .Setup(s => s.RemoveTraverse(GroupSid, @"C:\x"))
             .Returns(new GrantApplyResult());
 
-        var service = CreateService(db, pathGrantService: pathGrantService.Object);
+        var service = CreateService(db, traverseService: pathGrantService.Object);
 
         var result = service.DeleteGroup(GroupSid);
 
@@ -145,7 +145,7 @@ public class GroupDeletionServiceTests
             null,
             new InvalidOperationException("save failed"));
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
         pathGrantService
             .Setup(s => s.RemoveGrant(GroupSid, @"C:\grant", false))
             .Returns(new GrantApplyResult(
@@ -153,7 +153,7 @@ public class GroupDeletionServiceTests
                 DurableSaveCompleted: false,
                 Warnings: [warning]));
 
-        var service = CreateService(db, pathGrantService: pathGrantService.Object);
+        var service = CreateService(db, grantMutatorService: pathGrantService.Object);
 
         var result = service.DeleteGroup(GroupSid);
 
@@ -177,7 +177,7 @@ public class GroupDeletionServiceTests
             null,
             new InvalidOperationException("save failed"));
 
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<ITraverseService>();
         pathGrantService
             .Setup(s => s.RemoveTraverse(GroupSid, @"C:\x"))
             .Returns(new GrantApplyResult(
@@ -185,7 +185,7 @@ public class GroupDeletionServiceTests
                 DurableSaveCompleted: false,
                 Warnings: [warning]));
 
-        var service = CreateService(db, pathGrantService: pathGrantService.Object);
+        var service = CreateService(db, traverseService: pathGrantService.Object);
 
         var result = service.DeleteGroup(GroupSid);
 
@@ -200,20 +200,26 @@ public class GroupDeletionServiceTests
         AppDatabase db,
         ILocalGroupMutationService? groupMembership = null,
         IAclService? aclService = null,
-        IPathGrantService? pathGrantService = null,
+        IGrantMutatorService? grantMutatorService = null,
+        ITraverseService? traverseService = null,
         ISessionSaver? sessionSaver = null)
     {
-        var grantService = pathGrantService;
-        if (grantService == null)
+        if (grantMutatorService == null)
         {
-            var pathGrantMock = new Mock<IPathGrantService>();
+            var pathGrantMock = new Mock<IGrantMutatorService>();
             pathGrantMock
                 .Setup(s => s.RemoveGrant(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>()))
                 .Returns(new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: true));
-            pathGrantMock
+            grantMutatorService = pathGrantMock.Object;
+        }
+
+        if (traverseService == null)
+        {
+            var traverseMock = new Mock<ITraverseService>();
+            traverseMock
                 .Setup(s => s.RemoveTraverse(It.IsAny<string>(), It.IsAny<string>()))
                 .Returns(new GrantApplyResult(DatabaseModified: true, DurableSaveCompleted: true));
-            grantService = pathGrantMock.Object;
+            traverseService = traverseMock.Object;
         }
 
         var sessionProvider = new Mock<ISessionProvider>();
@@ -221,12 +227,13 @@ public class GroupDeletionServiceTests
 {
             Database = db,
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(TestSecretFactory.FromBytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.FromBytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])));
         return new GroupDeletionService(
             groupMembership ?? Mock.Of<ILocalGroupMutationService>(),
             sessionProvider.Object,
             aclService ?? Mock.Of<IAclService>(),
-            grantService,
+            grantMutatorService,
+            traverseService,
             sessionSaver,
             Mock.Of<ILoggingService>());
     }

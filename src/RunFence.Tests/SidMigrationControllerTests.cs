@@ -55,7 +55,7 @@ public class SidMigrationControllerTests
     }
 
     [Fact]
-    public void BuildDiskScanResult_FindsOwnerDeleteBlockingSidsCaseInsensitiveAndDistinct()
+    public void BuildDiskScanResult_WithMatches_ReportsCancelTextOnly()
     {
         var controller = new SidMigrationDiskScanStepController();
         var scanResults = new List<SidMigrationMatch>
@@ -66,12 +66,7 @@ public class SidMigrationControllerTests
             new() { MatchType = SidMigrationMatchType.Owner, OwnerOldSid = "S-1-5-21-3333" }
         };
 
-        var result = controller.BuildResult(scanResults, ["S-1-5-21-1111", "s-1-5-21-3333"]);
-
-        Assert.Equal(2, result.OwnerDeleteBlockingSids.Count);
-        var ownerDeleteBlockingSids = result.OwnerDeleteBlockingSids.ToList();
-        Assert.Contains("S-1-5-21-1111", ownerDeleteBlockingSids);
-        Assert.Contains("S-1-5-21-3333", ownerDeleteBlockingSids);
+        var result = controller.BuildResult(scanResults);
 
         Assert.Equal("Scan cancelled. Found 4 items so far.", result.CancelText);
     }
@@ -81,9 +76,8 @@ public class SidMigrationControllerTests
     {
         var controller = new SidMigrationDiskScanStepController();
 
-        var result = controller.BuildResult([], []);
+        var result = controller.BuildResult([]);
 
-        Assert.Empty(result.OwnerDeleteBlockingSids);
         Assert.Equal("Scan cancelled.", result.CancelText);
     }
 

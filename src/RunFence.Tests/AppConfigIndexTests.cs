@@ -1,9 +1,6 @@
-using Moq;
 using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 using RunFence.Persistence;
-using RunFence.Persistence.UI;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -12,29 +9,7 @@ public class AppConfigIndexTests
 {
     private static AppConfigIndex CreateIndex(AppDatabase database)
     {
-        var session = new SessionContext
-        {
-            Database = database,
-            CredentialStore = new CredentialStore
-            {
-                ArgonSalt = new byte[32],
-                EncryptedCanary = [1]
-            }
-        };
-        var sessionProvider = new Mock<ISessionProvider>();
-        sessionProvider.Setup(provider => provider.GetSession()).Returns(session);
-        var configSaveOrchestrator = new ConfigSaveOrchestrator(
-            sessionProvider.Object,
-            () => new InlineUiThreadInvoker(action => action()),
-            new Mock<IDatabaseService>().Object,
-            new Mock<IAppConfigService>().Object,
-            new Mock<IHandlerMappingService>().Object);
         var ownershipProjection = new GrantIntentOwnershipProjectionService();
-        var mainStore = new MainGrantIntentStore(
-            sessionProvider.Object,
-            configSaveOrchestrator,
-            ownershipProjection);
-        _ = new GrantIntentStoreProvider(mainStore, configSaveOrchestrator, ownershipProjection);
         return new AppConfigIndex(ownershipProjection, new AppIdValidator());
     }
 
@@ -133,8 +108,7 @@ public class AppConfigIndexTests
                     TargetSid = "S-1-5-21-1",
                     ExpectedMode = JobKeeperIntegrityMode.Restricted,
                     InstanceId = "instance",
-                    PipeName = "pipe",
-                    JobName = "job"
+                    PipeName = "pipe"
                 }
             }
         };
@@ -144,5 +118,26 @@ public class AppConfigIndexTests
         Assert.NotNull(filtered.JobKeeperInstances);
         Assert.True(filtered.JobKeeperInstances!.ContainsKey("sid|restricted"));
         Assert.NotSame(db.JobKeeperInstances, filtered.JobKeeperInstances);
+    }
+
+    [Fact]
+    public void FilterForMainConfig_IncludesTrackingJobSids_AsIndependentClone()
+    {
+        var db = new AppDatabase
+        {
+            TrackingJobSids =
+            [
+                "S-1-5-21-1-2-3-1001",
+                "s-1-5-21-1-2-3-1001",
+                "S-1-5-21-1-2-3-1002"
+            ]
+        };
+
+        var filtered = CreateIndex(db).FilterForMainConfig(db);
+
+        Assert.Equal(
+            ["S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"],
+            filtered.TrackingJobSids);
+        Assert.NotSame(db.TrackingJobSids, filtered.TrackingJobSids);
     }
 }

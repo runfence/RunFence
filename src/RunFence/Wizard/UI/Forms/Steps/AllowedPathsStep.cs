@@ -1,3 +1,5 @@
+using RunFence.Infrastructure;
+
 namespace RunFence.Wizard.UI.Forms.Steps;
 
 /// <summary>
@@ -9,15 +11,18 @@ public class AllowedPathsStep : WizardStepPage
     private readonly Action<List<string>> _setPaths;
     private readonly string _labelText;
     private readonly string _stepTitle;
+    private readonly IOpenFileDialogAdapterFactory _openFileDialogFactory;
 
     private FolderListEditor _editor = null!;
 
     public AllowedPathsStep(
         Action<List<string>> setPaths,
+        IOpenFileDialogAdapterFactory openFileDialogFactory,
         string? labelText = null,
         string? stepTitle = null)
     {
         _setPaths = setPaths;
+        _openFileDialogFactory = openFileDialogFactory;
         _labelText = labelText ?? "Add folders this account should be able to access:";
         _stepTitle = stepTitle ?? "Allowed Folders";
         BuildContent();
@@ -37,7 +42,7 @@ public class AllowedPathsStep : WizardStepPage
         SuspendLayout();
         Padding = new Padding(8);
 
-        _editor = new FolderListEditor();
+        _editor = new FolderListEditor(_openFileDialogFactory);
         _editor.Initialize(_labelText, FolderBrowseDialogType.FolderWithoutCreate);
 
         Controls.Add(_editor);

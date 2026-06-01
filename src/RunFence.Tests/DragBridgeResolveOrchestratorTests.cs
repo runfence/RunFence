@@ -25,7 +25,8 @@ public class DragBridgeResolveOrchestratorTests
         var uiThreadInvoker = new Mock<IUiThreadInvoker>();
         uiThreadInvoker.Setup(invoker => invoker.Invoke(It.IsAny<Action>()))
             .Callback<Action>(action => action());
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
+        var traverseService = pathGrantService.As<ITraverseService>();
         var resolvedPaths = new List<string> { @"C:\resolved.txt" };
         var grantedPaths = new List<string> { @"C:\source" };
         pasteHandler.Setup(handler => handler.ResolveFileAccessAsync(
@@ -45,7 +46,8 @@ public class DragBridgeResolveOrchestratorTests
             quickAccessPinService.Object,
             uiThreadInvoker.Object,
             notifications.Object,
-            pathGrantService.Object);
+            pathGrantService.Object,
+            traverseService.Object);
 
         var resolve = orchestrator.CreateResolveDelegate(
             new WindowOwnerInfo(TargetSid, NativeTokenHelper.MandatoryLevelMedium, false),
@@ -70,7 +72,8 @@ public class DragBridgeResolveOrchestratorTests
         var uiThreadInvoker = new Mock<IUiThreadInvoker>();
         uiThreadInvoker.Setup(invoker => invoker.Invoke(It.IsAny<Action>()))
             .Callback<Action>(action => action());
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
+        var traverseService = pathGrantService.As<ITraverseService>();
         var grantedPaths = new List<string> { @"C:\folder" };
         pasteHandler.Setup(handler => handler.ResolveFileAccessAsync(
                 TargetSid,
@@ -86,7 +89,8 @@ public class DragBridgeResolveOrchestratorTests
             quickAccessPinService.Object,
             uiThreadInvoker.Object,
             notifications.Object,
-            pathGrantService.Object);
+            pathGrantService.Object,
+            traverseService.Object);
 
         var resolve = orchestrator.CreateResolveDelegate(
             new WindowOwnerInfo(TargetSid, NativeTokenHelper.MandatoryLevelMedium, false),
@@ -109,7 +113,8 @@ public class DragBridgeResolveOrchestratorTests
         var uiThreadInvoker = new Mock<IUiThreadInvoker>();
         uiThreadInvoker.Setup(invoker => invoker.Invoke(It.IsAny<Action>()))
             .Callback<Action>(action => action());
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
+        var traverseService = pathGrantService.As<ITraverseService>();
         using var tempDir = new TempDirectory("DragBridgeResolveRollback");
         var tempFile = Path.Combine(tempDir.Path, "temp.txt");
         File.WriteAllText(tempFile, "temp");
@@ -137,7 +142,8 @@ public class DragBridgeResolveOrchestratorTests
             quickAccessPinService.Object,
             uiThreadInvoker.Object,
             notifications.Object,
-            pathGrantService.Object);
+            pathGrantService.Object,
+            traverseService.Object);
 
         var resolve = orchestrator.CreateResolveDelegate(
             new WindowOwnerInfo(TargetSid, NativeTokenHelper.MandatoryLevelMedium, false),
@@ -151,7 +157,7 @@ public class DragBridgeResolveOrchestratorTests
         Assert.Contains("durable save", exception.Message, StringComparison.OrdinalIgnoreCase);
         pathGrantService.Verify(service => service.RestoreGrant(TargetSid.Value, persistedPath, false, It.Is<GrantIntentRestoreSnapshot>(snapshot => snapshot.RuntimeEntry == null && snapshot.Locations.Count == 0)), Times.Once);
         pathGrantService.Verify(service => service.RestoreGrant(TargetSid.Value, repairedPath, false, It.IsAny<GrantIntentRestoreSnapshot>()), Times.Never);
-        pathGrantService.Verify(service => service.RestoreTraverse(TargetSid.Value, traversePath, It.Is<GrantIntentRestoreSnapshot>(snapshot => snapshot.RuntimeEntry == null && snapshot.Locations.Count == 0)), Times.Once);
+        traverseService.Verify(service => service.RestoreTraverse(TargetSid.Value, traversePath, It.Is<GrantIntentRestoreSnapshot>(snapshot => snapshot.RuntimeEntry == null && snapshot.Locations.Count == 0)), Times.Once);
         Assert.False(File.Exists(tempFile));
         quickAccessPinService.Verify(service => service.PinFolders(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>()), Times.Never);
     }
@@ -165,7 +171,8 @@ public class DragBridgeResolveOrchestratorTests
         var uiThreadInvoker = new Mock<IUiThreadInvoker>();
         uiThreadInvoker.Setup(invoker => invoker.Invoke(It.IsAny<Action>()))
             .Callback<Action>(action => action());
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
+        var traverseService = pathGrantService.As<ITraverseService>();
         var legacyGrant = new GrantedPathEntry
         {
             Path = @"C:\persisted",
@@ -174,7 +181,7 @@ public class DragBridgeResolveOrchestratorTests
         };
         var legacyLocations = new List<GrantIntentRestoreLocation>
         {
-            new(null, legacyGrant)
+            new(new GrantIntentStoreIdentity(null), legacyGrant)
         };
         var legacySnapshot = new GrantIntentRestoreSnapshot(legacyGrant, legacyLocations);
         pasteHandler.Setup(handler => handler.ResolveFileAccessAsync(
@@ -198,7 +205,8 @@ public class DragBridgeResolveOrchestratorTests
             quickAccessPinService.Object,
             uiThreadInvoker.Object,
             notifications.Object,
-            pathGrantService.Object);
+            pathGrantService.Object,
+            traverseService.Object);
 
         var resolve = orchestrator.CreateResolveDelegate(
             new WindowOwnerInfo(TargetSid, NativeTokenHelper.MandatoryLevelMedium, false),
@@ -231,7 +239,8 @@ public class DragBridgeResolveOrchestratorTests
         var uiThreadInvoker = new Mock<IUiThreadInvoker>();
         uiThreadInvoker.Setup(invoker => invoker.Invoke(It.IsAny<Action>()))
             .Callback<Action>(action => action());
-        var pathGrantService = new Mock<IPathGrantService>();
+        var pathGrantService = new Mock<IGrantMutatorService>();
+        var traverseService = pathGrantService.As<ITraverseService>();
         pasteHandler.Setup(handler => handler.ResolveFileAccessAsync(
                 TargetSid,
                 null,
@@ -254,7 +263,8 @@ public class DragBridgeResolveOrchestratorTests
             quickAccessPinService.Object,
             uiThreadInvoker.Object,
             notifications.Object,
-            pathGrantService.Object);
+            pathGrantService.Object,
+            traverseService.Object);
 
         var resolve = orchestrator.CreateResolveDelegate(
             new WindowOwnerInfo(TargetSid, NativeTokenHelper.MandatoryLevelMedium, false),

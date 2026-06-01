@@ -119,7 +119,7 @@ public sealed class RunAsCreatedAccountPostSetupServiceTests : IDisposable
 {
             Database = appState.Database,
             CredentialStore = new CredentialStore { ArgonSalt = [1, 2, 3] },
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
 
         var firewallApplyHelper = new FirewallApplyHelper(

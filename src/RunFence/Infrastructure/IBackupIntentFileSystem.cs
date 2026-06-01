@@ -1,10 +1,19 @@
 namespace RunFence.Infrastructure;
 
+public enum BackupIntentPathState
+{
+    Exists,
+    Missing,
+    Unknown
+}
+
 public interface IBackupIntentFileSystem
 {
-    bool FileExists(string path);
+    BackupIntentPathState GetFileState(string path);
 
-    bool DirectoryExists(string path);
+    BackupIntentPathState GetDirectoryState(string path);
 
-    IReadOnlyList<string> EnumerateDirectories(string path);
+    bool TryEnumerateDirectories(string path, out IReadOnlyList<string> directories);
+
+    bool TryGetDirectoryLastWriteTimeUtc(string path, out DateTime lastWriteTimeUtc);
 }

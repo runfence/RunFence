@@ -16,10 +16,11 @@ namespace RunFence.Apps.UI;
 /// Decouples launch execution and error handling from the panel's grid management concerns.
 /// </summary>
 public class ApplicationsPanelLaunchHandler(
-    AppEntryLauncher entryLauncher,
+    IAppEntryLauncher entryLauncher,
     ISidNameCacheService sidNameCache,
     ILaunchFeedbackPresenter launchFeedbackPresenter,
     ILoggingService log,
+    IMessageBoxService messageBoxService,
     IRunAsFlowHandler runAsFlowHandler)
 {
     /// <summary>
@@ -39,16 +40,19 @@ public class ApplicationsPanelLaunchHandler(
         }
         catch (CredentialNotFoundException ex)
         {
-            MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            messageBoxService.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch (MissingPasswordException ex)
         {
-            MessageBox.Show(ex.Message, "Missing Password", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            messageBoxService.Show(ex.Message, "Missing Password", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (Win32Exception ex) when (ex.NativeErrorCode == ProcessLaunchNative.Win32ErrorLogonFailure)
         {
-            MessageBox.Show("Stored credentials are incorrect. Please update the password in RunFence.",
-                "Launch Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            messageBoxService.Show(
+                "Stored credentials are incorrect. Please update the password in RunFence.",
+                "Launch Failed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
         }
         catch (OperationCanceledException)
         {
@@ -64,7 +68,7 @@ public class ApplicationsPanelLaunchHandler(
         catch (Exception ex)
         {
             log.Error($"Launch failed for {app.Name}", ex);
-            MessageBox.Show($"Failed to launch: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            messageBoxService.Show($"Failed to launch: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

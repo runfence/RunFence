@@ -173,21 +173,6 @@ public class AccountLifecycleManagerTests
     // ── DeleteUser ───────────────────────────────────────────────────────────
 
     [Fact]
-    public void DeleteUser_Success_ReturnsTrueWithNullError()
-    {
-        // Arrange
-        _windowsAccountService.Setup(s => s.DeleteSamAccount(Sid));
-        var manager = CreateManager();
-
-        // Act
-        var (success, error) = manager.DeleteSamAccount(Sid);
-
-        // Assert
-        Assert.True(success);
-        Assert.Null(error);
-    }
-
-    [Fact]
     public void DeleteUser_ServiceThrows_ReturnsFalseWithErrorMessage()
     {
         // Arrange

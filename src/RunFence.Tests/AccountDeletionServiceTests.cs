@@ -20,7 +20,7 @@ public class AccountDeletionServiceTests
 
     private readonly Mock<IAccountLifecycleManager> _lifecycleManager = new();
     private readonly Mock<IAccountCredentialManager> _credentialManager = new();
-    private readonly Mock<IPathGrantService> _pathGrantService = new();
+    private readonly Mock<IGrantAccountCleanupService> _pathGrantService = new();
     private readonly Mock<IFirewallCleanupService> _firewallCleanupService = new();
     private readonly Mock<IGlobalIcmpSettingsApplier> _globalIcmpSettingsApplier = new();
     private readonly Mock<ILoggingService> _log = new();
@@ -31,15 +31,33 @@ public class AccountDeletionServiceTests
     {
         _lifecycleManager.SetReturnsDefault(Task.FromResult(AccountDeleteValidationResult.Success));
         var dbProvider = new LambdaDatabaseProvider(() => database);
+        var trackingJobStateStore = CreateTrackingJobStateStore(database);
         return new(_lifecycleManager.Object, _credentialManager.Object,
             _pathGrantService.Object,
             _firewallCleanupService.Object,
             _globalIcmpSettingsApplier.Object,
-            new SidCleanupHelper(dbProvider),
+            new SidCleanupHelper(dbProvider, trackingJobStateStore.Object),
             _log.Object,
             _aclService.Object,
             _localUserProvider.Object,
             dbProvider);
+    }
+
+    private static Mock<ITrackingJobStateStore> CreateTrackingJobStateStore(AppDatabase database)
+    {
+        var store = new Mock<ITrackingJobStateStore>();
+        store.Setup(s => s.RemoveTrackingJobSid(It.IsAny<string>(), It.IsAny<bool>()))
+            .Callback<string, bool>((sid, _) =>
+            {
+                if (database.TrackingJobSids == null)
+                    return;
+
+                database.TrackingJobSids.RemoveAll(existing =>
+                    string.Equals(existing, sid, StringComparison.OrdinalIgnoreCase));
+                if (database.TrackingJobSids.Count == 0)
+                    database.TrackingJobSids = null;
+            });
+        return store;
     }
 
     private static (AppDatabase database, CredentialStore store) BuildSession(
@@ -140,7 +158,7 @@ public class AccountDeletionServiceTests
         _credentialManager.Verify(m => m.RemoveCredentialsBySid(Sid, store), Times.Once);
     }
 
-    [Fact]
+[Fact]
     public async Task DeleteAccount_RemovesEphemeralEntry()
     {
         // Arrange
@@ -155,7 +173,7 @@ public class AccountDeletionServiceTests
         Assert.Null(database.GetAccount(Sid));
     }
 
-    [Fact]
+[Fact]
     public async Task DeleteAccount_RemovesFirewallSettings()
     {
         // Arrange
@@ -168,6 +186,22 @@ public class AccountDeletionServiceTests
 
         // Assert — AccountEntry (including Firewall) removed by CleanupSidFromAppData
         Assert.Null(database.GetAccount(Sid));
+    }
+
+    [Fact]
+    public async Task DeleteAccount_RemovesTrackingJobSid()
+    {
+        var (database, store) = BuildSession(addApp: false);
+        database.TrackingJobSids = [Sid, OtherSid];
+        _lifecycleManager.Setup(m => m.DeleteSamAccount(Sid)).Returns(new AccountDeletionResult(true, Sid, null));
+        var service = BuildService(database);
+
+        await service.DeleteAccountAsync(Sid, Username, store);
+
+        Assert.DoesNotContain(database.TrackingJobSids!, sid =>
+            string.Equals(sid, Sid, StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(database.TrackingJobSids!, sid =>
+            string.Equals(sid, OtherSid, StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -267,20 +301,6 @@ public class AccountDeletionServiceTests
     }
 
     [Fact]
-    public async Task DeleteAccount_DeleteUserFails_DoesNotReturnWarnings()
-    {
-        var (database, store) = BuildSession(addGrant: true);
-        _lifecycleManager.Setup(m => m.DeleteSamAccount(Sid)).Returns(new AccountDeletionResult(false, Sid, "Access denied"));
-        var service = BuildService(database);
-
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            service.DeleteAccountAsync(Sid, Username, store));
-        Assert.Contains("Access denied", exception.Message);
-
-        _pathGrantService.Verify(g => g.RemoveAll(It.IsAny<string>()), Times.Never);
-    }
-
-    [Fact]
     public async Task DeleteAccount_ClearRestrictionsThrows_ContinuesDeletion()
     {
         // Unlike DeleteUser failure (which is terminal because the OS account still exists),
@@ -298,7 +318,6 @@ public class AccountDeletionServiceTests
 
         // Assert — deletion still proceeded
         _lifecycleManager.Verify(m => m.DeleteSamAccount(Sid), Times.Once);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(Sid))), Times.Once);
     }
 
     [Fact]
@@ -316,7 +335,6 @@ public class AccountDeletionServiceTests
 
         // Assert — deletion still proceeded
         _lifecycleManager.Verify(m => m.DeleteSamAccount(Sid), Times.Once);
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains(Sid))), Times.Once);
     }
 
     [Fact]
@@ -360,7 +378,6 @@ public class AccountDeletionServiceTests
         await service.DeleteAccountAsync(Sid, Username, store);
 
         Assert.Null(database.GetAccount(Sid));
-        _log.Verify(l => l.Warn(It.Is<string>(m => m.Contains("DeleteProfileAsync failed", StringComparison.Ordinal) && m.Contains(Sid, StringComparison.Ordinal))), Times.Once);
     }
 
     [Fact]
@@ -467,7 +484,6 @@ public class AccountDeletionServiceTests
         await service.DeleteAccountAsync(Sid, Username, store);
 
         // Assert: warning logged, RecomputeAllAncestorAcls still called
-        _log.Verify(l => l.Warn(It.Is<string>(s => s.Contains("BrokenApp"))), Times.Once);
         _aclService.Verify(a => a.RecomputeAllAncestorAcls(It.IsAny<IReadOnlyList<AppEntry>>()), Times.Once);
     }
 

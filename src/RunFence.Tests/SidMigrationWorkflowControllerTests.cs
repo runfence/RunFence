@@ -24,9 +24,37 @@ public class SidMigrationWorkflowControllerTests
             context.StepFactory.LastPathStep.RaiseSkipRequested();
             context.Controller.HandleViewShown(TestWindow.Instance);
 
+            Assert.Equal("Start Scan", context.Controller.CurrentView.NextText);
+            Assert.Equal("Back", context.Controller.CurrentView.SecondaryText);
+            Assert.False(context.Controller.CurrentView.SecondaryActsAsCancel);
+
             context.Controller.HandleSecondary(TestWindow.Instance);
 
             Assert.Equal("Step 1: Select Paths to Scan", context.Controller.CurrentView.Title);
+        });
+    }
+
+    [Fact]
+    public void HandleSecondary_OnStep3AfterDiscovery_RequestsCloseInsteadOfReturningToStep1()
+    {
+        StaTestHelper.RunAsyncOnSta(async () =>
+        {
+            using var context = CreateContext();
+            var closeRequested = false;
+            context.Controller.CloseRequested += () => closeRequested = true;
+
+            context.Controller.Initialize();
+            context.StepFactory.LastPathStep!.SelectedPaths = ["C:\\Data"];
+            context.Controller.HandleNext(TestWindow.Instance);
+            context.Controller.HandleViewShown(TestWindow.Instance);
+            await context.WaitForTitleAsync("Step 3: Review SID Mappings");
+            context.Controller.HandleViewShown(TestWindow.Instance);
+            await context.WaitForViewReadyAsync();
+
+            context.Controller.HandleSecondary(TestWindow.Instance);
+
+            Assert.True(closeRequested);
+            Assert.Equal("Step 3: Review SID Mappings", context.Controller.CurrentView.Title);
         });
     }
 
@@ -62,6 +90,46 @@ public class SidMigrationWorkflowControllerTests
     }
 
     [Fact]
+    public void HandleNext_ProgressesThroughWorkflowSteps()
+    {
+        StaTestHelper.RunAsyncOnSta(async () =>
+        {
+            using var context = CreateContext();
+            context.StepFactory.MappingSelections = new MappingSelectionResult(
+                [new SidMigrationMapping("S-1-old", "S-1-new", "old-user")],
+                []);
+            context.ScanResults = [new SidMigrationMatch { Path = @"C:\Data\File.txt", IsDirectory = false, MatchType = SidMigrationMatchType.Ace }];
+
+            context.Controller.Initialize();
+            Assert.Equal("Step 1: Select Paths to Scan", context.Controller.CurrentView.Title);
+
+            context.StepFactory.LastPathStep!.SelectedPaths = ["C:\\Data"];
+            context.Controller.HandleNext(TestWindow.Instance);
+            Assert.Equal("Step 2: Discovering Orphaned SIDs", context.Controller.CurrentView.Title);
+
+            context.Controller.HandleViewShown(TestWindow.Instance);
+            await context.WaitForTitleAsync("Step 3: Review SID Mappings");
+            context.Controller.HandleViewShown(TestWindow.Instance);
+            await context.WaitForViewReadyAsync();
+
+            context.Controller.HandleNext(TestWindow.Instance);
+            Assert.Equal("Step 4: Scanning Disk", context.Controller.CurrentView.Title);
+
+            context.Controller.HandleViewShown(TestWindow.Instance);
+            await context.WaitForTitleAsync("Step 5: Preview Changes");
+
+            context.Controller.HandleNext(TestWindow.Instance);
+            Assert.Equal("Step 6: Applying Changes", context.Controller.CurrentView.Title);
+
+            context.Controller.HandleViewShown(TestWindow.Instance);
+            await context.WaitForViewStateAsync(view => view.Title == "Step 6: Applying Changes" && view.NextEnabled);
+
+            context.Controller.HandleNext(TestWindow.Instance);
+            Assert.Equal("Step 7: In-App Data Migration", context.Controller.CurrentView.Title);
+        });
+    }
+
+    [Fact]
     public void DiscoveryCompletion_WithUnresolvedSids_ShowsWarningAndAdvancesToStep3()
     {
         StaTestHelper.RunAsyncOnSta(async () =>
@@ -91,7 +159,29 @@ public class SidMigrationWorkflowControllerTests
     }
 
     [Fact]
-    public void DiskScanCompletion_WithOwnerDeleteBlockingSid_ShowsWarningAndReturnsToStep3()
+    public void DiscoveryCompletion_OnStep3_ShowsExecuteAndCancel()
+    {
+        StaTestHelper.RunAsyncOnSta(async () =>
+        {
+            using var context = CreateContext();
+
+            context.Controller.Initialize();
+            context.StepFactory.LastPathStep!.SelectedPaths = ["C:\\Data"];
+            context.Controller.HandleNext(TestWindow.Instance);
+
+            context.Controller.HandleViewShown(TestWindow.Instance);
+            await context.WaitForTitleAsync("Step 3: Review SID Mappings");
+            context.Controller.HandleViewShown(TestWindow.Instance);
+            await context.WaitForViewReadyAsync();
+
+            Assert.Equal("Execute", context.Controller.CurrentView.NextText);
+            Assert.Equal("Cancel", context.Controller.CurrentView.SecondaryText);
+            Assert.True(context.Controller.CurrentView.SecondaryActsAsCancel);
+        });
+    }
+
+    [Fact]
+    public void DiskScanCompletion_WithOwnerDeleteSid_AdvancesToStep5()
     {
         StaTestHelper.RunAsyncOnSta(async () =>
         {
@@ -118,14 +208,7 @@ public class SidMigrationWorkflowControllerTests
 
             context.Controller.HandleNext(TestWindow.Instance);
             context.Controller.HandleViewShown(TestWindow.Instance);
-            await context.WaitForTitleAsync("Step 3: Review SID Mappings");
-
-            context.MessageBoxService.Verify(service => service.Show(
-                TestWindow.Instance,
-                It.Is<string>(text => text.Contains("S-1-old", StringComparison.Ordinal)),
-                "Owner Migration Required",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning), Times.Once);
+            await context.WaitForTitleAsync("Step 5: Preview Changes");
         });
     }
 
@@ -200,6 +283,24 @@ public class SidMigrationWorkflowControllerTests
         });
     }
 
+    [Fact]
+    public void HandleEscape_OnStep3WithBackVisible_IsNotHandled()
+    {
+        StaTestHelper.RunOnSta(() =>
+        {
+            using var context = CreateContext();
+            context.Controller.Initialize();
+            context.StepFactory.LastPathStep!.SelectedPaths = ["C:\\Data"];
+            context.StepFactory.LastPathStep.RaiseSkipRequested();
+            context.Controller.HandleViewShown(TestWindow.Instance);
+
+            var handled = context.Controller.HandleEscape(TestWindow.Instance);
+
+            Assert.False(handled);
+            Assert.Equal("Step 3: Review SID Mappings", context.Controller.CurrentView.Title);
+        });
+    }
+
     private static TestContext CreateContext()
     {
         var session = new SessionContext
@@ -215,7 +316,7 @@ public class SidMigrationWorkflowControllerTests
                     new CredentialEntry { Sid = "S-1-old" }
                 ]
             },
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
 
         var sidMigrationService = new Mock<ISidMigrationService>();
         var messageBoxService = new Mock<IMessageBoxService>();

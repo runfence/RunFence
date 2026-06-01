@@ -1,5 +1,3 @@
-using System.IO;
-
 namespace RunFence.Core;
 
 public sealed class AppIdValidator
@@ -70,10 +68,4 @@ public sealed class AppIdValidator
         reason = string.Empty;
         return false;
     }
-}
-
-public sealed class InvalidAppIdException(string? appId, string message)
-    : Exception(message)
-{
-    public string? AppId { get; } = appId;
 }

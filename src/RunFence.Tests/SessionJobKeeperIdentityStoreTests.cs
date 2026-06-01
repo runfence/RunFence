@@ -15,7 +15,7 @@ public class SessionJobKeeperIdentityStoreTests : IDisposable
     private const string ExtraConfigPath = @"D:\Configs\extra.rfn";
 
     private readonly SecureSecret _pinKey = TestSecretFactory.Create(32);
-    private readonly Mock<IConfigRepository> _configRepository = new();
+    private readonly Mock<IMainConfigPersistence> _configRepository = new();
     private readonly AppDatabase _database = new();
     private readonly IUiThreadInvoker _uiThreadInvoker;
     private readonly SessionJobKeeperIdentityStore _store;
@@ -35,7 +35,7 @@ public class SessionJobKeeperIdentityStoreTests : IDisposable
         {
             Database = _database,
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32] },
-        }.WithOwnedPinDerivedKey(_pinKey));
+        }.WithClonedPinDerivedKey(_pinKey));
         _store = new SessionJobKeeperIdentityStore(sessionProvider, () => _uiThreadInvoker, () => _configRepository.Object);
     }
 
@@ -55,11 +55,8 @@ public class SessionJobKeeperIdentityStoreTests : IDisposable
         Assert.Equal(Sid, identity.TargetSid);
         Assert.Equal(JobKeeperIntegrityMode.Restricted, identity.ExpectedMode);
         Assert.Contains(identity.InstanceId, identity.PipeName);
-        Assert.Contains(identity.InstanceId, identity.JobName);
         Assert.DoesNotContain(Sid, identity.PipeName);
-        Assert.DoesNotContain(Sid, identity.JobName);
         Assert.True(identity.PipeName.Length < 100);
-        Assert.True(identity.JobName.Length < 100);
         _configRepository.Verify(
             r => r.SaveConfig(_database, It.IsAny<ISecureSecretSnapshotSource>(), It.IsAny<byte[]>()),
             Times.Once);
@@ -76,7 +73,6 @@ public class SessionJobKeeperIdentityStoreTests : IDisposable
                 ExpectedMode = JobKeeperIntegrityMode.Restricted,
                 InstanceId = "broken",
                 PipeName = "",
-                JobName = "job",
             },
             [JobKeeperInstanceIdentity.CreateKey(Sid, true)] = new()
             {
@@ -84,7 +80,6 @@ public class SessionJobKeeperIdentityStoreTests : IDisposable
                 ExpectedMode = JobKeeperIntegrityMode.LowIntegrity,
                 InstanceId = "other",
                 PipeName = "pipe",
-                JobName = "job",
             },
         };
 
@@ -121,6 +116,28 @@ public class SessionJobKeeperIdentityStoreTests : IDisposable
         Assert.Same(oldIdentity, _store.Get(Sid, isLow: false));
         Assert.Same(newIdentity, _store.Get(OtherSid, isLow: false));
         Assert.NotSame(oldIdentity, newIdentity);
+    }
+
+    [Fact]
+    public void GetAll_ReturnsValidPersistedIdentities()
+    {
+        var restrictedIdentity = _store.CreateFresh(Sid, isLow: false);
+        var lowIdentity = _store.CreateFresh(OtherSid, isLow: true);
+        _database.JobKeeperInstances!["broken"] = new JobKeeperInstanceIdentity
+        {
+            TargetSid = "",
+            ExpectedMode = JobKeeperIntegrityMode.Restricted,
+            InstanceId = "broken",
+            PipeName = "pipe",
+        };
+
+        var result = _store.GetAll();
+
+        Assert.Equal(
+            [restrictedIdentity.InstanceId, lowIdentity.InstanceId],
+            result.Select(identity => identity.InstanceId));
+        Assert.NotSame(restrictedIdentity, result[0]);
+        Assert.NotSame(lowIdentity, result[1]);
     }
 
     [Fact]
@@ -189,7 +206,7 @@ public class SessionJobKeeperIdentityStoreTests : IDisposable
         {
             Database = database,
             CredentialStore = new CredentialStore { ArgonSalt = new byte[32] }
-        }.WithOwnedPinDerivedKey(pinKey);
+        }.WithClonedPinDerivedKey(pinKey);
         sessionProvider.SetSession(session);
 
         var databaseService = new DatabaseService(

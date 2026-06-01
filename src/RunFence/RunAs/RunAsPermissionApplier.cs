@@ -10,7 +10,7 @@ namespace RunFence.RunAs;
 /// credential SIDs and optionally pins the granted folder for credential launches.
 /// </summary>
 public class RunAsPermissionApplier(
-    IPathGrantService pathGrantService,
+    IGrantMutatorService grantMutatorService,
     IQuickAccessPinService quickAccessPinService)
 {
     public GrantApplyResult ApplyContainerGrant(AncestorPermissionResult grant, string? containerSid)
@@ -18,7 +18,7 @@ public class RunAsPermissionApplier(
         if (string.IsNullOrEmpty(containerSid))
             return default;
 
-        return pathGrantService.EnsureAccess(
+        return grantMutatorService.EnsureAccess(
             containerSid,
             grant.Path,
             grant.Rights,
@@ -31,7 +31,7 @@ public class RunAsPermissionApplier(
     /// </summary>
     public GrantApplyResult ApplyCredentialGrant(AncestorPermissionResult grant, string credentialSid)
     {
-        var result = pathGrantService.EnsureAccess(
+        var result = grantMutatorService.EnsureAccess(
             credentialSid,
             grant.Path,
             grant.Rights,

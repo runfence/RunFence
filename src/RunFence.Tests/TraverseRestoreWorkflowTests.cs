@@ -17,7 +17,8 @@ public class TraverseRestoreWorkflowTests
     private const string UserSid = "S-1-5-21-1234567890-1234567890-1234567890-1001";
     private const string ExistingDir = @"C:\Existing\TestDir";
 
-    private readonly Mock<IAclAccessor> _aclAccessor = new();
+    private readonly Mock<IPathSecurityDescriptorAccessor> _fileSecurityAccessor = new();
+    private readonly Mock<IExplicitAceAccessor> _explicitAceAccessor = new();
     private readonly Mock<ITraverseAcl> _traverseAcl = new();
     private readonly Mock<IAclPermissionService> _aclPermission = new();
     private readonly Mock<IInteractiveUserResolver> _iuResolver = new();
@@ -55,11 +56,11 @@ public class TraverseRestoreWorkflowTests
             .Returns(true);
 
         _iuResolver.Setup(r => r.GetInteractiveUserSid()).Returns((string?)null);
-        _aclAccessor.Setup(a => a.GetSecurity(It.IsAny<string>()))
+        _fileSecurityAccessor.Setup(a => a.GetSecurity(It.IsAny<string>()))
             .Returns(CreateSecurityWithOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null).Value));
 
-        _grantAceService = new GrantAceService(_aclAccessor.Object, _pathInfo);
-        _fileOwnerService = new FileOwnerService(_log.Object, _pathInfo);
+        _grantAceService = new GrantAceService(_fileSecurityAccessor.Object, _explicitAceAccessor.Object, _pathInfo);
+        _fileOwnerService = new FileOwnerService(_log.Object, _pathInfo, _fileSecurityAccessor.Object);
     }
 
     [Fact]
@@ -93,7 +94,7 @@ public class TraverseRestoreWorkflowTests
                     IsTraverseOnly = true,
                     AllAppliedPaths = null
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = ExistingDir,
                     IsTraverseOnly = true,
@@ -149,7 +150,7 @@ public class TraverseRestoreWorkflowTests
                     IsTraverseOnly = true,
                     AllAppliedPaths = [ExistingDir]
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = ExistingDir,
                     IsTraverseOnly = true,
@@ -209,7 +210,7 @@ public class TraverseRestoreWorkflowTests
                     IsTraverseOnly = true,
                     AllAppliedPaths = [ExistingDir]
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = ExistingDir,
                     IsTraverseOnly = true,
@@ -283,7 +284,7 @@ public class TraverseRestoreWorkflowTests
                     IsTraverseOnly = true,
                     AllAppliedPaths = [ExistingDir]
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = ExistingDir,
                     IsTraverseOnly = true,
@@ -336,7 +337,7 @@ public class TraverseRestoreWorkflowTests
                     SourceSids = [containerSid],
                     AllAppliedPaths = [ExistingDir]
                 },
-                [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                 {
                     Path = ExistingDir,
                     IsTraverseOnly = true,
@@ -387,7 +388,7 @@ public class TraverseRestoreWorkflowTests
                         IsTraverseOnly = true,
                         AllAppliedPaths = [ExistingDir, rootPath]
                     },
-                    [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                    [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                     {
                         Path = ExistingDir,
                         IsTraverseOnly = true,
@@ -465,7 +466,7 @@ public class TraverseRestoreWorkflowTests
                         AllAppliedPaths = [ExistingDir, rootPath]
                     },
                     [new GrantIntentRestoreLocation(
-                        additionalAStore.ConfigPath,
+                        new GrantIntentStoreIdentity(additionalAStore.ConfigPath),
                         new GrantedPathEntry
                         {
                             Path = ExistingDir,
@@ -540,7 +541,7 @@ public class TraverseRestoreWorkflowTests
                         IsTraverseOnly = true,
                         AllAppliedPaths = [ExistingDir]
                     },
-                    [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                    [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                     {
                         Path = ExistingDir,
                         IsTraverseOnly = true,
@@ -592,7 +593,7 @@ public class TraverseRestoreWorkflowTests
                         IsTraverseOnly = true,
                         AllAppliedPaths = [ExistingDir]
                     },
-                    [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                    [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                     {
                         Path = ExistingDir,
                         IsTraverseOnly = true,
@@ -653,7 +654,7 @@ public class TraverseRestoreWorkflowTests
                         IsTraverseOnly = true,
                         AllAppliedPaths = [ExistingDir]
                     },
-                    [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                    [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                     {
                         Path = ExistingDir,
                         IsTraverseOnly = true,
@@ -706,7 +707,7 @@ public class TraverseRestoreWorkflowTests
                         IsTraverseOnly = true,
                         AllAppliedPaths = [ExistingDir]
                     },
-                    [new GrantIntentRestoreLocation(null, new GrantedPathEntry
+                    [new GrantIntentRestoreLocation(new GrantIntentStoreIdentity(null), new GrantedPathEntry
                     {
                         Path = ExistingDir,
                         IsTraverseOnly = true,
@@ -758,16 +759,26 @@ public class TraverseRestoreWorkflowTests
             _pathInfo);
         var saveService = new GrantIntentStoreSaveService();
         var provider = storeProvider;
+        var grantMutationOrderResolver = new GrantMutationOrderResolver();
+        var grantRuntimeSnapshotService = new GrantRuntimeSnapshotService(dbAccessor, traverseGrantOwnerResolver);
+        var traverseRestoreStateRestorer = new TraverseRestoreStateRestorer(
+            grantRuntimeSnapshotService,
+            traverseGrantStateService,
+            saveService);
+        var traverseRestoreAclRollbackService = new TraverseRestoreAclRollbackService(
+            _pathInfo,
+            _traverseAcl.Object,
+            traverseCore,
+            traverseIntentStoreCoordinator);
 
         return new TraverseRestoreWorkflow(
             traverseCore,
-            dbAccessor,
             containerIuSync,
-            _pathInfo,
-            _traverseAcl.Object,
-            traverseGrantOwnerResolver,
             traverseIntentStoreCoordinator,
             traverseGrantStateService,
+            grantMutationOrderResolver,
+            traverseRestoreStateRestorer,
+            traverseRestoreAclRollbackService,
             () => provider,
             saveService);
     }

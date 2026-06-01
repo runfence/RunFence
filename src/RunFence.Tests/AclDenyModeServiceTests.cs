@@ -42,7 +42,7 @@ public class AclDenyModeServiceTests : IDisposable
         var log = new Mock<ILoggingService>();
 
         _service = new AclDenyModeService(log.Object, _localUserProvider.Object, containerLookup,
-            iuResolver.Object, acl);
+            iuResolver.Object, acl, new AppEntryAclTargetResolver());
     }
 
     public void Dispose() => _tempDir.Dispose();

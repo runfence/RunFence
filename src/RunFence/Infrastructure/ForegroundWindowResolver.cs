@@ -4,14 +4,16 @@ namespace RunFence.Infrastructure;
 
 public sealed class ForegroundWindowResolver : IForegroundWindowResolver
 {
-    public ForegroundWindowInfo GetForegroundWindow()
+    public ForegroundWindowInfo GetForegroundWindow() =>
+        GetWindowInfo(WindowNative.GetForegroundWindow());
+
+    public ForegroundWindowInfo GetWindowInfo(IntPtr hwnd)
     {
-        IntPtr hWnd = WindowNative.GetForegroundWindow();
-        WindowNative.GetWindowThreadProcessId(hWnd, out uint processId);
+        WindowNative.GetWindowThreadProcessId(hwnd, out uint processId);
 
         var className = new StringBuilder(256);
-        WindowNative.GetClassName(hWnd, className, className.Capacity);
+        WindowNative.GetClassName(hwnd, className, className.Capacity);
 
-        return new ForegroundWindowInfo(hWnd, processId, className.ToString());
+        return new ForegroundWindowInfo(hwnd, processId, className.ToString());
     }
 }

@@ -14,8 +14,8 @@ partial class AccountsPanel
     private ToolStrip _toolStrip;
     private ToolStripButton _addButton;
     private ToolStripButton _importButton;
-    private ToolStripButton _openCmdButton;
-    private ToolStripButton _openFolderBrowserButton;
+    private ToolStripSplitButton _openCmdButton;
+    private ToolStripSplitButton _openFolderBrowserButton;
     private ToolStripButton _accountsButton;
     private ToolStripButton _copyPasswordButton;
     private ToolStripButton _refreshButton;
@@ -53,12 +53,8 @@ partial class AccountsPanel
     {
         if (disposing)
         {
-            if (_parentForm != null)
-            {
-                _parentForm.Resize -= OnParentFormResize;
-                _parentForm = null;
-            }
-            _timerCoordinator?.Stop();
+            _lifecycleCoordinator?.OnParentChanged(null);
+            _lifecycleCoordinator?.StopProcessRefresh();
             _processDisplayManager?.Dispose();
             _credentialHandler?.Dispose();
             components?.Dispose();
@@ -68,12 +64,13 @@ partial class AccountsPanel
 
     private void InitializeComponent()
     {
+        components = new Container();
         _grid = new StyledDataGridView();
         _toolStrip = new ToolStrip();
         _addButton = new ToolStripButton();
         _importButton = new ToolStripButton();
-        _openCmdButton = new ToolStripButton();
-        _openFolderBrowserButton = new ToolStripButton();
+        _openCmdButton = new ToolStripSplitButton();
+        _openFolderBrowserButton = new ToolStripSplitButton();
         _accountsButton = new ToolStripButton();
         _copyPasswordButton = new ToolStripButton();
         _refreshButton = new ToolStripButton();
@@ -90,8 +87,8 @@ partial class AccountsPanel
         _runAsButton = new ToolStripButton();
         _toolStripSep1 = new ToolStripSeparator();
         _toolStripSep2 = new ToolStripSeparator();
-        _contextMenu = new ContextMenuStrip();
-        _headerContextMenu = new ContextMenuStrip();
+        _contextMenu = new ContextMenuStrip(components);
+        _headerContextMenu = new ContextMenuStrip(components);
         _hdrAdd = new ToolStripMenuItem();
         _hdrCreateUser = new ToolStripMenuItem();
         _hdrCreateContainer = new ToolStripMenuItem();

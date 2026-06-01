@@ -53,9 +53,6 @@ public class RunAsAppShortcutCreatorTests : IDisposable
             s => s.CreateBesideTargetShortcut(
                 It.IsAny<AppEntry>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()),
             Times.Never);
-        _log.Verify(
-            l => l.Warn("RunAsAppShortcutCreator: interactive user SID unavailable; skipping AppContainer beside-target shortcut for 'ContainerApp'."),
-            Times.Once);
     }
 
     [Fact]
@@ -71,9 +68,6 @@ public class RunAsAppShortcutCreatorTests : IDisposable
             s => s.CreateBesideTargetShortcut(
                 It.IsAny<AppEntry>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()),
             Times.Never);
-        _log.Verify(
-            l => l.Warn("RunAsAppShortcutCreator: interactive user SID unavailable; skipping AppContainer beside-target shortcut for 'ContainerApp'."),
-            Times.Once);
     }
 
     [Fact]
@@ -98,7 +92,7 @@ public class RunAsAppShortcutCreatorTests : IDisposable
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore(),
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
 
         return new RunAsAppShortcutCreator(

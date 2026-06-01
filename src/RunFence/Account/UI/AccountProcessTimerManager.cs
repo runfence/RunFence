@@ -154,7 +154,9 @@ public class AccountProcessTimerManager(ILoggingService log, IUiTimerFactory uiT
     /// <summary>
     /// Fetches process refresh data for the given expanded SIDs on a background thread.
     /// </summary>
-    public async Task<Dictionary<string, IReadOnlyList<ProcessInfo>>> FetchRefreshDataAsync(IReadOnlyList<string> expandedSids)
+    public async Task<Dictionary<string, IReadOnlyList<ProcessInfo>>> FetchRefreshDataAsync(
+        IReadOnlyList<string> expandedSids,
+        CancellationToken cancellationToken = default)
     {
         if (_disposed)
             return new Dictionary<string, IReadOnlyList<ProcessInfo>>(StringComparer.OrdinalIgnoreCase);
@@ -164,7 +166,8 @@ public class AccountProcessTimerManager(ILoggingService log, IUiTimerFactory uiT
         _processRefreshCts?.Cancel();
         _processRefreshCts?.Dispose();
         _processRefreshCts = new CancellationTokenSource();
-        var ct = _processRefreshCts.Token;
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_processRefreshCts.Token, cancellationToken);
+        var ct = linkedCts.Token;
         try
         {
             return await Task.Run(() =>
@@ -178,6 +181,7 @@ public class AccountProcessTimerManager(ILoggingService log, IUiTimerFactory uiT
         }
         catch (OperationCanceledException)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return new Dictionary<string, IReadOnlyList<ProcessInfo>>(StringComparer.OrdinalIgnoreCase);
         }
     }

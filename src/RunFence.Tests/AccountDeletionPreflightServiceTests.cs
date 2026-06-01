@@ -137,6 +137,7 @@ public class AccountDeletionPreflightServiceTests
     [Theory]
     [InlineData(PathConstants.JobKeeperExeName)]
     [InlineData(PathConstants.ProfileKeeperExeName)]
+    [InlineData(PathConstants.AppxLauncherExeName)]
     [InlineData(PathConstants.DragBridgeExeName)]
     [InlineData(PathConstants.PinHelperExeName)]
     [InlineData(PathConstants.LauncherExeName)]

@@ -5,7 +5,6 @@ using RunFence.Persistence.UI;
 using RunFence.Startup;
 using RunFence.Startup.UI;
 using RunFence.Startup.UI.Forms;
-using RunFence.UI.Forms;
 
 namespace RunFence.UI;
 
@@ -20,14 +19,16 @@ public class MainFormStartupOrchestrator(
     ILoggingService log,
     ConfigSaveOrchestrator configSaver,
     IStartupEnforcementService enforcementService,
+    StartupEnforcementRunner startupEnforcementRunner,
     ApplicationState applicationState,
     SessionContext session,
     EnforcementResultApplier enforcementResultApplier,
     FindingLocationHelper findingLocationHelper,
-    MainFormFirstRunExporter firstRunExporter)
+    IMainFormFirstRunExporter firstRunExporter,
+    IStartupEnforcementMessagePresenter messagePresenter)
 {
     public async Task RunStartupChecksAsync(
-        MainForm owner,
+        Form owner,
         bool suppressVisibility,
         Action showNagIfNeeded)
     {
@@ -126,11 +127,6 @@ public class MainFormStartupOrchestrator(
         if (!owner.IsDisposed && !suppressVisibility)
         {
             showNagIfNeeded();
-            if (!owner.IsDisposed)
-            {
-                WindowForegroundHelper.ForceToForeground(owner.Handle);
-                owner.BringToFront();
-            }
         }
     }
 
@@ -142,8 +138,18 @@ public class MainFormStartupOrchestrator(
         applicationState.EnforcementGuard.Begin(guardOwner);
         try
         {
+            var preparation = PrepareEnforcementSnapshot();
+            if (preparation.SaveFailureMessage != null)
+            {
+                if (!owner.IsDisposed)
+                {
+                    messagePresenter.ShowRepairSaveFailure(preparation.SaveFailureMessage);
+                }
+                return;
+            }
+
             var database = session.Database;
-            var snapshot = database.CreateSnapshot();
+            var snapshot = preparation.Snapshot!;
 
             var result = await Task.Run(() => enforcementService.Enforce(snapshot));
 
@@ -162,15 +168,11 @@ public class MainFormStartupOrchestrator(
                     : null;
                 if (warningMessage == null)
                 {
-                    MessageBox.Show("ACLs and shortcuts reapplied successfully.", "Reapply", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    messagePresenter.ShowSuccess();
                 }
                 else
                 {
-                    MessageBox.Show(
-                        $"ACLs were reapplied, but shortcut enforcement reported warnings:\n\n{warningMessage}",
-                        "Reapply Warning",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning);
+                    messagePresenter.ShowShortcutWarning(warningMessage);
                 }
             }
         }
@@ -178,11 +180,27 @@ public class MainFormStartupOrchestrator(
         {
             log.Error("Manual enforcement failed", ex);
             if (!owner.IsDisposed)
-                MessageBox.Show($"Enforcement failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                messagePresenter.ShowEnforcementFailure(ex);
         }
         finally
         {
             applicationState.EnforcementGuard.End(guardOwner);
         }
     }
+
+    internal ManualEnforcementPreparationResult PrepareEnforcementSnapshot()
+    {
+        var repairResult = startupEnforcementRunner.RepairMissingAppEntryPaths();
+        foreach (var warning in repairResult.Warnings)
+            log.Warn($"Manual reapply app path repair warning: {warning}");
+
+        if (repairResult.SaveFailureMessage != null)
+            return new ManualEnforcementPreparationResult(null, repairResult.SaveFailureMessage);
+
+        return new ManualEnforcementPreparationResult(session.Database.CreateSnapshot(), null);
+    }
 }
+
+internal sealed record ManualEnforcementPreparationResult(
+    AppDatabase? Snapshot,
+    string? SaveFailureMessage);

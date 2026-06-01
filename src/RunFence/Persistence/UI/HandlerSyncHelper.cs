@@ -11,6 +11,7 @@ public class HandlerSyncHelper(
     IAppHandlerRegistrationService handlerRegistrationService,
     IHandlerMappingService handlerMappingService,
     IAssociationAutoSetService autoSetService)
+    : IHandlerSyncService
 {
     public void Sync() => Sync(removedAssociationKeys: null);
 

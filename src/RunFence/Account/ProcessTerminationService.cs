@@ -2,10 +2,13 @@ using System.ComponentModel;
 using System.Diagnostics;
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Launching.Processes;
 
 namespace RunFence.Account;
 
-public class ProcessTerminationService(ILoggingService log) : IProcessTerminationService
+public class ProcessTerminationService(
+    ILoggingService log,
+    IProcessSnapshotEnumerator processEnumerator) : IProcessTerminationService
 {
     private static readonly TimeSpan ForceKillWaitTimeout = TimeSpan.FromSeconds(5);
 
@@ -213,16 +216,13 @@ public class ProcessTerminationService(ILoggingService log) : IProcessTerminatio
     {
         int currentPid = Environment.ProcessId;
         var result = new List<Process>();
-        foreach (var proc in Process.GetProcesses())
+        foreach (var process in processEnumerator.GetProcesses())
         {
-            if (proc.Id <= 4 || proc.Id == currentPid)
-            {
-                proc.Dispose();
+            if (process.ProcessId <= 4 || process.ProcessId == currentPid)
                 continue;
-            }
 
             bool isMatch = false;
-            IntPtr hProcess = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, proc.Id);
+            IntPtr hProcess = ProcessNative.OpenProcess(ProcessNative.ProcessQueryLimitedInformation, false, process.ProcessId);
             if (hProcess != IntPtr.Zero)
             {
                 try
@@ -235,10 +235,16 @@ public class ProcessTerminationService(ILoggingService log) : IProcessTerminatio
                 }
             }
 
-            if (isMatch)
-                result.Add(proc);
-            else
-                proc.Dispose();
+            if (!isMatch)
+                continue;
+
+            try
+            {
+                result.Add(Process.GetProcessById(process.ProcessId));
+            }
+            catch
+            {
+            }
         }
 
         return result;

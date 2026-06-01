@@ -1,30 +1,24 @@
-using Microsoft.Win32;
 using Moq;
 using RunFence.Infrastructure;
+using RunFence.Tests.Helpers;
 
 namespace RunFence.Tests;
 
 /// <summary>
-/// Shared helper for tests that need isolated registry hive roots (HKU and HKLM) under HKCU.
-/// Creates unique sub-keys per test instance and removes them on <see cref="Dispose"/>.
+/// Shared helper for tests that need isolated in-memory registry hive roots (HKU and HKLM).
 /// Also provides a pre-configured <see cref="IUserHiveManager"/> mock that reports every
 /// SID as loaded (no actual hive load attempted).
 /// </summary>
 public sealed class RegistryTestHelper : IDisposable
 {
-    public RegistryKey HkuRoot { get; }
-    public RegistryKey HklmRoot { get; }
+    public InMemoryRegistryKey HkuRoot { get; }
+    public InMemoryRegistryKey HklmRoot { get; }
     public Mock<IUserHiveManager> HiveManager { get; }
-
-    private readonly string _hkuSubKey;
-    private readonly string _hklmSubKey;
 
     public RegistryTestHelper(string hkuPrefix, string hklmPrefix)
     {
-        _hkuSubKey = $@"Software\RunFenceTests\{hkuPrefix}_{Guid.NewGuid():N}";
-        _hklmSubKey = $@"Software\RunFenceTests\{hklmPrefix}_{Guid.NewGuid():N}";
-        HkuRoot = Registry.CurrentUser.CreateSubKey(_hkuSubKey);
-        HklmRoot = Registry.CurrentUser.CreateSubKey(_hklmSubKey);
+        HkuRoot = InMemoryRegistryKey.CreateRoot(hkuPrefix);
+        HklmRoot = InMemoryRegistryKey.CreateRoot(hklmPrefix);
 
         HiveManager = new Mock<IUserHiveManager>();
         HiveManager.Setup(h => h.EnsureHiveLoaded(It.IsAny<string>())).Returns((IDisposable?)null);
@@ -35,7 +29,5 @@ public sealed class RegistryTestHelper : IDisposable
     {
         HkuRoot.Dispose();
         HklmRoot.Dispose();
-        try { Registry.CurrentUser.DeleteSubKeyTree(_hkuSubKey, throwOnMissingSubKey: false); } catch { }
-        try { Registry.CurrentUser.DeleteSubKeyTree(_hklmSubKey, throwOnMissingSubKey: false); } catch { }
     }
 }

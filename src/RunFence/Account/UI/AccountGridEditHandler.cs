@@ -28,7 +28,7 @@ public class AccountGridEditHandler(IAccountToggleService accountToggle, Account
             return;
         }
 
-        if (_grid.Columns[e.ColumnIndex].Name == "Account")
+        if (_grid.Columns[e.ColumnIndex].Name == AccountGridColumns.Account)
         {
             if (!RenameInProgress)
             {
@@ -43,7 +43,7 @@ public class AccountGridEditHandler(IAccountToggleService accountToggle, Account
     public void HandleCellEndEdit(DataGridViewCellEventArgs e)
     {
         RenameInProgress = false;
-        if (e.RowIndex < 0 || _grid.Columns[e.ColumnIndex].Name != "Account")
+        if (e.RowIndex < 0 || _grid.Columns[e.ColumnIndex].Name != AccountGridColumns.Account)
             return;
         var row = _grid.Rows[e.RowIndex];
         if (row.Tag is not AccountRow accountRow)
@@ -62,7 +62,7 @@ public class AccountGridEditHandler(IAccountToggleService accountToggle, Account
 
     public void HandleDirtyStateChanged()
     {
-        if (_grid.IsCurrentCellDirty && _grid.CurrentCell?.OwningColumn?.Name != "Account")
+        if (_grid.IsCurrentCellDirty && _grid.CurrentCell?.OwningColumn?.Name != AccountGridColumns.Account)
             _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
     }
 
@@ -70,13 +70,13 @@ public class AccountGridEditHandler(IAccountToggleService accountToggle, Account
     {
         if (_context.IsRefreshing || e.RowIndex < 0)
             return;
-        if (_grid.Columns[e.ColumnIndex].Name == "Import")
+        if (_grid.Columns[e.ColumnIndex].Name == AccountGridColumns.Import)
             _context.UpdateButtonState();
     }
 
     public void HandleCellValidating(DataGridViewCellValidatingEventArgs e)
     {
-        if (e.RowIndex < 0 || _grid.Columns[e.ColumnIndex].Name != "Account")
+        if (e.RowIndex < 0 || _grid.Columns[e.ColumnIndex].Name != AccountGridColumns.Account)
             return;
         if (_grid.Rows[e.RowIndex].Tag is ProcessRow)
             return;
@@ -86,7 +86,7 @@ public class AccountGridEditHandler(IAccountToggleService accountToggle, Account
 
     public void HandleEditingControlShowing(DataGridViewEditingControlShowingEventArgs e)
     {
-        if (_grid.CurrentCell?.OwningColumn?.Name != "Account")
+        if (_grid.CurrentCell?.OwningColumn?.Name != AccountGridColumns.Account)
             return;
         if (e.Control is not TextBox tb)
             return;
@@ -101,7 +101,7 @@ public class AccountGridEditHandler(IAccountToggleService accountToggle, Account
     public void HandleLogonToggle(DataGridViewRow row, AccountRow accountRow)
     {
         _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
-        var cell = (DataGridViewCheckBoxCell)row.Cells["Logon"];
+        var cell = (DataGridViewCheckBoxCell)row.Cells[AccountGridColumns.Logon];
         // Cell value type depends on per-cell ThreeState: bool when false, CheckState when true.
         // Checked = logon allowed, so blocked = NOT checked.
         var setBlocked = !(cell.Value is CheckState cs ? cs == CheckState.Checked : cell.Value is true);
@@ -122,7 +122,7 @@ public class AccountGridEditHandler(IAccountToggleService accountToggle, Account
     public void HandleAllowInternetToggle(DataGridViewRow row, AccountRow accountRow)
     {
         _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
-        var cell = (DataGridViewCheckBoxCell)row.Cells["colAllowInternet"];
+        var cell = (DataGridViewCheckBoxCell)row.Cells[AccountGridColumns.AllowInternet];
         var allowInternet = cell.Value is true;
 
         var result = accountToggle.SetAllowInternet(accountRow.Sid, allowInternet);

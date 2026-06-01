@@ -19,7 +19,8 @@ public interface IJobKeeperService
         JobKeeperInstanceIdentity identity,
         NamedPipeServerStream pipeServer,
         int expectedPid,
-        SecurityIdentifier targetUserSid);
+        SecurityIdentifier targetUserSid,
+        IntPtr keeperProcessHandle);
 
     /// <summary>
     /// Scans running processes for an existing job keeper (e.g. from a previous RunFence session)

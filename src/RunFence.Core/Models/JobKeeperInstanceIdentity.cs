@@ -11,7 +11,6 @@ public sealed record JobKeeperInstanceIdentity
 
     public required string InstanceId { get; init; }
     public required string PipeName { get; init; }
-    public required string JobName { get; init; }
     public int LastVerifiedKeeperPid { get; set; }
 
     public static string CreateKey(string targetSid, bool isLow) =>

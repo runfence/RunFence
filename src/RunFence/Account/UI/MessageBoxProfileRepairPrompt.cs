@@ -9,7 +9,7 @@ public sealed class MessageBoxProfileRepairPrompt : IProfileRepairPrompt
     public bool ConfirmRepair(string accountName) =>
         MessageBox.Show(
             $"Windows corrupted the profile for '{accountName}'.\n\n" +
-            "Close all applications running under that account before continuing.\n\n" +
+            "RunFence will forcefully kill all processes running under that account before repairing it.\n\n" +
             "Would you like to repair the profile?",
             "Profile Corruption Detected",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;

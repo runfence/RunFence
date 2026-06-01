@@ -1,7 +1,6 @@
 using RunFence.Acl.Permissions;
 using RunFence.Acl.Traverse;
 using RunFence.Acl.UI.Forms;
-using RunFence.Core.Infrastructure;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
@@ -17,17 +16,18 @@ public class AclManagerTraverseOperations(
     IDatabaseProvider databaseProvider,
     IReparsePointPromptHelper reparsePointHelper,
     IAclPermissionService aclPermission,
-    IFileSystemPathInfo pathInfo)
+    IFileSystemPathInfo pathInfo,
+    IOpenFileDialogAdapterFactory openFileDialogFactory)
 {
     private string _sid = null!;
     private AclManagerPendingChanges _pending = null!;
-    private Lazy<IReadOnlyList<string>> _groupSids = null!;
+    private IReadOnlyList<string> _groupSids = null!;
     private Action _populateTraverseGrid = null!;
 
     public void Initialize(
         string sid,
         AclManagerPendingChanges pending,
-        Lazy<IReadOnlyList<string>> groupSids,
+        IReadOnlyList<string> groupSids,
         Action populateTraverseGrid)
     {
         _sid = sid;
@@ -35,6 +35,7 @@ public class AclManagerTraverseOperations(
         _groupSids = groupSids;
         _populateTraverseGrid = populateTraverseGrid;
     }
+
 
     /// <summary>
     /// Adds a traverse path entry. Shows file/folder dialogs, validates, records to pending
@@ -55,11 +56,11 @@ public class AclManagerTraverseOperations(
         }
         else
         {
-            using var ofd = new OpenFileDialog();
+            using var openDialogAdapter = openFileDialogFactory.Create();
+            var ofd = openDialogAdapter.Dialog;
             ofd.Title = "Select file to grant traverse access";
             ofd.Filter = "All files (*.*)|*.*";
-            FileDialogHelper.AddInteractiveUserCustomPlaces(ofd);
-            if (ofd.ShowDialog(owner) != DialogResult.OK)
+            if (openDialogAdapter.ShowDialog(owner) != DialogResult.OK)
                 return null;
             selectedPath = ofd.FileName;
         }
@@ -84,19 +85,19 @@ public class AclManagerTraverseOperations(
         var normalized = Path.GetFullPath(selectedPath);
 
         // Check for duplicate in DB or pending adds (excluding pending removes/untracks — those are being removed).
-        if (_pending.ExistsTraverseInDbOrPending(databaseProvider.GetDatabase(), _sid, normalized))
+        if (_pending.Traverse.ExistsTraverseInDbOrPending(databaseProvider.GetDatabase(), _sid, normalized))
             return "This path is already in the list.";
 
         // If this path was previously queued for removal or untrack, cancel it instead.
-        if (_pending.PendingTraverseRemoves.Remove(normalized) ||
-            _pending.PendingUntrackTraverse.Remove(normalized))
+        if (_pending.Traverse.CancelTraverseRemoval(normalized) ||
+            _pending.Traverse.RemoveUntrackedTraverse(normalized))
         {
             _populateTraverseGrid();
             return null;
         }
 
         var entry = new GrantedPathEntry { Path = normalized, IsTraverseOnly = true };
-        _pending.PendingTraverseAdds[normalized] = entry;
+        _pending.Traverse.AddTraverse(entry);
         _populateTraverseGrid();
         return null;
     }
@@ -113,10 +114,10 @@ public class AclManagerTraverseOperations(
         foreach (var entry in entries)
         {
             var normalized = Path.GetFullPath(entry.Path);
-            if (!_pending.PendingTraverseAdds.Remove(normalized))
+            if (!_pending.Traverse.RemoveTraverse(normalized))
                 // Existing DB entry — queue for deferred removal.
-                _pending.PendingTraverseRemoves[normalized] = entry;
-            _pending.PendingTraverseConfigMoves.Remove(normalized);
+                _pending.Traverse.MarkTraverseForRemoval(entry);
+            _pending.Traverse.RemoveTraverseConfigMove(normalized, out _);
         }
 
         _populateTraverseGrid();
@@ -131,7 +132,7 @@ public class AclManagerTraverseOperations(
         if (entries.Count == 0)
             return;
         foreach (var entry in entries)
-            _pending.PendingTraverseFixes[Path.GetFullPath(entry.Path)] = entry;
+            _pending.Traverse.AddTraverseFix(entry);
         _populateTraverseGrid();
     }
 
@@ -148,19 +149,19 @@ public class AclManagerTraverseOperations(
         var normalized = Path.GetFullPath(grantDir);
 
         // Already covered by a DB entry or pending add (not pending removal or untrack)?
-        if (_pending.ExistsTraverseInDbOrPending(databaseProvider.GetDatabase(), _sid, normalized))
+        if (_pending.Traverse.ExistsTraverseInDbOrPending(databaseProvider.GetDatabase(), _sid, normalized))
             return false;
 
         // If this was queued for removal, cancel the removal (re-activate it).
-        if (_pending.PendingTraverseRemoves.Remove(normalized))
+        if (_pending.Traverse.CancelTraverseRemoval(normalized))
             return true;
 
         // Skip add when the SID already has effective traverse rights on this path.
-        if (TraverseRightsHelper.HasEffectiveTraverseForGrantSid(normalized, _sid, _groupSids.Value, aclPermission, pathInfo))
+        if (TraverseRightsHelper.HasEffectiveTraverseForGrantSid(normalized, _sid, _groupSids, aclPermission, pathInfo))
             return false;
 
         var entry = new GrantedPathEntry { Path = normalized, IsTraverseOnly = true };
-        _pending.PendingTraverseAdds[normalized] = entry;
+        _pending.Traverse.AddTraverse(entry);
         return true;
     }
 }

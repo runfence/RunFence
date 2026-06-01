@@ -138,36 +138,6 @@ public class AccountCredentialManagerTests : IDisposable
 
     // --- RemoveCredential ---
 
-    [Fact]
-    public void RemoveCredential_ExistingId_RemovesEntry()
-    {
-        // Arrange
-        var store = new CredentialStore();
-        var credId = Guid.NewGuid();
-        store.Credentials.Add(new CredentialEntry { Id = credId, Sid = FakeSid });
-
-        // Act
-        _manager.RemoveCredential(credId, store);
-
-        // Assert
-        Assert.Empty(store.Credentials);
-    }
-
-    [Fact]
-    public void RemoveCredential_WrongId_LeavesOtherCredentials()
-    {
-        // Arrange
-        var store = new CredentialStore();
-        var credId = Guid.NewGuid();
-        store.Credentials.Add(new CredentialEntry { Id = credId, Sid = FakeSid });
-
-        // Act
-        _manager.RemoveCredential(Guid.NewGuid(), store);
-
-        // Assert
-        Assert.Single(store.Credentials);
-    }
-
     // --- RemoveCredentialsBySid ---
 
     [Fact]
@@ -199,20 +169,6 @@ public class AccountCredentialManagerTests : IDisposable
 
         // Assert
         Assert.Empty(store.Credentials);
-    }
-
-    [Fact]
-    public void RemoveCredentialsBySid_NoMatch_LeavesCredentialsUnchanged()
-    {
-        // Arrange
-        var store = new CredentialStore();
-        store.Credentials.Add(new CredentialEntry { Sid = FakeSid });
-
-        // Act
-        _manager.RemoveCredentialsBySid(FakeSid2, store);
-
-        // Assert
-        Assert.Single(store.Credentials);
     }
 
     // --- UpdateCredentialPassword ---

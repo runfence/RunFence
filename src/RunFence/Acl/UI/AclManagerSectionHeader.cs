@@ -15,9 +15,7 @@ public record struct ConfigSectionHeader(string? ConfigPath);
 public static class AclManagerSectionHeader
 {
     /// <summary>Background color used for section header rows (also used when clearing drag-drop highlight).</summary>
-    public static readonly Color SectionHeaderBackColor = Color.FromArgb(0xE4, 0xEA, 0xF4);
-
-    private static readonly Dictionary<DataGridView, Font> _boldFontCache = new(ReferenceEqualityComparer.Instance);
+    public static Color SectionHeaderBackColor => AclManagerSectionHeaderFactory.SectionHeaderBackColor;
 
     /// <summary>
     /// Returns the config path of the section that contains the given row index,
@@ -80,55 +78,4 @@ public static class AclManagerSectionHeader
         return result.ToList();
     }
 
-    /// <summary>
-    /// Creates a styled, read-only header row for a config section.
-    /// <paramref name="sectionTitle"/> is placed in cell at <paramref name="titleCellIndex"/> (default 0);
-    /// other cells are empty. Image/checkbox/combobox cells are replaced with plain text cells.
-    /// The row's <c>Tag</c> is set to <see cref="ConfigSectionHeader"/>(<paramref name="configPath"/>).
-    /// </summary>
-    public static DataGridViewRow CreateSectionHeaderRow(DataGridView grid, string sectionTitle,
-        string? configPath, int titleCellIndex = 0)
-    {
-        var headerRow = new DataGridViewRow();
-        headerRow.CreateCells(grid);
-
-        // Replace non-text cells (checkbox, combobox, image) with text cells for clean header rendering
-        for (int i = 0; i < grid.Columns.Count; i++)
-        {
-            if (headerRow.Cells[i] is DataGridViewCheckBoxCell or DataGridViewComboBoxCell or DataGridViewImageCell)
-                headerRow.Cells[i] = new DataGridViewTextBoxCell();
-        }
-
-        headerRow.Cells[titleCellIndex].Value = sectionTitle;
-        headerRow.DefaultCellStyle.BackColor = SectionHeaderBackColor;
-        headerRow.DefaultCellStyle.ForeColor = Color.Black;
-        headerRow.DefaultCellStyle.SelectionBackColor = SectionHeaderBackColor;
-        headerRow.DefaultCellStyle.SelectionForeColor = Color.Black;
-        headerRow.DefaultCellStyle.Font = GetOrCreateBoldFont(grid);
-        headerRow.ReadOnly = true;
-        headerRow.Tag = new ConfigSectionHeader(configPath);
-        return headerRow;
-    }
-
-    private static Font GetOrCreateBoldFont(DataGridView grid)
-    {
-        if (_boldFontCache.TryGetValue(grid, out var cached))
-            return cached;
-
-        var bold = new Font(grid.Font, FontStyle.Bold);
-        _boldFontCache[grid] = bold;
-
-        grid.FontChanged += (_, _) =>
-        {
-            if (_boldFontCache.Remove(grid, out var old))
-                old.Dispose();
-            _boldFontCache[grid] = new Font(grid.Font, FontStyle.Bold);
-        };
-        grid.Disposed += (_, _) =>
-        {
-            if (_boldFontCache.Remove(grid, out var f))
-                f.Dispose();
-        };
-        return bold;
-    }
 }

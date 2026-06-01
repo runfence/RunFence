@@ -29,6 +29,9 @@ public partial class AclManagerDialog : RunFence.UI.Forms.ContextHelpForm, IAclM
     private readonly AclManagerMouseEventHandler _mouseEventHandler;
     private readonly AclManagerPathActionHelper _pathActionHelper;
     private readonly AclDialogApplyPresenter _applyPresenter;
+    private readonly AclManagerSectionHeaderFactory _sectionHeaderFactory;
+    private readonly AclManagerScanCancellationController _scanCancellation;
+    private readonly AclManagerCloseCoordinator _closeCoordinator;
     private DropFilesInterceptor? _grantsDropInterceptor;
     private DropFilesInterceptor? _traverseDropInterceptor;
     private readonly AclManagerPendingChanges _pending = new();
@@ -51,7 +54,9 @@ public partial class AclManagerDialog : RunFence.UI.Forms.ContextHelpForm, IAclM
         AclManagerModificationHandler modificationHandler,
         AclManagerMouseEventHandler mouseEventHandler,
         AclManagerPathActionHelper pathActionHelper,
-        AclDialogApplyPresenter applyPresenter)
+        AclDialogApplyPresenter applyPresenter,
+        AclManagerSectionHeaderFactory sectionHeaderFactory,
+        AclManagerScanCancellationController scanCancellation)
     {
         _aclPermission = aclPermission;
         _log = log;
@@ -67,6 +72,9 @@ public partial class AclManagerDialog : RunFence.UI.Forms.ContextHelpForm, IAclM
         _mouseEventHandler = mouseEventHandler;
         _pathActionHelper = pathActionHelper;
         _applyPresenter = applyPresenter;
+        _sectionHeaderFactory = sectionHeaderFactory;
+        _scanCancellation = scanCancellation;
+        _closeCoordinator = new AclManagerCloseCoordinator(_pending, _scanCancellation);
     }
 
     public void Initialize(
@@ -88,17 +96,16 @@ public partial class AclManagerDialog : RunFence.UI.Forms.ContextHelpForm, IAclM
 
         _grantsHelper.Initialize(
             _grantsGrid, sid, isContainer, groupSids,
-            _pending, _grantsSortHelper);
+            _pending, _sectionHeaderFactory, _grantsSortHelper);
 
         _traverseHelper.Initialize(
-            _traverseGrid, sid, isContainer, _pending, _traverseSortHelper);
+            _traverseGrid, sid, isContainer, _pending, groupSids, _sectionHeaderFactory, _traverseSortHelper);
 
         _dragDropHandler.Initialize(sid, _pending);
 
         _actionHandler.Initialize(sid, isContainer, this, _pending, this);
 
         _applyHandler.Initialize(_pending, sid, isContainer);
-
         _exportImport.Initialize(_pending, sid, isContainer, this, ExecuteApplyAsync);
 
         var controls = BuildControls();
@@ -106,7 +113,7 @@ public partial class AclManagerDialog : RunFence.UI.Forms.ContextHelpForm, IAclM
         _mouseEventHandler.Initialize(controls, RefreshGrantsGrid, RefreshTraverseGrid, _selectionHandler.UpdateActionButtons);
         _pathActionHelper.Initialize(this, controls);
         _selectionHandler.Initialize(isContainer, _pending, controls, RefreshTraverseGrid);
-        _modificationHandler.Initialize(this, sid, _pending, controls,
+        _modificationHandler.Initialize(this, sid, _pending, _scanCancellation, controls,
             RefreshGrantsGrid, RefreshTraverseGrid, _selectionHandler.UpdateActionButtons);
 
         _selectionHandler.RemoveKeyPressed += (_, _) => _modificationHandler.RemoveSelected();
@@ -230,18 +237,13 @@ public partial class AclManagerDialog : RunFence.UI.Forms.ContextHelpForm, IAclM
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        bool cancel = _selectionHandler.HandleFormClosing();
-        if (!cancel)
-            _modificationHandler.CancelScanCts?.Cancel();
-        if (cancel)
+        if (_selectionHandler.HandleFormClosing())
         {
-            e.Cancel = true;
+            _closeCoordinator.ApplyCloseDecision(e, cancelClose: true);
             return;
         }
 
-        // Discard all pending changes without applying — DB entries retain their original committed
-        // state (they were never mutated; pending mode/rights changes live only in _pending).
-        _pending.Clear();
+        _closeCoordinator.ApplyCloseDecision(e, cancelClose: false);
 
         base.OnFormClosing(e);
     }

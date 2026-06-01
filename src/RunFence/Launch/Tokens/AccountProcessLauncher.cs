@@ -1,5 +1,6 @@
 using RunFence.Core;
 using RunFence.Infrastructure;
+using RunFence.Launch;
 
 namespace RunFence.Launch.Tokens;
 
@@ -15,7 +16,7 @@ public class AccountProcessLauncher(
     IInteractiveLogonHelper logonHelper,
     ILogonTokenProvider logonTokenProvider) : IAccountProcessLauncher
 {
-    public ProcessInfo Launch(ProcessLaunchTarget target, AccountLaunchIdentity identity)
+    public ProcessInfo? Launch(ProcessLaunchTarget target, AccountLaunchIdentity identity)
     {
         var credentials = identity.Credentials!.Value;
         log.Info($"Launching {target.ExePath} {target.Arguments} as {credentials.Username} via {credentials.Domain}");
@@ -27,7 +28,7 @@ public class AccountProcessLauncher(
         };
     }
 
-    private ProcessInfo LaunchWithTokenSource(ProcessLaunchTarget psi, AccountLaunchIdentity identity)
+    private ProcessInfo? LaunchWithTokenSource(ProcessLaunchTarget psi, AccountLaunchIdentity identity)
     {
         IntPtr hToken = IntPtr.Zero;
         var credentials = identity.Credentials!.Value;
@@ -50,7 +51,7 @@ public class AccountProcessLauncher(
         }
     }
 
-    private ProcessInfo LaunchWithCredentials(ProcessLaunchTarget psi, AccountLaunchIdentity identity)
+    private ProcessInfo? LaunchWithCredentials(ProcessLaunchTarget psi, AccountLaunchIdentity identity)
     {
         IntPtr hProfileKeeperToken = IntPtr.Zero;
         var credentials = identity.Credentials!.Value;

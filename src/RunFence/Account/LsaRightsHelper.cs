@@ -12,6 +12,8 @@ public class LsaRightsHelper(NTTranslateApi ntTranslate) : ILsaRightsHelper
     public const string SeDenyBatchLogonRight = "SeDenyBatchLogonRight";
     public const string SeDenyServiceLogonRight = "SeDenyServiceLogonRight";
     public const string SeInteractiveLogonRight = "SeInteractiveLogonRight";
+    public const string SeRelabelPrivilege = "SeRelabelPrivilege";
+    public const string SeTcbPrivilege = "SeTcbPrivilege";
 
     public byte[] GetSidBytes(string sidString)
     {

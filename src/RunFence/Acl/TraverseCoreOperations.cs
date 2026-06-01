@@ -44,7 +44,7 @@ public class TraverseCoreOperations(
         return coveragePaths;
     }
 
-    public IReadOnlyList<string> GetPathsNeedingTraverseAce(string sid, IReadOnlyList<string> coveragePaths)
+    public IReadOnlyList<string> GetPathsNeedingTraverseAce(string sid, IReadOnlyList<string> coveragePaths, bool unelevated = true)
     {
         var effectiveGroupSids = aclPermission.ResolveAccountGroupSids(sid);
         var pathsNeedingAce = new List<string>();
@@ -56,7 +56,8 @@ public class TraverseCoreOperations(
                     sid,
                     effectiveGroupSids,
                     aclPermission,
-                    pathInfo))
+                    pathInfo,
+                    unelevated))
             {
                 pathsNeedingAce.Add(coveragePath);
             }
@@ -111,25 +112,31 @@ public class TraverseCoreOperations(
     public IReadOnlyList<string> ApplyTraverseAces(string sid, IReadOnlyList<string> paths)
     {
         var identity = new SecurityIdentifier(ownerResolver.ResolveAclSid(sid));
-        var appliedPaths = new List<string>();
+        var appliedPathSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var orderedPaths = paths
+            .OrderBy(path => path.Count(static c => c == Path.DirectorySeparatorChar || c == Path.AltDirectorySeparatorChar))
+            .ThenBy(path => path.Length)
+            .ToList();
 
         try
         {
-            foreach (var path in paths)
+            foreach (var path in orderedPaths)
             {
                 if (!pathInfo.DirectoryExists(path))
                     continue;
 
                 traverseAcl.AddAllowAce(path, identity);
-                appliedPaths.Add(path);
+                appliedPathSet.Add(path);
             }
         }
         catch (Exception ex)
         {
-            throw new TraverseAclApplyException(appliedPaths, ex);
+            throw new TraverseAclApplyException(
+                paths.Where(appliedPathSet.Contains).ToList(),
+                ex);
         }
 
-        return appliedPaths;
+        return paths.Where(appliedPathSet.Contains).ToList();
     }
 
     public void RemoveTraverseAces(string sid, IReadOnlyList<string> paths)
@@ -148,7 +155,7 @@ public class TraverseCoreOperations(
         }
     }
 
-    public void VerifyEffectiveTraverse(string sid, IReadOnlyList<string> paths)
+    public void VerifyEffectiveTraverse(string sid, IReadOnlyList<string> paths, bool unelevated = true)
     {
         var effectiveGroupSids = aclPermission.ResolveAccountGroupSids(sid);
 
@@ -162,7 +169,8 @@ public class TraverseCoreOperations(
                     sid,
                     effectiveGroupSids,
                     aclPermission,
-                    pathInfo))
+                    pathInfo,
+                    unelevated))
             {
                 continue;
             }

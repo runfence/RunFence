@@ -15,9 +15,7 @@ namespace RunFence.Launch;
 // Therefore, we can't reliably use rundll32 or cmd /c start to resolve association via windows mechanism.
 public class LaunchTargetResolver(
     IInteractiveUserResolver interactiveUserResolver,
-    AssociationRegistryResolver associationRegistryResolver,
-    AssociationCommandMaterializer associationCommandMaterializer,
-    IAssociationLaunchResolver associationLaunchResolver,
+    AssociationLaunchCandidateResolver associationLaunchCandidateResolver,
     UiThreadDatabaseAccessor dbAccessor,
     LaunchHiveLeaseCoordinator launchHiveLeaseCoordinator,
     ShortcutTargetResolver shortcutTargetResolver,
@@ -120,10 +118,10 @@ public class LaunchTargetResolver(
         try
         {
             launchedHiveLease = launchHiveLeaseCoordinator.EnsureHiveLoaded(identity.Sid);
-            var launchedTarget = ResolveForSid(
+            var launchedTarget = associationLaunchCandidateResolver.ResolveForSid(
                 identity.Sid,
-                databaseSnapshot,
                 request,
+                databaseSnapshot,
                 identity.AssociationResolutionPolicy,
                 rejectUserProfileHandlers: false);
             if (launchedTarget != null)
@@ -138,10 +136,10 @@ public class LaunchTargetResolver(
             if (launchHiveLeaseCoordinator.ShouldUseInteractiveFallback(identity.Sid, interactiveSid))
             {
                 interactiveHiveLease = launchHiveLeaseCoordinator.EnsureHiveLoaded(interactiveSid!);
-                var interactiveTarget = ResolveForSid(
+                var interactiveTarget = associationLaunchCandidateResolver.ResolveForSid(
                 interactiveSid!,
-                databaseSnapshot,
                 request,
+                databaseSnapshot,
                 identity.AssociationResolutionPolicy,
                     rejectUserProfileHandlers: true);
                 if (interactiveTarget != null)
@@ -181,75 +179,6 @@ public class LaunchTargetResolver(
         }
     }
 
-    private ProcessLaunchTarget? ResolveForSid(
-        string sid,
-        AppDatabase databaseSnapshot,
-        AssociationResolutionRequest request,
-        AssociationResolutionPolicy associationResolutionPolicy,
-        bool rejectUserProfileHandlers)
-    {
-        var candidates = request.Kind switch
-        {
-            AssociationLaunchKind.File => associationRegistryResolver.ResolveFileCandidates(
-                sid,
-                request.FileTarget!,
-                rejectUserProfileHandlers,
-                request.Extension),
-            AssociationLaunchKind.Url => associationRegistryResolver.ResolveUrlCandidates(
-                sid,
-                request.RawArgument,
-                rejectUserProfileHandlers),
-            _ => []
-        };
-
-        foreach (var candidate in candidates)
-        {
-            var materialized = associationCommandMaterializer.TryMaterialize(candidate);
-            if (materialized == null)
-                continue;
-
-            if (materialized.LauncherAssociation != null)
-            {
-                // This intentionally validates only unsafe account redirection, not full launcher setup.
-                // A broken launcher command is a configuration problem handled by later launch validation or failure behavior.
-                if (associationResolutionPolicy != AssociationResolutionPolicy.AllowAccountRedirection)
-                {
-                    var resolved = associationLaunchResolver.Resolve(
-                        databaseSnapshot,
-                        AssociationLaunchResolver.BuildRequest(materialized.LauncherAssociation, materialized.LauncherArgument),
-                        callerIdentity: null,
-                        callerSid: candidate.ResolutionSid,
-                        identityFromImpersonation: true);
-
-                    if (resolved.App != null
-                        && !string.Equals(resolved.App.AccountSid, candidate.ResolutionSid, StringComparison.OrdinalIgnoreCase))
-                    {
-                        LogCommandResolutionReject(candidate, materialized.MaterializedCommand,
-                            $"RunFence association launcher resolves to account SID '{resolved.App.AccountSid}' instead of '{candidate.ResolutionSid}'");
-                        continue;
-                    }
-                }
-
-                _log.Debug(
-                    $"LaunchTargetResolver: accepted {candidate.SourceLabel} candidate for '{candidate.RawArgument}'"
-                    + $"{AssociationLogHelper.FormatProgId(candidate.ProgId)} as RunFence association launcher."
-                    + $" RegistryCommand='{candidate.RegistryCommand}'. MaterializedCommand='{materialized.MaterializedCommand}'.");
-            }
-
-            return materialized.Target;
-        }
-
-        return null;
-    }
-
-    private void LogCommandResolutionReject(
-        AssociationRegistryCommandCandidate candidate,
-        string? command,
-        string reason)
-        => _log.Debug(
-            $"LaunchTargetResolver: rejected {candidate.SourceLabel} candidate for '{candidate.RawArgument}'"
-            + $"{AssociationLogHelper.FormatProgId(candidate.ProgId)}: {reason}. Command='{command ?? string.Empty}'.");
-
     private AppDatabase CreateDatabaseSnapshot()
         => dbAccessor.CreateSnapshot();
 
@@ -266,27 +195,4 @@ public class LaunchTargetResolver(
             => new(request.GetFallbackTarget(), LaunchResolutionKind.ShellWrapped, null, owner._log);
     }
 
-    private sealed record AssociationResolutionRequest(
-        AssociationLaunchKind Kind,
-        string RawArgument,
-        ProcessLaunchTarget? FileTarget,
-        string? Extension)
-    {
-        public ProcessLaunchTarget GetFallbackTarget()
-            => Kind == AssociationLaunchKind.File
-                ? ProcessLaunchHelper.WrapForShellLaunch(FileTarget!)
-                : ProcessLaunchHelper.BuildUrlLaunchTarget(RawArgument);
-
-        public static AssociationResolutionRequest ForFile(ProcessLaunchTarget originalTarget, string? extension)
-            => new(AssociationLaunchKind.File, originalTarget.ExePath, originalTarget, extension);
-
-        public static AssociationResolutionRequest ForUrl(string url)
-            => new(AssociationLaunchKind.Url, url, null, null);
-    }
-
-    private enum AssociationLaunchKind
-    {
-        File,
-        Url
-    }
 }

@@ -17,6 +17,8 @@ public sealed class RestrictedJobLaunchCoordinatorTests
     private static readonly IntPtr KeeperProcessHandle = new(20);
     private static readonly IntPtr KeeperThreadHandle = new(21);
     private static readonly IntPtr JobHandle = new(30);
+    private static readonly IntPtr RemoteKeepAliveHandle = new(40);
+    private static readonly IntPtr RemoteReconnectHandle = new(41);
 
     private readonly Mock<ILoggingService> _log = new();
     private readonly Mock<IProcessJobManager> _processJobManager = new();
@@ -25,7 +27,7 @@ public sealed class RestrictedJobLaunchCoordinatorTests
     private readonly Mock<IJobKeeperPipeServerFactory> _pipeServerFactory = new();
     private readonly Mock<IJobKeeperLaunchIpcClient> _launchIpcClient = new();
     private readonly Mock<IJobObjectApi> _jobObjectApi = new();
-    private readonly Mock<IRestrictedProcessControl> _processControl = new();
+    private readonly Mock<IProcessControl> _processControl = new();
     private readonly Mock<IJobKeeperLaunchProcessApi> _launchProcessApi = new();
     private readonly Mock<IPreparedTokenProcessLauncher> _preparedTokenLauncher = new();
     private readonly RestrictedJobLaunchCoordinator _coordinator;
@@ -75,14 +77,18 @@ public sealed class RestrictedJobLaunchCoordinatorTests
                     && !r.SuppressStartupFeedback),
                 It.IsAny<TimeSpan>(),
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(Environment.ProcessId);
+            .ReturnsAsync(new JobKeeperLaunchedProcess(Environment.ProcessId, 700));
 
         var result = _coordinator.SeedJobKeeperAndLaunch(TokenHandle, LaunchTokenSource.Credentials, Sid, false, target);
 
         Assert.Equal((uint)Environment.ProcessId, result.dwProcessId);
         _processJobManager.Verify(m => m.ResetJobHandle(Sid, JobAssignment.Restricted), Times.Once);
-        _processJobManager.Verify(m => m.TryAssignToJob(Sid, KeeperProcessHandle, JobAssignment.Restricted, identity.JobName), Times.Once);
-        _jobKeeperService.Verify(s => s.WaitAndRegisterJobKeeper(identity, pipe, 1234, It.Is<SecurityIdentifier>(sid => sid.Value == Sid)), Times.Once);
+        _processJobManager.Verify(m => m.TryAssignToJob(
+            Sid,
+            KeeperProcessHandle,
+            JobAssignment.Restricted,
+            It.Is<string>(jobName => jobName.StartsWith(@"Global\RunFence_JK_R_", StringComparison.Ordinal))), Times.Once);
+        _jobKeeperService.Verify(s => s.WaitAndRegisterJobKeeper(identity, pipe, 1234, It.Is<SecurityIdentifier>(sid => sid.Value == Sid), KeeperProcessHandle), Times.Once);
         _processControl.Verify(c => c.ResumeThread(KeeperThreadHandle, out It.Ref<int>.IsAny), Times.Once);
         _identityStore.Verify(s => s.Remove(It.IsAny<string>(), It.IsAny<bool>()), Times.Never);
     }
@@ -99,7 +105,7 @@ public sealed class RestrictedJobLaunchCoordinatorTests
                 It.IsAny<JobKeeperLaunchRequest>(),
                 It.IsAny<TimeSpan>(),
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(Environment.ProcessId);
+            .ReturnsAsync(new JobKeeperLaunchedProcess(Environment.ProcessId, 700));
 
         var result = _coordinator.SeedJobKeeperAndLaunch(TokenHandle, LaunchTokenSource.Credentials, Sid, false, target);
 
@@ -125,7 +131,7 @@ public sealed class RestrictedJobLaunchCoordinatorTests
                 It.IsAny<JobKeeperLaunchRequest>(),
                 It.IsAny<TimeSpan>(),
                 It.IsAny<CancellationToken>()))
-            .ReturnsAsync(Environment.ProcessId);
+            .ReturnsAsync(new JobKeeperLaunchedProcess(Environment.ProcessId, 700));
 
         var result = _coordinator.SeedJobKeeperAndLaunch(
             TokenHandle,
@@ -137,7 +143,11 @@ public sealed class RestrictedJobLaunchCoordinatorTests
         Assert.Equal((uint)Environment.ProcessId, result.dwProcessId);
         _identityStore.Verify(s => s.CreateFresh(Sid, true), Times.Once);
         _processJobManager.Verify(m => m.ResetJobHandle(Sid, JobAssignment.LowIntegrity), Times.Once);
-        _processJobManager.Verify(m => m.TryAssignToJob(Sid, KeeperProcessHandle, JobAssignment.LowIntegrity, identity.JobName), Times.Once);
+        _processJobManager.Verify(m => m.TryAssignToJob(
+            Sid,
+            KeeperProcessHandle,
+            JobAssignment.LowIntegrity,
+            It.Is<string>(jobName => jobName.StartsWith(@"Global\RunFence_JK_L_", StringComparison.Ordinal))), Times.Once);
     }
 
     [Fact]
@@ -148,17 +158,24 @@ public sealed class RestrictedJobLaunchCoordinatorTests
         var target = new ProcessLaunchTarget(@"C:\Apps\App.exe", (string?)null, null, HideWindow: false);
 
         SetupSuccessfulSeed(identity, pipe, isLow: false);
-        _jobKeeperService.Setup(s => s.WaitAndRegisterJobKeeper(identity, pipe, 1234, It.IsAny<SecurityIdentifier>()))
+        _jobKeeperService.Setup(s => s.WaitAndRegisterJobKeeper(identity, pipe, 1234, It.IsAny<SecurityIdentifier>(), KeeperProcessHandle))
             .Returns(0);
 
         var ex = Assert.Throws<LaunchFailedException>(() =>
             _coordinator.SeedJobKeeperAndLaunch(TokenHandle, LaunchTokenSource.Credentials, Sid, false, target));
 
         Assert.Contains("JobKeeper failed to register", ex.Message);
-        _processControl.Verify(c => c.TerminateProcess(It.IsAny<IntPtr>()), Times.Never);
+        _processControl.Verify(c => c.TerminateProcessBestEffort(KeeperProcessHandle, 1), Times.Once);
+        _processControl.Verify(c => c.CloseHandle(KeeperThreadHandle), Times.Once);
         _processControl.Verify(c => c.CloseHandle(KeeperProcessHandle), Times.Once);
         _processJobManager.Verify(m => m.ResetJobHandle(Sid, JobAssignment.Restricted), Times.Exactly(2));
         _identityStore.Verify(s => s.Remove(Sid, false), Times.Once);
+        _launchIpcClient.Verify(s => s.SendLaunchRequestAsync(
+            It.IsAny<string>(),
+            It.IsAny<bool>(),
+            It.IsAny<JobKeeperLaunchRequest>(),
+            It.IsAny<TimeSpan>(),
+            It.IsAny<CancellationToken>()), Times.Never);
         _preparedTokenLauncher.Verify(l => l.LaunchWithPreparedToken(
                 It.IsAny<IntPtr>(),
                 It.Is<ProcessLaunchTarget>(t => t.ExePath == target.ExePath),
@@ -166,6 +183,86 @@ public sealed class RestrictedJobLaunchCoordinatorTests
                 It.IsAny<string>(),
                 It.IsAny<bool>()),
             Times.Never);
+    }
+
+    [Fact]
+    public void SeedJobKeeperAndLaunch_KeepAliveDuplicateFails_TerminatesKeeperResetsJobAndDoesNotLaunch()
+    {
+        var identity = Identity(isLow: false);
+        using var pipe = CreatePipe();
+        var target = new ProcessLaunchTarget(@"C:\Apps\App.exe");
+
+        SetupSuccessfulSeed(identity, pipe, isLow: false);
+        var duplicateTargetHandle = RemoteKeepAliveHandle;
+        _jobObjectApi.Setup(a => a.DuplicateHandleToProcess(
+                It.IsAny<IntPtr>(),
+                JobHandle,
+                KeeperProcessHandle,
+                ProcessJobManager.JobObjectKeepAliveAccess,
+                out duplicateTargetHandle))
+            .Returns(false);
+        _jobObjectApi.Setup(a => a.GetLastWin32Error()).Returns(5);
+
+        var ex = Assert.Throws<LaunchFailedException>(() =>
+            _coordinator.SeedJobKeeperAndLaunch(TokenHandle, LaunchTokenSource.Credentials, Sid, false, target));
+
+        Assert.Contains("keeper job keep-alive handle", ex.Message);
+        _processControl.Verify(c => c.ResumeThread(It.IsAny<IntPtr>(), out It.Ref<int>.IsAny), Times.Never);
+        _processControl.Verify(c => c.TerminateProcessBestEffort(KeeperProcessHandle, 1), Times.Once);
+        _processControl.Verify(c => c.CloseHandle(KeeperThreadHandle), Times.Once);
+        _processControl.Verify(c => c.CloseHandle(KeeperProcessHandle), Times.Once);
+        _processJobManager.Verify(m => m.ResetJobHandle(Sid, JobAssignment.Restricted), Times.Exactly(2));
+        _identityStore.Verify(s => s.Remove(Sid, false), Times.Once);
+        _launchIpcClient.Verify(s => s.SendLaunchRequestAsync(
+            It.IsAny<string>(),
+            It.IsAny<bool>(),
+            It.IsAny<JobKeeperLaunchRequest>(),
+            It.IsAny<TimeSpan>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public void SeedJobKeeperAndLaunch_ReconnectDuplicateFails_DoesNotCloseRemoteKeepAliveHandleAndDoesNotLaunch()
+    {
+        var identity = Identity(isLow: false);
+        using var pipe = CreatePipe();
+        var target = new ProcessLaunchTarget(@"C:\Apps\App.exe");
+
+        SetupSuccessfulSeed(identity, pipe, isLow: false);
+        var keepAliveHandle = RemoteKeepAliveHandle;
+        _jobObjectApi.Setup(a => a.DuplicateHandleToProcess(
+                It.IsAny<IntPtr>(),
+                JobHandle,
+                KeeperProcessHandle,
+                ProcessJobManager.JobObjectKeepAliveAccess,
+                out keepAliveHandle))
+            .Returns(true);
+        var reconnectHandle = RemoteReconnectHandle;
+        _jobObjectApi.Setup(a => a.DuplicateHandleToProcess(
+                It.IsAny<IntPtr>(),
+                JobHandle,
+                KeeperProcessHandle,
+                ProcessJobManager.JobObjectReconnectAccess,
+                out reconnectHandle))
+            .Returns(false);
+        _jobObjectApi.Setup(a => a.GetLastWin32Error()).Returns(87);
+
+        var ex = Assert.Throws<LaunchFailedException>(() =>
+            _coordinator.SeedJobKeeperAndLaunch(TokenHandle, LaunchTokenSource.Credentials, Sid, false, target));
+
+        Assert.Contains("keeper reconnect discovery handle", ex.Message);
+        _processControl.Verify(c => c.TerminateProcessBestEffort(KeeperProcessHandle, 1), Times.Once);
+        _processControl.Verify(c => c.CloseHandle(KeeperThreadHandle), Times.Once);
+        _processControl.Verify(c => c.CloseHandle(KeeperProcessHandle), Times.Once);
+        _processControl.Verify(c => c.CloseHandle(RemoteKeepAliveHandle), Times.Never);
+        _processJobManager.Verify(m => m.ResetJobHandle(Sid, JobAssignment.Restricted), Times.Exactly(2));
+        _identityStore.Verify(s => s.Remove(Sid, false), Times.Once);
+        _launchIpcClient.Verify(s => s.SendLaunchRequestAsync(
+            It.IsAny<string>(),
+            It.IsAny<bool>(),
+            It.IsAny<JobKeeperLaunchRequest>(),
+            It.IsAny<TimeSpan>(),
+            It.IsAny<CancellationToken>()), Times.Never);
     }
 
     private void SetupSuccessfulSeed(JobKeeperInstanceIdentity identity, NamedPipeServerStream pipe, bool isLow)
@@ -186,16 +283,26 @@ public sealed class RestrictedJobLaunchCoordinatorTests
                 hThread = KeeperThreadHandle,
                 dwProcessId = 1234,
             });
-        _processJobManager.Setup(m => m.TryAssignToJob(Sid, KeeperProcessHandle, It.IsAny<JobAssignment>(), identity.JobName))
+        _processJobManager.Setup(m => m.TryAssignToJob(Sid, KeeperProcessHandle, It.IsAny<JobAssignment>(), It.IsAny<string>()))
             .Returns((string _, IntPtr _, JobAssignment assignment, string? jobName) =>
                 JobAssignmentResult.Success(assignment, assignment, jobName!, 1234, true, true, JobHandle));
+        var keepAliveHandle = RemoteKeepAliveHandle;
         _jobObjectApi.Setup(a => a.DuplicateHandleToProcess(
                 It.IsAny<IntPtr>(),
                 JobHandle,
                 KeeperProcessHandle,
-                ProcessJobManager.JobObjectKeepAliveAccess))
+                ProcessJobManager.JobObjectKeepAliveAccess,
+                out keepAliveHandle))
             .Returns(true);
-        _jobKeeperService.Setup(s => s.WaitAndRegisterJobKeeper(identity, pipe, 1234, It.IsAny<SecurityIdentifier>()))
+        var reconnectHandle = RemoteReconnectHandle;
+        _jobObjectApi.Setup(a => a.DuplicateHandleToProcess(
+                It.IsAny<IntPtr>(),
+                JobHandle,
+                KeeperProcessHandle,
+                ProcessJobManager.JobObjectReconnectAccess,
+                out reconnectHandle))
+            .Returns(true);
+        _jobKeeperService.Setup(s => s.WaitAndRegisterJobKeeper(identity, pipe, 1234, It.IsAny<SecurityIdentifier>(), KeeperProcessHandle))
             .Returns(1234);
     }
 
@@ -205,7 +312,6 @@ public sealed class RestrictedJobLaunchCoordinatorTests
         ExpectedMode = JobKeeperInstanceIdentity.GetMode(isLow),
         InstanceId = isLow ? "low" : "restricted",
         PipeName = $"pipe-{Guid.NewGuid():N}",
-        JobName = $"job-{Guid.NewGuid():N}",
     };
 
     private static NamedPipeServerStream CreatePipe() =>

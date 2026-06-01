@@ -1,41 +1,36 @@
 using System.Security.AccessControl;
-using System.Security.Principal;
-using RunFence.Acl;
 using RunFence.Core;
+using RunFence.Core.Models;
 
 namespace RunFence.Apps.Shortcuts;
 
 public class ShortcutProtectionService(
     ILoggingService log,
-    IAclAccessor aclAccessor,
-    IShortcutProtectionStateStore stateStore) : IShortcutProtectionService
+    IShortcutProtectionStateStore stateStore,
+    ShortcutProtectionOwnershipCalculator ownershipCalculator,
+    ShortcutManagedDenyAceEditor managedDenyAceEditor,
+    InternalShortcutAclEditor internalShortcutAclEditor) : IShortcutProtectionService
 {
-    private const FileSystemRights ManagedDenyRights = FileSystemRights.Delete |
-                                                       FileSystemRights.Write |
-                                                       FileSystemRights.WriteAttributes |
-                                                       FileSystemRights.AppendData;
-
-    public void ProtectShortcut(string shortcutPath, bool allowAdministratorsDelete = false)
+    public void ProtectShortcut(
+        string appId,
+        string shortcutPath,
+        bool allowAdministratorsDelete = false)
     {
         if (!File.Exists(shortcutPath))
             return;
 
-        var existingState = TryLoadExistingStateForProtect(shortcutPath);
+        var existingState = TryLoadExistingStateForProtect(appId, shortcutPath);
         var attrs = File.GetAttributes(shortcutPath);
         var wasReadOnlyBeforeProtection = (attrs & FileAttributes.ReadOnly) != 0;
-        var everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
-        var hasManagedDenyAce = allowAdministratorsDelete
-            ? false
-            : TryReadHasManagedDenyAce(shortcutPath, everyoneSid);
-        var protectionState = new ShortcutProtectionState(
+        var hasManagedDenyAce = TryReadHasManagedDenyAce(shortcutPath);
+        var protectionState = ownershipCalculator.BuildState(
             shortcutPath,
-            allowAdministratorsDelete
-                ? false
-                : existingState?.ManagedDenyAceApplied == true || !hasManagedDenyAce,
-            existingState?.WasReadOnlyBeforeProtection ?? wasReadOnlyBeforeProtection,
-            existingState?.ReadOnlySetByRunFence == true || !wasReadOnlyBeforeProtection);
+            existingState,
+            wasReadOnlyBeforeProtection,
+            hasManagedDenyAce,
+            allowAdministratorsDelete);
 
-        PersistProtectionStateForAdd(shortcutPath, protectionState);
+        PersistProtectionStateForAdd(appId, shortcutPath, protectionState);
 
         var readOnlyAppliedBeforeAcl = false;
         if (!allowAdministratorsDelete && !wasReadOnlyBeforeProtection)
@@ -43,6 +38,7 @@ public class ShortcutProtectionService(
             protectionState = TryApplyReadOnlyAttribute(
                 shortcutPath,
                 attrs,
+                appId,
                 existingState,
                 protectionState,
                 "Failed to mark shortcut as read-only");
@@ -53,35 +49,17 @@ public class ShortcutProtectionService(
         {
             if (allowAdministratorsDelete)
             {
-                aclAccessor.ModifyAclWithFallback(shortcutPath, isFolder: false, security =>
-                {
-                    if (existingState?.ManagedDenyAceApplied != true)
-                        return false;
-
-                    var rule = FindManagedEveryoneDenyRule(security, everyoneSid);
-                    if (rule == null)
-                        return false;
-
-                    security.RemoveAccessRuleSpecific(rule);
-                    return true;
-                });
+                RemoveManagedDenyAceIfOwned(existingState, shortcutPath);
             }
             else
             {
-                aclAccessor.ModifyAclWithFallback(shortcutPath, isFolder: false, security =>
-                {
-                    if (HasManagedEveryoneDenyAce(security, everyoneSid))
-                        return false;
-
-                    security.AddAccessRule(new FileSystemAccessRule(everyoneSid, ManagedDenyRights, AccessControlType.Deny));
-                    return true;
-                });
+                managedDenyAceEditor.AddManagedDenyAce(shortcutPath);
             }
         }
         catch (Exception ex)
         {
             var failure = TryRollbackReadOnlyAfterAclFailure(shortcutPath, attrs, readOnlyAppliedBeforeAcl, ex);
-            RestorePriorStateAfterOsFailure(shortcutPath, existingState, failure, "apply");
+            RestorePriorStateAfterOsFailure(appId, shortcutPath, existingState, failure, "apply");
             throw new ShortcutProtectionException(shortcutPath, "apply", failure);
         }
 
@@ -89,12 +67,13 @@ public class ShortcutProtectionService(
             TryApplyReadOnlyAttribute(
                 shortcutPath,
                 attrs,
+                appId,
                 existingState,
                 protectionState,
                 "Failed to mark shortcut as read-only");
     }
 
-    public void UnprotectShortcut(string shortcutPath)
+    public void UnprotectShortcut(string appId, string shortcutPath)
     {
         if (!File.Exists(shortcutPath))
             return;
@@ -102,27 +81,18 @@ public class ShortcutProtectionService(
         ShortcutProtectionState? state;
         try
         {
-            state = stateStore.Load(shortcutPath);
+            state = stateStore.Load(appId, shortcutPath);
         }
         catch (Exception ex)
         {
             throw new ShortcutProtectionException(shortcutPath, "load", ex);
         }
-        var everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
 
         if (state?.ManagedDenyAceApplied == true)
         {
             try
             {
-                aclAccessor.ModifyAclWithFallback(shortcutPath, isFolder: false, security =>
-                {
-                    var rule = FindManagedEveryoneDenyRule(security, everyoneSid);
-                    if (rule == null)
-                        return false;
-
-                    security.RemoveAccessRuleSpecific(rule);
-                    return true;
-                });
+                managedDenyAceEditor.RemoveManagedDenyAce(shortcutPath);
             }
             catch (Exception ex)
             {
@@ -139,13 +109,13 @@ public class ShortcutProtectionService(
             }
             catch (Exception ex)
             {
-                log.Error($"Failed to remove shortcut read-only attribute: {shortcutPath}", ex);
+                throw new ShortcutProtectionException(shortcutPath, "remove", ex);
             }
         }
 
         try
         {
-            stateStore.Delete(shortcutPath);
+            stateStore.Delete(appId, shortcutPath);
         }
         catch (Exception ex)
         {
@@ -160,41 +130,25 @@ public class ShortcutProtectionService(
     /// Used for shortcuts created inside managed folder apps. Only the specific account that
     /// owns the app entry gets access — not the entire Users group, since membership is not guaranteed.
     /// </summary>
-    public void ProtectInternalShortcut(string shortcutPath, string accountSid)
+    public void ProtectInternalShortcut(
+        string appId,
+        string shortcutPath,
+        string accountSid)
     {
         if (!File.Exists(shortcutPath))
             return;
 
-        var existingState = TryLoadExistingStateForProtect(shortcutPath);
+        var existingState = TryLoadExistingStateForProtect(appId, shortcutPath);
         var attrs = File.GetAttributes(shortcutPath);
         var wasReadOnlyBeforeProtection = (attrs & FileAttributes.ReadOnly) != 0;
-        var protectionState = new ShortcutProtectionState(
+        var protectionState = ownershipCalculator.BuildState(
             shortcutPath,
-            ManagedDenyAceApplied: false,
-            existingState?.WasReadOnlyBeforeProtection ?? wasReadOnlyBeforeProtection,
-            existingState?.ReadOnlySetByRunFence == true || !wasReadOnlyBeforeProtection);
+            existingState,
+            wasReadOnlyBeforeProtection,
+            hasOrdinaryManagedDenyAce: false,
+            allowAdministratorsDelete: true);
 
-        var systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-        var adminsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-        var accountIdentity = new SecurityIdentifier(accountSid);
-        // Include BuiltinUsersSid so any legacy ACEs from the old code get detected and removed.
-        var legacyUsersSid = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
-        var everyoneSid = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
-        var managedSids = new HashSet<SecurityIdentifier> { systemSid, adminsSid, accountIdentity, legacyUsersSid, everyoneSid };
-        var currentMockSid = AdminOperationMockAccessHelper.GetCurrentProcessSidWhenUsingMocks();
-        if (currentMockSid != null)
-            managedSids.Add(currentMockSid);
-
-        var desiredSet = new HashSet<(string sid, FileSystemRights rights, AccessControlType type)>
-        {
-            (systemSid.Value, FileSystemRights.FullControl, AccessControlType.Allow),
-            (adminsSid.Value, FileSystemRights.FullControl, AccessControlType.Allow),
-            (accountIdentity.Value, FileSystemRights.ReadAndExecute, AccessControlType.Allow),
-        };
-        if (currentMockSid != null)
-            desiredSet.Add((currentMockSid.Value, FileSystemRights.FullControl, AccessControlType.Allow));
-
-        PersistProtectionStateForAdd(shortcutPath, protectionState);
+        PersistProtectionStateForAdd(appId, shortcutPath, protectionState);
 
         var readOnlyAppliedBeforeAcl = false;
         if (!wasReadOnlyBeforeProtection)
@@ -202,6 +156,7 @@ public class ShortcutProtectionService(
             protectionState = TryApplyReadOnlyAttribute(
                 shortcutPath,
                 attrs,
+                appId,
                 existingState,
                 protectionState,
                 "Failed to mark internal shortcut as read-only");
@@ -210,92 +165,32 @@ public class ShortcutProtectionService(
 
         try
         {
-            aclAccessor.ModifyAclWithFallback(shortcutPath, isFolder: false, security =>
-            {
-                var inheritanceBroken = security.AreAccessRulesProtected;
-                var existingSet = new HashSet<(string sid, FileSystemRights rights, AccessControlType type)>();
-                var existingManaged = new List<FileSystemAccessRule>();
-                foreach (FileSystemAccessRule rule in security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
-                {
-                    if (rule.IdentityReference is not SecurityIdentifier sid || !managedSids.Contains(sid))
-                        continue;
-
-                    existingManaged.Add(rule);
-                    // Strip Synchronize from allow ACEs: Windows may auto-add it on read-back,
-                    // so ignore it to avoid false "changed" detection.
-                    var rights = rule.AccessControlType == AccessControlType.Allow
-                        ? rule.FileSystemRights & ~FileSystemRights.Synchronize
-                        : rule.FileSystemRights;
-                    existingSet.Add((sid.Value, rights, rule.AccessControlType));
-                }
-
-                var aclChanged = !inheritanceBroken || !desiredSet.SetEquals(existingSet);
-                if (!aclChanged)
-                    return false;
-
-                if (!inheritanceBroken)
-                    security.SetAccessRuleProtection(true, false);
-
-                if (!desiredSet.SetEquals(existingSet))
-                {
-                    foreach (var rule in existingManaged)
-                        security.RemoveAccessRuleSpecific(rule);
-                    security.AddAccessRule(new FileSystemAccessRule(systemSid, FileSystemRights.FullControl, AccessControlType.Allow));
-                    security.AddAccessRule(new FileSystemAccessRule(adminsSid, FileSystemRights.FullControl, AccessControlType.Allow));
-                    security.AddAccessRule(new FileSystemAccessRule(accountIdentity, FileSystemRights.ReadAndExecute, AccessControlType.Allow));
-                    if (currentMockSid != null)
-                        security.AddAccessRule(new FileSystemAccessRule(currentMockSid, FileSystemRights.FullControl, AccessControlType.Allow));
-                }
-
-                return true;
-            });
+            internalShortcutAclEditor.Protect(shortcutPath, accountSid);
         }
         catch (Exception ex)
         {
             var failure = TryRollbackReadOnlyAfterAclFailure(shortcutPath, attrs, readOnlyAppliedBeforeAcl, ex);
-            RestorePriorStateAfterOsFailure(shortcutPath, existingState, failure, "apply");
+            RestorePriorStateAfterOsFailure(appId, shortcutPath, existingState, failure, "apply");
             throw new ShortcutProtectionException(shortcutPath, "apply", failure);
         }
     }
 
-    private static bool HasManagedEveryoneDenyAce(FileSystemSecurity security, SecurityIdentifier everyoneSid)
-        => FindManagedEveryoneDenyRule(security, everyoneSid) != null;
-
-    private static FileSystemAccessRule? FindManagedEveryoneDenyRule(FileSystemSecurity security, SecurityIdentifier everyoneSid)
-    {
-        foreach (FileSystemAccessRule rule in security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
-        {
-            if (rule.AccessControlType != AccessControlType.Deny ||
-                rule.IdentityReference is not SecurityIdentifier sid ||
-                !sid.Equals(everyoneSid))
-            {
-                continue;
-            }
-
-            var normalizedRights = rule.FileSystemRights & ~FileSystemRights.Synchronize;
-            if (normalizedRights == ManagedDenyRights)
-                return rule;
-        }
-
-        return null;
-    }
-
-    private void SaveOrDeleteProtectionState(ShortcutProtectionState state)
+    private void SaveOrDeleteProtectionState(string appId, ShortcutProtectionState state)
     {
         if (!state.ManagedDenyAceApplied && !state.ReadOnlySetByRunFence)
         {
-            stateStore.Delete(state.ShortcutPath);
+            stateStore.Delete(appId, state.ShortcutPath);
             return;
         }
 
-        stateStore.Save(state);
+        stateStore.Save(appId, state);
     }
 
-    private ShortcutProtectionState? TryLoadExistingStateForProtect(string shortcutPath)
+    private ShortcutProtectionState? TryLoadExistingStateForProtect(string appId, string shortcutPath)
     {
         try
         {
-            return stateStore.Load(shortcutPath);
+            return stateStore.Load(appId, shortcutPath);
         }
         catch (Exception ex)
         {
@@ -303,11 +198,11 @@ public class ShortcutProtectionService(
         }
     }
 
-    private bool TryReadHasManagedDenyAce(string shortcutPath, SecurityIdentifier everyoneSid)
+    private bool TryReadHasManagedDenyAce(string shortcutPath)
     {
         try
         {
-            return HasManagedEveryoneDenyAce(new FileInfo(shortcutPath).GetAccessControl(), everyoneSid);
+            return managedDenyAceEditor.HasManagedDenyAce(shortcutPath);
         }
         catch (Exception ex)
         {
@@ -315,11 +210,11 @@ public class ShortcutProtectionService(
         }
     }
 
-    private void PersistProtectionStateForAdd(string shortcutPath, ShortcutProtectionState newState)
+    private void PersistProtectionStateForAdd(string appId, string shortcutPath, ShortcutProtectionState newState)
     {
         try
         {
-            SaveOrDeleteProtectionState(newState);
+            SaveOrDeleteProtectionState(appId, newState);
         }
         catch (Exception ex)
         {
@@ -327,11 +222,11 @@ public class ShortcutProtectionService(
         }
     }
 
-    private void PersistStateAfterReadOnlyFailure(string shortcutPath, ShortcutProtectionState correctedState)
+    private void PersistStateAfterReadOnlyFailure(string appId, string shortcutPath, ShortcutProtectionState correctedState)
     {
         try
         {
-            SaveOrDeleteProtectionState(correctedState);
+            SaveOrDeleteProtectionState(appId, correctedState);
         }
         catch (Exception ex)
         {
@@ -342,6 +237,7 @@ public class ShortcutProtectionService(
     private ShortcutProtectionState TryApplyReadOnlyAttribute(
         string shortcutPath,
         FileAttributes originalAttributes,
+        string appId,
         ShortcutProtectionState? existingState,
         ShortcutProtectionState protectionState,
         string logMessage)
@@ -355,7 +251,7 @@ public class ShortcutProtectionService(
         {
             log.Error($"{logMessage}: {shortcutPath}", ex);
             var correctedState = protectionState with { ReadOnlySetByRunFence = existingState?.ReadOnlySetByRunFence == true };
-            PersistStateAfterReadOnlyFailure(shortcutPath, correctedState);
+            PersistStateAfterReadOnlyFailure(appId, shortcutPath, correctedState);
             return correctedState;
         }
     }
@@ -381,6 +277,7 @@ public class ShortcutProtectionService(
     }
 
     private void RestorePriorStateAfterOsFailure(
+        string appId,
         string shortcutPath,
         ShortcutProtectionState? existingState,
         Exception originalException,
@@ -389,9 +286,9 @@ public class ShortcutProtectionService(
         try
         {
             if (existingState == null)
-                stateStore.Delete(shortcutPath);
+                stateStore.Delete(appId, shortcutPath);
             else
-                stateStore.Save(existingState);
+                stateStore.Save(appId, existingState);
         }
         catch (Exception restoreEx)
         {
@@ -402,4 +299,13 @@ public class ShortcutProtectionService(
         }
     }
 
+    private void RemoveManagedDenyAceIfOwned(
+        ShortcutProtectionState? existingState,
+        string shortcutPath)
+    {
+        if (existingState?.ManagedDenyAceApplied == true)
+        {
+            managedDenyAceEditor.RemoveManagedDenyAce(shortcutPath);
+        }
+    }
 }

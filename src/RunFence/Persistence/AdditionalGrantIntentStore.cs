@@ -11,7 +11,7 @@ public class AdditionalGrantIntentStore(
     GrantIntentOwnershipProjectionService ownershipProjection)
     : IGrantIntentStore
 {
-    public string ConfigPath { get; } = Path.GetFullPath(configPath);
+    public string ConfigPath { get; } = AppConfigPathHelper.NormalizePath(configPath);
 
     public IReadOnlyList<GrantedPathEntry> GetEntries(string ownerSid)
     {

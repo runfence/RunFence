@@ -14,11 +14,11 @@ public sealed class MockAccountProcessLauncher(
     // to keep DI validation working; uses Process.Start with credentials for real accounts,
     // current-user launch for current/interactive SID, no-op for fake-store accounts
 
-    public ProcessInfo Launch(ProcessLaunchTarget target, AccountLaunchIdentity identity)
+    public ProcessInfo? Launch(ProcessLaunchTarget target, AccountLaunchIdentity identity)
     {
         // Fake store accounts have no real OS presence — no-op
         if (store.IsFakeUser(identity.Sid))
-            return new(default);
+            return new ProcessInfo(default);
 
         var creds = identity.Credentials!.Value;
         var psi = ProcessLaunchHelper.BuildProcessStartInfo(target);
@@ -45,6 +45,6 @@ public sealed class MockAccountProcessLauncher(
         if (SidResolutionHelper.CanLaunchWithoutPassword(identity.Sid))
             return ProcessInfo.FromManagedProcess(Process.Start(psi));
 
-        return new(default);
+        return new ProcessInfo(default);
     }
 }

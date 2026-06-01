@@ -1,8 +1,6 @@
 using RunFence.Account.UI;
-using RunFence.Apps.Shortcuts;
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
-using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -17,9 +15,7 @@ namespace RunFence.Wizard.Templates;
 internal class CryptoWalletTemplate(
     WizardTemplateExecutor executor,
     WizardAccountSetupHelperFactory setupHelperFactory,
-    IShortcutDiscoveryService discoveryService,
-    IShortcutIconHelper iconHelper,
-    IExecutablePathResolver executablePathResolver)
+    StandardAppWizardStepBuilder stepBuilder)
     : IWizardTemplate
 {
     private readonly CommitData _data = new();
@@ -27,7 +23,7 @@ internal class CryptoWalletTemplate(
     public string DisplayName => "Crypto Wallet / Password Manager";
     public string Description => "Run a wallet or password manager in an isolated account with ACL protection.";
     public string IconEmoji => "\U0001F512";
-    public Action<IWin32Window>? PostWizardAction => null;
+    public Func<IWin32Window, Task>? PostWizardAction => null;
 
     public void Cleanup()
     {
@@ -45,15 +41,12 @@ internal class CryptoWalletTemplate(
                 description: "Choose a name for the new isolated account. " +
                              "The wallet or password manager will run in this account, " +
                              "protecting it from other processes on your system."),
-            new AppPathStep(
+            stepBuilder.CreateAppPathStep(
                 (path, name) =>
                 {
                     _data.AppPath = path;
                     _data.AppName = name;
                 },
-                discoveryService,
-                iconHelper,
-                executablePathResolver,
                 description: "Select the wallet or password manager executable. " +
                              "A deny ACL will be placed on its parent folder to prevent accidental launch of a malicious replacement.")
         ];

@@ -39,12 +39,13 @@ public class AppEditDialogInitializationBinder(
         if (options.ExePath != null)
             dialog.SetExePathAndDefaultName(options.ExePath);
 
+        dialog.ApplyNewOptions(options);
+
         if (options.AccountSid != null)
             dialog.SelectAccountBySid(options.AccountSid);
         else if (options.ContainerName != null)
             dialog.SelectAccountByContainerName(options.ContainerName);
 
-        dialog.ApplyNewOptions(options);
         dialog.SetAssociations(associations);
     }
 

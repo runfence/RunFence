@@ -25,3 +25,6 @@ installer/ProductComponents.wxs
 installer/License.rtf
 installer/dotnet-runtime-10-win-x64.url
 installer/dotnet-runtime-10-win-x64.exe
+
+TestResults/
+*.trx

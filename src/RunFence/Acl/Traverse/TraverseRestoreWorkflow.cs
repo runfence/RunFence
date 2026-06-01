@@ -1,29 +1,20 @@
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Persistence;
-using System.Security.Principal;
 
 namespace RunFence.Acl.Traverse;
 
 public class TraverseRestoreWorkflow(
     ITraverseCoreOperations traverseCore,
-    UiThreadDatabaseAccessor dbAccessor,
     ContainerInteractiveUserSync containerIuSync,
-    IFileSystemPathInfo pathInfo,
-    ITraverseAcl traverseAcl,
-    ITraverseGrantOwnerResolver traverseGrantOwnerResolver,
     ITraverseIntentStoreCoordinator traverseIntentStoreCoordinator,
     TraverseGrantStateService traverseGrantStateService,
+    GrantMutationOrderResolver grantMutationOrderResolver,
+    TraverseRestoreStateRestorer traverseRestoreStateRestorer,
+    TraverseRestoreAclRollbackService traverseRestoreAclRollbackService,
     Func<IGrantIntentStoreProvider> grantIntentStoreProvider,
     IGrantIntentStoreSaveService grantIntentStoreSaveService)
 {
-    private enum GrantMutationOrder
-    {
-        SaveThenApply,
-        ApplyThenSave,
-        RemoveSaveAdd
-    }
-
     private IGrantIntentStoreProvider GrantIntentStoreProvider => grantIntentStoreProvider();
 
     public GrantApplyResult Restore(
@@ -49,7 +40,7 @@ public class TraverseRestoreWorkflow(
             normalizedPath,
             includeManualSharedEntries: true);
         var finalStores = previousState.Locations
-            .Select(location => GrantIntentStoreProvider.ResolveStore(location.ConfigPath))
+            .Select(location => GrantIntentStoreProvider.ResolveStore(location.StoreIdentity.ConfigPath))
             .Distinct()
             .ToList();
         var affectedStores = existingLocations.Select(location => location.Store)
@@ -57,9 +48,8 @@ public class TraverseRestoreWorkflow(
             .Distinct()
             .ToList();
         var storeOwnerSid = traverseIntentStoreCoordinator.ResolveStorageOwnerSid(accountSid);
-        var snapshots = traverseGrantStateService.CaptureStoreSnapshots(storeOwnerSid, normalizedPath, affectedStores);
-        var runtimeSnapshot = dbAccessor.Read(db =>
-            FindRuntimeTraverseEntry(db, accountSid, normalizedPath, includeManualSharedEntries: true)?.Clone());
+        var snapshots = traverseRestoreStateRestorer.CaptureStoreSnapshots(storeOwnerSid, normalizedPath, affectedStores);
+        var runtimeSnapshot = traverseRestoreStateRestorer.CaptureRuntimeSnapshot(accountSid, normalizedPath);
         var primaryConfigPath = grantIntentStoreSaveService.GetPrimaryConfigPath(affectedStores);
         bool storeModified = RestoreTraverseStoresToExactLocations(
             accountSid,
@@ -68,8 +58,8 @@ public class TraverseRestoreWorkflow(
             mutate: false);
 
         var currentTrackedEntries = existingLocations.Select(location => location.Entry).ToList();
-        if (currentTrackedEntries.Count == 0 && runtimeSnapshot != null)
-            currentTrackedEntries.Add(runtimeSnapshot);
+        if (currentTrackedEntries.Count == 0 && runtimeSnapshot.Entry != null)
+            currentTrackedEntries.Add(runtimeSnapshot.Entry);
 
         var currentPaths = traverseGrantStateService.CollectStoredTraversePaths(currentTrackedEntries);
         var restoredPaths = traverseGrantStateService.CollectStoredTraversePaths(restoredEntry);
@@ -95,7 +85,9 @@ public class TraverseRestoreWorkflow(
             pathsToAdd = traverseCore.GetPathsNeedingTraverseAce(accountSid, restoredPaths)
                 .Where(pathToAdd => !pathsToRemove.Contains(pathToAdd, StringComparer.OrdinalIgnoreCase))
                 .ToList();
-            explicitTraversePathsToRestore = CaptureExplicitTraverseAclPaths(accountSid, pathsToRemove);
+            explicitTraversePathsToRestore = traverseRestoreAclRollbackService.CaptureExplicitTraverseAclPaths(
+                accountSid,
+                pathsToRemove);
         }
         catch (Exception ex)
         {
@@ -109,11 +101,9 @@ public class TraverseRestoreWorkflow(
         List<string> appliedPaths = [];
         IReadOnlyList<GrantApplyWarning> warnings = [];
         bool durableSaveCompleted = storeModified;
-        var mutationOrder = pathsToRemove.Count > 0
-            ? pathsToAdd.Count > 0
-                ? GrantMutationOrder.RemoveSaveAdd
-                : GrantMutationOrder.ApplyThenSave
-            : GrantMutationOrder.SaveThenApply;
+        var mutationOrder = grantMutationOrderResolver.ForAclDelta(
+            hasAclAdditions: pathsToAdd.Count > 0,
+            hasAclRemovals: pathsToRemove.Count > 0);
 
         switch (mutationOrder)
         {
@@ -137,9 +127,9 @@ public class TraverseRestoreWorkflow(
                 }
                 catch (GrantOperationException ex)
                 {
-                    TryRestoreTrackedRuntimeTraverseEntry(accountSid, normalizedPath, runtimeSnapshot, ex);
+                    traverseRestoreStateRestorer.TryRestoreRuntimeTraverseEntry(runtimeSnapshot, ex);
                     if (storeModified)
-                        TryRestoreTraverseSnapshots(storeOwnerSid, normalizedPath, snapshots, ex);
+                        traverseRestoreStateRestorer.TryRestoreStoreSnapshots(snapshots, ex);
                     throw;
                 }
                 catch (Exception ex)
@@ -149,9 +139,9 @@ public class TraverseRestoreWorkflow(
                         normalizedPath,
                         primaryConfigPath,
                         ex);
-                    TryRestoreTrackedRuntimeTraverseEntry(accountSid, normalizedPath, runtimeSnapshot, operationException);
+                    traverseRestoreStateRestorer.TryRestoreRuntimeTraverseEntry(runtimeSnapshot, operationException);
                     if (storeModified)
-                        TryRestoreTraverseSnapshots(storeOwnerSid, normalizedPath, snapshots, operationException);
+                        traverseRestoreStateRestorer.TryRestoreStoreSnapshots(snapshots, operationException);
                     throw operationException;
                 }
 
@@ -175,10 +165,14 @@ public class TraverseRestoreWorkflow(
                     var rollbackPaths = ex is TraverseAclApplyException applyFailure
                         ? applyFailure.AppliedPaths
                         : appliedPaths;
-                    TryRollbackTraverseAcl(accountSid, rollbackPaths, primaryConfigPath, operationException);
-                    TryRestoreTrackedRuntimeTraverseEntry(accountSid, normalizedPath, runtimeSnapshot, operationException);
+                    traverseRestoreAclRollbackService.TryRollbackTraverseAcl(
+                        accountSid,
+                        rollbackPaths,
+                        primaryConfigPath,
+                        operationException);
+                    traverseRestoreStateRestorer.TryRestoreRuntimeTraverseEntry(runtimeSnapshot, operationException);
                     if (storeModified)
-                        TryRestoreTraverseSnapshots(storeOwnerSid, normalizedPath, snapshots, operationException);
+                        traverseRestoreStateRestorer.TryRestoreStoreSnapshots(snapshots, operationException);
                     throw operationException;
                 }
                 break;
@@ -209,7 +203,7 @@ public class TraverseRestoreWorkflow(
                         ex is TraverseAclApplyException applyEx ? applyEx.InnerException ?? applyEx : ex);
                     if (pathsToRemove.Count > 0)
                     {
-                        TryReapplyRemovedTraverseAcl(
+                        traverseRestoreAclRollbackService.TryReapplyRemovedTraverseAcl(
                             accountSid,
                             explicitTraversePathsToRestore,
                             normalizedPath,
@@ -217,9 +211,9 @@ public class TraverseRestoreWorkflow(
                             operationException);
                     }
 
-                    TryRestoreTrackedRuntimeTraverseEntry(accountSid, normalizedPath, runtimeSnapshot, operationException);
+                    traverseRestoreStateRestorer.TryRestoreRuntimeTraverseEntry(runtimeSnapshot, operationException);
                     if (storeModified)
-                        TryRestoreTraverseSnapshots(storeOwnerSid, normalizedPath, snapshots, operationException);
+                        traverseRestoreStateRestorer.TryRestoreStoreSnapshots(snapshots, operationException);
                     throw operationException;
                 }
 
@@ -248,7 +242,7 @@ public class TraverseRestoreWorkflow(
                         ex is TraverseAclApplyException applyEx ? applyEx.InnerException ?? applyEx : ex);
                     if (pathsToRemove.Count > 0)
                     {
-                        TryReapplyRemovedTraverseAcl(
+                        traverseRestoreAclRollbackService.TryReapplyRemovedTraverseAcl(
                             accountSid,
                             explicitTraversePathsToRestore,
                             normalizedPath,
@@ -256,9 +250,9 @@ public class TraverseRestoreWorkflow(
                             operationException);
                     }
 
-                    TryRestoreTrackedRuntimeTraverseEntry(accountSid, normalizedPath, runtimeSnapshot, operationException);
+                    traverseRestoreStateRestorer.TryRestoreRuntimeTraverseEntry(runtimeSnapshot, operationException);
                     if (storeModified)
-                        TryRestoreTraverseSnapshots(storeOwnerSid, normalizedPath, snapshots, operationException);
+                        traverseRestoreStateRestorer.TryRestoreStoreSnapshots(snapshots, operationException);
                     throw operationException;
                 }
                 break;
@@ -291,7 +285,7 @@ public class TraverseRestoreWorkflow(
                 {
                     if (pathsToRemove.Count > 0)
                     {
-                        TryReapplyRemovedTraverseAcl(
+                        traverseRestoreAclRollbackService.TryReapplyRemovedTraverseAcl(
                             accountSid,
                             explicitTraversePathsToRestore,
                             normalizedPath,
@@ -299,9 +293,9 @@ public class TraverseRestoreWorkflow(
                             ex);
                     }
 
-                    TryRestoreTrackedRuntimeTraverseEntry(accountSid, normalizedPath, runtimeSnapshot, ex);
+                    traverseRestoreStateRestorer.TryRestoreRuntimeTraverseEntry(runtimeSnapshot, ex);
                     if (storeModified)
-                        TryRestoreTraverseSnapshots(storeOwnerSid, normalizedPath, snapshots, ex);
+                        traverseRestoreStateRestorer.TryRestoreStoreSnapshots(snapshots, ex);
                     throw;
                 }
                 catch (Exception ex)
@@ -313,7 +307,7 @@ public class TraverseRestoreWorkflow(
                         ex is TraverseAclApplyException applyEx ? applyEx.InnerException ?? applyEx : ex);
                     if (pathsToRemove.Count > 0)
                     {
-                        TryReapplyRemovedTraverseAcl(
+                        traverseRestoreAclRollbackService.TryReapplyRemovedTraverseAcl(
                             accountSid,
                             explicitTraversePathsToRestore,
                             normalizedPath,
@@ -321,9 +315,9 @@ public class TraverseRestoreWorkflow(
                             operationException);
                     }
 
-                    TryRestoreTrackedRuntimeTraverseEntry(accountSid, normalizedPath, runtimeSnapshot, operationException);
+                    traverseRestoreStateRestorer.TryRestoreRuntimeTraverseEntry(runtimeSnapshot, operationException);
                     if (storeModified)
-                        TryRestoreTraverseSnapshots(storeOwnerSid, normalizedPath, snapshots, operationException);
+                        traverseRestoreStateRestorer.TryRestoreStoreSnapshots(snapshots, operationException);
                     throw operationException;
                 }
 
@@ -347,10 +341,14 @@ public class TraverseRestoreWorkflow(
                     var rollbackPaths = ex is TraverseAclApplyException applyFailure
                         ? applyFailure.AppliedPaths
                         : appliedPaths;
-                    TryRollbackTraverseAcl(accountSid, rollbackPaths, primaryConfigPath, operationException);
+                    traverseRestoreAclRollbackService.TryRollbackTraverseAcl(
+                        accountSid,
+                        rollbackPaths,
+                        primaryConfigPath,
+                        operationException);
                     if (pathsToRemove.Count > 0)
                     {
-                        TryReapplyRemovedTraverseAcl(
+                        traverseRestoreAclRollbackService.TryReapplyRemovedTraverseAcl(
                             accountSid,
                             explicitTraversePathsToRestore,
                             normalizedPath,
@@ -358,9 +356,9 @@ public class TraverseRestoreWorkflow(
                             operationException);
                     }
 
-                    TryRestoreTrackedRuntimeTraverseEntry(accountSid, normalizedPath, runtimeSnapshot, operationException);
+                    traverseRestoreStateRestorer.TryRestoreRuntimeTraverseEntry(runtimeSnapshot, operationException);
                     if (storeModified)
-                        TryRestoreTraverseSnapshots(storeOwnerSid, normalizedPath, snapshots, operationException);
+                        traverseRestoreStateRestorer.TryRestoreStoreSnapshots(snapshots, operationException);
                     throw operationException;
                 }
                 break;
@@ -437,7 +435,7 @@ public class TraverseRestoreWorkflow(
     {
         var ownerSid = traverseIntentStoreCoordinator.ResolveStorageOwnerSid(sid);
         var desiredByConfigPath = desiredLocations
-            .GroupBy(location => NormalizeConfigPath(location.ConfigPath), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(location => NormalizeConfigPath(location.StoreIdentity.ConfigPath), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         bool modified = false;
 
@@ -454,7 +452,7 @@ public class TraverseRestoreWorkflow(
 
         foreach (var desired in desiredByConfigPath.Values)
         {
-            var targetStore = GrantIntentStoreProvider.ResolveStore(desired.ConfigPath);
+            var targetStore = GrantIntentStoreProvider.ResolveStore(desired.StoreIdentity.ConfigPath);
             var matchingLocations = currentLocations
                 .Where(location =>
                     string.Equals(
@@ -504,35 +502,6 @@ public class TraverseRestoreWorkflow(
         return modified;
     }
 
-    private void TryRestoreTraverseSnapshots(
-        string ownerSid,
-        string normalizedPath,
-        IReadOnlyList<TraverseGrantStateService.StoreSnapshot> snapshots,
-        GrantOperationException operationException)
-    {
-        try
-        {
-            traverseGrantStateService.RestoreStoreSnapshots(ownerSid, normalizedPath, snapshots);
-            grantIntentStoreSaveService.Save(
-                snapshots.Select(snapshot => snapshot.Store),
-                GrantApplyFailureStep.RevertIntentSave,
-                normalizedPath);
-        }
-        catch (GrantOperationException ex)
-        {
-            operationException.AppendCleanupFailure(ex.Step, ex.Path, ex.ConfigPath, ex.Cause);
-            operationException.AppendCleanupFailures(ex.CleanupFailures);
-        }
-        catch (Exception ex)
-        {
-            operationException.AppendCleanupFailure(
-                GrantApplyFailureStep.RevertIntentSave,
-                normalizedPath,
-                grantIntentStoreSaveService.GetPrimaryConfigPath(snapshots.Select(snapshot => snapshot.Store)),
-                ex);
-        }
-    }
-
     private void RemoveTraverseEntriesFromStores(
         string sid,
         string normalizedPath,
@@ -547,127 +516,6 @@ public class TraverseRestoreWorkflow(
         }
     }
 
-    private void TryRestoreTrackedRuntimeTraverseEntry(
-        string sid,
-        string normalizedPath,
-        GrantedPathEntry? snapshot,
-        GrantOperationException operationException)
-    {
-        try
-        {
-            dbAccessor.Write(db =>
-            {
-                var entries = snapshot != null
-                    ? traverseIntentStoreCoordinator.GetOrCreateTraverseStore(db, sid)
-                    : traverseIntentStoreCoordinator.GetTraverseStoreOrEmpty(db, sid);
-                var currentEntry = FindRuntimeTraverseEntry(
-                    db,
-                    sid,
-                    normalizedPath,
-                    includeManualSharedEntries: true);
-                if (currentEntry != null)
-                    entries.Remove(currentEntry);
-
-                if (snapshot != null)
-                    entries.Add(snapshot.Clone());
-
-                if (!AclHelper.IsSpecificContainerSid(sid))
-                    db.RemoveAccountIfEmpty(sid);
-            });
-        }
-        catch (Exception ex)
-        {
-            operationException.AppendCleanupFailure(
-                GrantApplyFailureStep.RevertIntentSave,
-                normalizedPath,
-                null,
-                ex);
-        }
-    }
-
-    private void TryRollbackTraverseAcl(
-        string sid,
-        IReadOnlyList<string> appliedPaths,
-        string? primaryConfigPath,
-        GrantOperationException operationException)
-    {
-        if (appliedPaths.Count == 0)
-            return;
-
-        try
-        {
-            traverseCore.RemoveTraverseAces(sid, appliedPaths);
-        }
-        catch (Exception ex)
-        {
-            operationException.AppendCleanupFailure(
-                GrantApplyFailureStep.TraverseAclRollback,
-                appliedPaths[0],
-                primaryConfigPath,
-                ex);
-        }
-    }
-
-    private List<string> CaptureExplicitTraverseAclPaths(
-        string sid,
-        IReadOnlyList<string> candidatePaths)
-    {
-        if (candidatePaths.Count == 0)
-            return [];
-
-        var traverseSid = traverseIntentStoreCoordinator.ResolveAclSid(sid);
-        var identity = new SecurityIdentifier(traverseSid);
-        var explicitPaths = new List<string>();
-
-        foreach (var path in candidatePaths)
-        {
-            if (HasExplicitTraverseAcl(path, identity))
-                explicitPaths.Add(path);
-        }
-
-        return explicitPaths;
-    }
-
-    private void TryReapplyRemovedTraverseAcl(
-        string sid,
-        IReadOnlyList<string> pathsToRestore,
-        string normalizedPath,
-        string? primaryConfigPath,
-        GrantOperationException operationException)
-    {
-        if (pathsToRestore.Count == 0)
-            return;
-
-        try
-        {
-            var traverseSid = traverseIntentStoreCoordinator.ResolveAclSid(sid);
-            var identity = new SecurityIdentifier(traverseSid);
-            var missingPaths = pathsToRestore
-                .Where(path => !HasExplicitTraverseAcl(path, identity))
-                .ToList();
-            if (missingPaths.Count == 0)
-                return;
-
-            traverseCore.ApplyTraverseAces(sid, missingPaths);
-        }
-        catch (Exception ex)
-        {
-            operationException.AppendCleanupFailure(
-                GrantApplyFailureStep.TraverseAclRollback,
-                normalizedPath,
-                primaryConfigPath,
-                ex);
-        }
-    }
-
-    private bool HasExplicitTraverseAcl(string path, SecurityIdentifier identity)
-    {
-        if (!pathInfo.DirectoryExists(path))
-            return false;
-
-        return traverseAcl.HasExplicitTraverseAceOrThrow(path, identity);
-    }
-
     private void RemoveTrackedTraverseWithoutFilesystem(string sid, string normalizedPath)
     {
         bool removed = traverseCore.RemoveTraverse(sid, normalizedPath, updateFileSystem: false);
@@ -675,17 +523,6 @@ public class TraverseRestoreWorkflow(
         if (!removed && AclHelper.IsContainerSid(sid))
             containerIuSync.RevertInteractiveUserTraverse(sid, normalizedPath);
     }
-
-    private GrantedPathEntry? FindRuntimeTraverseEntry(
-        AppDatabase database,
-        string sid,
-        string normalizedPath,
-        bool includeManualSharedEntries)
-        => traverseGrantOwnerResolver.FindTraverseEntry(
-            database,
-            sid,
-            normalizedPath,
-            includeManualSharedEntries);
 
     private static string NormalizeConfigPath(string? configPath)
         => configPath == null ? string.Empty : Path.GetFullPath(configPath);

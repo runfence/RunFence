@@ -9,6 +9,9 @@ namespace RunFence.Firewall;
 /// </summary>
 public class FirewallAddressRangeBuilder
 {
+    private const string LanIpv4RangeText = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10";
+    private const string LanIpv6RangeText = "fe80::/10,fc00::/7";
+
     // IPv4 base: everything except loopback and LAN
     private static readonly IReadOnlyList<(string Network, int Prefix)> IPv4BaseRanges =
     [
@@ -75,10 +78,10 @@ public class FirewallAddressRangeBuilder
     }
 
     /// <summary>Returns fixed IPv4 LAN ranges.</summary>
-    public string BuildLanIPv4Range() => "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,100.64.0.0/10";
+    public string BuildLanIPv4Range() => LanIpv4RangeText;
 
     /// <summary>Returns fixed IPv6 LAN ranges.</summary>
-    public string BuildLanIPv6Range() => "fe80::/10,fc00::/7";
+    public string BuildLanIPv6Range() => LanIpv6RangeText;
 
     /// <summary>
     /// Returns comma-separated IPv4 LAN block range with given IPs excluded.

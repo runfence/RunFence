@@ -1,11 +1,7 @@
-using System.Diagnostics;
 using RunFence.Account;
 using RunFence.Account.UI;
-using RunFence.Launch;
-using RunFence.Apps.Shortcuts;
-using RunFence.Apps.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
-using RunFence.Launching.Resolution;
 using RunFence.UI;
 using RunFence.Wizard.UI.Forms;
 using RunFence.Wizard.UI.Forms.Steps;
@@ -22,23 +18,20 @@ namespace RunFence.Wizard.Templates;
 /// </summary>
 internal class AiAgentTemplate(
     WizardTemplateExecutor executor,
-    WizardAccountSetupHelperFactory setupHelperFactory,
-    WizardFolderGrantHelper folderGrantHelper,
+    WizardTemplateSetupBuilder setupBuilder,
     AiAgentFirewallOrchestrator firewallOrchestrator,
     IWizardSessionSaver sessionSaver,
     SessionContext session,
-    IShortcutDiscoveryService discoveryService,
-    IShortcutIconHelper iconHelper,
-    IExecutableKindService executableKindService)
+    AiAgentWizardStepBuilder stepBuilder)
     : IWizardTemplate
 {
-    private readonly CommitData _data = new();
+    private readonly AiAgentTemplateState _data = new();
 
     public string DisplayName => "AI Coding Agent";
     public string Description => "Isolated account for Claude Code or other AI tools with project folder access";
     public string IconEmoji => "\U0001F916"; // 🤖
 
-    public Action<IWin32Window>? PostWizardAction { get; private set; }
+    public Func<IWin32Window, Task>? PostWizardAction { get; private set; }
 
     public void Cleanup()
     {
@@ -48,18 +41,16 @@ internal class AiAgentTemplate(
     {
         _data.Reset();
 
-        var accountNameStep = setupHelperFactory.CreateAccountNameStep(
+        var accountNameStep = stepBuilder.CreateAccountNameStep(
             (name, password) => { _data.Username = name; password.Dispose(); },
             description: "Choose a name for the new isolated AI agent account. " +
                          "It will be created without Users group membership. " +
                          "Required packages are installed during wizard setup, before firewall rules take effect.");
 
-        var projectPathsStep = new AllowedPathsStep(
-            paths => _data.ProjectPaths = paths,
-            labelText: "Add project folders this account should be able to access:",
-            stepTitle: "Project Folders");
+        var projectPathsStep = stepBuilder.CreateProjectFoldersStep(
+            paths => _data.ProjectPaths = paths);
 
-        var firewallOptionsStep = new FirewallOptionsStep(
+        var firewallOptionsStep = stepBuilder.CreateFirewallOptionsStep(
             (allowInternet, allowLan, allowLocalhost) =>
             {
                 _data.AllowInternet = allowInternet;
@@ -70,14 +61,12 @@ internal class AiAgentTemplate(
             defaultLan: false,
             defaultLocalhost: false);
 
-        var aiToolStep = new AiAgentToolStep(
+        var aiToolStep = stepBuilder.CreateToolStep(
             (useAiPackage, appPath) =>
             {
                 _data.UseAiPackage = useAiPackage;
                 _data.AppPath = appPath;
             },
-            discoveryService,
-            iconHelper,
             commitAction: progress =>
             {
                 if (_data.UseAiPackage)
@@ -99,88 +88,16 @@ internal class AiAgentTemplate(
             return;
         }
 
-        using var defaults = setupHelperFactory.CreateAccountDefaults();
-
-        var request = EditAccountDialogCreateHandler.CreateAccountRequest.ForIsolatedAccount(
-            _data.Username,
-            defaults.Password);
-
-        var firewallSettings = new FirewallAccountSettings
-        {
-            AllowInternet = _data.AllowInternet,
-            AllowLan = _data.AllowLan,
-            AllowLocalhost = _data.AllowLocalhost
-        };
-        var packages = _data.UseAiPackage
-            ? new List<InstallablePackage> { KnownPackages.WindowsTerminal, KnownPackages.ClaudeCode }
-            : new List<InstallablePackage> { KnownPackages.WindowsTerminal };
+        var flowParams = setupBuilder.BuildAiAgentFlow(_data, progress);
 
         try
         {
-            var flowParams = new WizardStandardFlowParams(
-                Request: request,
-                SetupOptions: new WizardSetupOptions(
-                    StoreCredential: true,
-                    IsEphemeral: false,
-                    PrivilegeLevel: PrivilegeLevel.Isolated,
-                    FirewallSettings: firewallSettings.IsDefault ? null : firewallSettings,
-                    DesktopSettingsPath: defaults.DesktopSettingsPath,
-                    InstallPackages: packages,
-                    TrayTerminal: true,
-                    WaitForInstallPackages: true),
-                BuildOptionsFactory: sid =>
-                {
-                    if (string.IsNullOrEmpty(_data.AppPath))
-                        return [];
-
-                    string appName;
-                    try
-                    {
-                        var info = FileVersionInfo.GetVersionInfo(_data.AppPath);
-                        appName = !string.IsNullOrWhiteSpace(info.FileDescription)
-                            ? info.FileDescription
-                            : Path.GetFileNameWithoutExtension(_data.AppPath);
-                    }
-                    catch
-                    {
-                        appName = Path.GetFileNameWithoutExtension(_data.AppPath);
-                    }
-
-                    return
-                    [
-                        AppEntryBuildOptions.ForWizard(
-                            name: appName,
-                            exePath: _data.AppPath,
-                            accountSid: sid,
-                            restrictAcl: false,
-                            aclMode: AclMode.Deny,
-                            manageShortcuts: true,
-                            privilegeLevel: executableKindService.IsUwpExeFile(_data.AppPath)
-                                            && session.Database.GetAccount(sid)?.PrivilegeLevel is not (PrivilegeLevel.Basic or PrivilegeLevel.HighestAllowed)
-                                ? PrivilegeLevel.Basic
-                                : null)
-                    ];
-                },
-                PreEnforcementAction: async (_, sid) =>
-                {
-                    _data.CreatedSid = sid;
-                    var readWriteSavedRights = new SavedRightsState(
-                        Execute: false, Write: true, Read: true, Special: false, Own: false);
-
-                    await folderGrantHelper.GrantFolderAccessAsync(
-                        _data.ProjectPaths,
-                        sid,
-                        readWriteSavedRights,
-                        progress);
-                },
-                CreateDesktopShortcut: !string.IsNullOrEmpty(_data.AppPath));
-
             await executor.ExecuteAsync(flowParams, progress);
         }
         finally
         {
-            request.Password.Dispose();
-            request.ConfirmPassword.Dispose();
+            flowParams.Request?.Password.Dispose();
+            flowParams.Request?.ConfirmPassword.Dispose();
         }
 
         var sid = _data.CreatedSid;
@@ -198,29 +115,5 @@ internal class AiAgentTemplate(
             session,
             sessionSaver,
             toolPath: _data.AppPath);
-    }
-
-    private sealed class CommitData
-    {
-        public string Username { get; set; } = string.Empty;
-        public bool UseAiPackage { get; set; } = true;
-        public List<string> ProjectPaths { get; set; } = [];
-        public string? AppPath { get; set; }
-        public string? CreatedSid { get; set; }
-        public bool AllowInternet { get; set; }
-        public bool AllowLan { get; set; }
-        public bool AllowLocalhost { get; set; }
-
-        public void Reset()
-        {
-            Username = string.Empty;
-            UseAiPackage = true;
-            ProjectPaths = [];
-            AppPath = null;
-            CreatedSid = null;
-            AllowInternet = false;
-            AllowLan = false;
-            AllowLocalhost = false;
-        }
     }
 }

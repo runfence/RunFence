@@ -7,7 +7,7 @@ public class HandlerMappingSubmitTransaction(
     IHandlerMappingService handlerMappingService,
     HandlerMappingSyncService syncService)
 {
-    public Task<HandlerMappingSubmitResult> SubmitAsync(
+    public HandlerMappingSubmitResult Submit(
         IHandlerMappingDialogPersistence persistence,
         IReadOnlyList<string> submittedKeys,
         IReadOnlyList<string> affectedAppIds,
@@ -27,22 +27,22 @@ public class HandlerMappingSubmitTransaction(
             persistence.SaveDatabase();
 
             var syncResult = syncService.Sync(keysToRestore);
-            return Task.FromResult(syncResult.Succeeded
+            return syncResult.Succeeded
                 ? new HandlerMappingSubmitResult(ShouldClose: true, SavedDurably: true)
                 : new HandlerMappingSubmitResult(
                     ShouldClose: true,
                     SavedDurably: true,
-                    RegistrySyncWarning: syncResult.WarningMessage));
+                    RegistrySyncWarning: syncResult.WarningMessage);
         }
         catch (Exception ex)
         {
             if (database != null && keySnapshots != null && appSnapshots != null)
                 RestoreBackingState(database, keySnapshots, appSnapshots);
 
-            return Task.FromResult(new HandlerMappingSubmitResult(
+            return new HandlerMappingSubmitResult(
                 ShouldClose: false,
                 SavedDurably: false,
-                SaveError: ex.Message));
+                SaveError: ex.Message);
         }
     }
 

@@ -7,26 +7,26 @@ using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Infrastructure;
 using RunFence.Launch;
+using RunFence.Tests.Helpers;
 using Xunit;
 
 namespace RunFence.Tests;
 
 public class FolderHandlerServiceTests : IDisposable
 {
-    private readonly string _testSubKey;
-    private readonly RegistryKey _hkuRoot;
+    private readonly InMemoryRegistryKey _hkuRoot;
     private readonly string _testSid;
     private readonly string _tempDir;
     private readonly string _launcherPath;
     private readonly string _unregisterScriptPath;
     private readonly Mock<ILoggingService> _log;
-    private readonly Mock<IPathGrantService> _pathGrant;
-    private readonly Mock<ILocalGroupMembershipService> _localGroupMembership;
+    private readonly Mock<IGrantMutatorService> _pathGrant;
+    private readonly Mock<ITraverseService> _traverseService;
+    private readonly Mock<ILocalGroupQueryService> _localGroupMembership;
 
     public FolderHandlerServiceTests()
     {
-        _testSubKey = $@"Software\RunFenceTests\{Guid.NewGuid():N}";
-        _hkuRoot = Registry.CurrentUser.CreateSubKey(_testSubKey);
+        _hkuRoot = InMemoryRegistryKey.CreateRoot();
         _testSid = WindowsIdentity.GetCurrent().User!.Value;
         _tempDir = Path.Combine(Path.GetTempPath(), "RunFenceTests_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_tempDir);
@@ -34,15 +34,15 @@ public class FolderHandlerServiceTests : IDisposable
         _unregisterScriptPath = Path.Combine(_tempDir, PathConstants.FolderHandlerUnregisterScriptName);
         File.WriteAllBytes(_launcherPath, []);
         _log = new Mock<ILoggingService>();
-        _pathGrant = new Mock<IPathGrantService>();
-        _localGroupMembership = new Mock<ILocalGroupMembershipService>();
+        _pathGrant = new Mock<IGrantMutatorService>();
+        _traverseService = new Mock<ITraverseService>();
+        _localGroupMembership = new Mock<ILocalGroupQueryService>();
         _localGroupMembership.Setup(s => s.GetGroupsForUser(It.IsAny<string>())).Returns([]);
     }
 
     public void Dispose()
     {
         _hkuRoot.Dispose();
-        Registry.CurrentUser.DeleteSubKeyTree(_testSubKey, throwOnMissingSubKey: false);
         if (Directory.Exists(_tempDir))
             Directory.Delete(_tempDir, recursive: true);
     }
@@ -50,26 +50,88 @@ public class FolderHandlerServiceTests : IDisposable
     private FolderHandlerService CreateService(
         bool isAdmin = false,
         string? shellServerPath = null,
-        string? launcherPath = null)
+        string? launcherPath = null,
+        ISessionProvider? sessionProviderOverride = null)
     {
         _localGroupMembership.Setup(s => s.GetGroupsForUser(It.IsAny<string>()))
             .Returns(isAdmin ? [new("Administrators", "S-1-5-32-544")] : []);
 
         var effectiveLauncherPath = launcherPath ?? _launcherPath;
-        var registryStore = new FolderHandlerRegistryStore(
+        var usersRootProvider = new TestHkuRootProvider(_hkuRoot);
+        var registrationWriter = CreateRegistrationWriter(usersRootProvider, effectiveLauncherPath, shellServerPath);
+        var cleanupService = new FolderHandlerCleanupService(
             _log.Object,
-            hkuOverride: _hkuRoot,
+            usersRootProvider,
             launcherPathOverride: effectiveLauncherPath,
             shellServerPathOverride: shellServerPath);
-        var rollback = new FolderHandlerRegistrationRollback(_log.Object, _pathGrant.Object, registryStore);
-        return new FolderHandlerService(
+        var rollback = CreateRollback(usersRootProvider);
+        var sessionProvider = sessionProviderOverride ?? CreateSessionProvider();
+        var trackedSidState = new FolderHandlerTrackedSidState();
+        var registrationWorkflow = new FolderHandlerRegistrationWorkflow(
             _log.Object,
-            _pathGrant.Object,
-            _localGroupMembership.Object,
-            registryStore,
+            new FolderHandlerSidPolicy(_log.Object, _localGroupMembership.Object),
+            trackedSidState,
+            new FolderHandlerRegistrationAccessService(_pathGrant.Object),
+            CreateRunOnceMaintenance(),
+            registrationWriter,
             rollback,
             new FolderHandlerSidLockProvider(),
             launcherPathOverride: effectiveLauncherPath);
+        var cleanupWorkflow = new FolderHandlerCleanupWorkflow(
+            _log.Object,
+            new FolderHandlerCleanupSidSnapshotProvider(_log.Object, sessionProvider),
+            new FolderHandlerSidPolicy(_log.Object, _localGroupMembership.Object),
+            trackedSidState,
+            registrationWriter,
+            cleanupService,
+            registrationWorkflow);
+        return new FolderHandlerService(
+            registrationWorkflow,
+            cleanupWorkflow);
+    }
+
+    private FolderHandlerRegistrationWriter CreateRegistrationWriter(
+        IHkuRootProvider usersRootProvider,
+        string launcherPath,
+        string? shellServerPath = null)
+    {
+        return new FolderHandlerRegistrationWriter(
+            usersRootProvider,
+            () => new FolderHandlerRegistrationChangeTracker(),
+            new FolderHandlerRunOnceMaintenance(_log.Object),
+            launcherPathOverride: launcherPath,
+            shellServerPathOverride: shellServerPath);
+    }
+
+    private FolderHandlerRegistrationRollback CreateRollback(IHkuRootProvider usersRootProvider)
+    {
+        return new FolderHandlerRegistrationRollback(
+            _log.Object,
+            _pathGrant.Object,
+            _traverseService.Object,
+            usersRootProvider,
+            new FolderHandlerRegistrationRollbackWriter());
+    }
+
+    private FolderHandlerRunOnceMaintenance CreateRunOnceMaintenance()
+        => new(_log.Object);
+
+    private static ISessionProvider CreateSessionProvider(SessionContext? session = null)
+    {
+        var provider = new Mock<ISessionProvider>();
+        provider.Setup(current => current.GetSession()).Returns(session ?? new SessionContext
+        {
+            Database = new AppDatabase(),
+            CredentialStore = new CredentialStore()
+        });
+        return provider.Object;
+    }
+
+    private static Mock<ISessionProvider> CreateSessionProviderMock(SessionContext session)
+    {
+        var provider = new Mock<ISessionProvider>();
+        provider.Setup(current => current.GetSession()).Returns(session);
+        return provider;
     }
 
     private string CommandKeyPath(string classType) =>
@@ -139,50 +201,11 @@ public class FolderHandlerServiceTests : IDisposable
     }
 
     [Fact]
-    public void Register_IsRegistered_ReturnsTrueAfterRegister()
-    {
-        var service = CreateService();
-        Assert.False(service.IsRegistered(_testSid));
-
-        service.Register(_testSid);
-
-        Assert.True(service.IsRegistered(_testSid));
-    }
-
-    [Fact]
     public void Register_EnsuresLauncherDirectoryAccessForAccountAndLowIntegrity()
     {
         var service = CreateService();
 
         service.Register(_testSid);
-
-        _pathGrant.Verify(g => g.EnsureAccess(
-            _testSid, _tempDir, FileSystemRights.ReadAndExecute,
-            null, true), Times.Once);
-        _pathGrant.Verify(g => g.EnsureAccess(
-            AclHelper.LowIntegritySid, _tempDir, FileSystemRights.ReadAndExecute,
-            null, true), Times.Once);
-    }
-
-    [Fact]
-    public void Register_IsIdempotent_DoesNotRegisterTwice()
-    {
-        var service = CreateService();
-
-        service.Register(_testSid);
-        service.Register(_testSid);
-
-        _log.Verify(l => l.Info(It.Is<string>(s => s.Contains("registration complete"))), Times.Once);
-    }
-
-    [Fact]
-    public async Task Register_ConcurrentSameSid_IsSerializedAndIdempotent()
-    {
-        var service = CreateService();
-
-        await Task.WhenAll(
-            Task.Run(() => service.Register(_testSid)),
-            Task.Run(() => service.Register(_testSid)));
 
         _pathGrant.Verify(g => g.EnsureAccess(
             _testSid, _tempDir, FileSystemRights.ReadAndExecute,
@@ -343,6 +366,91 @@ public class FolderHandlerServiceTests : IDisposable
         Assert.Equal("custom", resultKey.GetValue(null) as string);
         Assert.Null(resultKey.GetValue(PathConstants.RunFenceFallbackValueName));
         Assert.Null(_hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\open\command"));
+    }
+
+    [Fact]
+    public void CaptureCleanupSidSnapshot_ReturnsRawSidsFromCredentialsAppsAndAccounts()
+    {
+        const string credentialSid = "S-1-5-21-100-200-300-401";
+        const string appSid = "S-1-5-21-100-200-300-402";
+        const string accountSid = "S-1-5-21-100-200-300-403";
+        using var session = new SessionContext
+        {
+            CredentialStore = new CredentialStore
+            {
+                Credentials =
+                [
+                    new CredentialEntry { Sid = credentialSid },
+                    new CredentialEntry { Sid = credentialSid }
+                ]
+            },
+            Database = new AppDatabase
+            {
+                Apps = [new AppEntry { AccountSid = appSid }],
+                Accounts = [new AccountEntry { Sid = accountSid }]
+            }
+        };
+        var service = CreateService(sessionProviderOverride: CreateSessionProvider(session));
+
+        var snapshot = service.CaptureCleanupSidSnapshot();
+
+        Assert.Equal(
+            new[] { credentialSid, appSid, accountSid }.OrderBy(sid => sid).ToArray(),
+            snapshot.OrderBy(sid => sid).ToArray());
+    }
+
+    [Theory]
+    [InlineData("credential", "S-1-5-21-100-200-300-501")]
+    [InlineData("app", "S-1-5-21-100-200-300-502")]
+    [InlineData("account", "S-1-5-21-100-200-300-503")]
+    public void CleanupStaleRegistrations_PreservesOwnedRegistration_WhenSidExistsOnlyInCapturedSessionSnapshot(string source, string sid)
+    {
+        SeedOwnedRegistration(sid);
+        using var session = CreateSessionWithSid(source, sid);
+        var sessionProvider = CreateSessionProviderMock(session);
+        var service = CreateService(sessionProviderOverride: sessionProvider.Object);
+
+        var snapshot = service.CaptureCleanupSidSnapshot();
+
+        service.CleanupStaleRegistrations(snapshot);
+
+        sessionProvider.Verify(provider => provider.GetSession(), Times.Once);
+
+        Assert.Equal([sid], snapshot);
+
+        Assert.NotNull(_hkuRoot.OpenSubKey($@"{sid}\Software\Classes\Directory\shell\open\command"));
+        Assert.NotNull(_hkuRoot.OpenSubKey($@"{sid}\Software\Classes\Folder\shell\open\command"));
+    }
+
+    [Fact]
+    public void CleanupStaleRegistrations_WithRawSidSnapshot_DoesNotReadSessionState()
+    {
+        const string sid = "S-1-5-21-100-200-300-450";
+        SeedOwnedRegistration(sid);
+        var sessionProvider = new Mock<ISessionProvider>(MockBehavior.Strict);
+        var service = CreateService(sessionProviderOverride: sessionProvider.Object);
+
+        service.CleanupStaleRegistrations([sid]);
+
+        sessionProvider.Verify(provider => provider.GetSession(), Times.Never);
+        Assert.NotNull(_hkuRoot.OpenSubKey($@"{sid}\Software\Classes\Directory\shell\open\command"));
+    }
+
+    [Fact]
+    public void CleanupStaleRegistrations_FiltersSidEligibilityAfterSnapshotCapture()
+    {
+        const string sid = "S-1-5-21-100-200-300-451";
+        SeedOwnedRegistration(sid);
+        using var session = CreateSessionWithSid("credential", sid);
+        var service = CreateService(sessionProviderOverride: CreateSessionProvider(session));
+        var snapshot = service.CaptureCleanupSidSnapshot();
+        _localGroupMembership.Setup(service => service.GetGroupsForUser(sid))
+            .Returns([new("Administrators", "S-1-5-32-544")]);
+
+        service.CleanupStaleRegistrations(snapshot);
+
+        Assert.Null(_hkuRoot.OpenSubKey($@"{sid}\Software\Classes\Directory\shell\open\command"));
+        Assert.Null(_hkuRoot.OpenSubKey($@"{sid}\Software\Classes\Folder\shell\open\command"));
     }
 
     [Fact]
@@ -690,7 +798,7 @@ public class FolderHandlerServiceTests : IDisposable
     }
 
     [Fact]
-    public void UnregisterAll_UnregistersOnlySidsTrackedByThisInstance()
+    public void UnregisterAll_UnregistersOwnedSidsDiscoveredFromRegistry()
     {
         var sid2 = "S-1-5-21-99999-99999-99999-1001";
         var service = CreateService();
@@ -700,7 +808,6 @@ public class FolderHandlerServiceTests : IDisposable
         service2.Register(sid2);
 
         service.UnregisterAll();
-        service2.UnregisterAll();
 
         foreach (var sid in new[] { _testSid, sid2 })
         {
@@ -729,11 +836,8 @@ public class FolderHandlerServiceTests : IDisposable
     [Fact]
     public void Rollback_WhenGrantAndTraverseWereApplied_RemovesBothForAccountAndLowIntegrity()
     {
-        var registryStore = new FolderHandlerRegistryStore(
-            _log.Object,
-            hkuOverride: _hkuRoot,
-            launcherPathOverride: _launcherPath);
-        var rollback = new FolderHandlerRegistrationRollback(_log.Object, _pathGrant.Object, registryStore);
+        var usersRootProvider = new TestHkuRootProvider(_hkuRoot);
+        var rollback = CreateRollback(usersRootProvider);
         var effects = new FolderHandlerRegistrationEffects(_testSid, _launcherPath)
         {
             AccountGrantApplied = true,
@@ -745,9 +849,9 @@ public class FolderHandlerServiceTests : IDisposable
         rollback.Rollback(effects);
 
         _pathGrant.Verify(g => g.RemoveGrant(_testSid, _tempDir, false), Times.Once);
-        _pathGrant.Verify(g => g.RemoveTraverse(_testSid, _tempDir), Times.Once);
+        _traverseService.Verify(g => g.RemoveTraverse(_testSid, _tempDir), Times.Once);
         _pathGrant.Verify(g => g.RemoveGrant(AclHelper.LowIntegritySid, _tempDir, false), Times.Once);
-        _pathGrant.Verify(g => g.RemoveTraverse(AclHelper.LowIntegritySid, _tempDir), Times.Once);
+        _traverseService.Verify(g => g.RemoveTraverse(AclHelper.LowIntegritySid, _tempDir), Times.Once);
     }
 
     [Fact]
@@ -770,6 +874,184 @@ public class FolderHandlerServiceTests : IDisposable
         using var runOnceKey = _hkuRoot.OpenSubKey(
             $@"{_testSid}\Software\Microsoft\Windows\CurrentVersion\RunOnce");
         Assert.Null(runOnceKey?.GetValue(PathConstants.FolderHandlerRunOnceValueName));
+    }
+
+    [Fact]
+    public void Register_WithPreExistingOwnedRegistration_RunsMaintenanceAndPreservesTrackedCleanupState()
+    {
+        SeedOwnedRegistration(_testSid, includeRunOnce: true);
+        var service = CreateService();
+
+        service.Register(_testSid);
+
+        _pathGrant.Verify(g => g.EnsureAccess(
+            _testSid, _tempDir, FileSystemRights.ReadAndExecute,
+            null, true), Times.Once);
+        _pathGrant.Verify(g => g.EnsureAccess(
+            AclHelper.LowIntegritySid, _tempDir, FileSystemRights.ReadAndExecute,
+            null, true), Times.Once);
+
+        service.CleanupStaleRegistrations();
+        Assert.NotNull(_hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\open\command"));
+
+        service.UnregisterAll();
+        Assert.Null(_hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\open\command"));
+        Assert.Null(_hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Folder\shell\open\command"));
+    }
+
+    [Fact]
+    public void Register_WithIncompleteOwnedRegistration_RepairsOwnedShapeAndRunOnce()
+    {
+        SeedOwnedRegistration(_testSid, includeExploreCommand: false, includeDelegateExecute: false, includeRunOnce: false);
+        using (var directoryShellKey = _hkuRoot.CreateSubKey($@"{_testSid}\Software\Classes\Directory\shell"))
+            directoryShellKey.SetValue(null, "explore");
+        File.WriteAllText(_unregisterScriptPath, "@echo off");
+        var service = CreateService();
+
+        service.Register(_testSid);
+
+        Assert.Equal(
+            $"\"{_launcherPath}\" --open-folder \"%V\"",
+            _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\open\command")!.GetValue(null) as string);
+        Assert.Equal(
+            $"\"{_launcherPath}\" --open-folder \"%V\"",
+            _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\explore\command")!.GetValue(null) as string);
+        using var directoryShellResult = _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell");
+        Assert.Equal("open", directoryShellResult!.GetValue(null) as string);
+        Assert.Equal("explore", directoryShellResult.GetValue(PathConstants.RunFenceFallbackValueName) as string);
+        using var folderCommandKey = _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Folder\shell\open\command");
+        Assert.Equal(string.Empty, folderCommandKey!.GetValue("DelegateExecute") as string);
+        using var runOnceKey = _hkuRoot.OpenSubKey($@"{_testSid}\Software\Microsoft\Windows\CurrentVersion\RunOnce");
+        Assert.Equal($"cmd /c \"\"{_unregisterScriptPath}\"\"", runOnceKey!.GetValue(PathConstants.FolderHandlerRunOnceValueName) as string);
+    }
+
+    [Fact]
+    public void Register_WithExistingOwnedRegistrationAndMissingUnregisterScript_RemovesStaleRunOnce()
+    {
+        SeedOwnedRegistration(_testSid, includeRunOnce: true);
+        var service = CreateService();
+
+        service.Register(_testSid);
+
+        using var runOnceKey = _hkuRoot.OpenSubKey($@"{_testSid}\Software\Microsoft\Windows\CurrentVersion\RunOnce");
+        Assert.Null(runOnceKey?.GetValue(PathConstants.FolderHandlerRunOnceValueName));
+    }
+
+    [Fact]
+    public void RollbackRegistrationChanges_WhenMaintenanceStateExistedBeforeCall_PreservesPreExistingOwnedRegistration()
+    {
+        SeedOwnedRegistration(_testSid, includeRunOnce: true);
+        var foreignFallback = "foreign";
+        using (var directoryShellKey = _hkuRoot.CreateSubKey($@"{_testSid}\Software\Classes\Directory\shell"))
+            directoryShellKey.SetValue(PathConstants.RunFenceFallbackValueName, foreignFallback);
+        using (var runOnceKey = _hkuRoot.CreateSubKey($@"{_testSid}\Software\Microsoft\Windows\CurrentVersion\RunOnce"))
+            runOnceKey.SetValue(PathConstants.FolderHandlerRunOnceValueName, "stale");
+        File.WriteAllText(_unregisterScriptPath, "@echo off");
+        var usersRootProvider = new TestHkuRootProvider(_hkuRoot);
+        var registrationWriter = CreateRegistrationWriter(usersRootProvider, _launcherPath);
+        var rollback = CreateRollback(usersRootProvider);
+        var maintenanceResult = registrationWriter.EnsureOwnedRegistration(
+            _testSid,
+            _launcherPath,
+            CreateRunOnceMaintenance().BuildCommandLine(_launcherPath));
+        var effects = new FolderHandlerRegistrationEffects(_testSid, _launcherPath)
+        {
+            RegistrationChangeSet = maintenanceResult.ChangeSet
+        };
+
+        rollback.Rollback(effects);
+
+        Assert.Equal(
+            $"\"{_launcherPath}\" --open-folder \"%V\"",
+            _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\open\command")!.GetValue(null) as string);
+        Assert.Equal(
+            $"\"{_launcherPath}\" --open-folder \"%V\"",
+            _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\explore\command")!.GetValue(null) as string);
+        Assert.Equal(
+            $"\"{_launcherPath}\" --open-folder \"%V\"",
+            _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Folder\shell\open\command")!.GetValue(null) as string);
+        using var directoryShellResult = _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell");
+        Assert.Equal(foreignFallback, directoryShellResult!.GetValue(PathConstants.RunFenceFallbackValueName) as string);
+        Assert.Equal("open", directoryShellResult.GetValue(null) as string);
+        using var runOnceResult = _hkuRoot.OpenSubKey($@"{_testSid}\Software\Microsoft\Windows\CurrentVersion\RunOnce");
+        Assert.Equal("stale", runOnceResult!.GetValue(PathConstants.FolderHandlerRunOnceValueName) as string);
+        Assert.True(registrationWriter.HasOwnedRegistration(_testSid));
+    }
+
+    [Fact]
+    public void RollbackRegistrationChanges_RestoresDefaultAndNamedValuesFromSameChangeSet()
+    {
+        using (var folderCommandKey = _hkuRoot.CreateSubKey($@"{_testSid}\Software\Classes\Folder\shell\open\command"))
+        {
+            folderCommandKey.SetValue(null, "before-default");
+            folderCommandKey.SetValue("DelegateExecute", "before-named");
+        }
+
+        var tracker = new FolderHandlerRegistrationChangeTracker().Initialize(_hkuRoot, _testSid);
+        tracker.SetValue(@"Folder\shell\open\command", null, "after-default", RegistryValueKind.String, isRunOnceValue: false);
+        tracker.SetValue(@"Folder\shell\open\command", "DelegateExecute", "after-named", RegistryValueKind.String, isRunOnceValue: false);
+        var changeSet = tracker.BuildResult(hadOwnedRegistrationBeforeCall: false).ChangeSet!;
+
+        new FolderHandlerRegistrationRollbackWriter().RollbackRegistrationChanges(_hkuRoot, _testSid, changeSet);
+
+        using var resultKey = _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Folder\shell\open\command");
+        Assert.NotNull(resultKey);
+        Assert.Equal("before-default", resultKey!.GetValue(null) as string);
+        Assert.Equal("before-named", resultKey.GetValue("DelegateExecute") as string);
+    }
+
+    [Fact]
+    public void Register_WhenMaintenanceThrowsAfterDetectingPreExistingOwnedRegistration_PreservesOwnedRegistration()
+    {
+        SeedOwnedRegistration(_testSid, includeRunOnce: true);
+        var usersRootProvider = new ReadOnlyHkuRootProvider(_hkuRoot);
+        var registrationWriter = CreateRegistrationWriter(usersRootProvider, _launcherPath);
+        var cleanupService = new FolderHandlerCleanupService(
+            _log.Object,
+            usersRootProvider,
+            launcherPathOverride: _launcherPath);
+        var rollback = CreateRollback(usersRootProvider);
+        var sessionProvider = new Mock<ISessionProvider>();
+        sessionProvider.Setup(provider => provider.GetSession()).Returns(new SessionContext
+        {
+            Database = new AppDatabase(),
+            CredentialStore = new CredentialStore()
+        });
+        var trackedSidState = new FolderHandlerTrackedSidState();
+        var registrationWorkflow = new FolderHandlerRegistrationWorkflow(
+            _log.Object,
+            new FolderHandlerSidPolicy(_log.Object, _localGroupMembership.Object),
+            trackedSidState,
+            new FolderHandlerRegistrationAccessService(_pathGrant.Object),
+            CreateRunOnceMaintenance(),
+            registrationWriter,
+            rollback,
+            new FolderHandlerSidLockProvider(),
+            launcherPathOverride: _launcherPath);
+        var cleanupWorkflow = new FolderHandlerCleanupWorkflow(
+            _log.Object,
+            new FolderHandlerCleanupSidSnapshotProvider(_log.Object, sessionProvider.Object),
+            new FolderHandlerSidPolicy(_log.Object, _localGroupMembership.Object),
+            trackedSidState,
+            registrationWriter,
+            cleanupService,
+            registrationWorkflow);
+        var service = new FolderHandlerService(
+            registrationWorkflow,
+            cleanupWorkflow);
+
+        Assert.Throws<FolderHandlerRegistrationMaintenanceException>(() => service.Register(_testSid));
+
+        Assert.True(service.IsRegistered(_testSid));
+        Assert.Equal(
+            $"\"{_launcherPath}\" --open-folder \"%V\"",
+            _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\open\command")!.GetValue(null) as string);
+        Assert.Equal(
+            $"\"{_launcherPath}\" --open-folder \"%V\"",
+            _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Directory\shell\explore\command")!.GetValue(null) as string);
+        Assert.Equal(
+            $"\"{_launcherPath}\" --open-folder \"%V\"",
+            _hkuRoot.OpenSubKey($@"{_testSid}\Software\Classes\Folder\shell\open\command")!.GetValue(null) as string);
     }
 
     [Fact]
@@ -845,6 +1127,29 @@ public class FolderHandlerServiceTests : IDisposable
         Assert.Equal(registered, key != null);
     }
 
+    [Fact]
+    public async Task CleanupRegisterAndUnregister_ConcurrentCalls_KeepTrackedStateConsistent()
+    {
+        const string sid = "S-1-5-21-100-200-300-499";
+        SeedOwnedRegistration(sid);
+        using var session = CreateSessionWithSid("credential", sid);
+        var service = CreateService(sessionProviderOverride: CreateSessionProvider(session));
+
+        var tasks = Enumerable.Range(0, 20)
+            .SelectMany(_ => new Task[]
+            {
+                Task.Run(() => service.CleanupStaleRegistrations([sid])),
+                Task.Run(() => service.Register(sid)),
+                Task.Run(() => service.Unregister(sid))
+            })
+            .ToArray();
+
+        await Task.WhenAll(tasks);
+
+        using var key = _hkuRoot.OpenSubKey($@"{sid}\Software\Classes\Directory\shell\open\command");
+        Assert.Equal(service.IsRegistered(sid), key != null);
+    }
+
     private static string NormalizeLineEndings(string value)
     {
         return value.Replace("\r\n", "\n");
@@ -852,4 +1157,74 @@ public class FolderHandlerServiceTests : IDisposable
 
     private static GrantOperationException CreateGrantFailure(string path, GrantApplyFailureStep step, string message)
         => new(step, path, null, new InvalidOperationException(message));
+
+    private void SeedOwnedRegistration(
+        string sid,
+        bool includeExploreCommand = true,
+        bool includeDelegateExecute = true,
+        bool includeRunOnce = false)
+    {
+        var commandValue = $"\"{_launcherPath}\" --open-folder \"%V\"";
+        using (var openCommandKey = _hkuRoot.CreateSubKey($@"{sid}\Software\Classes\Directory\shell\open\command"))
+            openCommandKey.SetValue(null, commandValue);
+        if (includeExploreCommand)
+        {
+            using var exploreCommandKey = _hkuRoot.CreateSubKey($@"{sid}\Software\Classes\Directory\shell\explore\command");
+            exploreCommandKey.SetValue(null, commandValue);
+        }
+
+        using (var folderCommandKey = _hkuRoot.CreateSubKey($@"{sid}\Software\Classes\Folder\shell\open\command"))
+        {
+            folderCommandKey.SetValue(null, commandValue);
+            if (includeDelegateExecute)
+                folderCommandKey.SetValue("DelegateExecute", string.Empty);
+        }
+
+        using (var directoryShellKey = _hkuRoot.CreateSubKey($@"{sid}\Software\Classes\Directory\shell"))
+            directoryShellKey.SetValue(null, "open");
+
+        if (includeRunOnce)
+        {
+            using var runOnceKey = _hkuRoot.CreateSubKey($@"{sid}\Software\Microsoft\Windows\CurrentVersion\RunOnce");
+            runOnceKey.SetValue(PathConstants.FolderHandlerRunOnceValueName, $"cmd /c \"\"{_unregisterScriptPath}\"\"");
+        }
+    }
+
+    private static SessionContext CreateSessionWithSid(string source, string sid)
+    {
+        var session = new SessionContext
+        {
+            CredentialStore = new CredentialStore(),
+            Database = new AppDatabase()
+        };
+
+        switch (source)
+        {
+            case "credential":
+                session.CredentialStore.Credentials.Add(new CredentialEntry { Sid = sid });
+                break;
+            case "app":
+                session.Database.Apps = [new AppEntry { AccountSid = sid }];
+                break;
+            case "account":
+                session.Database.Accounts = [new AccountEntry { Sid = sid }];
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(source), source, null);
+        }
+
+        return session;
+    }
+
+    private sealed class TestHkuRootProvider(InMemoryRegistryKey usersRoot) : IHkuRootProvider
+    {
+        public IRegistryKey OpenUsersRoot()
+            => usersRoot;
+    }
+
+    private sealed class ReadOnlyHkuRootProvider(InMemoryRegistryKey usersRoot) : IHkuRootProvider
+    {
+        public IRegistryKey OpenUsersRoot()
+            => usersRoot.AsReadOnly();
+    }
 }

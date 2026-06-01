@@ -41,20 +41,27 @@ public static class StaTestHelper
 
                     using var nativeDialogGuard = new NativeDialogShowGuard();
                     using var showGuard = new VisibleFormShowGuard();
+
+                    void ThrowIfHeadlessGuardViolationDetected()
+                    {
+                        showGuard.FailIfVisibleFormsExist();
+                        Application.DoEvents();
+                        ExecutePendingSynchronizationCallbacks();
+                        showGuard.FailIfVisibleFormsExist();
+                        showGuard.ThrowIfViolationDetected();
+                        unhandledExceptionGuard.ThrowIfViolationDetected();
+                        nativeDialogGuard.ThrowIfViolationDetected();
+                    }
+
                     try
                     {
                         action();
                     }
                     catch (Exception ex)
                     {
-                        Application.DoEvents();
-                        ExecutePendingSynchronizationCallbacks();
                         try
                         {
-                            unhandledExceptionGuard.ThrowIfViolationDetected();
-                            showGuard.FailIfVisibleFormsExist();
-                            showGuard.ThrowIfViolationDetected();
-                            nativeDialogGuard.ThrowIfViolationDetected();
+                            ThrowIfHeadlessGuardViolationDetected();
                         }
                         catch (Exception guardEx)
                         {
@@ -68,12 +75,7 @@ public static class StaTestHelper
                     {
                         try
                         {
-                            Application.DoEvents();
-                            ExecutePendingSynchronizationCallbacks();
-                            unhandledExceptionGuard.ThrowIfViolationDetected();
-                            showGuard.FailIfVisibleFormsExist();
-                            showGuard.ThrowIfViolationDetected();
-                            nativeDialogGuard.ThrowIfViolationDetected();
+                            ThrowIfHeadlessGuardViolationDetected();
                         }
                         catch (Exception ex)
                         {
@@ -81,7 +83,14 @@ public static class StaTestHelper
                         }
                         finally
                         {
-                            DisposeOpenForms();
+                            try
+                            {
+                                DisposeOpenForms();
+                            }
+                            catch (Exception ex)
+                            {
+                                captured ??= ExceptionDispatchInfo.Capture(ex);
+                            }
                         }
                     }
                 }
@@ -258,11 +267,25 @@ public static class StaTestHelper
 
     private static void DisposeOpenForms()
     {
+        List<Exception>? failures = null;
         foreach (Form openForm in Application.OpenForms.Cast<Form>().ToArray())
-            openForm.Dispose();
+        {
+            try
+            {
+                openForm.Dispose();
+            }
+            catch (Exception ex)
+            {
+                failures ??= [];
+                failures.Add(ex);
+            }
+        }
+
+        if (failures != null)
+            throw new AggregateException("Failed to dispose one or more open WinForms windows.", failures);
     }
 
-    private readonly record struct VisibleFormInfo(string TypeName, string? Text);
+    private readonly record struct VisibleFormInfo(Form Form, string TypeName, string? Text);
 
     private sealed class VisibleFormShowGuard : IDisposable
     {
@@ -299,11 +322,21 @@ public static class StaTestHelper
             if (visibleForms.Count == 0)
                 return;
 
-            violation = new InvalidOperationException(
+            var detectedViolation = new InvalidOperationException(
                 $"Unexpected visible WinForms window in test: {DescribeForm(visibleForms[0])}. " +
                 "Use CreateControlTree() for handle creation instead of showing a form.");
 
-            closeVisibleForms(visibleForms);
+            violation = detectedViolation;
+            try
+            {
+                closeVisibleForms(visibleForms);
+            }
+            catch (Exception ex)
+            {
+                violation = new InvalidOperationException(
+                    detectedViolation.Message + " Cleanup of the visible form also failed.",
+                    ex);
+            }
         }
 
         public void ThrowIfViolationDetected()
@@ -324,13 +357,28 @@ public static class StaTestHelper
 
         private static IReadOnlyList<VisibleFormInfo> GetApplicationVisibleForms()
             => EnumerateVisibleTopLevelForms()
-                .Select(form => new VisibleFormInfo(form.GetType().FullName ?? form.GetType().Name, form.Text))
+                .Select(form => new VisibleFormInfo(form, form.GetType().FullName ?? form.GetType().Name, form.Text))
                 .ToArray();
 
-        private static void CloseApplicationVisibleForms(IReadOnlyList<VisibleFormInfo> _)
+        private static void CloseApplicationVisibleForms(IReadOnlyList<VisibleFormInfo> visibleForms)
         {
-            foreach (var form in EnumerateVisibleTopLevelForms())
-                form.Close();
+            List<Exception>? failures = null;
+            foreach (var form in visibleForms.Select(info => info.Form).Distinct().Where(form => !form.IsDisposed))
+            {
+                try
+                {
+                    form.Close();
+                    form.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    failures ??= [];
+                    failures.Add(ex);
+                }
+            }
+
+            if (failures != null)
+                throw new AggregateException("Failed to clean up one or more visible WinForms windows.", failures);
         }
 
         private static string DescribeForm(VisibleFormInfo form)

@@ -70,8 +70,16 @@ public class FirewallModule : Module
             .AsSelf()
             .SingleInstance();
 
-        builder.RegisterType<FirewallComRuleApplier>()
-            .As<IFirewallComRuleApplier>()
+        builder.RegisterType<FirewallRulePairSynchronizer>()
+            .AsSelf()
+            .SingleInstance();
+
+        builder.RegisterType<FirewallRuleQueryService>()
+            .As<IFirewallRuleQueryService>()
+            .SingleInstance();
+
+        builder.RegisterType<FirewallRuleRollbackCoordinator>()
+            .AsSelf()
             .SingleInstance();
 
         builder.RegisterType<FirewallWfpRuleApplier>()
@@ -174,6 +182,7 @@ public class FirewallModule : Module
         builder.RegisterType<FirewallAllowlistImportExportService>().AsSelf().SingleInstance();
         builder.RegisterType<BlockedConnectionsFlowHelper>().AsSelf().SingleInstance();
         builder.RegisterType<FirewallDialogApplyPresenter>().AsSelf().SingleInstance();
+        builder.RegisterType<FirewallAllowlistDialogComponentFactory>().AsSelf().InstancePerDependency();
         builder.RegisterType<FirewallDialogFactory>()
             .As<IFirewallDialogFactory>()
             .AsSelf()

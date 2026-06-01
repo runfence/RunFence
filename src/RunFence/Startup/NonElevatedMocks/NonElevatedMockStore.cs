@@ -1,16 +1,24 @@
-using System.Security.Cryptography;
-using System.Security.Principal;
-using System.Text;
 using RunFence.Core.Models;
 
 namespace RunFence.Startup.NonElevatedMocks;
 
 public class NonElevatedMockStore
 {
-    private readonly Dictionary<string, string> _users = new(StringComparer.OrdinalIgnoreCase); // SID → username (fake users)
+    private readonly MockSidGenerator _sidGenerator;
+    private readonly Dictionary<string, string> _users = new(StringComparer.OrdinalIgnoreCase); // SID -> username (fake users)
     private readonly Dictionary<string, (string Name, string? Description)> _groups = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, string> _knownUsernames = new(StringComparer.OrdinalIgnoreCase); // SID → username (real users seen via AddMemberships)
-    private readonly Dictionary<string, HashSet<string>> _memberships = new(StringComparer.OrdinalIgnoreCase); // userSid → groupSids
+    private readonly Dictionary<string, string> _knownUsernames = new(StringComparer.OrdinalIgnoreCase); // SID -> username (real users seen via AddMemberships)
+    private readonly Dictionary<string, HashSet<string>> _memberships = new(StringComparer.OrdinalIgnoreCase); // userSid -> groupSids
+
+    public NonElevatedMockStore() : this(new MockSidGenerator())
+    {
+    }
+
+    public NonElevatedMockStore(MockSidGenerator sidGenerator)
+    {
+        ArgumentNullException.ThrowIfNull(sidGenerator);
+        _sidGenerator = sidGenerator;
+    }
 
     public void AddUser(string sid, string username) => _users[sid] = username;
     public void RemoveUser(string sid) { _users.Remove(sid); _memberships.Remove(sid); }
@@ -65,20 +73,9 @@ public class NonElevatedMockStore
     public IEnumerable<string> GetStoredGroupSidsForUser(string userSid)
         => _memberships.TryGetValue(userSid, out var sids) ? sids : [];
 
-    private SecurityIdentifier? _machineSid;
+    public string CreateUserSid(string username, uint ridBase = 20001)
+        => _sidGenerator.DeriveFakeSid(username, ridBase);
 
-    private SecurityIdentifier? GetMachineSid() => _machineSid ??= WindowsIdentity.GetCurrent().User?.AccountDomainSid;
-
-    // RID ranges: accounts 20001–30000, groups 30001–40000.
-    // Machine SID prefix used so SIDs look like real local accounts.
-    // Falls back to hash-derived sub-authorities when AccountDomainSid unavailable (domain-account edge case).
-    public string DeriveFakeSid(string name, uint ridBase)
-    {
-        var machineSid = GetMachineSid();
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(name.ToUpperInvariant()));
-        var rid = ridBase + BitConverter.ToUInt32(hash, 0) % 10000u;
-        return machineSid != null
-            ? $"{machineSid}-{rid}"
-            : $"S-1-5-21-{BitConverter.ToUInt32(hash, 4)}-{BitConverter.ToUInt32(hash, 8)}-{BitConverter.ToUInt32(hash, 12)}-{rid}";
-    }
+    public string CreateGroupSid(string groupName, uint ridBase = 30001)
+        => _sidGenerator.DeriveFakeSid(groupName, ridBase);
 }

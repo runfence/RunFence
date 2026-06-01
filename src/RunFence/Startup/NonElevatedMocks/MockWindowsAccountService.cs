@@ -7,7 +7,7 @@ public sealed class MockWindowsAccountService(NonElevatedMockStore store) : IWin
 {
     public string CreateLocalUser(string username, ProtectedString password)
     {
-        var sid = store.DeriveFakeSid(username, ridBase: 20001);
+        var sid = store.CreateUserSid(username);
         store.AddUser(sid, username);
         return sid;
     }

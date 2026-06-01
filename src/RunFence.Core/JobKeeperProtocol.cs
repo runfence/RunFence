@@ -79,4 +79,6 @@ public record JobKeeperLaunchRequest(
     Dictionary<string, string>? EnvOverrides = null
 );
 
-public record JobKeeperLaunchResponse(int Pid, int Error);
+public record JobKeeperLaunchResponse(int Pid, int Error, long ProcessHandleValue = 0);
+
+public readonly record struct JobKeeperLaunchedProcess(int Pid, long ProcessHandleValue);

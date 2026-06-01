@@ -25,7 +25,6 @@ public sealed class JobKeeperPipeServerFactoryTests
                 ExpectedMode = mode,
                 InstanceId = Guid.NewGuid().ToString("N"),
                 PipeName = $"RunFenceTest_JobKeeperPipe_{Guid.NewGuid():N}",
-                JobName = $"RunFenceTest_JobKeeperJob_{Guid.NewGuid():N}",
             },
             new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null));
 

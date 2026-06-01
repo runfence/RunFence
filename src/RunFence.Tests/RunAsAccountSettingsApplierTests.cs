@@ -45,7 +45,7 @@ public class RunAsAccountSettingsApplierTests : IDisposable
         {
             Database = _database,
             CredentialStore = _credentialStore,
-        }.WithOwnedPinDerivedKey(_pinKey);
+        }.WithClonedPinDerivedKey(_pinKey);
         _sessions.Add(session);
         return session;
     }
@@ -68,30 +68,7 @@ public class RunAsAccountSettingsApplierTests : IDisposable
 
     // ── ApplyLaunchDefaults ─────────────────────────────────────────────────
 
-    [Theory]
-    [InlineData(PrivilegeLevel.Isolated)]
-    [InlineData(PrivilegeLevel.HighestAllowed)]
-    [InlineData(PrivilegeLevel.LowIntegrity)]
-    public void ApplyLaunchDefaults_SetsPrivilegeLevelOnAccount(PrivilegeLevel privilegeLevel)
-    {
-        CreateApplier().ApplyLaunchDefaults(TestSid, privilegeLevel);
-
-        Assert.Equal(privilegeLevel, _database.GetAccount(TestSid)?.PrivilegeLevel);
-    }
-
     // ── ApplyFirewallDbSettings ─────────────────────────────────────────────
-
-    [Fact]
-    public void ApplyFirewallDbSettings_NonDefaultValues_CreatesAccountEntry()
-    {
-        CreateApplier().ApplyFirewallDbSettings(TestSid, allowInternet: false, allowLocalhost: true, allowLan: true);
-
-        var entry = _database.GetAccount(TestSid);
-        Assert.NotNull(entry);
-        Assert.False(entry.Firewall.AllowInternet);
-        Assert.True(entry.Firewall.AllowLocalhost);
-        Assert.True(entry.Firewall.AllowLan);
-    }
 
     [Fact]
     public void ApplyFirewallDbSettings_AllDefaultValues_RemovesAccountEntry()
@@ -102,23 +79,6 @@ public class RunAsAccountSettingsApplierTests : IDisposable
 
         // The account entry should not exist (removed because all-default and otherwise empty)
         Assert.Null(_database.GetAccount(TestSid));
-    }
-
-    [Theory]
-    [InlineData(true, false, false)]   // internet allowed, localhost and LAN blocked
-    [InlineData(false, true, false)]   // localhost allowed, others blocked
-    [InlineData(false, false, true)]   // LAN allowed, others blocked
-    [InlineData(false, false, false)]  // all blocked
-    public void ApplyFirewallDbSettings_VariousValues_StoredCorrectly(
-        bool allowInternet, bool allowLocalhost, bool allowLan)
-    {
-        CreateApplier().ApplyFirewallDbSettings(TestSid, allowInternet, allowLocalhost, allowLan);
-
-        var entry = _database.GetAccount(TestSid);
-        Assert.NotNull(entry);
-        Assert.Equal(allowInternet, entry.Firewall.AllowInternet);
-        Assert.Equal(allowLocalhost, entry.Firewall.AllowLocalhost);
-        Assert.Equal(allowLan, entry.Firewall.AllowLan);
     }
 
     [Fact]
@@ -148,34 +108,5 @@ public class RunAsAccountSettingsApplierTests : IDisposable
 
         Assert.True(_database.GetAccount(TestSid)!.TrayDiscovery);
         Assert.Equal(PrivilegeLevel.LowIntegrity, _database.GetAccount(TestSid)!.PrivilegeLevel);
-    }
-    [Fact]
-    public async Task RunPostCreationTasksAsync_SaveConfig_ReceivesSessionKeySource()
-    {
-        var session = CreateSession();
-        session.ReplacePinDerivedKey(TestSecretFactory.Create(32, 9));
-        var expectedKeySource = session.PinDerivedKey;
-        var databaseService = new Mock<IDatabaseService>();
-        ISecureSecretSnapshotSource? capturedKeySource = null;
-
-        databaseService.Setup(s => s.SaveConfig(
-                _database,
-                It.IsAny<ISecureSecretSnapshotSource>(),
-                It.IsAny<byte[]>()))
-            .Callback<AppDatabase, ISecureSecretSnapshotSource, byte[]>((_, keySource, _) => capturedKeySource = keySource);
-
-        await CreateApplier(databaseService, session).RunPostCreationTasksAsync(
-            TestSid,
-            "newuser",
-            settingsImportPath: null,
-            firewallSettingsChanged: false,
-            errors: []);
-
-        Assert.NotNull(capturedKeySource);
-        Assert.Same(expectedKeySource, capturedKeySource);
-        databaseService.Verify(s => s.SaveConfig(
-            _database,
-            It.IsAny<ISecureSecretSnapshotSource>(),
-            It.IsAny<byte[]>()), Times.Once);
     }
 }

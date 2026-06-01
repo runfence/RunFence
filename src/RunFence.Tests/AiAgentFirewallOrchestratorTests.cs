@@ -1,4 +1,6 @@
 using Moq;
+using RunFence.Account.UI;
+using RunFence.Core;
 using RunFence.Core.Models;
 using RunFence.Firewall.UI;
 using RunFence.Firewall.UI.Forms;
@@ -13,39 +15,7 @@ namespace RunFence.Tests;
 public class AiAgentFirewallOrchestratorTests
 {
     [Fact]
-    public void BuildPostWizardAction_InternetNotRestrictedInWizard_ReturnsAction()
-    {
-        var orchestrator = CreateOrchestrator();
-
-        var action = orchestrator.BuildPostWizardAction(
-            sid: "S-1-5-21-100-200-300-1001",
-            username: "Agent",
-            internetRestrictedInWizard: false,
-            session: new SessionContext { Database = new AppDatabase() },
-            sessionSaver: Mock.Of<IWizardSessionSaver>(),
-            toolPath: null);
-
-        Assert.NotNull(action);
-    }
-
-    [Fact]
-    public void BuildPostWizardAction_InternetRestrictedInWizard_ReturnsAction()
-    {
-        var orchestrator = CreateOrchestrator();
-
-        var action = orchestrator.BuildPostWizardAction(
-            sid: "S-1-5-21-100-200-300-1001",
-            username: "Agent",
-            internetRestrictedInWizard: true,
-            session: new SessionContext { Database = new AppDatabase() },
-            sessionSaver: Mock.Of<IWizardSessionSaver>(),
-            toolPath: null);
-
-        Assert.NotNull(action);
-    }
-
-    [Fact]
-    public void PostWizardAction_InternetNotRestrictedInWizard_LaunchesToolWithoutOpeningFirewallUi()
+    public async Task PostWizardAction_InternetNotRestrictedInWizard_LaunchesToolWithoutOpeningFirewallUi()
     {
         var launchFacade = new Mock<ILaunchFacade>();
         launchFacade
@@ -67,7 +37,7 @@ public class AiAgentFirewallOrchestratorTests
             sessionSaver: Mock.Of<IWizardSessionSaver>(),
             toolPath: @"C:\Tools\agent.exe");
 
-        action!(null!);
+        await action!(null!);
 
         launchFacade.Verify(
             f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()),
@@ -80,7 +50,7 @@ public class AiAgentFirewallOrchestratorTests
     }
 
     [Fact]
-    public void PostWizardAction_InternetRestrictedInWizard_UsesDialogFactoryAndPropagatesRollbackAndSave()
+    public async Task PostWizardAction_InternetRestrictedInWizard_UsesDialogFactoryAndPropagatesRollbackAndSave()
     {
         const string sid = "S-1-5-21-100-200-300-1001";
         const string username = "Agent";
@@ -144,7 +114,7 @@ public class AiAgentFirewallOrchestratorTests
             sessionSaver: sessionSaver.Object,
             toolPath: toolPath);
 
-        action!(null!);
+        await action!(null!);
 
         Assert.NotNull(dialogFactory.LastRequest);
         Assert.Equal(username, dialogFactory.LastRequest!.DisplayName);
@@ -185,19 +155,108 @@ public class AiAgentFirewallOrchestratorTests
             Times.Once);
     }
 
+    [Fact]
+    public async Task PostWizardAction_TerminalLaunch_KeepsStoredHighIntegrityDefault()
+    {
+        const string sid = "S-1-5-21-100-200-300-1001";
+        var database = new AppDatabase();
+        database.GetOrCreateAccount(sid).PrivilegeLevel = PrivilegeLevel.HighIntegrity;
+        var profileRoot = Path.Combine(Path.GetTempPath(), $"RunFence.AiAgentFirewall.{Guid.NewGuid():N}");
+        var windowsAppsPath = Path.Combine(profileRoot, "AppData", "Local", "Microsoft", "WindowsApps");
+        Directory.CreateDirectory(windowsAppsPath);
+        File.WriteAllText(Path.Combine(windowsAppsPath, "wt.exe"), string.Empty);
+
+        try
+        {
+            var databaseProvider = new Mock<IDatabaseProvider>();
+            databaseProvider.Setup(provider => provider.GetDatabase()).Returns(database);
+
+            var launchFacade = new Mock<ILaunchFacade>();
+            launchFacade
+                .Setup(f => f.LaunchFile(It.IsAny<ProcessLaunchTarget>(), It.IsAny<LaunchIdentity>(), It.IsAny<Func<string, string, bool>?>()))
+                .Returns(new LaunchExecutionResult(LaunchExecutionStatus.ProcessStarted, null));
+
+            var profilePathResolver = new Mock<IProfilePathResolver>();
+            profilePathResolver.Setup(resolver => resolver.TryGetProfilePath(sid)).Returns(profileRoot);
+            var accountToolResolver = new AccountToolResolver(profilePathResolver.Object);
+            var windowsTerminalAccountStateService = new Mock<IWindowsTerminalAccountStateService>();
+            windowsTerminalAccountStateService.Setup(service => service.ResolveLaunchTarget(sid))
+                .Returns(Path.Combine(windowsAppsPath, "wt.exe"));
+            windowsTerminalAccountStateService.Setup(service => service.ResolveLaunchTarget(It.IsAny<AccountLaunchIdentity>()))
+                .Returns(Path.Combine(windowsAppsPath, "wt.exe"));
+            var windowsTerminalLaunchRefreshService = new Mock<IWindowsTerminalLaunchRefreshService>();
+            windowsTerminalLaunchRefreshService
+                .Setup(service => service.EnsureSharedDeploymentExistsBeforeTerminalLaunchAsync(It.IsAny<LaunchIdentity>()))
+                .Returns(Task.CompletedTask);
+
+            var orchestrator = CreateOrchestrator(
+                databaseProvider: databaseProvider.Object,
+                accountToolResolver: accountToolResolver,
+                windowsTerminalAccountStateService: windowsTerminalAccountStateService.Object,
+                windowsTerminalLaunchRefreshService: windowsTerminalLaunchRefreshService.Object,
+                launchFacade: launchFacade.Object,
+                launchFeedbackPresenter: Mock.Of<ILaunchFeedbackPresenter>());
+
+            var action = orchestrator.BuildPostWizardAction(
+                sid: sid,
+                username: "Agent",
+                internetRestrictedInWizard: false,
+                session: new SessionContext { Database = database },
+                sessionSaver: Mock.Of<IWizardSessionSaver>(),
+                toolPath: null);
+
+            await action!(null!);
+
+            launchFacade.Verify(
+                facade => facade.LaunchFile(
+                    It.Is<ProcessLaunchTarget>(target => target.ExePath.EndsWith("wt.exe", StringComparison.OrdinalIgnoreCase)),
+                    It.Is<AccountLaunchIdentity>(identity => identity.Sid == sid && identity.PrivilegeLevel == null),
+                    It.IsAny<Func<string, string, bool>?>()),
+                Times.Once);
+            windowsTerminalLaunchRefreshService.Verify(
+                service => service.TryStartOnlineRefreshAfterTerminalLaunch(
+                    It.Is<AccountLaunchIdentity>(identity => identity.Sid == sid)),
+                Times.Once);
+        }
+        finally
+        {
+            if (Directory.Exists(profileRoot))
+                Directory.Delete(profileRoot, recursive: true);
+        }
+    }
+
     private static AiAgentFirewallOrchestrator CreateOrchestrator(
         IFirewallApplyHelper? firewallApplyHelper = null,
         IFirewallDialogFactory? dialogFactory = null,
         ILaunchFacade? launchFacade = null,
-        ILaunchFeedbackPresenter? launchFeedbackPresenter = null)
+        ILaunchFeedbackPresenter? launchFeedbackPresenter = null,
+        IDatabaseProvider? databaseProvider = null,
+        AccountToolResolver? accountToolResolver = null,
+        IWindowsTerminalAccountStateService? windowsTerminalAccountStateService = null,
+        IWindowsTerminalLaunchRefreshService? windowsTerminalLaunchRefreshService = null)
     {
+        var resolvedDatabaseProvider = databaseProvider ?? Mock.Of<IDatabaseProvider>();
+        var resolvedLaunchFacade = launchFacade ?? Mock.Of<ILaunchFacade>();
+        var resolvedLaunchFeedbackPresenter = launchFeedbackPresenter ?? Mock.Of<ILaunchFeedbackPresenter>();
+        var resolvedAccountToolResolver = accountToolResolver ?? new AccountToolResolver(Mock.Of<IProfilePathResolver>());
+        var resolvedWindowsTerminalAccountStateService = windowsTerminalAccountStateService ?? Mock.Of<IWindowsTerminalAccountStateService>();
+        var resolvedWindowsTerminalLaunchRefreshService = windowsTerminalLaunchRefreshService ?? Mock.Of<IWindowsTerminalLaunchRefreshService>();
         return new AiAgentFirewallOrchestrator(
             firewallApplyHelper: firewallApplyHelper ?? Mock.Of<IFirewallApplyHelper>(),
             dialogFactory: dialogFactory ?? new FakeFirewallDialogFactory(isAvailable: true),
-            databaseProvider: Mock.Of<IDatabaseProvider>(),
-            launchFacade: launchFacade ?? Mock.Of<ILaunchFacade>(),
-            launchFeedbackPresenter: launchFeedbackPresenter ?? Mock.Of<ILaunchFeedbackPresenter>(),
-            accountToolResolver: null!);
+            databaseProvider: resolvedDatabaseProvider,
+            launchFacade: resolvedLaunchFacade,
+            launchFeedbackPresenter: resolvedLaunchFeedbackPresenter,
+            toolLauncher: new ToolLauncher(
+                resolvedLaunchFacade,
+                resolvedAccountToolResolver,
+                resolvedWindowsTerminalAccountStateService,
+                new TerminalLaunchIdentitySelector(resolvedDatabaseProvider, new WindowsTerminalDeploymentPaths(new TestProgramDataKnownPathResolver(Path.GetTempPath()))),
+                Mock.Of<IPackageInstallService>(),
+                Mock.Of<IWindowsTerminalDeploymentProgressRunner>(),
+                resolvedWindowsTerminalLaunchRefreshService,
+                resolvedLaunchFeedbackPresenter,
+                Mock.Of<ILoggingService>()));
     }
 
     private sealed record AllowlistDialogRequest(

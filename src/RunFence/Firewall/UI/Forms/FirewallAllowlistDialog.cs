@@ -1,6 +1,5 @@
 using RunFence.Apps.UI;
 using RunFence.Core.Models;
-using RunFence.Infrastructure;
 using RunFence.UI;
 using RunFence.UI.Forms;
 
@@ -10,22 +9,21 @@ namespace RunFence.Firewall.UI.Forms;
 /// Dialog for editing the firewall allowlist for one account. Lets the user add IP/CIDR
 /// or domain entries that bypass the internet block rule for this account.
 /// </summary>
-public partial class FirewallAllowlistDialog : RunFence.UI.Forms.ContextHelpForm, IFirewallAllowlistDialog
+public partial class FirewallAllowlistDialog : ContextHelpForm, IFirewallAllowlistDialog, IFirewallAllowlistDialogView
 {
-    private readonly IFirewallNetworkInfo _firewallNetworkInfo;
-    private readonly FirewallAllowlistTabHandler _allowlistHandler;
-    private readonly FirewallPortsTabHandler _portsHandler;
-    private readonly FirewallAllowlistGridHelper _allowlistGridHelper;
-    private readonly FirewallPortsGridHelper _portsGridHelper;
-    private readonly BlockedConnectionsFlowHelper _blockedConnectionsFlow;
-    private readonly FirewallDialogApplyPresenter _applyPresenter;
-    private FirewallAllowlistImportExportHelper _importExportHelper = null!;
-    private bool _initialAllowInternet;
-    private bool _initialAllowLan;
-    private bool _initialAllowLocalhost;
-    private bool _initialFilterEphemeral;
-    private bool _isApplying;
+    private readonly FirewallAllowlistEntriesController _allowlistEntriesController;
+    private readonly FirewallAllowlistPortsController _portsController;
+    private readonly FirewallAllowlistImportExportCoordinator _importExportCoordinator;
+    private readonly FirewallBlockedConnectionsDialogController _blockedConnectionsController;
+    private readonly FirewallAllowlistDialogCoordinator _dialogCoordinator;
     private readonly GridSortHelper _sortHelper = new();
+    private bool _initialized;
+    private List<FirewallAllowlistEntry> _result = [];
+    private bool _allowInternet = true;
+    private bool _allowLan = true;
+    private bool _allowLocalhost = true;
+    private IReadOnlyList<string> _allowedLocalhostPorts = [];
+    private bool _filterEphemeralLoopback = true;
 
     /// <summary>
     /// Raised on each Apply click, after dialog properties are updated.
@@ -36,96 +34,61 @@ public partial class FirewallAllowlistDialog : RunFence.UI.Forms.ContextHelpForm
     public event EventHandler<FirewallApplyEventArgs>? Applied;
 
     /// <summary>The last applied allowlist. Only meaningful after Apply was clicked.</summary>
-    public List<FirewallAllowlistEntry> Result { get; private set; } = [];
+    public List<FirewallAllowlistEntry> Result => _result;
 
     /// <summary>Whether Internet access is allowed. Only meaningful after Apply was clicked.</summary>
-    public bool AllowInternet { get; private set; } = true;
+    public bool AllowInternet => _allowInternet;
 
     /// <summary>Whether LAN access is allowed. Only meaningful after Apply was clicked.</summary>
-    public bool AllowLan { get; private set; } = true;
+    public bool AllowLan => _allowLan;
 
     /// <summary>Whether Localhost access is allowed. Only meaningful after Apply was clicked.</summary>
-    public bool AllowLocalhost { get; private set; } = true;
+    public bool AllowLocalhost => _allowLocalhost;
 
     /// <summary>The last applied localhost port allow-list. Only meaningful after Apply was clicked.</summary>
-    public IReadOnlyList<string> AllowedLocalhostPorts { get; private set; } = [];
+    public IReadOnlyList<string> AllowedLocalhostPorts => _allowedLocalhostPorts;
 
     /// <summary>
     /// Whether the background scanner is enabled to block cross-user ephemeral ports.
     /// Only meaningful after Apply was clicked.
     /// </summary>
-    public bool FilterEphemeralLoopback { get; private set; } = true;
+    public bool FilterEphemeralLoopback => _filterEphemeralLoopback;
 
     internal FirewallAllowlistDialog(
-        List<FirewallAllowlistEntry> current,
-        IFirewallNetworkInfo firewallNetworkInfo,
-        FirewallAllowlistValidator validator,
-        FirewallPortValidator portValidator,
-        FirewallDomainResolver domainResolver,
-        BlockedConnectionsFlowHelper blockedConnectionsFlow,
-        FirewallAllowlistImportExportService importExportService,
-        FirewallDialogApplyPresenter applyPresenter,
-        string? displayName = null,
-        bool allowInternet = true,
-        bool allowLan = true,
-        bool allowLocalhost = true,
-        IReadOnlyList<string>? allowedLocalhostPorts = null,
-        bool filterEphemeralLoopback = true)
+        FirewallAllowlistInitialState initialState,
+        FirewallAllowlistDialogComponentFactory componentFactory)
     {
-        _firewallNetworkInfo = firewallNetworkInfo;
-        _allowlistHandler = new FirewallAllowlistTabHandler(validator, domainResolver, current);
-        _portsHandler = new FirewallPortsTabHandler(portValidator, allowedLocalhostPorts);
-        _blockedConnectionsFlow = blockedConnectionsFlow;
-        _applyPresenter = applyPresenter;
-        _initialAllowInternet = allowInternet;
-        _initialAllowLan = allowLan;
-        _initialAllowLocalhost = allowLocalhost;
-        _initialFilterEphemeral = filterEphemeralLoopback;
-
         InitializeComponent();
         InitializeRuntimeImages();
         Icon = AppIcons.GetAppIcon();
-        Text = displayName != null ? $"Internet Allowlist \u2014 {displayName}" : "Internet Allowlist";
+        Text = initialState.DisplayName != null ? $"Internet Allowlist \u2014 {initialState.DisplayName}" : "Internet Allowlist";
 
-        _tooltip.SetToolTip(_filterEphemeralCheckBox,
+        _tooltip.SetToolTip(
+            _filterEphemeralCheckBox,
             "Dynamically blocks loopback connections to services running under other accounts on ephemeral ports (49152-65535).");
 
-        _allowlistGridHelper = new FirewallAllowlistGridHelper(
-            _grid,
-            v => _ctxAdd.Visible = v,
-            v => _ctxRemoveItem.Visible = v,
-            v => _ctxExportItem.Visible = v,
-            _allowlistHandler,
-            (entries, title) => _importExportHelper.TryExportToFile(entries, title),
-            () => _importExportHelper.TryExportCombinedToFile(),
-            UpdateApplyButton, UpdateToolbarForCurrentTab);
+        var (allowlistHandler, portsHandler) = componentFactory.CreateTabHandlers(initialState);
+        var importExportHelper = componentFactory.CreateImportExportHelper(allowlistHandler, portsHandler, this);
+        _allowlistEntriesController = componentFactory.CreateEntriesController(this, allowlistHandler, importExportHelper);
+        _portsController = componentFactory.CreatePortsController(this, portsHandler, importExportHelper);
+        _blockedConnectionsController = componentFactory.CreateBlockedConnectionsController(this, _allowlistEntriesController);
+        _dialogCoordinator = componentFactory.CreateDialogCoordinator(
+            initialState,
+            this,
+            allowlistHandler,
+            portsHandler);
+        _importExportCoordinator = componentFactory.CreateImportExportCoordinator(
+            importExportHelper,
+            _allowlistEntriesController,
+            _portsController,
+            this);
 
-        _portsGridHelper = new FirewallPortsGridHelper(
-            _portsGrid,
-            v => _portsCtxAdd.Visible = v,
-            v => _portsCtxRemove.Visible = v,
-            v => _portsCtxExport.Visible = v,
-            _portsHandler,
-            (entries, title) => _importExportHelper.TryExportToFile(entries, title),
-            () => _importExportHelper.TryExportCombinedToFile(),
-            UpdateApplyButton);
+        _allowInternetCheckBox.Checked = initialState.AllowInternet;
+        _allowLanCheckBox.Checked = initialState.AllowLan;
+        _allowLocalhostCheckBox.Checked = initialState.AllowLocalhost;
+        _filterEphemeralCheckBox.Checked = initialState.FilterEphemeralLoopback;
 
-        _importExportHelper = new FirewallAllowlistImportExportHelper(
-            importExportService, _allowlistHandler, _portsHandler,
-            _allowlistGridHelper, _portsGridHelper, this);
-
-        _allowInternetCheckBox.Checked = allowInternet;
-        _allowLanCheckBox.Checked = allowLan;
-        _allowLocalhostCheckBox.Checked = allowLocalhost;
-        _filterEphemeralCheckBox.Checked = filterEphemeralLoopback;
-        _filterEphemeralCheckBox.Enabled = !allowLocalhost;
-        UpdateWarningLabel();
-        UpdatePortsWarningLabel();
-        _sortHelper.EnableThreeStateSorting(_grid, _allowlistGridHelper.PopulateGrid);
-        _allowlistGridHelper.PopulateGrid();
-        _portsGridHelper.PopulatePortsGrid();
-        UpdateDnsLabel();
-        UpdateApplyButton();
+        _sortHelper.EnableThreeStateSorting(_grid, _allowlistEntriesController.PopulateGrid);
         RegisterContextHelp();
     }
 
@@ -157,175 +120,101 @@ public partial class FirewallAllowlistDialog : RunFence.UI.Forms.ContextHelpForm
         _portsCtxExport.Image = UiIconFactory.CreateToolbarIcon("\u2191", Color.FromArgb(0x22, 0x8B, 0x22), 16);
     }
 
-    private void OnFirewallSettingsChanged(object? sender, EventArgs e)
-    {
-        _filterEphemeralCheckBox.Enabled = !_allowLocalhostCheckBox.Checked;
-        UpdateWarningLabel();
-        UpdatePortsWarningLabel();
-        UpdateApplyButton();
-    }
+    private void OnFirewallSettingsChanged(object? sender, EventArgs e) => _dialogCoordinator.HandleFirewallSettingsChanged();
 
-    private void UpdateWarningLabel() =>
-        _warningLabel.Visible = _allowInternetCheckBox.Checked && _allowLanCheckBox.Checked;
-
-    private void UpdatePortsWarningLabel() =>
-        _portsWarningLabel.Visible = _allowLocalhostCheckBox.Checked;
-
-    private void UpdateDnsLabel()
-    {
-        try
-        {
-            var servers = _firewallNetworkInfo.GetDnsServerAddresses();
-            _dnsLabel.Text = servers.Count > 0
-                ? $"DNS servers (auto-included when allowlist is non-empty): {string.Join(", ", servers)}"
-                : "DNS servers: none detected";
-        }
-        catch
-        {
-            _dnsLabel.Text = "DNS servers: unavailable";
-        }
-    }
-
-    private void UpdateToolbarForCurrentTab()
-    {
-        bool isInternetTab = _tabControl.SelectedTab == _allowlistTab;
-
-        _addButton.Enabled = !isInternetTab || !_allowlistGridHelper.IsResolvingDomains;
-        _addButton.ToolTipText = isInternetTab
-            ? "Add entry (IP, CIDR, or domain — auto-detected)"
-            : "Add port exception";
-
-        _removeButton.Enabled = isInternetTab
-            ? _grid.SelectedRows.Count > 0
-            : _portsGrid.SelectedRows.Count > 0;
-        _removeButton.ToolTipText = isInternetTab ? "Remove selected entries" : "Remove selected ports";
-
-        _exportButton.ToolTipText = isInternetTab
-            ? "Export selected entries to file (exports all entries and ports when nothing is selected)"
-            : "Export selected ports to file (exports all entries and ports when nothing is selected)";
-
-        _resolveButton.Enabled = isInternetTab && !_allowlistGridHelper.IsResolvingDomains;
-        _viewBlockedButton.Enabled = isInternetTab;
-    }
-
-    private void OnTabChanged(object? sender, EventArgs e) => UpdateToolbarForCurrentTab();
+    private void OnTabChanged(object? sender, EventArgs e) => _dialogCoordinator.HandleSelectedTabChanged();
 
     private void OnGridSelectionChanged(object? sender, EventArgs e)
     {
         if (_tabControl.SelectedTab == _allowlistTab)
-            _removeButton.Enabled = _grid.SelectedRows.Count > 0;
+            _dialogCoordinator.HandleSelectedTabChanged();
     }
 
     private void OnPortsGridSelectionChanged(object? sender, EventArgs e)
     {
         if (_tabControl.SelectedTab == _portsTab)
-            _removeButton.Enabled = _portsGrid.SelectedRows.Count > 0;
+            _dialogCoordinator.HandleSelectedTabChanged();
     }
 
     private void OnAddButtonClick(object? sender, EventArgs e)
     {
         if (_tabControl.SelectedTab == _allowlistTab)
-        {
-            var input = PromptInput("Add Entry", "Enter an IP address, CIDR range, or domain name:");
-            if (input != null)
-                _allowlistGridHelper.AddEntry(input);
-        }
+            _allowlistEntriesController.HandleAdd();
         else
-        {
-            var input = PromptInput("Add Port Exception", "Enter a port number or range (e.g. 53, 8080-8090):");
-            if (input != null)
-                _portsGridHelper.AddPort(input);
-        }
+            _portsController.HandleAdd();
     }
 
     private void OnRemoveButtonClick(object? sender, EventArgs e)
     {
         if (_tabControl.SelectedTab == _allowlistTab)
-            _allowlistGridHelper.RemoveSelected();
+            _allowlistEntriesController.HandleRemove();
         else
-            _portsGridHelper.RemoveSelected();
+            _portsController.HandleRemove();
     }
 
-    private void OnExportButtonClick(object? sender, EventArgs e)
-    {
-        if (_tabControl.SelectedTab == _allowlistTab)
-            _allowlistGridHelper.ExportSelected();
-        else
-            _portsGridHelper.ExportSelected();
-    }
+    private void OnExportButtonClick(object? sender, EventArgs e) =>
+        _importExportCoordinator.HandleExport(_tabControl.SelectedTab == _allowlistTab);
 
-    private void OnAddClick(object? sender, EventArgs e)
-    {
-        var input = PromptInput("Add Entry", "Enter an IP address, CIDR range, or domain name:");
-        if (input != null)
-            _allowlistGridHelper.AddEntry(input);
-    }
+    private void OnAddClick(object? sender, EventArgs e) => _allowlistEntriesController.HandleAdd();
 
-    private void OnRemoveClick(object? sender, EventArgs e) => _allowlistGridHelper.RemoveSelected();
-    private void OnExportClick(object? sender, EventArgs e) => _allowlistGridHelper.ExportSelected();
+    private void OnRemoveClick(object? sender, EventArgs e) => _allowlistEntriesController.HandleRemove();
+
+    private void OnExportClick(object? sender, EventArgs e) => _importExportCoordinator.HandleExport(internetTabSelected: true);
 
     private void OnGridCellEndEdit(object? sender, DataGridViewCellEventArgs e) =>
-        _allowlistGridHelper.ApplyCellEdit(e.RowIndex, e.ColumnIndex);
+        _allowlistEntriesController.HandleCellEndEdit(e.RowIndex, e.ColumnIndex);
 
     private void OnGridMouseDown(object? sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Right)
-            _allowlistGridHelper.HandleMouseDown(e.X, e.Y);
+            _allowlistEntriesController.HandleMouseDown(e.X, e.Y);
     }
 
     private void OnContextMenuOpening(object? sender, System.ComponentModel.CancelEventArgs e) =>
-        _allowlistGridHelper.ConfigureContextMenu();
+        _allowlistEntriesController.ConfigureContextMenu();
 
     private void OnGridKeyDown(object? sender, KeyEventArgs e)
     {
-        if (_allowlistGridHelper.HandleKeyDown(e.KeyCode, e.Control))
+        if (_allowlistEntriesController.HandleKeyDown(e.KeyCode, e.Control))
         {
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
     }
 
-    private void OnPortsAddClick(object? sender, EventArgs e)
-    {
-        var input = PromptInput("Add Port Exception", "Enter a port number or range (e.g. 53, 8080-8090):");
-        if (input != null)
-            _portsGridHelper.AddPort(input);
-    }
+    private void OnPortsAddClick(object? sender, EventArgs e) => _portsController.HandleAdd();
 
-    private void OnPortsRemoveClick(object? sender, EventArgs e) => _portsGridHelper.RemoveSelected();
-    private void OnPortsExportClick(object? sender, EventArgs e) => _portsGridHelper.ExportSelected();
+    private void OnPortsRemoveClick(object? sender, EventArgs e) => _portsController.HandleRemove();
+
+    private void OnPortsExportClick(object? sender, EventArgs e) => _importExportCoordinator.HandleExport(internetTabSelected: false);
 
     private void OnPortsGridCellEndEdit(object? sender, DataGridViewCellEventArgs e) =>
-        _portsGridHelper.ApplyCellEdit(e.RowIndex, e.ColumnIndex);
+        _portsController.HandleCellEndEdit(e.RowIndex, e.ColumnIndex);
 
     private void OnPortsGridMouseDown(object? sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Right)
-            _portsGridHelper.HandleMouseDown(e.X, e.Y);
+            _portsController.HandleMouseDown(e.X, e.Y);
     }
 
     private void OnPortsContextMenuOpening(object? sender, System.ComponentModel.CancelEventArgs e) =>
-        _portsGridHelper.ConfigureContextMenu();
+        _portsController.ConfigureContextMenu();
 
     private void OnPortsGridKeyDown(object? sender, KeyEventArgs e)
     {
-        if (_portsGridHelper.HandleKeyDown(e.KeyCode))
+        if (_portsController.HandleKeyDown(e.KeyCode))
         {
             e.Handled = true;
             e.SuppressKeyPress = true;
         }
     }
 
-    private void OnImportClick(object? sender, EventArgs e)
-    {
-        _importExportHelper.OnImportClick();
-        UpdateApplyButton();
-    }
+    private void OnImportClick(object? sender, EventArgs e) => _importExportCoordinator.HandleImport();
 
     /// <summary>
     /// Schedules the blocked-connections dialog to open automatically when this dialog is first shown.
     /// Passes <c>enableAuditLogging: true</c> so audit logging is activated immediately.
-    /// Call this before <see cref="Form.ShowDialog()"/> — intended for the post-wizard flow.
+    /// Call this before <see cref="Form.ShowDialog()"/> - intended for the post-wizard flow.
     /// </summary>
     public void AutoOpenBlockedConnectionsOnShow()
     {
@@ -335,155 +224,165 @@ public partial class FirewallAllowlistDialog : RunFence.UI.Forms.ContextHelpForm
     private void OnAutoOpenBlockedConnections(object? sender, EventArgs e)
     {
         Shown -= OnAutoOpenBlockedConnections;
-        OpenBlockedConnectionsDialog(enableAuditLogging: true);
+        _blockedConnectionsController.OpenDialog(enableAuditLogging: true);
+        UpdateApplyButton();
     }
 
-    private void OnViewBlockedClick(object? sender, EventArgs e) => OpenBlockedConnectionsDialog();
-
-    private void OpenBlockedConnectionsDialog(bool enableAuditLogging = false)
+    private void OnViewBlockedClick(object? sender, EventArgs e)
     {
-        var selected = _blockedConnectionsFlow.ShowDialog(
-            _allowlistHandler.GetEntries(), this, enableAuditLogging);
-        if (selected == null)
-            return;
-
-        var addResult = _allowlistGridHelper.AddEntriesFromBlockedConnections(selected);
-        if (addResult.TruncatedCount > 0)
-        {
-            var limitMessage = _allowlistHandler.GetLicenseLimitMessage();
-            if (limitMessage != null)
-                MessageBox.Show(limitMessage, "License Limit", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
+        _blockedConnectionsController.OpenDialog();
+        UpdateApplyButton();
     }
 
-    private async void OnResolveClick(object? sender, EventArgs e)
-    {
-        if (!_allowlistHandler.HasDomainEntries())
-        {
-            MessageBox.Show("No domain entries to resolve.", "Resolve",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
+    private async void OnResolveClick(object? sender, EventArgs e) =>
+        await _allowlistEntriesController.HandleResolveDomainsAsync(CancellationToken.None);
 
-        await _allowlistGridHelper.ResolveDomainEntriesAsync(showError: true);
-    }
-
-    protected override async void OnLoad(EventArgs e)
+    protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
-        UpdateToolbarForCurrentTab();
-        if (_allowlistHandler.HasDomainEntries())
-            await _allowlistGridHelper.ResolveDomainEntriesAsync(showError: false);
-    }
-
-    private bool HasUnappliedChanges() =>
-        _allowInternetCheckBox.Checked != _initialAllowInternet ||
-        _allowLanCheckBox.Checked != _initialAllowLan ||
-        _allowLocalhostCheckBox.Checked != _initialAllowLocalhost ||
-        _filterEphemeralCheckBox.Checked != _initialFilterEphemeral ||
-        _allowlistHandler.HasUnappliedChanges() ||
-        _portsHandler.HasUnappliedChanges();
-
-    private void UpdateApplyButton() => _applyButton.Enabled = !_isApplying && HasUnappliedChanges();
-
-    private void OnApplyClick(object? sender, EventArgs e)
-    {
-        if (_isApplying)
+        if (_initialized)
             return;
 
-        _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
-        _portsGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
-        Result = _allowlistHandler.GetEntries().ToList();
-        AllowInternet = _allowInternetCheckBox.Checked;
-        AllowLan = _allowLanCheckBox.Checked;
-        AllowLocalhost = _allowLocalhostCheckBox.Checked;
-        AllowedLocalhostPorts = _portsHandler.GetPortEntries().ToList();
-        FilterEphemeralLoopback = _filterEphemeralCheckBox.Checked;
-
-        _isApplying = true;
-        SetApplyState(enabled: false);
-        try
-        {
-            var args = new FirewallApplyEventArgs();
-            Applied?.Invoke(this, args);
-            var presentation = _applyPresenter.Present(args.RolledBack, changedSettingsCount: 1);
-            if (!presentation.RetainPendingInput)
-            {
-                _initialAllowInternet = _allowInternetCheckBox.Checked;
-                _initialAllowLan = _allowLanCheckBox.Checked;
-                _initialAllowLocalhost = _allowLocalhostCheckBox.Checked;
-                _initialFilterEphemeral = _filterEphemeralCheckBox.Checked;
-                _allowlistHandler.CommitApply();
-                _portsHandler.CommitApply();
-            }
-        }
-        finally
-        {
-            _isApplying = false;
-            SetApplyState(enabled: true);
-            UpdateApplyButton();
-        }
+        _initialized = true;
+        _allowlistEntriesController.Initialize();
+        _portsController.Initialize();
+        _dialogCoordinator.Initialize();
     }
 
-    private void OnCloseClick(object? sender, EventArgs e)
-    {
-        if (_isApplying)
-            return;
+    private async void OnApplyClick(object? sender, EventArgs e) =>
+        await _dialogCoordinator.ApplyAsync(CancellationToken.None);
 
-        Close();
-    }
+    private void OnCloseClick(object? sender, EventArgs e) => Close();
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (_isApplying)
+        if (!_dialogCoordinator.ConfirmCloseWithPendingChanges())
         {
             e.Cancel = true;
             return;
         }
 
-        if (HasUnappliedChanges())
-        {
-            var result = MessageBox.Show(
-                "You have unapplied changes. Discard and close?",
-                "Internet Allowlist", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (result != DialogResult.Yes)
-            {
-                e.Cancel = true;
-                return;
-            }
-        }
         base.OnFormClosing(e);
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        if (keyData == Keys.Escape)
-        {
-            if (_isApplying)
-                return true;
-
-            OnCloseClick(this, EventArgs.Empty);
+        if (_dialogCoordinator.HandleShortcutKey(keyData))
             return true;
-        }
 
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
-    private string? PromptInput(string title, string prompt)
+    private void UpdateApplyButton() => _dialogCoordinator.UpdateApplyButtonState();
+
+    private void RefreshToolbarState() => _dialogCoordinator.HandleSelectedTabChanged();
+
+    private string? ShowInputPrompt(string title, string prompt)
     {
         using var dlg = new InputPromptDialog(title, prompt);
         return dlg.ShowDialog(this) == DialogResult.OK ? dlg.Value?.Trim() : null;
     }
 
-    private void SetApplyState(bool enabled)
+    bool IFirewallAllowlistDialogView.IsInternetTabSelected => _tabControl.SelectedTab == _allowlistTab;
+    bool IFirewallAllowlistDialogView.IsResolvingDomains => _allowlistEntriesController.IsResolvingDomains;
+    int IFirewallAllowlistDialogView.SelectedAllowlistRowCount => _grid.SelectedRows.Count;
+    int IFirewallAllowlistDialogView.SelectedPortRowCount => _portsGrid.SelectedRows.Count;
+    bool IFirewallAllowlistDialogView.AllowInternetChecked => _allowInternetCheckBox.Checked;
+    bool IFirewallAllowlistDialogView.AllowLanChecked => _allowLanCheckBox.Checked;
+    bool IFirewallAllowlistDialogView.AllowLocalhostChecked => _allowLocalhostCheckBox.Checked;
+    bool IFirewallAllowlistDialogView.FilterEphemeralChecked => _filterEphemeralCheckBox.Checked;
+    DataGridView IFirewallAllowlistDialogView.AllowlistGrid => _grid;
+    DataGridView IFirewallAllowlistDialogView.PortsGrid => _portsGrid;
+
+    string? IFirewallAllowlistDialogView.PromptInput(string title, string prompt) =>
+        ShowInputPrompt(title, prompt);
+
+    void IFirewallAllowlistDialogView.SetDnsLabelText(string text) => _dnsLabel.Text = text;
+
+    void IFirewallAllowlistDialogView.SetFilterEphemeralEnabled(bool enabled) =>
+        _filterEphemeralCheckBox.Enabled = enabled;
+
+    void IFirewallAllowlistDialogView.SetWarningVisibility(bool internetWarningVisible, bool portsWarningVisible)
     {
-        _applyButton.Enabled = enabled && HasUnappliedChanges();
+        _warningLabel.Visible = internetWarningVisible;
+        _portsWarningLabel.Visible = portsWarningVisible;
+    }
+
+    void IFirewallAllowlistDialogView.SetToolbarState(
+        bool addEnabled,
+        string addToolTipText,
+        bool removeEnabled,
+        string removeToolTipText,
+        string exportToolTipText,
+        bool resolveEnabled,
+        bool viewBlockedEnabled)
+    {
+        _addButton.Enabled = addEnabled;
+        _addButton.ToolTipText = addToolTipText;
+        _removeButton.Enabled = removeEnabled;
+        _removeButton.ToolTipText = removeToolTipText;
+        _exportButton.ToolTipText = exportToolTipText;
+        _resolveButton.Enabled = resolveEnabled;
+        _viewBlockedButton.Enabled = viewBlockedEnabled;
+    }
+
+    void IFirewallAllowlistDialogView.SetInteractionEnabled(bool enabled, bool filterEphemeralEnabled)
+    {
         _closeButton.Enabled = enabled;
         _tabControl.Enabled = enabled;
         _toolStrip.Enabled = enabled;
         _allowInternetCheckBox.Enabled = enabled;
         _allowLanCheckBox.Enabled = enabled;
         _allowLocalhostCheckBox.Enabled = enabled;
-        _filterEphemeralCheckBox.Enabled = enabled && !_allowLocalhostCheckBox.Checked;
+        _filterEphemeralCheckBox.Enabled = enabled && filterEphemeralEnabled;
     }
+
+    void IFirewallAllowlistDialogView.SetApplyButtonEnabled(bool enabled) => _applyButton.Enabled = enabled;
+
+    void IFirewallAllowlistDialogView.CommitGridEdits()
+    {
+        _grid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        _portsGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
+    }
+
+    void IFirewallAllowlistDialogView.RaiseApplied(FirewallApplyEventArgs args) =>
+        Applied?.Invoke(this, args);
+
+    void IFirewallAllowlistDialogView.SetAppliedValues(
+        List<FirewallAllowlistEntry> result,
+        bool allowInternet,
+        bool allowLan,
+        bool allowLocalhost,
+        IReadOnlyList<string> allowedLocalhostPorts,
+        bool filterEphemeralLoopback)
+    {
+        _result = result;
+        _allowInternet = allowInternet;
+        _allowLan = allowLan;
+        _allowLocalhost = allowLocalhost;
+        _allowedLocalhostPorts = allowedLocalhostPorts;
+        _filterEphemeralLoopback = filterEphemeralLoopback;
+    }
+
+    DialogResult IFirewallAllowlistDialogView.ShowDiscardChangesPrompt() =>
+        MessageBox.Show(
+            "You have unapplied changes. Discard and close?",
+            "Internet Allowlist",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+    void IFirewallAllowlistDialogView.ShowInformation(string title, string message) =>
+        MessageBox.Show(this, message, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+    void IFirewallAllowlistDialogView.ShowWarning(string title, string message) =>
+        MessageBox.Show(this, message, title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+    void IFirewallAllowlistDialogView.ShowError(string title, string message) =>
+        MessageBox.Show(this, message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+
+    void IFirewallAllowlistDialogView.RequestClose() => Close();
+
+    void IFirewallAllowlistDialogView.UpdateApplyButton() => UpdateApplyButton();
+
+    void IFirewallAllowlistDialogView.RefreshToolbarState() => RefreshToolbarState();
 }

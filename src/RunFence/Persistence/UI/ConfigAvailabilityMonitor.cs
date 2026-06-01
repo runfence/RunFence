@@ -65,13 +65,18 @@ public class ConfigAvailabilityMonitor(
         if (pathsToCheck.Count == 0)
             return;
 
-        _ = Task.Run(() =>
-        {
-            var unavailable = pathsToCheck.Where(p => !File.Exists(p)).ToList();
-            if (unavailable.Count == 0 || appStateProvider.IsShuttingDown)
-                return;
-            uiThreadInvoker.BeginInvoke(() => AutoUnloadUnavailableConfigs(unavailable));
-        });
+        _ = Task.Factory.StartNew(
+            () =>
+            {
+                var unavailable = pathsToCheck.Where(p => !File.Exists(p)).ToList();
+                if (unavailable.Count == 0 || appStateProvider.IsShuttingDown)
+                    return;
+
+                uiThreadInvoker.BeginInvoke(() => AutoUnloadUnavailableConfigs(unavailable));
+            },
+            CancellationToken.None,
+            TaskCreationOptions.DenyChildAttach | TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
     }
 
     public void Dispose()

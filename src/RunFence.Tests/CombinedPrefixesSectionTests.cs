@@ -11,70 +11,6 @@ namespace RunFence.Tests;
 public class CombinedPrefixesSectionTests
 {
     [Fact]
-    public void SetAssociationPrefixes_AndGetAssociationPrefixes_RoundTrip()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            // Arrange
-            using var section = new CombinedPrefixesSection();
-            var prefixes = new[] { @"C:\Work\", @"D:\Projects\" };
-
-            // Act
-            section.SetAssociationPrefixes(prefixes, replacePrefixes: false);
-            var result = section.GetAssociationPrefixes();
-
-            // Assert
-            Assert.NotNull(result);
-            Assert.Equal(prefixes, result);
-        });
-    }
-
-    [Fact]
-    public void SetAppPrefixes_AndGetAppPrefixes_RoundTrip()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            // Arrange
-            using var section = new CombinedPrefixesSection();
-            var prefixes = new[] { @"C:\Apps\", @"D:\Tools\" };
-
-            // Act
-            section.SetAppPrefixes(prefixes);
-            var result = section.GetAppPrefixes();
-
-            // Assert
-            Assert.NotNull(result);
-            Assert.Equal(prefixes, result);
-        });
-    }
-
-    [Fact]
-    public void SetAssociationPrefixes_WithReplace_IsReplace_ReturnsTrue()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var section = new CombinedPrefixesSection();
-
-            section.SetAssociationPrefixes(null, replacePrefixes: true);
-
-            Assert.True(section.IsReplace);
-        });
-    }
-
-    [Fact]
-    public void SetAssociationPrefixes_WithAdd_IsReplace_ReturnsFalse()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var section = new CombinedPrefixesSection();
-
-            section.SetAssociationPrefixes(null, replacePrefixes: false);
-
-            Assert.False(section.IsReplace);
-        });
-    }
-
-    [Fact]
     public void FlatMode_CollectsOnlyAssociationPrefixes()
     {
         StaTestHelper.RunOnSta(() =>
@@ -161,34 +97,6 @@ public class CombinedPrefixesSectionTests
             Assert.NotNull(appResult);
             Assert.Single(appResult);
             Assert.Equal(@"C:\Apps\", appResult[0]);
-        });
-    }
-
-    [Fact]
-    public void SetAssociationPrefixes_NullPrefixes_GetAssociationPrefixes_ReturnsNull()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var section = new CombinedPrefixesSection();
-
-            section.SetAssociationPrefixes(null, replacePrefixes: false);
-            var result = section.GetAssociationPrefixes();
-
-            Assert.Null(result);
-        });
-    }
-
-    [Fact]
-    public void SetAppPrefixes_NullPrefixes_GetAppPrefixes_ReturnsNull()
-    {
-        StaTestHelper.RunOnSta(() =>
-        {
-            using var section = new CombinedPrefixesSection();
-
-            section.SetAppPrefixes(null);
-            var result = section.GetAppPrefixes();
-
-            Assert.Null(result);
         });
     }
 

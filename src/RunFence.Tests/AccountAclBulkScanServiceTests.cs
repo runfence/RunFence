@@ -2,6 +2,8 @@ using System.Security.AccessControl;
 using System.Security.Principal;
 using Moq;
 using RunFence.Acl;
+using RunFence.Core.Models;
+using RunFence.Persistence;
 using Xunit;
 
 namespace RunFence.Tests;
@@ -20,8 +22,30 @@ public class AccountAclBulkScanServiceTests
         FileSystemRights.ExecuteFile | FileSystemRights.ReadAttributes | FileSystemRights.Synchronize;
 
     private static AccountAclBulkScanService CreateService(
-        IEnumerable<(string Path, FileSystemSecurity Security)> entries)
-        => new(new StubTraverser(entries), Mock.Of<IAclAccessor>());
+        IEnumerable<(string Path, FileSystemSecurity Security)> entries,
+        AppDatabase? database = null,
+        Mock<IAclDenyModeService>? denyModeService = null)
+    {
+        var resolver = new AppEntryAclTargetResolver();
+        var effectiveDenyModeService = denyModeService ?? new Mock<IAclDenyModeService>();
+        if (denyModeService == null)
+        {
+            effectiveDenyModeService
+                .Setup(service => service.GetDeniedRightsPerSid(
+                    It.IsAny<string>(),
+                    It.IsAny<IReadOnlyList<AppEntry>>(),
+                    It.IsAny<bool>()))
+                .Returns(new Dictionary<string, DeniedRights>(StringComparer.OrdinalIgnoreCase));
+        }
+
+        return new AccountAclBulkScanService(
+            new StubTraverser(entries),
+            Mock.Of<IPathSecurityDescriptorAccessor>(),
+            new LambdaDatabaseProvider(() => database ?? new AppDatabase()),
+            new AppEntryManagedAclScanFilter(
+                new AppEntryAllowAclRuleProvider(resolver),
+                effectiveDenyModeService.Object));
+    }
 
     /// <summary>
     /// Builds a <see cref="DirectorySecurity"/> with explicit ACEs for the given SID.
@@ -355,6 +379,94 @@ public class AccountAclBulkScanServiceTests
         Assert.Contains(grants, grant => grant.IsDeny && grant.Write);
     }
 
+    [Fact]
+    public async Task Scan_AppEntryAllowManagedAceOnManagedPath_SkipsManagedAceButKeepsManualAce()
+    {
+        var database = new AppDatabase();
+        database.Apps.Add(new AppEntry
+        {
+            Id = "allow-app",
+            Name = "AllowApp",
+            ExePath = @"C:\Foo",
+            AclTarget = AclTarget.File,
+            RestrictAcl = true,
+            AclMode = AclMode.Allow,
+            AllowedAclEntries =
+            [
+                new AllowAclEntry
+                {
+                    Sid = Sid1,
+                    AllowExecute = false,
+                    AllowWrite = false
+                }
+            ]
+        });
+
+        var security = MakeSecurity(
+        [
+            (Sid1, FileSystemRights.Read | FileSystemRights.Synchronize, AccessControlType.Allow),
+            (Sid2, FileSystemRights.WriteData, AccessControlType.Allow)
+        ]);
+        var service = CreateService([(@"C:\Foo", security)], database);
+
+        var result = await service.ScanAllAccountsAsync(
+            @"C:\Foo",
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1, Sid2 },
+            new Progress<long>(),
+            CancellationToken.None);
+
+        Assert.DoesNotContain(Sid1, result.Keys);
+        var grant = Assert.Single(result[Sid2].Grants);
+        Assert.False(grant.IsDeny);
+        Assert.Equal(@"C:\Foo", grant.Path, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Scan_AppEntryDenyManagedAceOnManagedPath_SkipsManagedAceButKeepsManualAce()
+    {
+        var database = new AppDatabase();
+        database.Apps.Add(new AppEntry
+        {
+            Id = "deny-app",
+            Name = "DenyApp",
+            ExePath = @"C:\Foo",
+            AclTarget = AclTarget.File,
+            RestrictAcl = true,
+            AclMode = AclMode.Deny,
+            DeniedRights = DeniedRights.Execute
+        });
+
+        var denyModeService = new Mock<IAclDenyModeService>();
+        denyModeService
+            .Setup(service => service.GetDeniedRightsPerSid(
+                It.Is<string>(path => string.Equals(path, @"C:\Foo", StringComparison.OrdinalIgnoreCase)),
+                It.IsAny<IReadOnlyList<AppEntry>>(),
+                false))
+            .Returns(new Dictionary<string, DeniedRights>(StringComparer.OrdinalIgnoreCase)
+            {
+                [Sid1] = DeniedRights.Execute
+            });
+
+        var security = MakeSecurity(
+        [
+            (Sid1, FileSystemRights.ExecuteFile, AccessControlType.Deny),
+            (Sid2, FileSystemRights.ReadData, AccessControlType.Deny)
+        ]);
+        var service = CreateService([(@"C:\Foo", security)], database, denyModeService);
+
+        var result = await service.ScanAllAccountsAsync(
+            @"C:\Foo",
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1, Sid2 },
+            new Progress<long>(),
+            CancellationToken.None);
+
+        Assert.DoesNotContain(Sid1, result.Keys);
+        var grant = Assert.Single(result[Sid2].Grants);
+        Assert.True(grant.IsDeny);
+        Assert.True(grant.Read);
+        Assert.False(grant.Execute);
+    }
+
     // --- Cancellation ---
 
     [Fact]
@@ -386,7 +498,7 @@ public class AccountAclBulkScanServiceTests
         using var tempDir = new TempDirectory();
         var deleteOnlyRights = FileSystemRights.Delete;
         var security = MakeSecurity([(Sid1, deleteOnlyRights, AccessControlType.Allow)]);
-        var service = new AccountAclBulkScanService(new StubTraverser([(tempDir.Path, security)]), Mock.Of<IAclAccessor>());
+        var service = CreateService([(tempDir.Path, security)]);
 
         var result = await service.ScanAllAccountsAsync(
             tempDir.Path, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 },
@@ -409,7 +521,7 @@ public class AccountAclBulkScanServiceTests
 
         var deleteOnlyRights = FileSystemRights.Delete;
         var security = MakeSecurity([(Sid1, deleteOnlyRights, AccessControlType.Allow)]);
-        var service = new AccountAclBulkScanService(new StubTraverser([(tempFile, security)]), Mock.Of<IAclAccessor>());
+        var service = CreateService([(tempFile, security)]);
 
         var result = await service.ScanAllAccountsAsync(
             tempFile, new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1 },
@@ -435,7 +547,11 @@ public class AccountAclBulkScanServiceTests
         // CancellingTraverser yields the first entry, then cancels the token and throws.
         var service = new AccountAclBulkScanService(
             new CancellingTraverser([security1, security2], cts),
-            Mock.Of<IAclAccessor>());
+            Mock.Of<IPathSecurityDescriptorAccessor>(),
+            new LambdaDatabaseProvider(() => new AppDatabase()),
+            new AppEntryManagedAclScanFilter(
+                new AppEntryAllowAclRuleProvider(new AppEntryAclTargetResolver()),
+                new Mock<IAclDenyModeService>(MockBehavior.Strict).Object));
 
         var knownSids = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Sid1, Sid2 };
 
@@ -451,14 +567,18 @@ public class AccountAclBulkScanServiceTests
     public async Task Scan_InaccessibleRoot_ThrowsAndDoesNotReportSuccess()
     {
         var root = Path.GetPathRoot(Environment.SystemDirectory)!;
-        var aclAccessor = new Mock<IAclAccessor>();
+        var aclAccessor = new Mock<IPathSecurityDescriptorAccessor>();
         bool isFolder = true;
         aclAccessor.Setup(a => a.PathExists(root, out isFolder)).Returns(true);
         aclAccessor.Setup(a => a.GetSecurity(root)).Throws(new UnauthorizedAccessException("denied"));
 
         var service = new AccountAclBulkScanService(
             new StubTraverser([]),
-            aclAccessor.Object);
+            aclAccessor.Object,
+            new LambdaDatabaseProvider(() => new AppDatabase()),
+            new AppEntryManagedAclScanFilter(
+                new AppEntryAllowAclRuleProvider(new AppEntryAclTargetResolver()),
+                new Mock<IAclDenyModeService>(MockBehavior.Strict).Object));
 
         await Assert.ThrowsAsync<IOException>(() => service.ScanAllAccountsAsync(
             root,

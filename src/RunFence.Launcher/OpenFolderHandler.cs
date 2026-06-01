@@ -12,7 +12,8 @@ namespace RunFence.Launcher;
 /// </summary>
 public class OpenFolderHandler(
     ILauncherIpcCommandSender commandSender,
-    ILauncherProcessStarter processStarter)
+    ILauncherProcessStarter processStarter,
+    ILauncherUserNotifier notifier)
 {
     private const string DefaultClassesRootPath = @"Software\Classes";
 
@@ -47,7 +48,7 @@ public class OpenFolderHandler(
             return 1;
         if (!response.Success)
         {
-            LauncherIpcHelper.ShowError($"{response.ErrorMessage ?? "Could not open folder."}\n\n{folderPath}");
+            notifier.ShowError($"{response.ErrorMessage ?? "Could not open folder."}\n\n{folderPath}");
             return 1;
         }
 
@@ -141,7 +142,8 @@ public class OpenFolderHandler(
     {
         try
         {
-            CreateOwnedRegistryCleaner().UnregisterOwnedFolderHandler();
+            using var root = OpenRegistryRoot();
+            CreateOwnedRegistryCleaner(root).UnregisterOwnedFolderHandler();
             NotifyShellAssociationsChanged();
         }
         catch
@@ -164,10 +166,13 @@ public class OpenFolderHandler(
 
     protected virtual string GetOwnedShellServerExeName() => PathConstants.ShellServerExeName;
 
-    private FolderHandlerOwnedRegistryCleaner CreateOwnedRegistryCleaner()
+    protected virtual IRegistryKey OpenRegistryRoot()
+        => new WindowsRegistryKey(Registry.CurrentUser);
+
+    private FolderHandlerOwnedRegistryCleaner CreateOwnedRegistryCleaner(IRegistryKey root)
     {
         return new FolderHandlerOwnedRegistryCleaner(
-            Registry.CurrentUser,
+            root,
             GetClassesRootPath(),
             GetOwnedLauncherExeName(),
             GetOwnedShellServerExeName());

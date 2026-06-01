@@ -17,8 +17,8 @@ public class OptionsSettingsHandlerTests
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore { ArgonSalt = [1, 2, 3] },
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
-        var configRepository = new Mock<IConfigRepository>(MockBehavior.Strict);
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
+        var configRepository = new Mock<IMainConfigPersistence>(MockBehavior.Strict);
         var sessionProvider = new Mock<ISessionProvider>(MockBehavior.Strict);
         sessionProvider.Setup(provider => provider.GetSession()).Returns(session);
 
@@ -45,8 +45,8 @@ public class OptionsSettingsHandlerTests
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore { ArgonSalt = [4, 5, 6] },
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
-        var configRepository = new Mock<IConfigRepository>(MockBehavior.Strict);
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
+        var configRepository = new Mock<IMainConfigPersistence>(MockBehavior.Strict);
         var sessionProvider = new Mock<ISessionProvider>(MockBehavior.Strict);
         sessionProvider.Setup(provider => provider.GetSession()).Returns(session);
 
@@ -77,11 +77,11 @@ public class OptionsSettingsHandlerTests
 {
             Database = new AppDatabase(),
             CredentialStore = new CredentialStore { ArgonSalt = [7, 8, 9] },
-        }.WithOwnedPinDerivedKey(TestSecretFactory.Create(32));
+        }.WithPinDerivedKeyTakingOwnership(TestSecretFactory.Create(32));
         var initialKeySource = session.PinDerivedKey;
         session.ReplacePinDerivedKey(new SecureSecret(32, data => data.Fill(0x5A)));
 
-        var configRepository = new Mock<IConfigRepository>(MockBehavior.Strict);
+        var configRepository = new Mock<IMainConfigPersistence>(MockBehavior.Strict);
         var sessionProvider = new Mock<ISessionProvider>(MockBehavior.Strict);
         sessionProvider.Setup(provider => provider.GetSession()).Returns(session);
 

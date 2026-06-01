@@ -14,7 +14,7 @@ public class AccountConfigTransferOrchestrator(
     IAccountConfigTransferSecureDesktopService secureDesktopService,
     IAccountConfigTransferPromptService promptService,
     IAccountConfigMigrationService migrationService,
-    ILocalGroupMembershipService localGroupMembership,
+    ILocalGroupQueryService localGroupMembership,
     ISidNameCacheService sidNameCache,
     ICredentialEncryptionSpanService encryptionService,
     ILoggingService log)

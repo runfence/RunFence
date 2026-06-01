@@ -10,8 +10,8 @@ namespace RunFence.Acl.Traverse;
 public static class TraversePathsHelper
 {
     /// <summary>
-    /// Adds <paramref name="path"/> to <paramref name="traversePaths"/> if not already present.
-    /// Returns true if newly added.
+    /// Adds or refreshes <paramref name="path"/> in <paramref name="traversePaths"/>.
+    /// Returns true when the stored entry changed.
     /// </summary>
     public static bool TrackPath(
         List<GrantedPathEntry> traversePaths,
@@ -25,11 +25,17 @@ public static class TraversePathsHelper
             string.Equals(e.Path, normalized, StringComparison.OrdinalIgnoreCase));
         if (existing != null)
         {
-            if (!AclHelper.IsSpecificContainerSid(trackedSourceSid ?? string.Empty) ||
-                existing.SourceSids == null ||
-                existing.SourceSids.Contains(trackedSourceSid!, StringComparer.OrdinalIgnoreCase))
+            var trackedSource = trackedSourceSid ?? string.Empty;
+            if (!AclHelper.IsSpecificContainerSid(trackedSource))
+                return RefreshAppliedPaths(existing, appliedPaths);
+
+            var sourceSids = existing.SourceSids;
+            if (sourceSids == null)
                 return false;
-            existing.SourceSids.Add(trackedSourceSid!);
+            bool changed = RefreshAppliedPaths(existing, appliedPaths);
+            if (sourceSids.Contains(trackedSource, StringComparer.OrdinalIgnoreCase))
+                return changed;
+            sourceSids.Add(trackedSource);
             return true;
         }
 
@@ -37,7 +43,7 @@ public static class TraversePathsHelper
         {
             Path = normalized,
             IsTraverseOnly = true,
-            AllAppliedPaths = appliedPaths.Count > 0 ? appliedPaths : null
+            AllAppliedPaths = appliedPaths.Count > 0 ? appliedPaths.ToList() : null
         };
         if (AclHelper.IsSpecificContainerSid(trackedSourceSid ?? string.Empty))
             entry.SourceSids = [trackedSourceSid!];
@@ -68,5 +74,22 @@ public static class TraversePathsHelper
 
     public static List<GrantedPathEntry> GetTraversePaths(AppDatabase database, string sid)
         => database.GetAccount(sid)?.Grants ?? [];
+
+    private static bool RefreshAppliedPaths(GrantedPathEntry existing, List<string> appliedPaths)
+    {
+        var refreshedAppliedPaths = appliedPaths.Count > 0 ? appliedPaths.ToList() : null;
+        if (existing.AllAppliedPaths == null || refreshedAppliedPaths == null)
+        {
+            if (existing.AllAppliedPaths == refreshedAppliedPaths)
+                return false;
+        }
+        else if (existing.AllAppliedPaths.SequenceEqual(refreshedAppliedPaths, StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        existing.AllAppliedPaths = refreshedAppliedPaths;
+        return true;
+    }
 
 }
